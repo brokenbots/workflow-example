@@ -1,0 +1,52 @@
+variable "workstream_file" {
+    description = "path to workstream file for processing."
+    type        = string
+}
+
+variable "repo_dir" {
+    description = "Absolute path of the repo's primary working tree. Worktree lifecycle steps (git fetch / worktree add / worktree remove) run here. The operator's main checkout is fine — git worktree add only reads its .git. Empty = run in the process working directory (no isolation)."
+    type        = string
+    default     = ""
+}
+
+variable "worktree_dir" {
+    description = "Absolute path of the isolated per-run git worktree the workstream develops in. Created by branch_manager and torn down after merge. Must be under $HOME (or CRITERIA_SHELL_ALLOWED_PATHS) and contain no '..' (e.g. <repo_dir>/.worktrees/<branch>). Empty = run in the process working directory (no isolation)."
+    type        = string
+    default     = ""
+}
+
+variable "base_branch" {
+    description = "Base branch to fork from and validate against. Defaults to main."
+    type        = string
+    default     = "main"
+}
+
+variable "ci_gate_cmd" {
+    description = "Command the pair programming loop runs as its CI gate (exit 0 = clean). Empty (the default) skips the gate. Set it to mirror what the remote CI actually runs — a repo's aggregate target often omits gates CI runs separately (e.g. a vulnerability scan), and any gate missing here is one the developer only discovers after the PR is already red (e.g. 'make ci && make vuln-scan')."
+    type        = string
+    default     = ""
+}
+
+variable "log_file" {
+    description = "path the workstream log file, if not set its equivalent to `{replace(var.workstream_file, '.md', '.log')}`"
+    type        = string
+    default     = ""
+}
+
+variable "allow_dirty" {
+    description = "allow the paired programming loop to run even if the working tree has uncommitted changes"
+    type        = bool
+    default     = false
+}
+
+variable "reviewer_gh_user" {
+    description = "GitHub username for the reviewer role (must be pre-configured via gh auth login). The workflow switches to this account — and verifies it is active — before the PR review loop, so the reviewer is distinct from the coordinator. Leave empty to skip reviewer credential switching."
+    type        = string
+    default     = ""
+}
+
+variable "coordinator_gh_user" {
+    description = "GitHub username for the coordinator role: PR creation, feedback triage, thread responses, and merge (must be pre-configured via gh auth login). The workflow switches to — and verifies — this account at the start and again after every PR review loop, so coordinator operations never run under the reviewer identity even if a previous run left gh on the wrong account. Leave empty to fall back to whichever account is active at startup."
+    type        = string
+    default     = ""
+}

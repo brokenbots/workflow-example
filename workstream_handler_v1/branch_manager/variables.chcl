@@ -1,0 +1,53 @@
+variable "branch" {
+    type        = string
+    description = "Branch name to create or validate. If empty, derived from workstream_file."
+    default     = ""
+}
+
+variable "workstream_file" {
+    type        = string
+    description = "Path to workstream file; used to derive branch name when var.branch is not set."
+    default     = ""
+}
+
+variable "base_branch" {
+    type        = string
+    description = "Base branch to fork from and validate against."
+    default     = "main"
+}
+
+variable "repo_dir" {
+    type        = string
+    description = "Absolute path of the repo's primary working tree, where git fetch / worktree add run. Empty = process working directory."
+    default     = ""
+}
+
+variable "worktree_dir" {
+    type        = string
+    description = "Absolute path of the isolated worktree this run develops in; created by setup_worktree. Empty = process working directory."
+    default     = ""
+}
+
+variable "repair_agent" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 15)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+    description = "Model configuration for the branch repair agent."
+    default = {
+        model            = "minimax-m3:cloud"
+        max_turns        = 15
+        reasoning_effort = "high"
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

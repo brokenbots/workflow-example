@@ -1,0 +1,47 @@
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.2"
+    environment = shell.worktree
+}
+
+adapter "noop" "default" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-noop"
+    version = "0.5.1"
+}
+
+adapter "copilot" "developer" {
+    environment = shell.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.2"
+    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    secrets {
+        GITHUB_TOKEN = "env:GITHUB_TOKEN"
+    }
+    config {
+        model             = var.developer.model
+        max_turns         = "${var.developer.max_turns}"
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.developer.provider.base_url
+        provider_wire_api = var.developer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+// Review runs on Claude Code (claude-agent adapter) rather than the copilot
+// harness — the copilot harness stays for dev work, Claude Code is preferred
+// for review.
+adapter "claude-agent" "reviewer" {
+    environment = shell.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-claude-agent"
+    version = "0.5.5"
+    config {
+        model         = var.reviewer.model
+        thinking      = var.reviewer.thinking
+        system_prompt = file("./agents/reviewer.md")
+        cwd           = var.worktree_dir
+    }
+}

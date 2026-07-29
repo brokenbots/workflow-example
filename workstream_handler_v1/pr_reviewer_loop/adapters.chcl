@@ -1,0 +1,28 @@
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.2"
+    environment = shell.worktree
+}
+
+adapter "noop" "default" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-noop"
+    version = "0.5.1"
+}
+
+// PR review runs on Claude Code (claude-agent adapter) — preferred over the
+// copilot harness for review work.
+adapter "claude-agent" "pr_reviewer" {
+    environment = shell.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-claude-agent"
+    version = "0.5.5"
+    config {
+        model         = var.pr_reviewer.model
+        thinking      = var.pr_reviewer.thinking
+        system_prompt = file("./agents/pr_reviewer.md")
+        cwd           = var.worktree_dir
+    }
+}

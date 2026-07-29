@@ -1,0 +1,36 @@
+variable "pr_url" {
+    type        = string
+    description = "URL of the GitHub PR to review (e.g. https://github.com/org/repo/pull/42). If omitted, derived from the current branch via gh pr view."
+    default     = ""
+}
+
+variable "workstream_file" {
+    type        = string
+    description = "Path to the workstream markdown file used as the acceptance bar for the reviewer."
+}
+
+variable "worktree_dir" {
+    type        = string
+    description = "Absolute path of the isolated worktree the PR reviewer agent operates in. Empty = process working directory."
+    default     = ""
+}
+
+variable "ci_backoff_seconds" {
+    type        = number
+    description = "Seconds to sleep between CI status polls when checks are still pending."
+    default     = 60
+}
+
+// PR reviewer runs on the claude-agent adapter (Claude Code CLI). Requires the
+// `claude` CLI installed and authenticated; no provider config needed.
+variable "pr_reviewer" {
+    type = object({
+        model    = string
+        thinking = optional(bool, true)
+    })
+
+    default = {
+        model    = "claude-opus-5"
+        thinking = true
+    }
+}

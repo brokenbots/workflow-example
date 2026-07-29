@@ -1,0 +1,44 @@
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+environment "shell" "primary" {
+    working_directory = var.repo_dir
+}
+
+adapter "copilot" "coordinator" {
+    environment = shell.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.2"
+    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    secrets {
+        GITHUB_TOKEN = "env:GITHUB_TOKEN"
+    }
+    config {
+        model             = "minimax-m3:cloud"
+        system_prompt     = file("./agents/coordinator.md")
+        provider_base_url = "http://localhost:11434/v1"
+        provider_wire_api = "responses"
+        working_directory = var.worktree_dir
+    }
+}
+
+// Runs inside the isolated worktree: all branch-scoped git/gh/coordinator ops.
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.2"
+    environment = shell.worktree
+}
+
+// Runs in the repo's primary working tree: worktree lifecycle (read workstream,
+// teardown) that must not depend on the per-run worktree existing.
+adapter "shell" "repo" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.2"
+    environment = shell.primary
+}
+
+adapter "noop" "default" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-noop"
+    version = "0.5.1"
+}
