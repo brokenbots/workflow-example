@@ -250,7 +250,7 @@ step "backoff" {
 // for the coordinator to triage.
 
 step "pr_review" {
-    target      = adapter.claude-agent.pr_reviewer
+    target      = adapter.copilot.pr_reviewer
     allow_tools = ["*"]
     max_visits  = 5
 

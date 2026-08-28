@@ -1,0 +1,1226 @@
+workflow {
+    name          = "devops_triage_v1"
+    version       = "1"
+    initial_state = "stage_report"
+    target_state  = "delivered"
+
+    policy {
+        max_total_steps = 200
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// Slug for this run. Names the run directory and the work branch.
+data "internal" "slug" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of this run's directory: <ops_root>/<slug>. Evidence lives at
+// <run_dir>/evidence and is never removed.
+data "internal" "run_dir" {
+    type  = string
+    value = ""
+}
+
+// The run's work branch, created deterministically off base_branch.
+data "internal" "branch" {
+    type  = string
+    value = ""
+}
+
+// The branch's HEAD when THIS run started — the boundary between work that was
+// already reviewed and work this run is responsible for.
+//
+// It exists because a branch can accumulate work across several runs (a follow-up
+// request against an open PR). The scope checks must diff against this, not
+// against base_branch: reviewing against base makes every earlier run's approved
+// commits look like unrequested scope creep, and a manager acting on that
+// conclusion sends a brief to revert work the operator asked for. That happened.
+//
+// On a fresh branch this equals base_sha and nothing changes.
+data "internal" "run_base_sha" {
+    type  = string
+    value = ""
+}
+
+// Concrete SHA of the base branch, resolved after an explicit fetch so the work
+// is cut from the remote's commit and not a stale local ref.
+data "internal" "base_sha" {
+    type  = string
+    value = ""
+}
+
+// Manager's revision notes to the triage agent, carried as data rather than
+// accumulated in the prompt so a refine cycle costs one message, not a growing
+// transcript.
+data "internal" "manager_feedback" {
+    type  = string
+    value = ""
+}
+
+// The brief the worker subworkflow is launched with. Written by the manager at
+// the work-list gate, and rewritten by the manager at the final gate on every
+// needs_work cycle — the worker's next session starts from this text and nothing
+// else, which is what makes the reset meaningful.
+data "internal" "worker_brief" {
+    type  = string
+    value = ""
+}
+
+// The worker's own account of the cycle it just finished.
+data "internal" "worker_summary" {
+    type  = string
+    value = ""
+}
+
+// Triage's report of where things stand: "complete" | "incomplete" | "blocked".
+// This is an observation, not a decision — the manager decides what to do about
+// it at the final gate.
+data "internal" "triage_state" {
+    type  = string
+    value = ""
+}
+
+// How the run concluded. Drives teardown and the final routing.
+data "internal" "verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pr_url" {
+    type  = string
+    value = ""
+}
+
+// ── Worker subworkflow ───────────────────────────────────────────────────────
+//
+// Declared once and re-entered per cycle. Each entry runs the child from its
+// initial state, so the devops agent gets a new session every time: the only
+// thing that survives a cycle is the committed diff and the brief below. That is
+// the point — an executor carrying three failed attempts in its context spends
+// the fourth defending them.
+
+subworkflow "devops_worker" {
+    source = "./devops_worker"
+    input = {
+        brief         = data.internal.worker_brief.value
+        worklist_file = "${data.internal.run_dir.value}/evidence/worklist.md"
+        report_file   = "${data.internal.run_dir.value}/evidence/report.md"
+        evidence_dir  = "${data.internal.run_dir.value}/evidence"
+        worktree_dir  = var.worktree_dir
+        base_branch   = var.base_branch
+        branch        = data.internal.branch.value
+        ci_gate_cmd   = var.ci_gate_cmd
+        devops        = var.devops
+    }
+}
+
+// ── Intake ───────────────────────────────────────────────────────────────────
+
+// Normalizes the request to a single file before anything else looks at it, so
+// every downstream step has one shape to handle. Also the only place the
+// workspace preconditions are checked — failing here costs nothing, and failing
+// after a worktree exists costs a manual cleanup.
+step "stage_report" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            wt='${var.worktree_dir}'
+            if [ -z "$wt" ]; then
+                echo "worktree_dir is required: every agent in this workflow writes there, and an empty value points them at the process working directory" >&2
+                exit 1
+            fi
+            if [ "$wt" = '${var.repo_dir}' ]; then
+                echo "worktree_dir must not be the primary tree: $wt" >&2
+                exit 1
+            fi
+
+            root='${var.ops_root}'
+            case "$root" in
+                '${var.repo_dir}'|'${var.repo_dir}'/*)
+                    echo "ops_root must be outside the repository under work: $root" >&2
+                    exit 1
+                    ;;
+            esac
+
+            file='${var.ops_report_file}'
+            staged="$root/.staging/report.md"
+            mkdir -p "$root/.staging"
+            rm -f "$staged"
+
+            if [ -n "$file" ]; then
+                if [ ! -f "$file" ]; then
+                    echo "ops report not found: $file" >&2
+                    exit 1
+                fi
+                cp "$file" "$staged"
+            else
+                # QUOTED heredoc delimiter: report_text is operator-supplied text
+                # and may contain backticks or $(...). HCL interpolates the value
+                # in before the shell sees it; quoted, the shell then treats every
+                # byte as literal instead of executing it.
+                cat > "$staged" <<'____CRITERIA_EOF____'
+${var.report_text}
+____CRITERIA_EOF____
+            fi
+
+            if [ ! -s "$staged" ]; then
+                echo "no request supplied: set exactly one of ops_report_file or report_text" >&2
+                exit 1
+            fi
+            cat "$staged"
+        SHELL
+    }
+    outcome "success" { next = step.resolve_slug }
+    outcome "failure" { next = state.failed }
+}
+
+step "resolve_slug" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            slug='${var.run_label}'
+            if [ -z "$slug" ]; then
+                if [ -n '${var.ops_report_file}' ]; then
+                    slug=$(basename '${var.ops_report_file}')
+                    slug="$${slug%.*}"
+                else
+                    # First non-empty line of the request, stripped of markdown
+                    # heading marks. A one-line request is expected to be the
+                    # common case, so it has to produce a usable branch name.
+                    slug=$(grep -m1 -v '^[[:space:]]*$' '${var.ops_root}/.staging/report.md' || echo "")
+                fi
+            fi
+            slug=$(printf '%s' "$slug" \
+                | tr '[:upper:]' '[:lower:]' \
+                | sed -e 's/^[#[:space:]]*//' -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//' \
+                | cut -c1-48 | sed -e 's/-$//')
+            [ -n "$slug" ] || slug="ops-run"
+            # printf, not echo: the trailing newline is captured into
+            # output.stdout and then interpolated into paths and git refs.
+            printf '%s' "$slug"
+        SHELL
+    }
+    outcome "success" {
+        next = step.resolve_branch
+        write {
+            target = data.internal.slug.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "resolve_branch" {
+    target = adapter.shell.repo
+    input {
+        command = "printf '%s%s' '${var.branch_prefix}' '${data.internal.slug.value}'"
+    }
+    outcome "success" {
+        next = step.prepare_workspace
+        write {
+            target = data.internal.branch.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "prepare_workspace" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            run_dir='${var.ops_root}/${data.internal.slug.value}'
+            # Evidence from a previous run of the same request must not be read as
+            # evidence for this one. The directory is replaced, not merged.
+            rm -rf "$run_dir"
+            mkdir -p "$run_dir/evidence"
+            cp '${var.ops_root}/.staging/report.md' "$run_dir/evidence/report.md"
+            rm -f '${var.ops_root}/.staging/report.md'
+            printf '%s' "$run_dir"
+        SHELL
+    }
+    outcome "success" {
+        next = step.resolve_base
+        write {
+            target = data.internal.run_dir.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// Fetch first, then resolve. Resolving without fetching is how a run ends up
+// branching from a commit that is not what anyone else means by "main".
+step "resolve_base" {
+    target  = adapter.shell.repo
+    timeout = "120s"
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            git -C '${var.repo_dir}' fetch --all --tags --quiet
+            printf '%s' "$(git -C '${var.repo_dir}' rev-parse 'origin/${var.base_branch}')"
+        SHELL
+    }
+    outcome "success" {
+        next = step.write_context
+        write {
+            target = data.internal.base_sha.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// Facts that are identical for every run, recorded once so no agent has to
+// establish them and no two agents can disagree about them.
+//
+// Deliberately NOT a discovery step. What is worth collecting depends entirely
+// on the task — a failing release wants run logs, a permissions audit wants
+// branch protections and token scopes, a dependency alert wants a lockfile
+// history — and a fixed collector would either pull the wrong things or would
+// quietly define the workflow as being about one kind of task. Discovery is
+// triage's job, and what triage finds it writes back here.
+step "write_context" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            ev='${data.internal.run_dir.value}/evidence'
+            mkdir -p "$ev"
+            gate='${var.ci_gate_cmd}'
+            verify='${var.verify_cmd}'
+            {
+                printf '# Run context\n\n'
+                printf -- '- repository: %s\n' '${var.repo_dir}'
+                printf -- '- remote: %s\n' "$(git -C '${var.repo_dir}' remote get-url origin 2>/dev/null || echo '<none>')"
+                printf -- '- base branch: %s\n' '${var.base_branch}'
+                printf -- '- base SHA: %s\n' '${data.internal.base_sha.value}'
+                printf -- '- work branch: %s\n' '${data.internal.branch.value}'
+                printf -- '- worktree: %s\n' '${var.worktree_dir}'
+                printf -- '- evidence: %s\n' "$ev"
+                printf -- '- gate command: %s\n' "$${gate:-<none configured>}"
+                printf -- '- verify command: %s\n' "$${verify:-<none configured>}"
+                printf -- '- started at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '## Hints from the operator\n\n'
+                cat <<'____CRITERIA_EOF____'
+${var.hints}
+____CRITERIA_EOF____
+            } > "$ev/context.md"
+            cat "$ev/context.md"
+        SHELL
+    }
+    outcome "success" { next = step.setup_worktree }
+    outcome "failure" { next = state.failed }
+}
+
+// The only tree the agents may write in, created before any of them starts.
+//
+// Deterministic on purpose. Branch creation and worktree attachment are
+// identical every run — there is no judgement in them, so there is no agent in
+// them. An agent asked to "get onto a branch" is an agent that can invent a
+// different branch each time.
+step "setup_worktree" {
+    target  = adapter.shell.repo
+    timeout = "120s"
+    input {
+        command = <<-SHELL
+            set -euo pipefail; exec 2>&1
+            branch='${data.internal.branch.value}'
+            base='${var.base_branch}'
+            wt='${var.worktree_dir}'
+            echo "branch=$branch base=$base worktree=$wt"
+
+            git -C '${var.repo_dir}' worktree prune 2>&1 || true
+
+            # Reuse a worktree already at this path (resume case). Ask git rather
+            # than string-matching paths, which differ under symlinks (/tmp vs
+            # /private/tmp on macOS).
+            if [ -d "$wt" ]; then
+                if git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                    echo "reusing worktree at $wt (on '$(git -C "$wt" branch --show-current)')"
+                    exit 0
+                fi
+                echo "path $wt exists but is not a git worktree"
+                exit 1
+            fi
+
+            mkdir -p "$(dirname "$wt")"
+            if git -C '${var.repo_dir}' show-ref --verify --quiet "refs/heads/$branch"; then
+                git -C '${var.repo_dir}' worktree add --force "$wt" "$branch"
+            elif git -C '${var.repo_dir}' show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+                git -C '${var.repo_dir}' worktree add --force -b "$branch" "$wt" "origin/$branch"
+            else
+                git -C '${var.repo_dir}' worktree add --force -b "$branch" "$wt" '${data.internal.base_sha.value}'
+            fi
+            echo "worktree_ready=$wt on_branch=$(git -C "$wt" branch --show-current)"
+        SHELL
+    }
+    outcome "success" { next = step.record_run_base }
+    outcome "failure" { next = state.failed }
+}
+
+// Mark where this run started, before any agent has touched the branch.
+step "record_run_base" {
+    target = adapter.shell.repo
+    input {
+        command = "printf '%s' \"$(git -C '${var.worktree_dir}' rev-parse HEAD)\""
+    }
+    outcome "success" {
+        next = step.intake_review
+        write {
+            target = data.internal.run_base_sha.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Gate 0: is there a request here at all? ──────────────────────────────────
+//
+// A deliberately low bar. The request is allowed to be one line: triage does the
+// discovery, so demanding a run ID or a diagnosis up front would reject exactly
+// the requests this workflow is for.
+
+step "intake_review" {
+    target      = adapter.copilot.manager
+    max_visits  = 2
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 0 — INTAKE.
+
+            Request:       ${data.internal.run_dir.value}/evidence/report.md
+            Run context:   ${data.internal.run_dir.value}/evidence/context.md
+            Evidence dir:  ${data.internal.run_dir.value}/evidence
+
+            Decide only whether a devops engineer could begin work from this.
+            Do not diagnose. Do not read source code. Do not plan.
+
+            The request may be a single sentence. That is expected and is not a
+            defect in it — the triage agent discovers the specifics.
+
+            Call submit_outcome with `actionable`, `insufficient`, or `needs_human`.
+        PROMPT
+    }
+
+    outcome "actionable" { next = step.triage_worklist }
+    outcome "insufficient" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "insufficient_report"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "needs_human" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_intake"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Triage: call 1 of 2 ──────────────────────────────────────────────────────
+//
+// Discovery and specification. This is the agent that goes and finds out what is
+// actually true — it queries GitHub, reads run logs, walks history, inspects
+// settings, runs scanners — and then writes down what has to be done.
+//
+// It does not do any of it. The agent that writes the work list never executes
+// the work list, so the same reasoning is never both the plan and its own proof.
+//
+// It may also come back and say there is nothing to fix. That is a first-class
+// result, not a failure to find one.
+
+step "triage_worklist" {
+    target      = adapter.copilot.triage
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            PHASE: DISCOVERY AND WORK LIST.
+
+            Request:       ${data.internal.run_dir.value}/evidence/report.md
+            Run context:   ${data.internal.run_dir.value}/evidence/context.md
+            Evidence dir:  ${data.internal.run_dir.value}/evidence
+
+            Write the work list to
+            ${data.internal.run_dir.value}/evidence/worklist.md
+
+            The request may be a single line. Finding out what it refers to is
+            your job — nobody has run any queries for you. Save what you find
+            into the evidence directory as you go; a claim with no artifact
+            behind it will not survive the manager's review.
+
+            You are in a worktree at ${var.worktree_dir}, on branch
+            ${data.internal.branch.value}, cut from ${var.base_branch}
+            (${data.internal.base_sha.value}).
+
+            Gate command that will run after each work cycle: ${var.ci_gate_cmd}
+            Verification command that will run after the gate:  ${var.verify_cmd}
+
+            Manager feedback on your previous attempt (empty on the first pass):
+            ${data.internal.manager_feedback.value}
+
+            Investigate and specify. Do NOT fix anything, do not edit any file
+            outside the evidence directory, and do not change any remote state.
+
+            Call submit_outcome with `worklist_ready`, `no_action_needed`, or
+            `need_help`.
+        PROMPT
+    }
+
+    outcome "worklist_ready" { next = step.review_worklist }
+    // The premise was wrong, the problem is already fixed, or the behavior is
+    // working as designed. Reviewed like any other finding — an unreviewed "it's
+    // fine" from the agent that would otherwise have to do the work is the one
+    // conclusion this workflow should trust least.
+    outcome "no_action_needed" { next = step.review_no_action }
+    outcome "need_help" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_triage"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Gate 1a: is "nothing is wrong" actually true? ────────────────────────────
+
+step "review_no_action" {
+    target      = adapter.copilot.manager
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 1 — NO ACTION NEEDED.
+
+            Triage reports that this request needs no change. Its finding:
+            ${data.internal.run_dir.value}/evidence/no-action.md
+
+            Request:       ${data.internal.run_dir.value}/evidence/report.md
+            Run context:   ${data.internal.run_dir.value}/evidence/context.md
+            Evidence dir:  ${data.internal.run_dir.value}/evidence
+
+            This is the conclusion to be most sceptical of: it is also the
+            cheapest one for the agent that would otherwise have had to do the
+            work. Confirm it only if the evidence on disk shows it — that the
+            reported symptom does not occur, that it was already fixed and by
+            what, or that the behavior is deliberate and documented as such.
+
+            "I could not find a problem" is not the same as "there is no
+            problem". If triage did not look, send it back.
+
+            On `confirmed`, your reason is what the requester is told, and it is
+            the whole answer they get. Say what was checked, what was found, and
+            why no change follows.
+
+            Call submit_outcome with `confirmed`, `disputed`, or `needs_human`.
+        PROMPT
+    }
+
+    outcome "confirmed" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "no_action_needed"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "disputed" {
+        next = step.triage_worklist
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "needs_human" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_triage"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Gate 1b: is the work list right, before it costs a work cycle? ───────────
+
+step "review_worklist" {
+    target      = adapter.copilot.manager
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 1 — WORK LIST.
+
+            Work list:     ${data.internal.run_dir.value}/evidence/worklist.md
+            Request:       ${data.internal.run_dir.value}/evidence/report.md
+            Run context:   ${data.internal.run_dir.value}/evidence/context.md
+            Evidence dir:  ${data.internal.run_dir.value}/evidence
+              — everything else in this directory was put there by triage during
+                discovery. It is what its claims must rest on.
+
+            Judge the work list. Do not execute it and do not rewrite it.
+
+            Check every claim about the current state against those artifacts. A
+            claim with nothing behind it was inferred from reading code, and a
+            plausible inference is not an observation.
+
+            On `worklist_approved`, your reason becomes the brief the executing
+            agent is launched with, and it is the only instruction that agent
+            receives. Write it as a directive, not as a verdict on the work list.
+
+            Remote-state changes: if the work list has a REMOTE CHANGES section,
+            that is the set of actions the executor may take outside this
+            worktree. It may take NONE of them unless your brief names them one
+            by one. Anything you do not name, it must report back instead of
+            doing. If an item needs an approval, a credential, or a decision that
+            is not yours, `needs_human` — do not delegate the judgement to the
+            executor by writing "do it if your token permits".
+
+            Call submit_outcome with `worklist_approved`, `worklist_revise`,
+            `worklist_reject`, or `needs_human`.
+        PROMPT
+    }
+
+    outcome "worklist_approved" {
+        next = step.run_devops_worker
+        write {
+            target = data.internal.worker_brief.value
+            value  = output.reason
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = ""
+        }
+    }
+    outcome "worklist_revise" {
+        next = step.triage_worklist
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "worklist_reject" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "worklist_rejected"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    // The work is warranted but cannot proceed without an operator action —
+    // a repository that must be created, a credential nobody has minted, an
+    // approval this run does not hold. Distinct from worklist_reject, which
+    // means the work is not wanted. Without this outcome the manager's only
+    // way to move a blocked prerequisite forward is to write it into the
+    // brief, which is how a forbidden action becomes an instruction.
+    outcome "needs_human" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_worklist"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Work cycle ───────────────────────────────────────────────────────────────
+//
+// max_visits bounds the manager's needs_work <-> worker cycle: a brief that
+// never converges fails the run instead of looping forever.
+
+step "run_devops_worker" {
+    target     = subworkflow.devops_worker
+    max_visits = 5
+    outcome "success" {
+        next = switch.route_worker
+        write {
+            target = data.internal.worker_summary.value
+            value  = try(subworkflow.summary, "")
+        }
+    }
+    outcome "failure" {
+        next = switch.route_worker
+        write {
+            target = data.internal.worker_summary.value
+            // A child that dies before flushing outputs has no `summary`
+            // attribute at all — try() keeps the failure path from crashing the
+            // whole run while evaluating this write.
+            value  = try(subworkflow.summary, "")
+        }
+    }
+}
+
+// Engine bug workaround: a subworkflow's success=false is not observed by the
+// parent, so the child's status output is checked explicitly.
+switch "route_worker" {
+    match {
+        condition = try(steps.run_devops_worker.status, "") == "ok"
+        next      = step.run_verify
+    }
+    default { next = step.mark_worker_failed }
+}
+
+// The worker never reached its own success path — the agent gave up, the gate
+// never went green within the child's budget, or the session died. The commits
+// it did make are left in the worktree and the run stops; sending a broken cycle
+// on to state validation only spends two more agent turns to conclude the same.
+step "mark_worker_failed" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "worker_failed"
+        }
+    }
+    outcome "failure" { next = step.write_ops_report }
+}
+
+// The expensive proof, run deterministically rather than by the agent that
+// wants it to pass. Non-fatal by design: a failed verification is a finding for
+// the state validation and the final gate, not a reason to abandon the run.
+step "run_verify" {
+    target  = adapter.shell.wt
+    timeout = "1800s"
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            ev='${data.internal.run_dir.value}/evidence'
+            mkdir -p "$ev"
+            log="$ev/verify.log"
+            if [ -z '${var.verify_cmd}' ]; then
+                {
+                    printf '# Verification — SKIPPED\n\n'
+                    printf 'No verify_cmd was configured. Nothing in this run\n'
+                    printf 'demonstrates that the change works; it shows only\n'
+                    printf 'that the change was made and the gate passed.\n'
+                } > "$log"
+                echo "verify skipped"
+                exit 0
+            fi
+            {
+                printf '# Verification\n\n'
+                printf -- '- command: %s\n' '${var.verify_cmd}'
+                printf -- '- ran at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            } > "$log"
+            ${var.verify_cmd} >> "$log" 2>&1
+            rc=$?
+            printf '\n- exit: %s\n' "$rc" >> "$log"
+            echo "verify exit=$rc (log: $log)"
+            exit 0
+        SHELL
+    }
+    outcome "success" { next = step.validate_state }
+    outcome "failure" { next = step.validate_state }
+}
+
+// ── Triage: call 2 of 2 ──────────────────────────────────────────────────────
+// The same role that discovered the situation now reports what is and is not
+// done. It reports; it does not decide, and it does not fix. Deciding is the
+// manager's and fixing is the worker's — a triage agent that repairs what it
+// finds destroys the only independent account of the tree's state.
+
+step "validate_state" {
+    target      = adapter.copilot.triage
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            PHASE: STATE VALIDATION.
+
+            Write your report to
+            ${data.internal.run_dir.value}/evidence/state-report.md
+
+            Work list:     ${data.internal.run_dir.value}/evidence/worklist.md
+            Request:       ${data.internal.run_dir.value}/evidence/report.md
+            Verification:  ${data.internal.run_dir.value}/evidence/verify.log
+            Work log:      ${data.internal.run_dir.value}/evidence/work-log.md
+            Evidence dir:  ${data.internal.run_dir.value}/evidence
+
+            The executing agent's own account of the cycle it just finished:
+            ${data.internal.worker_summary.value}
+
+            That account is a claim, not a result. Verify it against the diff
+            and against verify.log. Anything you cannot see in a diff or a log
+            did not happen.
+
+            THIS RUN'S WORK is everything after ${data.internal.run_base_sha.value}:
+              `git log ${data.internal.run_base_sha.value}..HEAD`
+              `git diff ${data.internal.run_base_sha.value}..HEAD`
+            That is the diff to judge, and the only one your "changes not in the
+            work list" section may draw on.
+
+            The branch may also carry earlier commits, back to
+            ${data.internal.base_sha.value} (${var.base_branch}). Those were
+            reviewed and approved by earlier runs. They are context, not scope.
+            Do not report them as unrequested, and do not propose reverting them.
+
+            Go item by item through the work list. Do NOT fix anything, do not
+            edit any file outside the evidence directory, and do not commit.
+
+            Call submit_outcome with `state_complete`, `state_incomplete`, or
+            `state_blocked`.
+        PROMPT
+    }
+
+    outcome "state_complete" {
+        next = step.final_review
+        write {
+            target = data.internal.triage_state.value
+            value  = "complete"
+        }
+    }
+    outcome "state_incomplete" {
+        next = step.final_review
+        write {
+            target = data.internal.triage_state.value
+            value  = "incomplete"
+        }
+    }
+    outcome "state_blocked" {
+        next = step.final_review
+        write {
+            target = data.internal.triage_state.value
+            value  = "blocked"
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Gate 2: final authority over whether this work ships ─────────────────────
+
+step "final_review" {
+    target      = adapter.copilot.manager
+    max_visits  = 6
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 2 — FINAL. You alone decide whether this work is delivered.
+
+            State report:  ${data.internal.run_dir.value}/evidence/state-report.md
+            Work list:     ${data.internal.run_dir.value}/evidence/worklist.md
+            Request:       ${data.internal.run_dir.value}/evidence/report.md
+            Verification:  ${data.internal.run_dir.value}/evidence/verify.log
+            Evidence dir:  ${data.internal.run_dir.value}/evidence
+
+            Triage reports the state as: ${data.internal.triage_state.value}
+
+            Branch ${data.internal.branch.value}, cut from ${var.base_branch}
+            (${data.internal.base_sha.value}).
+
+            Read the diff yourself — and read the RIGHT one:
+              `git diff ${data.internal.run_base_sha.value}..HEAD`
+            That is what this run produced, and it is what you are judging.
+
+            If those two SHAs differ, the branch already carried work when this
+            run began — an earlier run against the same branch and pull request,
+            reviewed and approved at the time. **That work is settled.** It is
+            not in scope, it is not unrequested, and criterion 3 does not apply
+            to it. Never send a brief to revert it: doing so destroys work the
+            operator asked for, and the executing agent has no memory with which
+            to question the instruction.
+
+            The diff is not the whole run. If you authorized changes outside the
+            worktree at GATE 1, query their live state and confirm each landed as
+            authorized and no wider. Then read the executor's report and the
+            evidence directory for anything it changed that you did NOT
+            authorize — remote or on the host. None of that appears in a diff,
+            and this is the only gate positioned to catch it.
+
+            Nothing has been pushed. If you approve, the branch is pushed and
+            delivered by deterministic steps that ask you nothing further, so
+            this is the last point at which the work can be stopped.
+
+            On `needs_work`, your reason is the ENTIRE brief the next executing
+            agent receives — it is a fresh session with no memory of the cycle
+            you just reviewed. Name files, commands, and the required end state.
+            Do not write it as feedback on work the reader cannot remember doing.
+
+            Call submit_outcome with `approved`, `needs_work`, `reject`, or
+            `needs_human`.
+        PROMPT
+    }
+
+    outcome "approved" {
+        next = switch.route_delivery
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "needs_work" {
+        next = step.run_devops_worker
+        write {
+            target = data.internal.worker_brief.value
+            value  = output.reason
+        }
+    }
+    outcome "reject" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "work_rejected"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "needs_human" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_final"
+        }
+        write {
+            target = data.internal.manager_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Delivery ─────────────────────────────────────────────────────────────────
+// Every action past this point is deterministic shell. No agent pushes, tags,
+// opens a PR, or touches a release in this workflow — those are identical every
+// run, and the one thing worse than an agent that cannot fix a release pipeline
+// is an agent that can publish one.
+
+switch "route_delivery" {
+    match {
+        condition = var.deliver == "none"
+        next      = step.mark_local
+    }
+    default { next = step.push_branch }
+}
+
+step "mark_local" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "completed_local"
+        }
+    }
+    outcome "failure" { next = step.write_ops_report }
+}
+
+step "push_branch" {
+    target  = adapter.shell.wt
+    timeout = "120s"
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            branch='${data.internal.branch.value}'
+            # Do not discard stderr: a rejected push (no write access, protected
+            # branch, non-fast-forward) is otherwise reduced to a bare exit 128
+            # with no indication of the cause.
+            if ! out=$(git push -u origin "$branch" 2>&1); then
+                echo "push_failed=true branch=$branch"
+                echo "$out"
+                exit 1
+            fi
+            echo "pushed=$branch"
+            echo "$out"
+        SHELL
+    }
+    outcome "success" { next = switch.route_pr }
+    outcome "failure" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "push_failed"
+        }
+    }
+}
+
+switch "route_pr" {
+    match {
+        condition = var.deliver == "pr"
+        next      = step.open_pr
+    }
+    default { next = step.mark_pushed }
+}
+
+step "mark_pushed" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "pushed"
+        }
+    }
+    outcome "failure" { next = step.write_ops_report }
+}
+
+// Opens the PR and stops. Nothing here merges: review and merge belong to a
+// human or to workstream_handler_v1, and a workflow that both writes a change
+// and merges it has no gate left that it does not control.
+step "open_pr" {
+    target  = adapter.shell.wt
+    timeout = "120s"
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            branch='${data.internal.branch.value}'
+            title='${data.internal.slug.value}'
+
+            existing=$(gh pr view "$branch" --json url,state 2>/dev/null || true)
+            if [ -n "$existing" ]; then
+                url=$(printf '%s' "$existing" | jq -r '.url')
+                st=$(printf '%s' "$existing" | jq -r '.state')
+                if [ "$st" = "OPEN" ]; then
+                    printf '%s' "$url" | tr -d '\n'
+                    exit 0
+                fi
+            fi
+
+            body_file=$(mktemp)
+            {
+                cat '${data.internal.run_dir.value}/evidence/report.md'
+                printf '\n\n---\n\n'
+                printf 'Produced by devops_triage_v1. Evidence (discovery\n'
+                printf 'artifacts, work list, state report, verification log):\n\n'
+                printf '    %s/evidence\n' '${data.internal.run_dir.value}'
+            } > "$body_file"
+
+            if ! out=$(gh pr create \
+                --base '${var.base_branch}' \
+                --head "$branch" \
+                --title "$title" \
+                --body-file "$body_file" 2>&1); then
+                echo "pr_create_failed=true branch=$branch"
+                echo "$out"
+                rm -f "$body_file"
+                exit 1
+            fi
+            rm -f "$body_file"
+            printf '%s' "$out" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'
+        SHELL
+    }
+    outcome "success" {
+        next = step.mark_pr_opened
+        write {
+            target = data.internal.pr_url.value
+            value  = output.stdout
+        }
+    }
+    // The branch is already pushed at this point, so a failed PR creation loses
+    // nothing — it is recorded and the run concludes as `pushed`.
+    outcome "failure" {
+        next = step.mark_pushed
+    }
+}
+
+step "mark_pr_opened" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" {
+        next = step.write_ops_report
+        write {
+            target = data.internal.verdict.value
+            value  = "pr_opened"
+        }
+    }
+    outcome "failure" { next = step.write_ops_report }
+}
+
+// ── Run record ───────────────────────────────────────────────────────────────
+
+// Written on every terminating path, including the ones that deliver nothing. A
+// run that concludes "there was nothing to fix" is a result worth keeping — it
+// is the answer to the request, and it is what stops the next person re-running
+// the same investigation.
+step "write_ops_report" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            ev='${data.internal.run_dir.value}/evidence'
+
+            # The header is built with printf so $(date) still runs, but the
+            # manager's reasoning goes through a QUOTED heredoc delimiter. It is
+            # agent-authored text: with an unquoted delimiter the shell
+            # command-substitutes any backticks or $(...) it contains and splices
+            # the output into the report. HCL still interpolates the value in —
+            # that happens before the shell sees it — but the shell then treats
+            # every byte as literal.
+            {
+                printf '# Ops run report\n\n'
+                printf -- '- verdict: %s\n' '${data.internal.verdict.value}'
+                printf -- '- triage state: %s\n' '${data.internal.triage_state.value}'
+                printf -- '- branch: %s (from %s @ %s)\n' '${data.internal.branch.value}' '${var.base_branch}' '${data.internal.base_sha.value}'
+                printf -- '- worktree: %s\n' '${var.worktree_dir}'
+                printf -- '- pull request: %s\n' '${data.internal.pr_url.value}'
+                printf -- '- concluded at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '## Request\n\n'
+                cat "$ev/report.md"
+                printf '\n## Manager reasoning\n\n'
+                cat <<'____CRITERIA_EOF____'
+${data.internal.manager_feedback.value}
+____CRITERIA_EOF____
+                printf '\n## Last worker cycle\n\n'
+                cat <<'____CRITERIA_EOF____'
+${data.internal.worker_summary.value}
+____CRITERIA_EOF____
+            } > "$ev/ops-report.md"
+            cat "$ev/ops-report.md"
+        SHELL
+    }
+    outcome "success" { next = step.teardown }
+    outcome "failure" { next = step.teardown }
+}
+
+// Evidence is the deliverable and is never removed.
+//
+// The worktree is removed ONLY when the commits are safely on the remote, or
+// when there were never any commits to lose. Everywhere else it holds the sole
+// copy of the run's work, and tearing it down would delete the thing the run
+// exists to produce.
+step "teardown" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            verdict='${data.internal.verdict.value}'
+            wt='${var.worktree_dir}'
+            keep=yes
+            case "$verdict" in
+                pr_opened|pushed)
+                    keep=no
+                    ;;
+                insufficient_report|no_action_needed|worklist_rejected|needs_human_at_intake|needs_human_at_triage|needs_human_at_worklist)
+                    # These conclude before any work cycle runs, so the worktree
+                    # is an untouched checkout — unless an agent wrote in it
+                    # despite being told not to, which is worth keeping to look at.
+                    if [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+                        keep=no
+                    fi
+                    ;;
+            esac
+            if [ "$keep" = "no" ]; then
+                git -C '${var.repo_dir}' worktree remove --force "$wt" 2>/dev/null || true
+                git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
+                echo "removed worktree $wt"
+            else
+                echo "kept worktree $wt — it holds the only copy of this run's commits"
+            fi
+            echo "evidence retained at ${data.internal.run_dir.value}/evidence"
+            exit 0
+        SHELL
+    }
+    outcome "success" { next = switch.route_final }
+    outcome "failure" { next = switch.route_final }
+}
+
+switch "route_final" {
+    match {
+        condition = data.internal.verdict.value == "pr_opened" || data.internal.verdict.value == "pushed" || data.internal.verdict.value == "completed_local"
+        next      = state.delivered
+    }
+    match {
+        condition = startswith(data.internal.verdict.value, "needs_human")
+        next      = state.needs_human
+    }
+    // A worker that never reached "ok", or a push that was refused, is a
+    // mechanical failure of the run — not a considered decision not to ship.
+    match {
+        condition = data.internal.verdict.value == "push_failed" || data.internal.verdict.value == "worker_failed" || data.internal.verdict.value == ""
+        next      = state.failed
+    }
+    default { next = state.closed_no_change }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+state "delivered" {
+    terminal = true
+    success  = true
+}
+
+// Not a failure, and for `no_action_needed` it is the point of the run: the
+// answer to "is this broken?" is allowed to be no. The evidence directory
+// records what was checked so the question is not re-investigated from scratch.
+state "closed_no_change" {
+    terminal = true
+    success  = true
+}
+
+state "needs_human" {
+    terminal = true
+    success  = false
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+output "branch" {
+    type  = string
+    value = data.internal.branch.value
+}
+
+output "pr_url" {
+    type  = string
+    value = data.internal.pr_url.value
+}
+
+output "verdict" {
+    type  = string
+    value = data.internal.verdict.value
+}

@@ -9,10 +9,18 @@ environment "shell" "primary" {
 adapter "copilot" "coordinator" {
     environment = shell.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.2"
+    version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    //
+    // Deliberately NOT named GITHUB_TOKEN in the host environment: a bare
+    // GITHUB_TOKEN exported by the operator is inherited by every adapter
+    // subprocess and by the agent's own tool shell, where it overrides both the
+    // per-adapter secret and the active `gh` account. That silently collapses
+    // the workflow's two-identity separation — the reviewer ends up acting as
+    // the PR author and GitHub rejects the approval. Each role therefore reads
+    // a distinctly named variable; see pr_reviewer_loop/adapters.chcl.
     secrets {
-        GITHUB_TOKEN = "env:GITHUB_TOKEN"
+        GITHUB_TOKEN = "env:COORDINATOR_GITHUB_TOKEN"
     }
     config {
         model             = "minimax-m3:cloud"
@@ -40,5 +48,12 @@ adapter "shell" "repo" {
 
 adapter "noop" "default" {
     source  = "ghcr.io/brokenbots/criteria-adapter-noop"
-    version = "0.5.1"
+    version = "0.5.2"
+    // noop >= 0.5.2 holds its Log stream open, so idle sessions no longer die
+    // of a false heartbeat stall (verified A/B against 0.5.1 and 0.5.2).
+    // on_crash is now belt-and-braces only: the host still arms its stall
+    // detector against any adapter that goes quiet, and that host-side gap is
+    // unfixed (see workstreams/fix-idle-adapter-session-heartbeat-stall.md).
+    // Safe to drop once that lands.
+    on_crash = "respawn"
 }

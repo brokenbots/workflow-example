@@ -10,19 +10,42 @@ adapter "shell" "sh" {
 
 adapter "noop" "default" {
     source  = "ghcr.io/brokenbots/criteria-adapter-noop"
-    version = "0.5.1"
+    version = "0.5.2"
+    // noop >= 0.5.2 holds its Log stream open, so idle sessions no longer die
+    // of a false heartbeat stall (verified A/B against 0.5.1 and 0.5.2).
+    // on_crash is now belt-and-braces only: the host still arms its stall
+    // detector against any adapter that goes quiet, and that host-side gap is
+    // unfixed (see workstreams/fix-idle-adapter-session-heartbeat-stall.md).
+    // Safe to drop once that lands.
+    on_crash = "respawn"
 }
 
-// PR review runs on Claude Code (claude-agent adapter) — preferred over the
-// copilot harness for review work.
-adapter "claude-agent" "pr_reviewer" {
+// PR review runs on the copilot harness, resolving through the local Ollama
+// endpoint. glm-5.2 is the review model.
+adapter "copilot" "pr_reviewer" {
     environment = shell.worktree
-    source  = "ghcr.io/brokenbots/criteria-adapter-claude-agent"
-    version = "0.5.5"
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.4"
+    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    //
+    // This adapter must authenticate as the *reviewer*, not the coordinator.
+    // The workflow's two-identity separation is enforced at the shell level by
+    // `gh auth switch`, but an agent adapter carries its own token and ignores
+    // the active gh account — so sharing one GITHUB_TOKEN across all copilot
+    // instances makes the reviewer act as the PR author, and GitHub rejects
+    // self-approval. REVIEWER_GITHUB_TOKEN must be set in the environment and
+    // must hold a token for var.reviewer_gh_user; set it to the same value as
+    // GITHUB_TOKEN for single-identity setups.
+    secrets {
+        GITHUB_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
+    }
     config {
-        model         = var.pr_reviewer.model
-        thinking      = var.pr_reviewer.thinking
-        system_prompt = file("./agents/pr_reviewer.md")
-        cwd           = var.worktree_dir
+        model             = var.pr_reviewer.model
+        max_turns         = "${var.pr_reviewer.max_turns}"
+        reasoning_effort  = var.pr_reviewer.reasoning_effort
+        system_prompt     = file("./agents/pr_reviewer.md")
+        provider_base_url = var.pr_reviewer.provider.base_url
+        provider_wire_api = var.pr_reviewer.provider.wire_api
+        working_directory = var.worktree_dir
     }
 }

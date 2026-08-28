@@ -1,0 +1,47 @@
+// Worktree lifecycle runs in the repo's primary tree — it must work before the
+// per-ref worktree exists.
+environment "shell" "primary" {
+    working_directory = var.repo_dir
+}
+
+// Build, baseline tests, and the reproduction itself run inside the checked-out
+// ref. Bound lazily: the worktree is created by this subworkflow's first step.
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+adapter "shell" "repo" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.primary
+}
+
+adapter "shell" "wt" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.worktree
+}
+
+adapter "copilot" "investigator" {
+    environment = shell.worktree
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:TRIAGE_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.investigator.model
+        max_turns         = "${var.investigator.max_turns}"
+        reasoning_effort  = var.investigator.reasoning_effort
+        system_prompt     = file("./agents/investigator.md")
+        provider_base_url = var.investigator.provider.base_url
+        provider_wire_api = var.investigator.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "noop" "default" {
+    source   = "ghcr.io/brokenbots/criteria-adapter-noop"
+    version  = "0.5.2"
+    on_crash = "respawn"
+}

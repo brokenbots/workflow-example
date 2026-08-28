@@ -1,5 +1,5 @@
 schema_version = 1
-adapter "copilot" "coordinator" {
+adapter "copilot" "investigator" {
   reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.4"
   version              = "0.5.4"
   resolved_digest      = "sha256:b3bea8a4f03e3caccdeea6fca9aab6f9422528d855603c1b4c0f9c64b7b76e9e"
@@ -41,7 +41,7 @@ adapter "shell" "repo" {
     }
   }
 }
-adapter "shell" "sh" {
+adapter "shell" "wt" {
   reference            = "ghcr.io/brokenbots/criteria-adapter-shell:0.5.2"
   version              = "0.5.2"
   resolved_digest      = "sha256:38f23c92a11548ce57c54e9312c567558d3ad017fd632adfba305b058988703d"

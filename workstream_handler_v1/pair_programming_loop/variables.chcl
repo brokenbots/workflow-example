@@ -56,8 +56,8 @@ variable "developer" {
         }))
     })
 
-    // kimi-k3:cloud is "extra usage only" on the current Ollama plan; k2.7-code
-    // is the latest included kimi and is coding-tuned.
+    // kimi-k3:cloud is "extra usage only" on the current Ollama plan;
+    // kimi-k2.7-code:cloud is the latest included kimi and is coding-tuned.
     default = {
         model     = "kimi-k2.7-code:cloud"
         max_turns = 30
@@ -69,16 +69,27 @@ variable "developer" {
     }
 }
 
-// Reviewer runs on the claude-agent adapter (Claude Code CLI). Requires the
-// `claude` CLI installed and authenticated; no provider config needed.
+// Reviewer runs on the copilot adapter, resolving through the local Ollama
+// endpoint like the developer. glm-5.2:cloud is the review model.
 variable "reviewer" {
     type = object({
-        model    = string
-        thinking = optional(bool, true)
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
     })
 
     default = {
-        model    = "claude-opus-5"
-        thinking = true
+        model     = "glm-5.2:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
     }
 }

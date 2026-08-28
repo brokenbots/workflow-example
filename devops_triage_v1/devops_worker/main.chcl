@@ -1,0 +1,314 @@
+workflow {
+    name          = "devops_worker"
+    version       = "1"
+    initial_state = "assert_worktree"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 80
+    }
+}
+
+// "ok" only on the paths the parent should treat as a completed cycle; empty
+// otherwise. Mirrors the workaround used in workstream_handler_v1 and
+// qa_triage_v1 — a subworkflow's success=false is not observed by the parent, so
+// status is checked explicitly.
+data "internal" "status" {
+    type  = string
+    value = ""
+}
+
+// The executing agent's account of this cycle, returned to the parent for the
+// state validation and the manager's final gate. A claim, not a result — both
+// readers are told to check it against the diff.
+data "internal" "summary" {
+    type  = string
+    value = ""
+}
+
+// The prompt for the current attempt. Starts as the manager's brief and is
+// replaced wholesale by gate output on a retry, so a failing gate is the whole
+// of what the agent is asked to deal with rather than an appendix to a brief it
+// has already acted on.
+data "internal" "agent_prompt" {
+    type  = string
+    value = "if you get this prompt there is a serious error: call submit_outcome with `blocked` and a reason of `worker launched with no brief`"
+}
+
+// "yes" when the agent reported it cannot proceed. Skips the gate — a gate run
+// against work the agent already said is unfinished tells nobody anything — and
+// hands the cycle back to the manager to decide.
+data "internal" "blocked" {
+    type  = string
+    value = ""
+}
+
+// ── Worktree assertion ───────────────────────────────────────────────────────
+//
+// Assert, never correct. The parent created this worktree on this branch; if it
+// is not there, something upstream is wrong and the right response is to stop.
+// A subworkflow that quietly checks out the branch it expected turns a setup bug
+// into commits on whatever branch it found.
+
+step "assert_worktree" {
+    target  = adapter.shell.wt
+    timeout = "30s"
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            expected='${var.branch}'
+            current=$(git branch --show-current)
+            if [ "$current" != "$expected" ]; then
+                echo "expected branch '$expected' but worktree is on '$current'" >&2
+                exit 1
+            fi
+            echo "on_branch=$current"
+        SHELL
+    }
+    outcome "success" { next = switch.route_brief }
+    outcome "failure" { next = state.failed }
+}
+
+// The empty-brief guard is an HCL condition, NOT a shell test.
+//
+// It was `[ -z '${var.brief}' ]` inside the step above, and that killed a real
+// run: the brief is manager-authored prose, an apostrophe in it closed the
+// single quote, and a later `(` parsed as a shell token —
+// `sh: -c: line 13: syntax error near unexpected token '('`.
+//
+// The rule the rest of this workflow already follows for agent text going into
+// a FILE (always a quoted heredoc) applies just as much to agent text going onto
+// a COMMAND LINE. The safest version is not to put it there at all: HCL compares
+// the value without a shell ever seeing it.
+switch "route_brief" {
+    match {
+        condition = var.brief == ""
+        next      = state.failed
+    }
+    default { next = step.init_prompt }
+}
+
+step "init_prompt" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" {
+        next = step.execute
+        write {
+            target = data.internal.agent_prompt.value
+            value  = <<-PROMPT
+                You are executing one work cycle on branch ${var.branch}, in the
+                worktree at ${var.worktree_dir}. You are already in it.
+
+                Your brief — this is the whole of what you have been asked to do:
+
+                ${var.brief}
+
+                Reference material:
+                  Work list:  ${var.worklist_file}
+                  Request:    ${var.report_file}
+                  Evidence:   ${var.evidence_dir}
+                              — the triage agent's discovery artifacts are in
+                                here. Read them before re-deriving anything.
+
+                Read the work list before you start. Where the brief and the work
+                list disagree, the brief wins — it is more recent.
+
+                Do NOT run git commit, git push, git tag, gh release, or anything
+                else that publishes. Your changes are committed for you when you
+                finish. Leave your work in the tree.
+
+                Call submit_outcome with `work_done` or `blocked`.
+            PROMPT
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Execute ──────────────────────────────────────────────────────────────────
+//
+// max_visits bounds the execute <-> gate cycle within this one worker run. The
+// parent bounds how many worker runs happen at all, so a stuck job terminates at
+// both levels.
+
+step "execute" {
+    target      = adapter.copilot.devops
+    max_visits  = 8
+    allow_tools = ["*"]
+
+    input {
+        prompt = data.internal.agent_prompt.value
+    }
+
+    outcome "work_done" {
+        next = step.write_work_log
+        write {
+            target = data.internal.summary.value
+            value  = output.reason
+        }
+    }
+    outcome "blocked" {
+        next = step.write_work_log
+        write {
+            target = data.internal.summary.value
+            value  = "BLOCKED — the executing agent reported it could not complete this cycle:\n\n${output.reason}"
+        }
+        write {
+            target = data.internal.blocked.value
+            value  = "yes"
+        }
+    }
+    // The copilot adapter emits "failure" if the session dies or the agent never
+    // calls submit_outcome after re-prompts. Any uncommitted work is left in the
+    // worktree; the parent keeps that worktree on a failed cycle.
+    outcome "need_help" { next = state.failed }
+    outcome "failure"   { next = state.failed }
+    outcome "default"   { next = state.failed }
+}
+
+step "write_work_log" {
+    target = adapter.shell.wt
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            mkdir -p '${var.evidence_dir}'
+            {
+                printf '\n## Work cycle — %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                # QUOTED delimiter: this is agent-authored text, and an unquoted
+                # heredoc would command-substitute any backticks or $(...) it
+                # contains and splice the output into the log. HCL still
+                # interpolates the value in before the shell sees it.
+                cat <<'____CRITERIA_EOF____'
+${data.internal.summary.value}
+____CRITERIA_EOF____
+            } >> '${var.evidence_dir}/work-log.md'
+            echo "work log appended"
+        SHELL
+    }
+    outcome "success" { next = step.commit_cycle }
+    outcome "failure" { next = step.commit_cycle }
+}
+
+// ── Deterministic commit ─────────────────────────────────────────────────────
+//
+// The agent is told not to commit and does not need to: staging and committing
+// a cycle is identical every time, so it is done here. That removes the whole
+// "you forgot to commit, go back and commit" loop, and it removes the class of
+// cycle where an agent commits a subset of its own work and reports all of it.
+//
+// One commit per cycle. The cycle boundary is a real boundary — it is what the
+// manager reviews — so it is worth having it visible in the history.
+
+step "commit_cycle" {
+    target  = adapter.shell.wt
+    timeout = "60s"
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            if [ -z "$(git status --porcelain)" ]; then
+                echo "no_changes=true"
+                exit 0
+            fi
+            base='${var.base_branch}'
+            n=$(git rev-list --count "origin/$base..HEAD" 2>/dev/null || echo 0)
+            n=$((n + 1))
+            git add -A
+            if ! out=$(git commit -m "ops: ${var.branch} cycle $n" 2>&1); then
+                echo "commit_failed=true"
+                echo "$out"
+                exit 1
+            fi
+            echo "committed=$(git rev-parse --short HEAD) cycle=$n"
+        SHELL
+    }
+    outcome "success" { next = switch.route_gate }
+    outcome "failure" { next = switch.route_gate }
+}
+
+switch "route_gate" {
+    match {
+        condition = data.internal.blocked.value == "yes"
+        next      = step.mark_done
+    }
+    match {
+        condition = var.ci_gate_cmd == ""
+        next      = step.mark_done
+    }
+    default { next = step.ci_gate }
+}
+
+// The gate is the only thing in this loop that can send the agent back, and it
+// is deterministic. A reviewer agent here would be a third opinion on work two
+// agents upstream already judge; a command that exits non-zero is not an
+// opinion.
+step "ci_gate" {
+    target  = adapter.shell.wt
+    timeout = "1800s"
+    input {
+        command = var.ci_gate_cmd
+    }
+
+    outcome "success" { next = step.mark_done }
+
+    outcome "failure" {
+        next = step.execute
+        write {
+            target = data.internal.agent_prompt.value
+            value  = "The gate command `${var.ci_gate_cmd}` is failing on branch ${var.branch}. Fix it. Everything you changed so far is already committed — keep going from here, do not start over.\n\nstdout:\n${output.stdout}\n\nstderr:\n${output.stderr}\n\nDo NOT run git commit, git push, git tag, or gh release. Call submit_outcome with `work_done` or `blocked`."
+        }
+    }
+}
+
+// ── Completion ───────────────────────────────────────────────────────────────
+
+// Stamp status="ok" and flush the snapshot before the terminal state so the
+// parent's route switch can read it (engine bug: DataStore writes are not
+// included in finalVars without an intervening step — mirrors branch_manager
+// and pair_programming_loop).
+step "mark_done" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" {
+        next = step.finish
+        write {
+            target = data.internal.status.value
+            value  = "ok"
+        }
+    }
+    outcome "failure" { next = step.finish }
+}
+
+step "finish" {
+    target = adapter.noop.default
+    input  {}
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.done }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// Declared outputs. `data "internal"` alone is NOT visible to the parent as
+// `subworkflow.<name>` — without these blocks the parent's
+// try(subworkflow.summary, "") silently takes the fallback and every cycle
+// reports nothing regardless of what actually happened.
+output "status" {
+    type  = string
+    value = data.internal.status.value
+}
+
+output "summary" {
+    type  = string
+    value = data.internal.summary.value
+}
+
+output "blocked" {
+    type  = string
+    value = data.internal.blocked.value
+}

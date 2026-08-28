@@ -1,0 +1,5 @@
+bug_reports/**
+workstreams/**
+varfiles/*.chcl
+ops_reports
+DESIGN-INTENT.md

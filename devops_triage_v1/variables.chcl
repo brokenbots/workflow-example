@@ -1,0 +1,187 @@
+// ── The request ──────────────────────────────────────────────────────────────
+//
+// Supply exactly one of ops_report_file or report_text. Both are allowed to be
+// one line long: "the release workflow isn't working" is a valid request. The
+// triage agent does the discovery, so a request does not have to arrive with a
+// run ID, a log excerpt, or a diagnosis attached.
+
+variable "ops_report_file" {
+    description = "Absolute path to an operations report / ticket (markdown or plain text). Read-only — the run never modifies it. Mutually exclusive with report_text."
+    type        = string
+    default     = ""
+}
+
+variable "report_text" {
+    description = "The request as inline text, for when writing a file is more ceremony than the request deserves (e.g. --var 'report_text=the release workflow is failing on tag builds'). Mutually exclusive with ops_report_file."
+    type        = string
+    default     = ""
+}
+
+variable "run_label" {
+    description = "Overrides the run slug, which names the run directory and the work branch. Empty derives it from the report filename, or from the first line of report_text."
+    type        = string
+    default     = ""
+}
+
+// Free-text hints, passed to triage as a starting point and nothing more. A
+// workflow name, a tag, a run ID, a component, a compliance standard, "check
+// the last three releases". Triage is not bound by them: a hint that turns out
+// to point at the wrong thing is a finding, not an instruction.
+variable "hints" {
+    description = "Optional free-text hints for the triage agent — where to start looking, a workflow name, a ref, a run ID, a deadline, a constraint. Empty is fine; triage discovers its own scope."
+    type        = string
+    default     = ""
+}
+
+// ── Repository and workspace ─────────────────────────────────────────────────
+
+// Defaults to "" rather than being required: it is referenced from adapter
+// config, which must resolve at compile time. A required variable leaves it
+// unknown and the compile fails. Always pass it at apply time.
+variable "repo_dir" {
+    description = "Absolute path of the repository's primary working tree. Ref resolution and worktree lifecycle run here. Must be under $HOME (or CRITERIA_SHELL_ALLOWED_PATHS). Empty runs in the process working directory."
+    type        = string
+    default     = ""
+}
+
+// The single tree every agent is allowed to write in. Created deterministically
+// before any agent runs, and NOT removed at teardown unless the work was pushed
+// — deleting an unpushed worktree would destroy the run's entire output.
+variable "worktree_dir" {
+    description = "Absolute path of the isolated per-run git worktree the agents work in. Created by setup_worktree on the run's branch. Must be under $HOME (or CRITERIA_SHELL_ALLOWED_PATHS), contain no '..', and must not be the primary tree. Required in practice — the run aborts if it is empty."
+    type        = string
+    default     = ""
+}
+
+// Deliberately OUTSIDE the repository under work: this is where the evidence
+// that outlives the run is written, and evidence stored inside a tree the agents
+// edit is evidence that can be edited.
+variable "ops_root" {
+    description = "Absolute path under which the per-run directory (<ops_root>/<slug>) and its evidence directory are created. Must be OUTSIDE repo_dir, and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS."
+    type        = string
+    default     = "/tmp/criteria-devops"
+}
+
+variable "base_branch" {
+    description = "Branch the run's work branch is cut from and, when a PR is opened, targeted at."
+    type        = string
+    default     = "main"
+}
+
+variable "branch_prefix" {
+    description = "Prefix for the run's work branch. The branch is <branch_prefix><slug>."
+    type        = string
+    default     = "ops/"
+}
+
+// ── Gates ────────────────────────────────────────────────────────────────────
+
+variable "ci_gate_cmd" {
+    description = "Fast local gate the worker subworkflow runs after each work cycle (exit 0 = clean); its output is fed back to the devops agent on failure. Meant for cheap static checks — e.g. 'actionlint .github/workflows/*.yml && make build'. Empty skips the gate."
+    type        = string
+    default     = ""
+}
+
+variable "verify_cmd" {
+    description = "The expensive proof, run once per cycle in the worktree after the worker's gate passes and before state validation (e.g. a dry-run release, 'act -j release', a scanner, a packaging script). Its exit code and output become evidence for the state validation and the final review. Empty skips verification — and a run with no verify_cmd can only ever claim the change looks right, never that it works."
+    type        = string
+    default     = ""
+}
+
+// ── Delivery ─────────────────────────────────────────────────────────────────
+// Every delivery action is deterministic shell. Agents never push, never tag,
+// never open a PR, and never touch a release.
+
+variable "deliver" {
+    description = "What happens after the manager accepts the work: \"pr\" (default) pushes the branch and opens a PR against base_branch; \"push\" pushes the branch only; \"none\" leaves the commits in the worktree, which is then kept rather than torn down. Nothing here merges — a PR is handed to a human or to workstream_handler_v1."
+    type        = string
+    default     = "pr"
+}
+
+// NOTE: retry budgets are NOT variables. `max_visits` must be a compile-time
+// literal — the compiler rejects a variable reference — so each gate's budget is
+// written inline in main.chcl. Change it there.
+
+// Manager: gates intake, the work list, the no-action finding, and the final
+// result. Sole authority to send work forward or close the run. Deliberately a
+// DIFFERENT model family from the two devops roles — a manager sharing the
+// executor's blind spots is not a review, it is a second opinion from the same
+// mind.
+variable "manager" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.2:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Triage: called exactly twice per run — once to discover the situation and
+// specify the work, once to report where everything stands after the work. It
+// never executes the work list it wrote, so the agent that judges "is this done"
+// is not the agent whose work is being judged.
+variable "triage" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 60)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    // Discovery is the expensive half of this role's job — reading run logs,
+    // walking history, querying GitHub, running scanners — so its turn budget is
+    // higher than the manager's, which only ever reads and decides.
+    default = {
+        model     = "kimi-k2.7-code:cloud"
+        max_turns = 60
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Executor. Passed straight through to devops_worker, which is re-entered from
+// its initial state on every cycle — so this agent gets a fresh session, and a
+// failed approach from cycle N is not still in the context window at cycle N+1.
+variable "devops" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 40)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "kimi-k2.7-code:cloud"
+        max_turns = 40
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

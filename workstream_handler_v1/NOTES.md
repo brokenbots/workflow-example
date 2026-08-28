@@ -6,37 +6,52 @@ v0.5 "adapter-v2" model). All pins lock and compile end-to-end on this host
 and `criteria compile <dir>` succeeds for the root workflow and all three
 subworkflows.
 
-## Pins (as of 2026-07-27)
+## Pins (as of 2026-07-28)
 
 | adapter | source | version | notes |
 |---|---|---|---|
-| copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.2` | multi-arch, signed. Used for dev work: developer, coordinator, branch-repair. |
+| copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.2` | multi-arch, signed. Used for every agent role: developer, coordinator, branch-repair, pair-loop reviewer, PR reviewer. |
 | shell        | `ghcr.io/brokenbots/criteria-adapter-shell`        | `0.5.2` | multi-arch, keyless-signed. |
 | noop         | `ghcr.io/brokenbots/criteria-adapter-noop`         | `0.5.1` | multi-arch, keyless-signed. |
-| claude-agent | `ghcr.io/brokenbots/criteria-adapter-claude-agent` | `0.5.5` | Claude Code CLI adapter. Used for review roles (pair-loop reviewer, PR reviewer). Signature warning: keyless signature has no Rekor transparency-log proof — locks in warn mode; re-publish with Rekor enabled to verify strictly. |
 
-## Model pins (as of 2026-07-27)
+All agent roles now run on the copilot adapter; the `claude-agent` adapter is
+no longer used anywhere in this workflow.
+
+## Model pins (as of 2026-07-28)
 
 | role | adapter | model |
 |---|---|---|
-| developer (pair loop)  | copilot      | `kimi-k2.7-code:cloud` (Ollama cloud — `kimi-k3:cloud` is extra-usage-only on the current plan) |
-| coordinator (root)     | copilot      | `minimax-m3:cloud` (Ollama cloud) |
-| branch repair          | copilot      | `minimax-m3:cloud` (Ollama cloud) |
-| reviewer (pair loop)   | claude-agent | `claude-opus-5` |
-| PR reviewer            | claude-agent | `claude-opus-5` |
+| developer (pair loop)  | copilot | `kimi-k2.7-code:cloud` (Ollama cloud — `kimi-k3:cloud` is extra-usage-only on the current plan; `kimi-k2.7-code:cloud` is the latest included kimi and is coding-tuned) |
+| coordinator (root)     | copilot | `minimax-m3:cloud` (Ollama cloud) |
+| branch repair          | copilot | `minimax-m3:cloud` (Ollama cloud) |
+| reviewer (pair loop)   | copilot | `glm-5.2:cloud` (Ollama cloud) |
+| PR reviewer            | copilot | `glm-5.2:cloud` (Ollama cloud) |
 
-Copilot roles resolve through the local Ollama endpoint
+Every copilot role resolves through the local Ollama endpoint
 (`http://localhost:11434/v1`, `responses` wire API); pull the cloud models with
-`ollama pull kimi-k3:cloud minimax-m3:cloud`. The claude-agent roles need the
-`claude` CLI installed and authenticated on `PATH` (or set `claude_executable`
-in the adapter config) — no provider config.
+`ollama pull kimi-k2.7-code:cloud minimax-m3:cloud glm-5.2:cloud`. No `claude`
+CLI is required — there are no claude-agent roles left.
 
 ## Refresh procedure
 
 ```sh
 criteria adapter lock workstream_handler_v1
+criteria compile workstream_handler_v1
+```
+
+`adapter lock` recurses into every subworkflow as of criteria #288, so the root
+invocation locks the whole tree — it reports each workflow it visited and the
+adapter count per workflow. Before that change it locked only the named
+directory, and this procedure listed all four directories separately; a
+subworkflow whose lockfile was missing then failed at run time with
+`adapter "<name>" not found (searched: ~/.criteria/adapters/criteria-adapter-<name>)`
+when the run first entered it.
+
+Requires a criteria binary built at or after #288. With an older binary, fall
+back to locking each directory individually:
+
+```sh
 criteria adapter lock workstream_handler_v1/pair_programming_loop
 criteria adapter lock workstream_handler_v1/pr_reviewer_loop
 criteria adapter lock workstream_handler_v1/branch_manager
-criteria compile workstream_handler_v1
 ```

@@ -1,0 +1,74 @@
+// Ref resolution, worktree lifecycle, `gh` queries, push, and PR creation bind
+// to the repo's primary tree. Every one of those is deterministic shell — no
+// agent is ever given a session here.
+environment "shell" "primary" {
+    working_directory = var.repo_dir
+}
+
+// The run's isolated worktree, created by setup_worktree before any agent runs.
+// Gates, verification, and all three agent roles bind here.
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+adapter "shell" "repo" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.primary
+}
+
+adapter "shell" "wt" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.worktree
+}
+
+// Named DEVOPS_GITHUB_TOKEN rather than GITHUB_TOKEN deliberately: a bare
+// GITHUB_TOKEN exported by the operator is inherited by every adapter subprocess
+// and by each agent's own tool shell, where it silently overrides the
+// per-adapter secret. Same discipline as qa_triage_v1 and workstream_handler_v1.
+adapter "copilot" "manager" {
+    environment = shell.worktree
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:DEVOPS_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.manager.model
+        max_turns         = "${var.manager.max_turns}"
+        reasoning_effort  = var.manager.reasoning_effort
+        system_prompt     = file("./agents/manager.md")
+        provider_base_url = var.manager.provider.base_url
+        provider_wire_api = var.manager.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+// Triage reads the repository and the evidence directory. It is bound to the
+// worktree like everyone else, but its instructions forbid modifying anything —
+// the state report it writes at the end must describe the tree as the worker
+// left it, and a triage agent that fixes what it finds cannot do that.
+adapter "copilot" "triage" {
+    environment = shell.worktree
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:DEVOPS_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.triage.model
+        max_turns         = "${var.triage.max_turns}"
+        reasoning_effort  = var.triage.reasoning_effort
+        system_prompt     = file("./agents/devops_triage.md")
+        provider_base_url = var.triage.provider.base_url
+        provider_wire_api = var.triage.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "noop" "default" {
+    source   = "ghcr.io/brokenbots/criteria-adapter-noop"
+    version  = "0.5.2"
+    on_crash = "respawn"
+}

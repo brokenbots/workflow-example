@@ -1,0 +1,301 @@
+workflow {
+    name          = "repro_runner"
+    version       = "1"
+    initial_state = "prepare_worktree"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 60
+    }
+}
+
+// "ok" only on the success path; empty on failure. Mirrors the workaround used
+// in workstream_handler_v1 — a subworkflow's success=false is not observed by
+// the parent, so status is checked explicitly.
+data "internal" "status" {
+    type  = string
+    value = ""
+}
+
+// This arm's result: "yes" | "no" | "inconclusive".
+//
+// "inconclusive" is a first-class outcome, not a failure. A build that does not
+// compile at this ref, or a reproduction whose result is ambiguous, must NOT be
+// reported as "no" — a false "no" is what turns a real bug into a closed report.
+data "internal" "reproduced" {
+    type  = string
+    value = "inconclusive"
+}
+
+// Whether the baseline test suite was already failing at this ref, before any
+// reproduction was attempted. Carried into evidence so a pre-existing failure is
+// never mistaken for the reported bug.
+data "internal" "baseline_health" {
+    type  = string
+    value = "unknown"
+}
+
+step "prepare_worktree" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            git -C '${var.repo_dir}' worktree remove --force '${var.worktree_dir}' 2>/dev/null || true
+            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
+            rm -rf '${var.worktree_dir}'
+            mkdir -p "$(dirname '${var.worktree_dir}')"
+            git -C '${var.repo_dir}' worktree add --detach '${var.worktree_dir}' '${var.ref}'
+            git -C '${var.worktree_dir}' rev-parse HEAD
+        SHELL
+    }
+    outcome "success" { next = switch.route_build }
+    outcome "failure" { next = step.mark_inconclusive }
+}
+
+switch "route_build" {
+    match {
+        condition = var.build_cmd == ""
+        next      = switch.route_baseline_tests
+    }
+    default { next = step.build }
+}
+
+// A ref that does not build cannot host a reproduction. That is inconclusive
+// for this arm, never a "no".
+step "build" {
+    target = adapter.shell.wt
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            log='${var.evidence_dir}/build-${var.ref_label}.log'
+            mkdir -p '${var.evidence_dir}'
+            ${var.build_cmd} > "$log" 2>&1
+            rc=$?
+            echo "build exit=$rc (log: $log)"
+            exit $rc
+        SHELL
+    }
+    outcome "success" { next = switch.route_baseline_tests }
+    outcome "failure" { next = step.mark_build_failed }
+}
+
+step "mark_build_failed" {
+    target = adapter.shell.wt
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            cat > '${var.evidence_dir}/run-${var.ref_label}.md' <<____CRITERIA_EOF____
+# ${var.ref_label} — INCONCLUSIVE (build failed)
+
+- ref: ${var.ref} (${var.ref_display})
+- build command: ${var.build_cmd}
+- build log: ${var.evidence_dir}/build-${var.ref_label}.log
+
+The tree does not build at this ref, so no reproduction was attempted. This is
+NOT evidence that the bug is absent.
+____CRITERIA_EOF____
+            echo "build failed at ${var.ref_label}"
+        SHELL
+    }
+    outcome "success" { next = step.mark_inconclusive }
+    outcome "failure" { next = step.mark_inconclusive }
+}
+
+switch "route_baseline_tests" {
+    match {
+        condition = var.test_cmd == ""
+        next      = switch.route_provided_workflow
+    }
+    default { next = step.baseline_tests }
+}
+
+// Deliberately non-fatal. The result is recorded either way: knowing the suite
+// was already red at this ref is what prevents an unrelated failure being
+// attributed to the reported bug.
+step "baseline_tests" {
+    target = adapter.shell.wt
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            log='${var.evidence_dir}/baseline-${var.ref_label}.log'
+            mkdir -p '${var.evidence_dir}'
+            ${var.test_cmd} > "$log" 2>&1
+            rc=$?
+            if [ $rc -eq 0 ]; then printf 'clean'; else printf 'already_failing'; fi
+        SHELL
+    }
+    outcome "success" {
+        next = switch.route_provided_workflow
+        write {
+            target = data.internal.baseline_health.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" {
+        next = switch.route_provided_workflow
+        write {
+            target = data.internal.baseline_health.value
+            value  = "already_failing"
+        }
+    }
+}
+
+switch "route_provided_workflow" {
+    match {
+        condition = var.repro_workflow_dir == ""
+        next      = step.execute_plan
+    }
+    default { next = step.run_provided_workflow }
+}
+
+// The reporter's own reproduction, run unmodified, before the investigator gets
+// a chance to construct its own. When a report ships a reproduction, that
+// reproduction is the evidence — an investigator-authored substitute tests
+// whatever the investigator understood the report to mean, which is exactly the
+// substitution this workflow exists to prevent.
+step "run_provided_workflow" {
+    target = adapter.shell.wt
+    input {
+        command = <<-SHELL
+            set -uo pipefail
+            log='${var.evidence_dir}/provided-${var.ref_label}.log'
+            mkdir -p '${var.evidence_dir}'
+            {
+                echo "# provided reproduction — ${var.ref_label} (${var.ref_display})"
+                echo "# source: ${var.repro_workflow_dir}"
+                echo
+            } > "$log"
+
+            if [ -d '${var.repro_workflow_dir}' ] && ls '${var.repro_workflow_dir}'/*.chcl >/dev/null 2>&1; then
+                criteria apply '${var.repro_workflow_dir}' >> "$log" 2>&1
+            elif [ -x '${var.repro_workflow_dir}' ]; then
+                '${var.repro_workflow_dir}' >> "$log" 2>&1
+            else
+                echo "provided path is neither a criteria workflow directory nor an executable" >> "$log"
+                exit 2
+            fi
+            rc=$?
+            echo "provided reproduction exit=$rc (log: $log)"
+        SHELL
+    }
+    outcome "success" { next = step.execute_plan }
+    outcome "failure" { next = step.execute_plan }
+}
+
+step "execute_plan" {
+    target      = adapter.copilot.investigator
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            Execute the approved plan against this ref and write your findings to
+            ${var.evidence_dir}/run-${var.ref_label}.md
+
+            Ref under test: ${var.ref} (${var.ref_display})
+            Arm: ${var.ref_label}
+            Worktree (you are already in it): ${var.worktree_dir}
+            Plan: ${var.evidence_dir}/plan.md
+            Bug report: ${var.evidence_dir}/report.md
+            Baseline suite health at this ref: ${data.internal.baseline_health.value}
+            Provided reproduction log (empty if none was supplied):
+            ${var.evidence_dir}/provided-${var.ref_label}.log
+
+            Record every shape you tried, including the ones that did NOT
+            reproduce. Do not fix anything. Do not commit.
+
+            Call submit_outcome with `reproduced`, `not_reproduced`, or
+            `inconclusive`.
+        PROMPT
+    }
+
+    outcome "reproduced"     { next = step.mark_reproduced }
+    outcome "not_reproduced" { next = step.mark_not_reproduced }
+    outcome "inconclusive"   { next = step.mark_inconclusive }
+    outcome "need_help"      { next = step.mark_inconclusive }
+    outcome "failure"        { next = step.mark_inconclusive }
+    outcome "default"        { next = step.mark_inconclusive }
+}
+
+step "mark_reproduced" {
+    target = adapter.noop.default
+    outcome "success" {
+        next = step.finish
+        write {
+            target = data.internal.reproduced.value
+            value  = "yes"
+        }
+        write {
+            target = data.internal.status.value
+            value  = "ok"
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "mark_not_reproduced" {
+    target = adapter.noop.default
+    outcome "success" {
+        next = step.finish
+        write {
+            target = data.internal.reproduced.value
+            value  = "no"
+        }
+        write {
+            target = data.internal.status.value
+            value  = "ok"
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "mark_inconclusive" {
+    target = adapter.noop.default
+    outcome "success" {
+        next = step.finish
+        write {
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
+        }
+        write {
+            target = data.internal.status.value
+            value  = "ok"
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "finish" {
+    target = adapter.noop.default
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// Declared outputs. `data "internal"` alone is NOT visible to the parent as
+// `subworkflow.<name>` — without these blocks the parent's
+// try(subworkflow.reproduced, "inconclusive") silently takes the fallback and
+// every arm reports "inconclusive" regardless of what actually happened.
+output "status" {
+    type  = string
+    value = data.internal.status.value
+}
+
+output "reproduced" {
+    type  = string
+    value = data.internal.reproduced.value
+}
+
+output "baseline_health" {
+    type  = string
+    value = data.internal.baseline_health.value
+}

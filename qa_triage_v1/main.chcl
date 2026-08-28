@@ -1,0 +1,859 @@
+workflow {
+    name          = "qa_triage_v1"
+    version       = "1"
+    initial_state = "read_report"
+    target_state  = "workstream_published"
+
+    policy {
+        max_total_steps = 150
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// Absolute path of this triage run's directory: <triage_root>/<slug>.
+// Evidence lives at <run_dir>/evidence, throwaway worktrees at <run_dir>/wt/<label>.
+data "internal" "run_dir" {
+    type  = string
+    value = ""
+}
+
+// Concrete SHA of the mainline ref, resolved after an explicit fetch so the
+// tested commit is the remote's rather than a stale local ref.
+data "internal" "main_sha" {
+    type  = string
+    value = ""
+}
+
+// Highest non-prerelease semver tag, or var.stable_ref when set. Empty when the
+// repo has no stable release — a valid state that the verdict must account for
+// rather than treat as a failed resolution.
+data "internal" "stable_tag" {
+    type  = string
+    value = ""
+}
+
+// Per-ref reproduction results: "yes" | "no" | "inconclusive" | "skipped".
+// The PAIR is the finding — see the verdict gate. A single ref's result in
+// isolation cannot distinguish a live bug from a regression from a stale build.
+data "internal" "repro_main" {
+    type  = string
+    value = "skipped"
+}
+
+data "internal" "repro_stable" {
+    type  = string
+    value = "skipped"
+}
+
+// Supervisor's revision notes, fed back to the investigator on a bounded retry.
+// Carried as data rather than accumulated in the prompt so a refine cycle costs
+// one message, not a growing transcript.
+data "internal" "supervisor_feedback" {
+    type  = string
+    value = ""
+}
+
+// Supervisor's verdict, recorded for the triage report.
+data "internal" "verdict" {
+    type  = string
+    value = ""
+}
+
+// ── Reproduction subworkflows ────────────────────────────────────────────────
+// Declared once per ref rather than iterated: the two runs take different refs
+// and different worktrees, and keeping them separate makes the routing between
+// them explicit rather than hidden in iteration state.
+
+subworkflow "repro_main" {
+    source = "./repro_runner"
+    input = {
+        ref                = var.main_ref
+        ref_label          = "main"
+        ref_display        = data.internal.main_sha.value
+        repo_dir           = var.repo_dir
+        worktree_dir       = "${data.internal.run_dir.value}/wt/main"
+        evidence_dir       = "${data.internal.run_dir.value}/evidence"
+        bug_report_file    = var.bug_report_file
+        repro_workflow_dir = var.repro_workflow_dir
+        build_cmd          = var.build_cmd
+        test_cmd           = var.test_cmd
+        investigator       = var.investigator
+    }
+}
+
+subworkflow "repro_stable" {
+    source = "./repro_runner"
+    input = {
+        ref                = data.internal.stable_tag.value
+        ref_label          = "stable"
+        ref_display        = data.internal.stable_tag.value
+        repo_dir           = var.repo_dir
+        worktree_dir       = "${data.internal.run_dir.value}/wt/stable"
+        evidence_dir       = "${data.internal.run_dir.value}/evidence"
+        bug_report_file    = var.bug_report_file
+        repro_workflow_dir = var.repro_workflow_dir
+        build_cmd          = var.build_cmd
+        test_cmd           = var.test_cmd
+        investigator       = var.investigator
+    }
+}
+
+// ── Intake ───────────────────────────────────────────────────────────────────
+
+step "read_report" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            if [ ! -f '${var.bug_report_file}' ]; then
+                echo "bug report not found: ${var.bug_report_file}" >&2
+                exit 1
+            fi
+            cat '${var.bug_report_file}'
+        SHELL
+    }
+    outcome "success" { next = step.prepare_workspace }
+    outcome "failure" { next = state.failed }
+}
+
+step "prepare_workspace" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            root='${var.triage_root}'
+            case "$root" in
+                '${var.repo_dir}'|'${var.repo_dir}'/*)
+                    echo "triage_root must be outside the repository under test: $root" >&2
+                    exit 1
+                    ;;
+            esac
+            mkdir -p "$root"
+            slug=$(basename '${var.bug_report_file}')
+            slug="$${slug%.*}"
+            run_dir="$root/$slug"
+
+            # A previous triage of the same report must not contaminate this one.
+            # Worktrees are git-registered, so prune before removing the tree.
+            if [ -d "$run_dir/wt" ]; then
+                for wt in "$run_dir"/wt/*; do
+                    [ -d "$wt" ] || continue
+                    git -C '${var.repo_dir}' worktree remove --force "$wt" 2>/dev/null || true
+                done
+            fi
+            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
+            rm -rf "$run_dir"
+
+            mkdir -p "$run_dir/evidence" "$run_dir/wt"
+            cp '${var.bug_report_file}' "$run_dir/evidence/report.md"
+            printf '%s' "$run_dir"
+        SHELL
+    }
+    outcome "success" {
+        next = step.resolve_main_ref
+        write {
+            target = data.internal.run_dir.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// Fetch first, then resolve. Resolving without fetching is how a triage ends up
+// testing a commit that is not what anyone else means by "main".
+step "resolve_main_ref" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            git -C '${var.repo_dir}' fetch --all --tags --quiet
+            # printf, not a bare rev-parse: the trailing newline is captured into
+            # output.stdout and then interpolated into evidence and git refs.
+            printf '%s' "$(git -C '${var.repo_dir}' rev-parse '${var.main_ref}')"
+        SHELL
+    }
+    outcome "success" {
+        next = step.resolve_stable_ref
+        write {
+            target = data.internal.main_sha.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// An empty result is legitimate — a repo with no release tags has no stable ref.
+// It is recorded as empty and handled at routing, never treated as an error.
+step "resolve_stable_ref" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            if [ -n '${var.stable_ref}' ]; then
+                printf '%s' '${var.stable_ref}'
+                exit 0
+            fi
+            git -C '${var.repo_dir}' tag --list \
+                | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+                | sed 's/^v//' \
+                | sort -t. -k1,1n -k2,2n -k3,3n \
+                | tail -1 \
+                | while read -r v; do
+                    if git -C '${var.repo_dir}' rev-parse "v$v" >/dev/null 2>&1; then
+                        printf 'v%s' "$v"
+                    else
+                        printf '%s' "$v"
+                    fi
+                done
+        SHELL
+    }
+    outcome "success" {
+        next = step.record_refs
+        write {
+            target = data.internal.stable_tag.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "record_refs" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            cat > '${data.internal.run_dir.value}/evidence/refs.md' <<____CRITERIA_EOF____
+# Refs under test
+
+- requested matrix: ${var.test_refs}
+- main ref: ${var.main_ref}
+- main SHA: ${data.internal.main_sha.value}
+- stable ref: ${data.internal.stable_tag.value}
+- resolved at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- provided repro workflow: ${var.repro_workflow_dir}
+____CRITERIA_EOF____
+            echo "refs recorded"
+        SHELL
+    }
+    outcome "success" { next = step.setup_scratch_worktree }
+    outcome "failure" { next = state.failed }
+}
+
+// A real checkout at the mainline ref that the triage team owns outright.
+//
+// The investigator plans and drafts here, and is free to write reproduction
+// harnesses, add test files, and patch code to test a hypothesis. That is
+// normal triage work and it needs somewhere to happen — without this, an agent
+// with nowhere legitimate to write ends up writing into the operator's
+// checkout, which is exactly what happened before this step existed.
+//
+// Discarded wholesale at teardown. Nothing here is ever measured for a verdict:
+// per-ref measurements come from repro_runner's own clean worktrees.
+step "setup_scratch_worktree" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            scratch='${var.triage_root}/scratch'
+            git -C '${var.repo_dir}' worktree remove --force "$scratch" 2>/dev/null || true
+            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
+            rm -rf "$scratch"
+            mkdir -p "$(dirname "$scratch")"
+            git -C '${var.repo_dir}' worktree add --detach "$scratch" '${data.internal.main_sha.value}'
+            echo "scratch worktree at $scratch ($(git -C "$scratch" rev-parse --short HEAD))"
+        SHELL
+    }
+    outcome "success" { next = step.intake_review }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Gate 0: is this report actionable at all? ────────────────────────────────
+// Cheapest possible rejection. A report with no version, no environment, and no
+// reproduction path cannot be triaged, and discovering that after a full build
+// and reproduction cycle wastes the entire run.
+
+step "intake_review" {
+    target      = adapter.copilot.supervisor
+    max_visits  = 2
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 0 — INTAKE.
+
+            Bug report: ${data.internal.run_dir.value}/evidence/report.md
+            Refs under test: ${data.internal.run_dir.value}/evidence/refs.md
+
+            Decide whether this report contains enough to attempt a reproduction.
+            Do not attempt the reproduction yourself. Do not read source code.
+
+            Call submit_outcome with `actionable`, `insufficient`, or `needs_human`.
+        PROMPT
+    }
+
+    outcome "actionable" { next = step.plan_repro }
+    outcome "insufficient" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "insufficient_report"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "needs_human" {
+        next = state.needs_human
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_intake"
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Plan ─────────────────────────────────────────────────────────────────────
+
+step "plan_repro" {
+    target      = adapter.copilot.investigator
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            Write the reproduction test plan to
+            ${data.internal.run_dir.value}/evidence/plan.md
+
+            Bug report: ${data.internal.run_dir.value}/evidence/report.md
+            Refs under test: ${data.internal.run_dir.value}/evidence/refs.md
+            Provided repro workflow (empty if none): ${var.repro_workflow_dir}
+            Build command: ${var.build_cmd}
+            Test command: ${var.test_cmd}
+
+            Supervisor feedback on your previous attempt (empty on first pass):
+            ${data.internal.supervisor_feedback.value}
+
+            Plan only. Do not execute anything yet. Do not modify the repository.
+            Call submit_outcome with `plan_ready` when plan.md is written.
+        PROMPT
+    }
+
+    outcome "plan_ready"  { next = step.review_plan }
+    outcome "need_help"   { next = state.needs_human }
+    outcome "failure"     { next = state.failed }
+    outcome "default"     { next = state.failed }
+}
+
+// ── Gate 1: is the plan adequate, before it costs a build and a run? ─────────
+
+step "review_plan" {
+    target      = adapter.copilot.supervisor
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 1 — TEST PLAN.
+
+            Plan: ${data.internal.run_dir.value}/evidence/plan.md
+            Bug report: ${data.internal.run_dir.value}/evidence/report.md
+            Provided repro workflow (empty if none): ${var.repro_workflow_dir}
+
+            Judge the plan only. Do not execute it.
+
+            Call submit_outcome with `plan_approved`, `plan_revise`, or `plan_reject`.
+        PROMPT
+    }
+
+    outcome "plan_approved" {
+        next = switch.route_repro_start
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = ""
+        }
+    }
+    outcome "plan_revise" {
+        next = step.plan_repro
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "plan_reject" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "plan_rejected"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Reproduction across the ref matrix ───────────────────────────────────────
+
+switch "route_repro_start" {
+    match {
+        condition = var.test_refs == "stable"
+        next      = switch.route_stable_available
+    }
+    default { next = step.run_repro_main }
+}
+
+step "run_repro_main" {
+    target = subworkflow.repro_main
+    outcome "success" {
+        next = switch.route_after_main
+        write {
+            target = data.internal.repro_main.value
+            value  = try(subworkflow.reproduced, "inconclusive")
+        }
+    }
+    outcome "failure" {
+        next = switch.route_after_main
+        write {
+            target = data.internal.repro_main.value
+            value  = try(subworkflow.reproduced, "inconclusive")
+        }
+    }
+}
+
+switch "route_after_main" {
+    match {
+        condition = var.test_refs == "both"
+        next      = switch.route_stable_available
+    }
+    default { next = step.aggregate_evidence }
+}
+
+// A repo with no release tag cannot be tested against stable. That is recorded
+// as "skipped" and carried into the verdict, not silently dropped — a verdict
+// reached without the stable arm is a weaker verdict and must be labelled so.
+switch "route_stable_available" {
+    match {
+        condition = data.internal.stable_tag.value == ""
+        next      = step.note_no_stable
+    }
+    default { next = step.run_repro_stable }
+}
+
+step "note_no_stable" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            cat > '${data.internal.run_dir.value}/evidence/run-stable.md' <<____CRITERIA_EOF____
+# stable — SKIPPED
+
+No non-prerelease semver tag was found in this repository, and var.stable_ref
+was not set. The stable arm of the matrix did not run.
+
+Any verdict from this triage rests on the mainline result alone and cannot
+distinguish a live bug from a regression introduced since the last release.
+____CRITERIA_EOF____
+            echo "stable skipped"
+        SHELL
+    }
+    outcome "success" { next = step.aggregate_evidence }
+    outcome "failure" { next = state.failed }
+}
+
+step "run_repro_stable" {
+    target = subworkflow.repro_stable
+    outcome "success" {
+        next = step.aggregate_evidence
+        write {
+            target = data.internal.repro_stable.value
+            value  = try(subworkflow.reproduced, "inconclusive")
+        }
+    }
+    outcome "failure" {
+        next = step.aggregate_evidence
+        write {
+            target = data.internal.repro_stable.value
+            value  = try(subworkflow.reproduced, "inconclusive")
+        }
+    }
+}
+
+step "aggregate_evidence" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            ev='${data.internal.run_dir.value}/evidence'
+            cat > "$ev/summary.md" <<____CRITERIA_EOF____
+# Triage evidence summary
+
+- matrix requested: ${var.test_refs}
+- main (${data.internal.main_sha.value}): ${data.internal.repro_main.value}
+- stable (${data.internal.stable_tag.value}): ${data.internal.repro_stable.value}
+
+Artifacts in this directory:
+____CRITERIA_EOF____
+            ls -1 "$ev" | sed 's/^/- /' >> "$ev/summary.md"
+            cat "$ev/summary.md"
+        SHELL
+    }
+    outcome "success" { next = step.assert_repo_clean }
+    outcome "failure" { next = state.failed }
+}
+
+// Triage treats the repository as a read-only input. If the primary working
+// tree is dirty after the reproduction phases, an agent wrote into the repo it
+// was supposed to be observing — which both corrupts the evidence (a "clean
+// build at ref X" that has uncommitted edits is not a build at ref X) and
+// leaves the operator's checkout modified.
+//
+// Reported loudly and fails the run. Deliberately does NOT revert: discarding
+// changes in someone's working tree is not a decision this workflow gets to
+// make unattended, and the operator may have legitimate work in progress.
+step "assert_repo_clean" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            dirty=$(git -C '${var.repo_dir}' status --porcelain 2>/dev/null || true)
+            if [ -n "$dirty" ]; then
+                {
+                    printf '# Repository was modified during triage\n\n'
+                    printf 'Triage treats %s as read-only. It is dirty:\n\n' '${var.repo_dir}'
+                    printf '%s\n' "$dirty"
+                    printf '\nAn agent wrote into the repository under test. Evidence from this\n'
+                    printf 'run is not trustworthy: the trees it measured were not clean checkouts.\n'
+                    printf 'Nothing was reverted — inspect and clean up manually.\n'
+                } | tee '${data.internal.run_dir.value}/evidence/repo-dirty.md' >&2
+                exit 1
+            fi
+            echo "repository clean"
+        SHELL
+    }
+    outcome "success" { next = step.verdict }
+    outcome "failure" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "aborted_repo_modified"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = "Run aborted: the repository under test was modified during triage. See evidence/repo-dirty.md. No verdict was reached and no workstream was produced, because evidence gathered against a dirty tree cannot be attributed to the refs under test."
+        }
+    }
+}
+
+// ── Gate 2: does the evidence support the claim? ─────────────────────────────
+
+step "verdict" {
+    target      = adapter.copilot.supervisor
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 2 — VERDICT.
+
+            Evidence directory: ${data.internal.run_dir.value}/evidence
+            Start with summary.md, then read report.md, plan.md, refs.md, and
+            each run-<label>.md.
+
+            Reproduction results (authoritative — these are the subworkflow's
+            own reported outcomes; if summary.md disagrees with them, these win
+            and you must say so in your reason):
+              main   (${data.internal.main_sha.value}): ${data.internal.repro_main.value}
+              stable (${data.internal.stable_tag.value}): ${data.internal.repro_stable.value}
+
+            Design-intent file (empty if none supplied): ${var.design_intent_file}
+            When a path is given, read it BEFORE applying test 4. Behavior it
+            records as intended is not a defect, however strong the reproduction.
+
+            Apply the verdict matrix and the four evidence tests from your
+            instructions. Judge only what the evidence shows.
+
+            Test 4 is the one this workflow most often gets wrong. If deciding
+            "defect or intended design" requires design intent you do not have,
+            return `needs_human` — do not resolve the ambiguity yourself.
+
+            Call submit_outcome with `reproduced`, `regression`, `already_fixed`,
+            `not_reproduced`, `insufficient_evidence`, or `needs_human`.
+        PROMPT
+    }
+
+    outcome "reproduced" {
+        next = step.draft_workstream
+        write {
+            target = data.internal.verdict.value
+            value  = "reproduced"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "regression" {
+        next = step.draft_workstream
+        write {
+            target = data.internal.verdict.value
+            value  = "regression"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "already_fixed" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "already_fixed"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "not_reproduced" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "not_reproduced"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "insufficient_evidence" {
+        next = step.plan_repro
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "needs_human" {
+        next = state.needs_human
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_verdict"
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+// ── Workstream drafting ──────────────────────────────────────────────────────
+
+step "draft_workstream" {
+    target      = adapter.copilot.investigator
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            Draft the workstream file to
+            ${data.internal.run_dir.value}/evidence/workstream-draft.md
+
+            Verdict: ${data.internal.verdict.value}
+            Evidence directory: ${data.internal.run_dir.value}/evidence
+
+            Supervisor's verdict reasoning and any revision notes:
+            ${data.internal.supervisor_feedback.value}
+
+            Follow the workstream file contract in your instructions exactly.
+            Specify required behavior — never delegate a design decision back to
+            the implementer. If the fix requires a design decision you cannot
+            make from the evidence, call submit_outcome with `needs_design`
+            instead of guessing.
+
+            Call submit_outcome with `draft_ready` or `needs_design`.
+        PROMPT
+    }
+
+    outcome "draft_ready"  { next = step.approve_workstream }
+    outcome "needs_design" {
+        next = state.needs_human
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_design_decision"
+        }
+    }
+    outcome "need_help" { next = state.needs_human }
+    outcome "failure"   { next = state.failed }
+    outcome "default"   { next = state.failed }
+}
+
+// ── Gate 3: final authority over whether a workstream file exists ────────────
+
+step "approve_workstream" {
+    target      = adapter.copilot.supervisor
+    max_visits  = 3
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            GATE 3 — FINAL. You alone authorize a workstream file.
+
+            Draft: ${data.internal.run_dir.value}/evidence/workstream-draft.md
+            Evidence directory: ${data.internal.run_dir.value}/evidence
+            Verdict: ${data.internal.verdict.value}
+
+            Verify every claim in the draft is supported by an artifact in the
+            evidence directory. A measurement in the draft that appears nowhere
+            in the evidence is disqualifying.
+
+            Reject any draft that designs a fix rather than specifying required
+            behavior.
+
+            Call submit_outcome with `approved`, `revise`, or `reject`.
+        PROMPT
+    }
+
+    outcome "approved" { next = step.publish_workstream }
+    outcome "revise" {
+        next = step.draft_workstream
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "reject" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "workstream_rejected"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" { next = state.failed }
+    outcome "default" { next = state.failed }
+}
+
+step "publish_workstream" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            draft='${data.internal.run_dir.value}/evidence/workstream-draft.md'
+            if [ ! -s "$draft" ]; then
+                echo "approved draft is missing or empty: $draft" >&2
+                exit 1
+            fi
+            mkdir -p '${var.workstream_out_dir}'
+            slug=$(basename '${var.bug_report_file}')
+            slug="$${slug%.*}"
+            out='${var.workstream_out_dir}'"/$slug.md"
+            cp "$draft" "$out"
+            echo "$out"
+        SHELL
+    }
+    outcome "success" { next = step.write_triage_report }
+    outcome "failure" { next = state.failed }
+}
+
+// Written on every terminating path, including the ones that produce no
+// workstream. A triage that concludes "not reproduced" is a result worth
+// keeping — it is what stops the next person re-running the same dead end.
+step "write_triage_report" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            ev='${data.internal.run_dir.value}/evidence'
+
+            # The header is built with printf so $(date) still runs, but the
+            # supervisor's reasoning goes through a QUOTED heredoc delimiter.
+            # It is agent-authored text: with an unquoted delimiter the shell
+            # command-substitutes any backticks or $(...) it contains and
+            # splices the output into the report — verified executing `make
+            # build` from a supervisor's prose. Quoted, HCL still interpolates
+            # the value in (that happens before the shell sees it) but the
+            # shell treats every byte as literal.
+            {
+                printf '# Triage report\n\n'
+                printf -- '- report: %s\n' '${var.bug_report_file}'
+                printf -- '- verdict: %s\n' '${data.internal.verdict.value}'
+                printf -- '- matrix requested: %s\n' '${var.test_refs}'
+                printf -- '- main (%s): %s\n' '${data.internal.main_sha.value}' '${data.internal.repro_main.value}'
+                printf -- '- stable (%s): %s\n' '${data.internal.stable_tag.value}' '${data.internal.repro_stable.value}'
+                printf -- '- provided repro workflow: %s\n' '${var.repro_workflow_dir}'
+                printf -- '- concluded at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '## Supervisor reasoning\n\n'
+                cat <<'____CRITERIA_EOF____'
+${data.internal.supervisor_feedback.value}
+____CRITERIA_EOF____
+            } > "$ev/triage-report.md"
+            cat "$ev/triage-report.md"
+        SHELL
+    }
+    outcome "success" { next = step.teardown }
+    outcome "failure" { next = state.failed }
+}
+
+// Worktrees are throwaway; evidence is the deliverable and is never removed.
+step "teardown" {
+    target = adapter.shell.repo
+    input {
+        command = <<-SHELL
+            set -euo pipefail
+            run_dir='${data.internal.run_dir.value}'
+            if [ -d "$run_dir/wt" ]; then
+                for wt in "$run_dir"/wt/*; do
+                    [ -d "$wt" ] || continue
+                    git -C '${var.repo_dir}' worktree remove --force "$wt" 2>/dev/null || true
+                done
+            fi
+            # The scratch worktree is expected to be dirty — the triage team was
+            # free to experiment in it. --force discards whatever they left.
+            scratch='${var.triage_root}/scratch'
+            git -C '${var.repo_dir}' worktree remove --force "$scratch" 2>/dev/null || true
+            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
+            rm -rf "$run_dir/wt" "$scratch"
+            echo "evidence retained at $run_dir/evidence"
+        SHELL
+    }
+    outcome "success" { next = switch.route_final }
+    outcome "failure" { next = switch.route_final }
+}
+
+switch "route_final" {
+    match {
+        condition = data.internal.verdict.value == "reproduced" || data.internal.verdict.value == "regression"
+        next      = state.workstream_published
+    }
+    default { next = state.closed_no_workstream }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+state "workstream_published" {
+    terminal = true
+    success  = true
+}
+
+// Not a failure. A report that does not reproduce, or is already fixed, or was
+// too thin to triage, is a legitimate and useful conclusion — the evidence
+// directory records what was tried so it is not repeated.
+state "closed_no_workstream" {
+    terminal = true
+    success  = true
+}
+
+state "needs_human" {
+    terminal = true
+    success  = false
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

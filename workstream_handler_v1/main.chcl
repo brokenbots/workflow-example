@@ -380,12 +380,23 @@ step "create_pr" {
             if [ -n "$existing_url" ] && [ "$existing_state" = "OPEN" ]; then
                 printf '%s' "$existing_url" | tr -d '\n'
             else
-                git push -u origin "$branch" >/dev/null 2>&1
+                # Do not discard stderr here: a rejected push (no write access,
+                # protected branch, non-fast-forward) is otherwise reduced to a
+                # bare exit 128 with no indication of the cause.
+                if ! push_err=$(git push -u origin "$branch" 2>&1); then
+                    echo "push_failed=true branch=$branch"
+                    echo "push_error=$push_err"
+                    exit 1
+                fi
                 pr_url=$(gh pr create \
                     --base '${var.base_branch}' \
                     --head "$branch" \
                     --title "$title" \
-                    --body "$(cat '${var.workstream_file}')" 2>/dev/null)
+                    --body "$(cat '${var.workstream_file}')" 2>&1) || {
+                    echo "pr_create_failed=true branch=$branch"
+                    echo "pr_create_error=$pr_url"
+                    exit 1
+                }
                 printf '%s' "$pr_url" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'
             fi
         SHELL
@@ -519,9 +530,15 @@ step "merge_pr" {
         command = <<-SHELL
             set -uo pipefail
             pr=$(printf '%s' '${data.internal.pr_url.value}' | grep -oE 'pull/[0-9]+' | cut -d/ -f2 | tail -1 | tr -d '\n')
+            owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "")
+            repo=$(gh repo view --json name --jq '.name' 2>/dev/null || echo "")
 
+            # Capture stderr rather than discarding it: a merge can be refused for
+            # reasons the operator cannot guess from an exit code alone (branch
+            # protection, unresolved conversations, stale approval). Swallowing it
+            # turns a precise GitHub error into a bare "merge_failed".
             merge_rc=0
-            gh pr merge "$pr" --squash --delete-branch 2>/dev/null || merge_rc=$?
+            merge_err=$(gh pr merge "$pr" --squash --delete-branch 2>&1) || merge_rc=$?
 
             if [ "$merge_rc" -eq 0 ]; then
                 echo "merged=true pr=$pr"
@@ -537,11 +554,37 @@ step "merge_pr" {
             fi
 
             echo "merge_failed=true pr=$pr"
+            echo "merge_error=$merge_err"
+
+            # Report the mergeability facts the error alone may not name, so the
+            # coordinator can act without a human reproducing the merge by hand.
+            gh pr view "$pr" --json mergeStateStatus,mergeable,reviewDecision \
+                --jq '"merge_state=\(.mergeStateStatus) mergeable=\(.mergeable) review_decision=\(.reviewDecision)"' 2>&1 || true
+
+            unresolved=$(gh api graphql -f query="
+                { repository(owner: \"$owner\", name: \"$repo\") {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 50) { nodes { isResolved } }
+                    } } }" \
+                --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "unknown")
+            echo "unresolved_threads=$unresolved"
             exit 1
         SHELL
     }
     outcome "success" { next = step.teardown_worktree }
-    outcome "failure" { next = state.failed }
+    // A refused merge is usually actionable, not terminal: an unresolved review
+    // thread (GitHub's required_conversation_resolution), a bot review that
+    // landed after the approving pass, or an approval dismissed by a new commit.
+    // Route it to the coordinator with the diagnostics above instead of killing
+    // the run — triage_pr_feedback is bounded by max_visits, so a genuinely
+    // unmergeable PR still terminates rather than looping forever.
+    outcome "failure" {
+        next = step.triage_pr_feedback
+        write {
+            target = data.internal.developer_feedback.value
+            value  = "The merge was refused. Diagnose and resolve it before anything else.\n\n${output.stdout}\n\nIf unresolved_threads is non-zero, read each thread: address real findings as code changes, and reply-then-resolve anything already handled or out of scope."
+        }
+    }
 }
 
 // Remove the isolated worktree after a successful merge. Runs in the repo's
@@ -555,9 +598,30 @@ step "teardown_worktree" {
         command = <<-SHELL
             set -uo pipefail; exec 2>&1
             wt='${var.worktree_dir}'
+            branch='${data.internal.branch.value}'
             git worktree remove --force "$wt" 2>&1 || true
             git worktree prune 2>&1 || true
             echo "removed worktree $wt"
+
+            # Delete the local branch, but only once its PR is actually merged.
+            # The PR state is the authority, not git: PRs here are squash-merged,
+            # which leaves the branch's own commits outside main's history, so
+            # `git branch -d` refuses and `git branch --merged` cannot see them.
+            # Without this, every run leaves a branch behind forever — 16 had
+            # accumulated before it was noticed.
+            #
+            # -D is safe *only* because the MERGED check gates it. Never move
+            # this deletion outside that guard.
+            if [ -n "$branch" ]; then
+                state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
+                if [ "$state" = "MERGED" ]; then
+                    git branch -D "$branch" 2>&1 || true
+                    echo "deleted merged branch $branch"
+                else
+                    echo "kept branch $branch (PR state: $${state:-unknown}) — not merged, nothing discarded"
+                fi
+            fi
+            git fetch --prune --quiet 2>&1 || true
         SHELL
     }
     outcome "success" { next = state.done }

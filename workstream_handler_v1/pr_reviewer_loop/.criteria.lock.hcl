@@ -1,29 +1,29 @@
 schema_version = 1
-adapter "claude-agent" "pr_reviewer" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-claude-agent:0.5.5"
-  version              = "0.5.5"
-  resolved_digest      = "sha256:0d978bfcab56da1c5a210f7ecec6f3840a66f94eb1ead9152854c5a7f78a4172"
-  source_url           = "https://github.com/brokenbots/criteria-typescript-adapter-claude-agent"
+adapter "copilot" "pr_reviewer" {
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.4"
+  version              = "0.5.4"
+  resolved_digest      = "sha256:b3bea8a4f03e3caccdeea6fca9aab6f9422528d855603c1b4c0f9c64b7b76e9e"
+  source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
-  platforms            = ["linux/amd64", "linux/arm64", "darwin/arm64"]
+  platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-typescript-adapter-claude-agent/.github/workflows/publish.yml@refs/tags/v0.5.5"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.4"
     }
   }
 }
 adapter "noop" "default" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-noop:0.5.1"
-  version              = "0.5.1"
-  resolved_digest      = "sha256:690554ed032c238834de83f8105204b8a2e92bd6a4cc281a99bbec3ba2c0983f"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-noop:0.5.2"
+  version              = "0.5.2"
+  resolved_digest      = "sha256:00ab4151baacba3b14e89cdd5c99e0c1924e23198d0ff91387f995021d75ce4f"
   source_url           = "https://github.com/brokenbots/criteria-adapter-noop"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-noop/.github/workflows/publish.yml@refs/tags/v0.5.1"
+      subject = "https://github.com/brokenbots/criteria-adapter-noop/.github/workflows/publish.yml@refs/tags/v0.5.2"
     }
   }
 }

@@ -35,9 +35,9 @@ data "internal" "reviewer_prompt" {
 }
 
 // Verdict of the last review pass ("approved" / "changes_requested"). Written
-// by the review step's outcome handlers and read by triage_review — the
-// claude-agent adapter does not expose an `outcome` step output, so the
-// workflow tracks the verdict itself rather than reading steps.review.outcome.
+// by the review step's outcome handlers and read by triage_review — the copilot
+// adapter does not expose an `outcome` step output, so the workflow tracks the
+// verdict itself rather than reading steps.review.outcome.
 data "internal" "review_verdict" {
     type  = string
     value = ""
@@ -245,7 +245,7 @@ step "ci_gate" {
 }
 
 step "review" {
-    target     = adapter.claude-agent.reviewer
+    target     = adapter.copilot.reviewer
     max_visits = 10
 
     allow_tools = ["*"]
@@ -280,8 +280,8 @@ step "review" {
             value  = "Re-review: verify the developer's latest commits resolve every finding from your previous review. Inspect the diffs yourself — do not take the developer's notes at face value.\n\nYour previous findings were:\n${output.reason}"
         }
     }
-    // claude-agent emits "failure" if the session dies or the agent never
-    // calls submit_outcome after re-prompts — route it somewhere terminal.
+    // The copilot adapter emits "failure" if the session dies or the agent
+    // never calls submit_outcome after re-prompts — route it somewhere terminal.
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
 }

@@ -1,0 +1,78 @@
+// Ref resolution and worktree lifecycle need the repo's primary tree.
+// Deterministic shell steps bind here; agents deliberately do NOT.
+environment "shell" "primary" {
+    working_directory = var.repo_dir
+}
+
+// Agents run in a throwaway scratch worktree checked out at the mainline ref —
+// NOT in the operator's checkout, and not in a bare scratch directory either.
+//
+// Both early triage runs left reproduction tests and experimental edits in the
+// primary working tree, because that is where I had pointed their cwd. The fix
+// is not to forbid writing — writing reproduction harnesses and patching code
+// to test a hypothesis is exactly what an investigator should do. The fix is to
+// give them a real checkout they are free to destroy. Whatever they do here is
+// discarded at teardown.
+environment "shell" "scratch" {
+    working_directory = "${var.triage_root}/scratch"
+}
+
+adapter "shell" "repo" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.primary
+}
+
+// Investigator: plans and drafts at root level, executes reproductions inside
+// repro_runner. Bound to the primary tree here because the root-level phases
+// only read the report and the evidence directory.
+//
+// Named TRIAGE_GITHUB_TOKEN rather than GITHUB_TOKEN deliberately: a bare
+// GITHUB_TOKEN exported by the operator is inherited by every adapter
+// subprocess and by the agent's own tool shell, where it silently overrides the
+// per-adapter secret. Triage uses a single read-only identity — it never opens
+// a PR — but the naming discipline is kept consistent with workstream_handler_v1.
+adapter "copilot" "investigator" {
+    environment = shell.scratch
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:TRIAGE_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.investigator.model
+        max_turns         = "${var.investigator.max_turns}"
+        reasoning_effort  = var.investigator.reasoning_effort
+        system_prompt     = file("./agents/investigator.md")
+        provider_base_url = var.investigator.provider.base_url
+        provider_wire_api = var.investigator.provider.wire_api
+        working_directory = "${var.triage_root}/scratch"
+    }
+}
+
+// Supervisor: the independent check. Reads evidence artifacts from disk, never
+// the investigator's transcript, so a poisoned investigator context cannot
+// propagate into the gate that authorizes a workstream file.
+adapter "copilot" "supervisor" {
+    environment = shell.scratch
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:TRIAGE_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.supervisor.model
+        max_turns         = "${var.supervisor.max_turns}"
+        reasoning_effort  = var.supervisor.reasoning_effort
+        system_prompt     = file("./agents/supervisor.md")
+        provider_base_url = var.supervisor.provider.base_url
+        provider_wire_api = var.supervisor.provider.wire_api
+        working_directory = "${var.triage_root}/scratch"
+    }
+}
+
+adapter "noop" "default" {
+    source   = "ghcr.io/brokenbots/criteria-adapter-noop"
+    version  = "0.5.2"
+    on_crash = "respawn"
+}

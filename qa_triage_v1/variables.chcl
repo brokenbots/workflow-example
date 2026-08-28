@@ -1,0 +1,136 @@
+variable "bug_report_file" {
+    description = "Absolute path to the raw bug report (markdown or plain text). Read-only input — triage never modifies it."
+    type        = string
+}
+
+// Defaults to "" rather than being required: it is referenced from adapter
+// config, which must be resolvable at compile time. A required variable leaves
+// it unknown and the compile fails. Always pass it at apply time.
+variable "repo_dir" {
+    description = "Absolute path of the repository's primary working tree. Ref resolution and worktree lifecycle run here. Must be under $HOME (or CRITERIA_SHELL_ALLOWED_PATHS). Empty runs in the process working directory."
+    type        = string
+    default     = ""
+}
+
+// Deliberately OUTSIDE the repository under test. Two things depend on it:
+// agents bind their working directory here (see adapters.chcl), and evidence
+// plus throwaway worktrees are written here. Putting it inside the repo made
+// the repo the agents' cwd-adjacent scratch space and left untracked test files
+// in the primary working tree. It also needs a concrete compile-time value,
+// since adapter config references it.
+variable "triage_root" {
+    description = "Absolute path under which per-ref triage worktrees and the evidence directory are created, and the working directory agents run in. Must be OUTSIDE the repository under test, and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS."
+    type        = string
+    default     = "/tmp/criteria-triage"
+}
+
+variable "workstream_out_dir" {
+    description = "Absolute path of the directory a confirmed workstream file is written to. The file is written and nothing else happens — no commit, no PR, no handoff. A human queues it."
+    type        = string
+}
+
+// Records design decisions that are NOT discoverable from the code or the
+// documentation — behavior that is deliberate but undocumented, and would
+// otherwise read as a defect to anyone reading the spec literally. The
+// supervisor consults it before deciding whether a reproduced behavior is a
+// defect. Absence of an entry proves nothing; it only means the supervisor
+// decides under its normal ambiguity rules.
+variable "design_intent_file" {
+    description = "Optional absolute path to a markdown file recording deliberate design decisions that are not documented in the repository. Consulted by the verdict gate. Empty means no such file."
+    type        = string
+    default     = ""
+}
+
+variable "repro_workflow_dir" {
+    description = "Optional absolute path to a reproduction workflow supplied with the bug report (a criteria workflow directory, a script, or a test). When set it is executed FIRST and UNMODIFIED against every ref under test, and its result is the primary evidence. Empty means the investigator must construct a reproduction from the report alone."
+    type        = string
+    default     = ""
+}
+
+variable "test_refs" {
+    description = "Which refs to test: \"main\", \"stable\", or \"both\" (default). \"both\" is strongly preferred — the delta between refs is what distinguishes a live bug from a regression from an already-fixed report, and it is the only way to rule out a stale-build explanation."
+    type        = string
+    default     = "both"
+}
+
+variable "main_ref" {
+    description = "Ref treated as mainline. Fetched before resolution so the tested SHA is the remote's, not a stale local ref."
+    type        = string
+    default     = "origin/main"
+}
+
+variable "stable_ref" {
+    description = "Ref treated as latest stable. Empty (the default) resolves to the highest non-prerelease semver tag reachable in the repo. Set explicitly when a repo's tag scheme is not semver."
+    type        = string
+    default     = ""
+}
+
+variable "build_cmd" {
+    description = "Command that builds the project inside a triage worktree, run before any reproduction attempt. Empty skips the build step. A reproduction run against an unbuilt or stale tree is worthless — set this for any compiled project (e.g. 'make build')."
+    type        = string
+    default     = ""
+}
+
+variable "test_cmd" {
+    description = "Command that runs the project's test suite inside a triage worktree. Empty skips it. Used to establish that the tree is otherwise healthy, so an unrelated pre-existing failure is not mistaken for the reported bug."
+    type        = string
+    default     = ""
+}
+
+// NOTE: the refine bound is NOT a variable. `max_visits` must be a compile-time
+// literal — the compiler rejects a variable reference there — so each gate's
+// retry budget is written inline in main.chcl (3 for every agent gate, 2 for
+// intake). Change it there.
+
+// Investigator: plans, builds, executes reproductions, drafts. Coding-tuned,
+// because it writes and runs test harnesses. It has NO authority to declare a
+// bug real — every such judgement is the supervisor's.
+variable "investigator" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 40)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "kimi-k2.7-code:cloud"
+        max_turns = 40
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Supervisor: gates intake, plan, verdict, and the final workstream. Sole
+// authority to emit a workstream file. Deliberately a DIFFERENT model family
+// from the investigator — a supervisor sharing the investigator's blind spots
+// provides no independent check, which is the entire point of the role.
+variable "supervisor" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.2:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
