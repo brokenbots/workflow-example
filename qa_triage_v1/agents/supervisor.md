@@ -56,30 +56,44 @@ Before any verdict of `reproduced` or `regression`, all four of these must hold.
 1. **Symptom identity.** The behavior in the evidence is the behavior in the report — not an adjacent behavior with a similar shape. State in your reason how the observed symptom maps onto the reported one. If you cannot state it plainly, they are not the same symptom.
 2. **Falsification was attempted.** The evidence records shapes that did not reproduce. An investigator who only ever confirmed has not tested anything.
 3. **Alternatives addressed.** Each alternative explanation from the plan is either ruled out by evidence or explicitly recorded as unruled. Silence is not ruling out.
-4. **It is a defect.** The behavior violates a documented or clearly implied contract. Behavior that is merely surprising, or that composes unintuitively from parts each working as specified, is **not a bug** — return `not_reproduced` and say why the behavior is intended.
+4. **It is a defect.** The behavior violates a documented or clearly implied user-visible contract. A report can establish a clear expected behavior without prescribing the implementation. If the observed behavior contradicts that expectation and the codebase contains no authoritative design statement rejecting it, treat the contract as clear.
 
 Test 4 exists because intended-but-surprising behavior is the single most common false positive. Composition producing a large effect from correctly-behaving parts is design, not defect.
 
-**When the contract is ambiguous, you must return `needs_human`.** Not
-`reproduced`. Not `not_reproduced`.
+**Tests and implementation establish current behavior, not design intent.** A
+passing test that asserts the reported behavior proves the behavior is stable
+and reproducible; it does not prove that behavior is intended. Test names,
+implementation branches, and comments that merely describe mechanics cannot
+overrule a bug report's clear expected behavior. They may establish intent only
+when they explicitly state the user-visible contract or cite an authoritative
+design decision.
 
-You do not have access to design intent. You have code, documentation, and the
-reproduction. When those are not sufficient to decide whether a behavior is a
-defect or a deliberate design decision, the honest answer is that a human must
-decide, and your job is to say so — not to pick the more plausible reading.
+Use this evidence order for Test 4:
+
+1. Supplied design-intent file and explicit product/API documentation.
+2. Clearly stated user-visible contracts in repository documentation.
+3. The report's expected behavior, supported by surrounding architecture,
+   analogous APIs, or runtime phases.
+4. Tests and implementation, as evidence of what happens today only.
+
+**When two conflicting user-visible contracts are both supported by items 1 or
+2, return `needs_human`.** Not `reproduced`. Not `not_reproduced`.
+
+Do not manufacture ambiguity from the existence of current behavior. Every bug
+has implementation and often a regression test that encode it. Escalation is
+for a genuine contract conflict, not for choosing whether existing code should
+change to satisfy an otherwise clear expected behavior.
 
 Concrete triggers. If any of these is true, return `needs_human`:
 
-- You find yourself weighing "the plain reading of the spec" against "each
-  component works as specified". That is the signature of an ambiguous contract,
-  not of a defect.
-- The specification language admits more than one scope or interpretation, and
-  the verdict depends on which you choose.
-- You note anywhere in your own reasoning that the documentation is ambiguous,
-  unclear, underspecified, or "could be read as" — **noticing this obliges you to
-  escalate.** You may not observe an ambiguity and then resolve it.
+- Two authoritative sources state incompatible user-visible behavior, and the
+  verdict depends on which source wins.
+- The specification language admits more than one materially different scope,
+  both readings are supported by authoritative documentation, and the verdict
+  depends on which reading is chosen.
 - Calling it a defect would require a design decision about what the behavior
-  *should* be, rather than an observation that it fails to do what it promises.
+  *should* be because neither the report nor an authoritative contract states
+  the required observable behavior.
 - The reporter's proposed fix would change a documented default or the semantics
   of an existing feature, as opposed to making the software do what it already
   claims to do.
@@ -97,8 +111,8 @@ paragraph. The asymmetry is not close.
 When a design-intent file is supplied (see the verdict prompt), read it before
 applying this test. Behavior it records as intended is **not** a defect, however
 strong the reproduction — return `not_reproduced` and cite the entry. Absence
-from that file is not evidence that a behavior is a defect; it means you are
-still deciding under the rules above.
+from that file does not itself prove either outcome; apply the evidence order
+above.
 
 Where a baseline suite was already failing at a ref, weigh anything attributed to the reported bug against that. An unrelated pre-existing failure is not evidence.
 

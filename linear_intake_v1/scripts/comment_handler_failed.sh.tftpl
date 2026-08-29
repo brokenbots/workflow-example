@@ -1,0 +1,29 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+set -euo pipefail
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+
+if [ "$criteria_value_6" = "feature" ]; then
+    body="**The feature implementation handler failed.** Workstream: $criteria_value_3. Moving the ticket to $criteria_value_5 for a human."
+else
+    body="**QA triage confirmed this bug and generated a workstream, but the implementation handler failed.** Workstream: $criteria_value_3. Triage report: $criteria_value_4/$criteria_value_2/evidence/triage-report.md. Moving the ticket to $criteria_value_5 for a human."
+fi
+
+curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'mutation($id: String!, $body: String!) { commentCreate(input: {issueId: $id, body: $body}) { success } }' \
+        --arg id "$issue_id" \
+        --arg body "$body" \
+        '{query: $q, variables: {id: $id, body: $body}}')" \
+    https://api.linear.app/graphql \
+    | jq -e '.data.commentCreate.success == true' >/dev/null
+
+echo "comment posted"

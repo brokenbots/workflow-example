@@ -1,0 +1,24 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+slug="$criteria_value_1"
+if [ -z "$slug" ]; then
+    if [ -n "$criteria_value_2" ]; then
+        slug=$(basename "$criteria_value_2")
+        slug="${slug%.*}"
+    else
+        # First non-empty line of the request, stripped of markdown
+        # heading marks. A one-line request is expected to be the
+        # common case, so it has to produce a usable branch name.
+        slug=$(grep -m1 -v '^[[:space:]]*$' "$criteria_value_3/.staging/report.md" || echo "")
+    fi
+fi
+slug=$(printf '%s' "$slug" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/^[#[:space:]]*//' -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//' \
+    | cut -c1-48 | sed -e 's/-$//')
+[ -n "$slug" ] || slug="ops-run"
+# printf, not echo: the trailing newline is captured into
+# output.stdout and then interpolated into paths and git refs.
+printf '%s' "$slug"

@@ -1,0 +1,38 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail
+branch=$(git branch --show-current)
+# Clean title: strip any trailing annotations, convert hyphens to spaces
+title=$(printf '%s' "$branch" | sed 's/-approved$//i; s/-reviewed$//i; s/-draft$//i' | tr '-' ' ')
+
+# Reuse only an active OPEN PR.  Closed or merged PRs get a fresh one.
+existing_json=$(gh pr view "$branch" --json url,state 2>/dev/null || true)
+existing_url=""
+existing_state=""
+if [ -n "$existing_json" ]; then
+    existing_url=$(printf '%s' "$existing_json" | jq -r '.url')
+    existing_state=$(printf '%s' "$existing_json" | jq -r '.state')
+fi
+
+if [ -n "$existing_url" ] && [ "$existing_state" = "OPEN" ]; then
+    printf '%s' "$existing_url" | tr -d '\n'
+else
+    # Do not discard stderr here: a rejected push (no write access,
+    # protected branch, non-fast-forward) is otherwise reduced to a
+    # bare exit 128 with no indication of the cause.
+    if ! push_err=$(git push -u origin "$branch" 2>&1); then
+        echo "push_failed=true branch=$branch"
+        echo "push_error=$push_err"
+        exit 1
+    fi
+    pr_url=$(gh pr create \
+        --base "$criteria_value_1" \
+        --head "$branch" \
+        --title "$title" \
+        --body "$(cat "$criteria_value_2")" 2>&1) || {
+        echo "pr_create_failed=true branch=$branch"
+        echo "pr_create_error=$pr_url"
+        exit 1
+    }
+    printf '%s' "$pr_url" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'
+fi

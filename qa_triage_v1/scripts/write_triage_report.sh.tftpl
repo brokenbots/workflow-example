@@ -1,0 +1,36 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+criteria_value_7={{ .criteria_value_7 | shellquote }}
+criteria_value_8={{ .criteria_value_8 | shellquote }}
+criteria_value_9={{ .criteria_value_9 | shellquote }}
+criteria_value_10={{ .criteria_value_10 | shellquote }}
+            set -euo pipefail
+            ev="$criteria_value_1/evidence"
+
+            # The header is built with printf so $(date) still runs, but the
+            # supervisor's reasoning goes through a QUOTED heredoc delimiter.
+            # It is agent-authored text: with an unquoted delimiter the shell
+            # command-substitutes any backticks or $(...) it contains and
+            # splices the output into the report — verified executing `make
+            # build` from a supervisor's prose. Quoted, HCL still interpolates
+            # the value in (that happens before the shell sees it) but the
+            # shell treats every byte as literal.
+            {
+                printf '# Triage report\n\n'
+                printf -- '- report: %s\n' "$criteria_value_2"
+                printf -- '- verdict: %s\n' "$criteria_value_3"
+                printf -- '- matrix requested: %s\n' "$criteria_value_4"
+                printf -- '- main (%s): %s\n' "$criteria_value_5" "$criteria_value_6"
+                printf -- '- stable (%s): %s\n' "$criteria_value_7" "$criteria_value_8"
+                printf -- '- provided repro workflow: %s\n' "$criteria_value_9"
+                printf -- '- concluded at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '## Supervisor reasoning\n\n'
+                cat <<____CRITERIA_EOF____
+$criteria_value_10
+____CRITERIA_EOF____
+            } > "$ev/triage-report.md"
+            cat "$ev/triage-report.md"

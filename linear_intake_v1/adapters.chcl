@@ -1,0 +1,65 @@
+// All of this workflow's own work — Linear API calls, file guards — happens
+// under intake_root. Nothing here touches the repository directly;
+// qa_triage_v1 and workstream_handler_v1 manage their own environments and
+// adapter sets as subworkflows.
+environment "shell" "intake" {
+    working_directory = var.intake_root
+}
+
+// Deterministic steps. Also carries the Linear credential: every Linear step
+// runs curl against https://api.linear.app/graphql with this key.
+//
+// NOTE: LINEAR_API_KEY must also be exported before `criteria apply`. Whether
+// the shell adapter surfaces adapter-level secrets as command env vars is
+// unverified — export is the reliable path (the key is never interpolated into
+// step input; secret-tainted interpolation into input is a compile error).
+adapter "shell" "intake" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.intake
+    secrets {
+        LINEAR_API_KEY = "env:LINEAR_API_KEY"
+    }
+}
+
+// Named INTAKE_GITHUB_TOKEN rather than GITHUB_TOKEN deliberately, following
+// qa_triage_v1's discipline: a bare GITHUB_TOKEN exported by the operator is
+// inherited by every adapter subprocess and by the agent's own tool shell,
+// where it silently overrides the per-adapter secret.
+adapter "copilot" "intake_classifier" {
+    environment = shell.intake
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:INTAKE_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.intake_classifier.model
+        max_turns         = "${var.intake_classifier.max_turns}"
+        reasoning_effort  = var.intake_classifier.reasoning_effort
+        system_prompt     = file("./agents/intake_classifier.md")
+        provider_base_url = var.intake_classifier.provider.base_url
+        provider_wire_api = var.intake_classifier.provider.wire_api
+        working_directory = var.intake_root
+    }
+}
+
+// The routing gate at the end of triage. Reads artifacts from disk — the
+// triage report and the workstream file — never another agent's transcript.
+adapter "copilot" "triage_reviewer" {
+    environment = shell.intake
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:INTAKE_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.triage_reviewer.model
+        max_turns         = "${var.triage_reviewer.max_turns}"
+        reasoning_effort  = var.triage_reviewer.reasoning_effort
+        system_prompt     = file("./agents/triage_reviewer.md")
+        provider_base_url = var.triage_reviewer.provider.base_url
+        provider_wire_api = var.triage_reviewer.provider.wire_api
+        working_directory = var.intake_root
+    }
+}

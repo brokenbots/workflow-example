@@ -1,0 +1,62 @@
+set -eu
+branch=$(git branch --show-current)
+pr_json=$(gh pr view "$branch" --json number,state,reviewDecision,url 2>/dev/null || echo "")
+if [ -z "$pr_json" ]; then
+    echo "status:no_pr"
+    exit 0
+fi
+state=$(printf '%s' "$pr_json" | jq -r '.state')
+if [ "$state" = "MERGED" ]; then echo "status:merged"; exit 0; fi
+if [ "$state" = "CLOSED" ]; then echo "status:closed"; exit 0; fi
+
+review_decision=$(printf '%s' "$pr_json" | jq -r '.reviewDecision // "REVIEW_REQUIRED"')
+number=$(printf '%s' "$pr_json" | jq -r '.number')
+
+# Viewer-agnostic approval check: PR author sees empty reviewDecision.
+# Fall back to the REST API reviews list to detect any APPROVED review.
+if [ -z "$review_decision" ] || [ "$review_decision" = "REVIEW_REQUIRED" ]; then
+    owner=$(gh repo view --json owner --jq '.owner.login')
+    repo=$(gh repo view --json name --jq '.name')
+    approved_count=$(gh api "repos/$owner/$repo/pulls/$number/reviews" --jq '[.[] | select(.state == "APPROVED")] | length' 2>/dev/null || echo "0")
+    if [ "$approved_count" -gt 0 ]; then
+        review_decision="APPROVED"
+    fi
+fi
+
+# Inspect ALL checks, not just --required: every gate must be green
+# before merge, and a non-required red check still blocks it.
+checks_rc=0
+checks_json=$(gh pr checks "$number" --json bucket,name,state 2>&1) || checks_rc=$?
+if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
+    # CI hasn't registered check runs yet (common right after PR
+    # creation / push) — pending, not failed.
+    echo "status:pending"
+    exit 0
+elif [ "$checks_rc" -ne 0 ] && ! printf '%s' "$checks_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    # Non-zero with output that isn't the checks array — a real error.
+    echo "status:checks_failed"
+    exit 0
+else
+    any_failing=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "fail")] | length' 2>/dev/null || echo "0")
+    any_pending=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "pending")] | length' 2>/dev/null || echo "0")
+    if [ "$any_failing" -gt 0 ]; then echo "status:checks_failed"; exit 0; fi
+    if [ "$any_pending" -gt 0 ]; then echo "status:pending"; exit 0; fi
+fi
+
+owner=$(gh repo view --json owner --jq '.owner.login')
+repo=$(gh repo view --json name --jq '.name')
+threads_json=$(gh api graphql \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved isOutdated}}}}}' \
+    -f owner="$owner" \
+    -f repo="$repo" \
+    -F number="$number")
+unresolved=$(printf '%s' "$threads_json" | \
+    jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select((.isOutdated|not) and (.isResolved|not))] | length')
+
+if [ "$review_decision" = "APPROVED" ] && [ "$unresolved" -eq 0 ]; then
+    echo "status:ready"
+elif [ "$review_decision" = "CHANGES_REQUESTED" ] || [ "$unresolved" -gt 0 ]; then
+    echo "status:needs_work"
+else
+    echo "status:open"
+fi

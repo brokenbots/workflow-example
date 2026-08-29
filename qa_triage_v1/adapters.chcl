@@ -70,9 +70,3 @@ adapter "copilot" "supervisor" {
         working_directory = "${var.triage_root}/scratch"
     }
 }
-
-adapter "noop" "default" {
-    source   = "ghcr.io/brokenbots/criteria-adapter-noop"
-    version  = "0.5.2"
-    on_crash = "respawn"
-}

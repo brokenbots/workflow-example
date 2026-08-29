@@ -1,0 +1,17 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+            set -euo pipefail
+            cat > "$criteria_value_1/run-$criteria_value_2.md" <<____CRITERIA_EOF____
+# $criteria_value_2 — INCONCLUSIVE (build failed)
+
+- ref: $criteria_value_3 ($criteria_value_4)
+- build command: $criteria_value_5
+- build log: $criteria_value_1/build-$criteria_value_2.log
+
+The tree does not build at this ref, so no reproduction was attempted. This is
+NOT evidence that the bug is absent.
+____CRITERIA_EOF____
+            echo "build failed at $criteria_value_2"

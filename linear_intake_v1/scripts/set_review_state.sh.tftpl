@@ -1,0 +1,37 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+team_id=$(jq -r '.data.issue.team.id' "$run_dir/ticket.json")
+
+states=$(curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'query($team: ID!, $name: String!) { workflowStates(filter: {team: {id: {eq: $team}}, name: {eq: $name}}) { nodes { id } } }' \
+        --arg team "$team_id" \
+        --arg name "$criteria_value_3" \
+        '{query: $q, variables: {team: $team, name: $name}}')" \
+    https://api.linear.app/graphql)
+
+state_id=$(printf '%s' "$states" | jq -r '.data.workflowStates.nodes[0].id // empty')
+if [ -z "$state_id" ]; then
+    echo "Linear state '$criteria_value_3' not found on the ticket's team" >&2
+    exit 1
+fi
+
+curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: {stateId: $state}) { success } }' \
+        --arg id "$issue_id" \
+        --arg state "$state_id" \
+        '{query: $q, variables: {id: $id, state: $state}}')" \
+    https://api.linear.app/graphql \
+    | jq -e '.data.issueUpdate.success == true' >/dev/null
+
+echo "ticket moved to $criteria_value_3"

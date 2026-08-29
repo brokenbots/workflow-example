@@ -1,0 +1,32 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+criteria_value_7={{ .criteria_value_7 | shellquote }}
+criteria_value_8={{ .criteria_value_8 | shellquote }}
+criteria_value_9={{ .criteria_value_9 | shellquote }}
+            set -euo pipefail
+            ev="$criteria_value_1/evidence"
+            mkdir -p "$ev"
+            gate="$criteria_value_2"
+            verify="$criteria_value_3"
+            {
+                printf '# Run context\n\n'
+                printf -- '- repository: %s\n' "$criteria_value_4"
+                printf -- '- remote: %s\n' "$(git -C "$criteria_value_4" remote get-url origin 2>/dev/null || echo '<none>')"
+                printf -- '- base branch: %s\n' "$criteria_value_5"
+                printf -- '- base SHA: %s\n' "$criteria_value_6"
+                printf -- '- work branch: %s\n' "$criteria_value_7"
+                printf -- '- worktree: %s\n' "$criteria_value_8"
+                printf -- '- evidence: %s\n' "$ev"
+                printf -- '- gate command: %s\n' "${gate:-<none configured>}"
+                printf -- '- verify command: %s\n' "${verify:-<none configured>}"
+                printf -- '- started at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '## Hints from the operator\n\n'
+                cat <<____CRITERIA_EOF____
+$criteria_value_9
+____CRITERIA_EOF____
+            } > "$ev/context.md"
+            cat "$ev/context.md"

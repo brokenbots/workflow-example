@@ -1,5 +1,6 @@
 workflow {
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     name          = "pair_loop"
     initial_state = "get_branch_name"
     target_state  = "done"
@@ -10,11 +11,6 @@ workflow {
 }
 
 data "internal" "branch" {
-    type  = string
-    value = ""
-}
-
-data "internal" "status" {
     type  = string
     value = ""
 }
@@ -61,13 +57,6 @@ step "read_workstream" {
         command = "cat ${var.workstream_file}"
     }
 
-    outcome "success" { next = step.init_variables }
-    outcome "failure" { next = state.failed }
-}
-
-step "init_variables" {
-    target = adapter.noop.default
-    input  {}
     outcome "success" {
         next = step.checkout_branch
         write {
@@ -80,13 +69,14 @@ step "init_variables" {
         }
         write {
             target = data.internal.developer_prompt.value
-            value  = var.developer_initial_prompt != "" ? var.developer_initial_prompt : (var.developer.initial_prompt != "" ? var.developer.initial_prompt : "Review the details for this workstream and then work through each item until its complete and addresses the workstream requirements, when finished call the submit_outcome tool with details of the work in the reason field.\n\nworkstream details:\n${steps.read_workstream.stdout}\n\nmake sure to end the session by calling the `submit_outcome` tool with the correct value.")
+            value  = var.developer_initial_prompt != "" ? var.developer_initial_prompt : (var.developer.initial_prompt != "" ? var.developer.initial_prompt : "Review the details for this workstream and then work through each item until its complete and addresses the workstream requirements, when finished call the submit_outcome tool with details of the work in the reason field.\n\nworkstream details:\n${output.stdout}\n\nmake sure to end the session by calling the `submit_outcome` tool with the correct value.")
         }
         write {
             target = data.internal.reviewer_prompt.value
-            value  = "Review the changes for this workstream. Inspect the actual diffs and commits yourself (git diff, git log) — do not rely on the developer's notes alone. Verify the changes match what the developer stated and meet the workstream requirements.\n\nworkstream details:\n${steps.read_workstream.stdout}"
+            value  = "Review the changes for this workstream. Inspect the actual diffs and commits yourself (git diff, git log) — do not rely on the developer's notes alone. Verify the changes match what the developer stated and meet the workstream requirements.\n\nworkstream details:\n${output.stdout}"
         }
     }
+    outcome "failure" { next = state.failed }
 }
 
 // The isolated worktree is already on the feature branch (branch_manager created
@@ -95,16 +85,9 @@ step "init_variables" {
 step "checkout_branch" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            expected=$(basename '${var.workstream_file}' .md)
-            current=$(git branch --show-current)
-            if [ "$current" != "$expected" ]; then
-                echo "expected branch '$expected' but worktree is on '$current'" >&2
-                exit 1
-            fi
-            echo "on_branch=$current"
-        SHELL
+        command = templatefile("./scripts/checkout_branch.sh.tftpl", {
+            criteria_value_1 = var.workstream_file
+        })
     }
     timeout = "10s"
     outcome "success" { next = step.check_working_tree }
@@ -120,22 +103,10 @@ step "checkout_branch" {
 step "check_working_tree" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            if [ "${var.allow_dirty}" = "true" ]; then
-                echo "working_tree_check=skipped" >&2
-                exit 0
-            fi
-            notes='${var.branch_notes}'
-            status=$(git status --porcelain)
-            if [ -n "$status" ]; then
-                if [ -n "$notes" ]; then
-                    printf '%s\n\n' "$notes"
-                fi
-                printf 'The working tree has uncommitted changes. Review them, commit anything that belongs to this workstream, and discard the rest:\n%s\n' "$status"
-            fi
-            exit 0
-        SHELL
+        command = templatefile("./scripts/check_working_tree.sh.tftpl", {
+            criteria_value_1 = format("%s", var.allow_dirty)
+            criteria_value_2 = var.branch_notes
+        })
     }
     outcome "success" {
         next = step.develop
@@ -151,7 +122,7 @@ step "check_working_tree" {
 // cycles — a stuck exchange fails the run instead of looping forever.
 step "develop" {
     target     = adapter.copilot.developer
-    max_visits = 10
+    max_visits = var.max_agent_visits
 
     allow_tools = ["*"]
 
@@ -168,11 +139,10 @@ step "write_work_log" {
     target = adapter.shell.sh
 
     input {
-        command = <<-SHELL
-            cat >> '${data.internal._log_file.value}' <<'____CRITERIA_EOF____'
-${steps.develop.reason}
-____CRITERIA_EOF____
-        SHELL
+        command = templatefile("./scripts/write_work_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+            criteria_value_2 = steps.develop.reason
+        })
     }
 
     outcome "success" { next = step.commit_work_log }
@@ -184,14 +154,9 @@ ____CRITERIA_EOF____
 step "commit_work_log" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            log="${data.internal._log_file.value}"
-            if git ls-files --error-unmatch "$log" 2>/dev/null; then
-                git add "$log"
-                git commit -m "chore: update work log"
-            fi
-        SHELL
+        command = templatefile("./scripts/commit_work_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+        })
     }
     outcome "success" { next = step.verify_committed }
     outcome "failure" { next = state.failed }
@@ -203,16 +168,7 @@ step "commit_work_log" {
 step "verify_committed" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            status=$(git status --porcelain)
-            if [ -n "$status" ]; then
-                echo "uncommitted_changes:"
-                echo "$status"
-                exit 1
-            fi
-            echo "all_changes_committed=true"
-        SHELL
+        command = templatefile("./scripts/verify_committed.sh.tftpl", {})
     }
     outcome "success" { next = step.ci_gate }
     outcome "failure" {
@@ -246,7 +202,7 @@ step "ci_gate" {
 
 step "review" {
     target     = adapter.copilot.reviewer
-    max_visits = 10
+    max_visits = var.max_agent_visits
 
     allow_tools = ["*"]
 
@@ -290,11 +246,10 @@ step "write_review_log" {
     target = adapter.shell.sh
 
     input {
-        command = <<-SHELL
-            cat >> '${data.internal._log_file.value}' <<'____CRITERIA_EOF____'
-${steps.review.reason}
-____CRITERIA_EOF____
-        SHELL
+        command = templatefile("./scripts/write_review_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+            criteria_value_2 = steps.review.reason
+        })
     }
 
     outcome "success" { next = step.commit_review_log }
@@ -304,14 +259,9 @@ ____CRITERIA_EOF____
 step "commit_review_log" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            log="${data.internal._log_file.value}"
-            if git ls-files --error-unmatch "$log" 2>/dev/null; then
-                git add "$log"
-                git commit -m "chore: update review log"
-            fi
-        SHELL
+        command = templatefile("./scripts/commit_review_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+        })
     }
     outcome "success" { next = switch.triage_review }
     outcome "failure" { next = state.failed }
@@ -320,36 +270,13 @@ step "commit_review_log" {
 switch "triage_review" {
     match {
         condition = data.internal.review_verdict.value == "approved"
-        next      = step.mark_done
+        next      = state.done
     }
     // changes_requested: back to the developer, whose prompt now carries the
     // review findings (written by the review step's changes_requested outcome).
     default {
         next = step.develop
     }
-}
-
-// Stamp status="ok" and flush the snapshot before the terminal state so the
-// parent's route switch can read it (engine bug: DataStore writes are not
-// included in finalVars without an intervening step — mirrors branch_manager).
-step "mark_done" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.finish
-        write {
-            target = data.internal.status.value
-            value  = "ok"
-        }
-    }
-    outcome "failure" { next = step.finish }
-}
-
-step "finish" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" { next = state.done }
-    outcome "failure" { next = state.done }
 }
 
 state "done" {
@@ -361,8 +288,4 @@ state "failed" {
     terminal = true
     success  = false
 }
-
-output "status" {
-    type  = string
-    value = data.internal.status.value
-}
+// The parent receives this terminal failure directly on Criteria v0.5.9.

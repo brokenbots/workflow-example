@@ -77,10 +77,23 @@ variable "test_cmd" {
     default     = ""
 }
 
-// NOTE: the refine bound is NOT a variable. `max_visits` must be a compile-time
-// literal — the compiler rejects a variable reference there — so each gate's
-// retry budget is written inline in main.chcl (3 for every agent gate, 2 for
-// intake). Change it there.
+variable "max_intake_visits" {
+    description = "Maximum attempts for the initial supervisor intake gate."
+    type        = number
+    default     = 2
+}
+
+variable "max_refine_visits" {
+    description = "Maximum attempts for each investigation, verdict, and workstream refinement gate."
+    type        = number
+    default     = 3
+}
+
+variable "max_repro_visits" {
+    description = "Maximum investigator attempts in each per-ref reproduction subworkflow."
+    type        = number
+    default     = 3
+}
 
 // Investigator: plans, builds, executes reproductions, drafts. Coding-tuned,
 // because it writes and runs test harnesses. It has NO authority to declare a

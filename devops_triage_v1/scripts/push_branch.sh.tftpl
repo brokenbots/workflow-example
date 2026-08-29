@@ -1,0 +1,13 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -uo pipefail
+branch="$criteria_value_1"
+# Do not discard stderr: a rejected push (no write access, protected
+# branch, non-fast-forward) is otherwise reduced to a bare exit 128
+# with no indication of the cause.
+if ! out=$(git push -u origin "$branch" 2>&1); then
+    echo "push_failed=true branch=$branch"
+    echo "$out"
+    exit 1
+fi
+echo "pushed=$branch"
+echo "$out"

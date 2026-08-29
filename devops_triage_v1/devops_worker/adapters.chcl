@@ -27,9 +27,3 @@ adapter "copilot" "devops" {
         working_directory = var.worktree_dir
     }
 }
-
-adapter "noop" "default" {
-    source   = "ghcr.io/brokenbots/criteria-adapter-noop"
-    version  = "0.5.2"
-    on_crash = "respawn"
-}

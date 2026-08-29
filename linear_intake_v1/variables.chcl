@@ -1,0 +1,232 @@
+variable "ticket_id" {
+    description = "Linear ticket identifier to process (e.g. \"CRI-32\"). Doubles as the run's slug: every artifact lives under <intake_root>/<ticket_id>/ and <triage_root>/<ticket_id>/."
+    type        = string
+}
+
+variable "max_agent_visits" {
+    description = "Maximum attempts for each intake classification and QA-review agent gate."
+    type        = number
+    default     = 2
+}
+
+// Defaults to "" rather than being required: it is referenced from adapter
+// config, which must be resolvable at compile time. A required variable leaves
+// it unknown and the compile fails. Always pass it at apply time.
+variable "repo_dir" {
+    description = "Absolute path of the repository's primary working tree. Passed through to qa_triage_v1 and workstream_handler_v1, which run all repo operations themselves. Empty runs in the process working directory."
+    type        = string
+    default     = ""
+}
+
+// Deliberately OUTSIDE the repository under test, same discipline as
+// qa_triage_v1's triage_root: intake artifacts (ticket JSON, rendered bug
+// report, confirmed workstream, review notes, handler worktree) must never
+// land in the repo's working tree.
+variable "intake_root" {
+    description = "Absolute path under which per-ticket working directories are created (<intake_root>/<ticket_id>/). Must be OUTSIDE the repository under test, and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+variable "linear_review_state" {
+    description = "Name of the Linear workflow state the ticket is moved to whenever the run cannot proceed autonomously: unusable ticket, invalid finding, ambiguous triage, or a crashed/failed subworkflow. Resolved by name against the ticket's team (must exist there — e.g. Linear's default \"In Review\", or a custom state like \"Human Review\"); an unknown name fails the run loudly."
+    type        = string
+    default     = "In Review"
+}
+
+variable "linear_bug_label" {
+    description = "Linear label applied before a classified bug enters QA. When absent from the team, the conflicting feature label is removed and routing continues."
+    type        = string
+    default     = "Bug"
+}
+
+variable "linear_feature_label" {
+    description = "Linear label applied before a classified feature request enters the implementation handler. When absent from the team, the conflicting bug label is removed and routing continues."
+    type        = string
+    default     = "Feature"
+}
+
+// ── qa_triage_v1 pass-throughs ───────────────────────────────────────────────
+// Kept in sync with qa_triage_v1/variables.chcl. See that file for the full
+// rationale on each.
+
+variable "triage_root" {
+    description = "qa_triage_v1: root for triage worktrees and the evidence directory. Must be OUTSIDE the repository under test."
+    type        = string
+    default     = "/tmp/criteria-triage"
+}
+
+variable "design_intent_file" {
+    description = "qa_triage_v1: optional absolute path to a markdown file recording deliberate design decisions not documented in the repository. Consulted by the verdict gate. Empty means no such file."
+    type        = string
+    default     = ""
+}
+
+variable "repro_workflow_dir" {
+    description = "qa_triage_v1: optional absolute path to a reproduction workflow supplied with the bug report, executed first and unmodified against every ref under test. Empty means the investigator constructs a reproduction from the report alone."
+    type        = string
+    default     = ""
+}
+
+variable "test_refs" {
+    description = "qa_triage_v1: which refs to test: \"main\", \"stable\", or \"both\" (default). \"both\" is strongly preferred — the delta between refs distinguishes a live bug from a regression from an already-fixed report."
+    type        = string
+    default     = "both"
+}
+
+variable "main_ref" {
+    description = "qa_triage_v1: ref treated as mainline. Fetched before resolution so the tested SHA is the remote's, not a stale local ref."
+    type        = string
+    default     = "origin/main"
+}
+
+variable "stable_ref" {
+    description = "qa_triage_v1: ref treated as latest stable. Empty (the default) resolves to the highest non-prerelease semver tag reachable in the repo."
+    type        = string
+    default     = ""
+}
+
+variable "build_cmd" {
+    description = "qa_triage_v1: command that builds the project inside a triage worktree, run before any reproduction attempt. Empty skips the build step — set this for any compiled project (e.g. 'make build')."
+    type        = string
+    default     = ""
+}
+
+variable "test_cmd" {
+    description = "qa_triage_v1: command that runs the project's test suite inside a triage worktree, used to establish that the tree is otherwise healthy. Empty skips it."
+    type        = string
+    default     = ""
+}
+
+// ── workstream_handler_v1 pass-throughs ──────────────────────────────────────
+
+variable "base_branch" {
+    description = "workstream_handler_v1: base branch to fork from and validate against."
+    type        = string
+    default     = "main"
+}
+
+variable "ci_gate_cmd" {
+    description = "workstream_handler_v1: command the pair programming loop runs as its CI gate (exit 0 = clean). Empty skips the gate. Set it to mirror what the remote CI actually runs (e.g. 'make ci && make vuln-scan')."
+    type        = string
+    default     = ""
+}
+
+variable "allow_dirty" {
+    description = "workstream_handler_v1: allow the pair programming loop to run even if the working tree has uncommitted changes."
+    type        = bool
+    default     = false
+}
+
+variable "reviewer_gh_user" {
+    description = "workstream_handler_v1: GitHub username for the reviewer role (must be pre-configured via gh auth login). Leave empty to skip reviewer credential switching."
+    type        = string
+    default     = ""
+}
+
+variable "coordinator_gh_user" {
+    description = "workstream_handler_v1: GitHub username for the coordinator role: PR creation, feedback triage, thread responses, and merge (must be pre-configured via gh auth login). Leave empty to fall back to whichever account is active at startup."
+    type        = string
+    default     = ""
+}
+
+// ── Agent configs ────────────────────────────────────────────────────────────
+
+// Intake classifier: routes bugs through QA and writes concrete feature
+// requests directly as workstreams for the implementation handler.
+variable "intake_classifier" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 20)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "kimi-k2.7-code:cloud"
+        max_turns = 20
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Triage reviewer: routes the completed triage run. Deliberately a DIFFERENT
+// model family from the intake classifier — the value of a review gate is that it
+// does not share the writer's blind spots.
+variable "triage_reviewer" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 20)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.2:cloud"
+        max_turns = 20
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Investigator and supervisor are qa_triage_v1's agent configs, passed through
+// unchanged. The block shapes must stay in sync with qa_triage_v1/variables.chcl.
+variable "investigator" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 40)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "kimi-k2.7-code:cloud"
+        max_turns = 40
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+variable "supervisor" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.2:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

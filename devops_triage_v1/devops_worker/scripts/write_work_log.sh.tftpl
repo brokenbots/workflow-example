@@ -1,0 +1,15 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+            set -euo pipefail
+            mkdir -p "$criteria_value_1"
+            {
+                printf '\n## Work cycle — %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                # QUOTED delimiter: this is agent-authored text, and an unquoted
+                # heredoc would command-substitute any backticks or $(...) it
+                # contains and splice the output into the log. HCL still
+                # interpolates the value in before the shell sees it.
+                cat <<____CRITERIA_EOF____
+$criteria_value_2
+____CRITERIA_EOF____
+            } >> "$criteria_value_1/work-log.md"
+            echo "work log appended"

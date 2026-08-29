@@ -1,0 +1,30 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+root="$criteria_value_1"
+case "$root" in
+    "$criteria_value_2"|"$criteria_value_2"/*)
+        echo "triage_root must be outside the repository under test: $root" >&2
+        exit 1
+        ;;
+esac
+mkdir -p "$root"
+slug=$(basename "$criteria_value_3")
+slug="${slug%.*}"
+run_dir="$root/$slug"
+
+# A previous triage of the same report must not contaminate this one.
+# Worktrees are git-registered, so prune before removing the tree.
+if [ -d "$run_dir/wt" ]; then
+    for wt in "$run_dir"/wt/*; do
+        [ -d "$wt" ] || continue
+        git -C "$criteria_value_2" worktree remove --force "$wt" 2>/dev/null || true
+    done
+fi
+git -C "$criteria_value_2" worktree prune 2>/dev/null || true
+rm -rf "$run_dir"
+
+mkdir -p "$run_dir/evidence" "$run_dir/wt"
+cp "$criteria_value_3" "$run_dir/evidence/report.md"
+printf '%s' "$run_dir"

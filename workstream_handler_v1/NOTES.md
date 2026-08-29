@@ -12,7 +12,6 @@ subworkflows.
 |---|---|---|---|
 | copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.2` | multi-arch, signed. Used for every agent role: developer, coordinator, branch-repair, pair-loop reviewer, PR reviewer. |
 | shell        | `ghcr.io/brokenbots/criteria-adapter-shell`        | `0.5.2` | multi-arch, keyless-signed. |
-| noop         | `ghcr.io/brokenbots/criteria-adapter-noop`         | `0.5.1` | multi-arch, keyless-signed. |
 
 All agent roles now run on the copilot adapter; the `claude-agent` adapter is
 no longer used anywhere in this workflow.
@@ -41,17 +40,4 @@ criteria compile workstream_handler_v1
 
 `adapter lock` recurses into every subworkflow as of criteria #288, so the root
 invocation locks the whole tree — it reports each workflow it visited and the
-adapter count per workflow. Before that change it locked only the named
-directory, and this procedure listed all four directories separately; a
-subworkflow whose lockfile was missing then failed at run time with
-`adapter "<name>" not found (searched: ~/.criteria/adapters/criteria-adapter-<name>)`
-when the run first entered it.
-
-Requires a criteria binary built at or after #288. With an older binary, fall
-back to locking each directory individually:
-
-```sh
-criteria adapter lock workstream_handler_v1/pair_programming_loop
-criteria adapter lock workstream_handler_v1/pr_reviewer_loop
-criteria adapter lock workstream_handler_v1/branch_manager
-```
+adapter count per workflow.

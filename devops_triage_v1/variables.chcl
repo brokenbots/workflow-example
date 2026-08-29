@@ -98,9 +98,35 @@ variable "deliver" {
     default     = "pr"
 }
 
-// NOTE: retry budgets are NOT variables. `max_visits` must be a compile-time
-// literal — the compiler rejects a variable reference — so each gate's budget is
-// written inline in main.chcl. Change it there.
+variable "max_intake_visits" {
+    description = "Maximum attempts for the initial manager intake gate."
+    type        = number
+    default     = 2
+}
+
+variable "max_refine_visits" {
+    description = "Maximum attempts for triage, worklist review, and state validation gates."
+    type        = number
+    default     = 3
+}
+
+variable "max_worker_cycles" {
+    description = "Maximum fresh devops-worker cycles before the parent stops retrying."
+    type        = number
+    default     = 5
+}
+
+variable "max_worker_visits" {
+    description = "Maximum executor attempts inside one devops-worker cycle."
+    type        = number
+    default     = 8
+}
+
+variable "max_final_review_visits" {
+    description = "Maximum attempts for the final manager review gate."
+    type        = number
+    default     = 6
+}
 
 // Manager: gates intake, the work list, the no-action finding, and the final
 // result. Sole authority to send work forward or close the run. Deliberately a

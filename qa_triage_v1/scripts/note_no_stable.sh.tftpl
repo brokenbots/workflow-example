@@ -1,0 +1,12 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+            set -euo pipefail
+            cat > "$criteria_value_1/evidence/run-stable.md" <<____CRITERIA_EOF____
+# stable — SKIPPED
+
+No non-prerelease semver tag was found in this repository, and var.stable_ref
+was not set. The stable arm of the matrix did not run.
+
+Any verdict from this triage rests on the mainline result alone and cannot
+distinguish a live bug from a regression introduced since the last release.
+____CRITERIA_EOF____
+            echo "stable skipped"

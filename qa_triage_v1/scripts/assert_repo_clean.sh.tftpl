@@ -1,0 +1,16 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail
+dirty=$(git -C "$criteria_value_1" status --porcelain 2>/dev/null || true)
+if [ -n "$dirty" ]; then
+    {
+        printf '# Repository was modified during triage\n\n'
+        printf 'Triage treats %s as read-only. It is dirty:\n\n' "$criteria_value_1"
+        printf '%s\n' "$dirty"
+        printf '\nAn agent wrote into the repository under test. Evidence from this\n'
+        printf 'run is not trustworthy: the trees it measured were not clean checkouts.\n'
+        printf 'Nothing was reverted — inspect and clean up manually.\n'
+    } | tee "$criteria_value_2/evidence/repo-dirty.md" >&2
+    exit 1
+fi
+echo "repository clean"

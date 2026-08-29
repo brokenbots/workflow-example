@@ -1,6 +1,7 @@
 workflow {
     name          = "devops_triage_v1"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "stage_report"
     target_state  = "delivered"
 
@@ -113,6 +114,7 @@ subworkflow "devops_worker" {
         base_branch   = var.base_branch
         branch        = data.internal.branch.value
         ci_gate_cmd   = var.ci_gate_cmd
+        max_visits    = var.max_worker_visits
         devops        = var.devops
     }
 }
@@ -126,53 +128,13 @@ subworkflow "devops_worker" {
 step "stage_report" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            wt='${var.worktree_dir}'
-            if [ -z "$wt" ]; then
-                echo "worktree_dir is required: every agent in this workflow writes there, and an empty value points them at the process working directory" >&2
-                exit 1
-            fi
-            if [ "$wt" = '${var.repo_dir}' ]; then
-                echo "worktree_dir must not be the primary tree: $wt" >&2
-                exit 1
-            fi
-
-            root='${var.ops_root}'
-            case "$root" in
-                '${var.repo_dir}'|'${var.repo_dir}'/*)
-                    echo "ops_root must be outside the repository under work: $root" >&2
-                    exit 1
-                    ;;
-            esac
-
-            file='${var.ops_report_file}'
-            staged="$root/.staging/report.md"
-            mkdir -p "$root/.staging"
-            rm -f "$staged"
-
-            if [ -n "$file" ]; then
-                if [ ! -f "$file" ]; then
-                    echo "ops report not found: $file" >&2
-                    exit 1
-                fi
-                cp "$file" "$staged"
-            else
-                # QUOTED heredoc delimiter: report_text is operator-supplied text
-                # and may contain backticks or $(...). HCL interpolates the value
-                # in before the shell sees it; quoted, the shell then treats every
-                # byte as literal instead of executing it.
-                cat > "$staged" <<'____CRITERIA_EOF____'
-${var.report_text}
-____CRITERIA_EOF____
-            fi
-
-            if [ ! -s "$staged" ]; then
-                echo "no request supplied: set exactly one of ops_report_file or report_text" >&2
-                exit 1
-            fi
-            cat "$staged"
-        SHELL
+        command = templatefile("./scripts/stage_report.sh.tftpl", {
+            criteria_value_1 = var.worktree_dir
+            criteria_value_2 = var.repo_dir
+            criteria_value_3 = var.ops_root
+            criteria_value_4 = var.ops_report_file
+            criteria_value_5 = var.report_text
+        })
     }
     outcome "success" { next = step.resolve_slug }
     outcome "failure" { next = state.failed }
@@ -181,29 +143,11 @@ ____CRITERIA_EOF____
 step "resolve_slug" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            slug='${var.run_label}'
-            if [ -z "$slug" ]; then
-                if [ -n '${var.ops_report_file}' ]; then
-                    slug=$(basename '${var.ops_report_file}')
-                    slug="$${slug%.*}"
-                else
-                    # First non-empty line of the request, stripped of markdown
-                    # heading marks. A one-line request is expected to be the
-                    # common case, so it has to produce a usable branch name.
-                    slug=$(grep -m1 -v '^[[:space:]]*$' '${var.ops_root}/.staging/report.md' || echo "")
-                fi
-            fi
-            slug=$(printf '%s' "$slug" \
-                | tr '[:upper:]' '[:lower:]' \
-                | sed -e 's/^[#[:space:]]*//' -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//' \
-                | cut -c1-48 | sed -e 's/-$//')
-            [ -n "$slug" ] || slug="ops-run"
-            # printf, not echo: the trailing newline is captured into
-            # output.stdout and then interpolated into paths and git refs.
-            printf '%s' "$slug"
-        SHELL
+        command = templatefile("./scripts/resolve_slug.sh.tftpl", {
+            criteria_value_1 = var.run_label
+            criteria_value_2 = var.ops_report_file
+            criteria_value_3 = var.ops_root
+        })
     }
     outcome "success" {
         next = step.resolve_branch
@@ -233,17 +177,10 @@ step "resolve_branch" {
 step "prepare_workspace" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            run_dir='${var.ops_root}/${data.internal.slug.value}'
-            # Evidence from a previous run of the same request must not be read as
-            # evidence for this one. The directory is replaced, not merged.
-            rm -rf "$run_dir"
-            mkdir -p "$run_dir/evidence"
-            cp '${var.ops_root}/.staging/report.md' "$run_dir/evidence/report.md"
-            rm -f '${var.ops_root}/.staging/report.md'
-            printf '%s' "$run_dir"
-        SHELL
+        command = templatefile("./scripts/prepare_workspace.sh.tftpl", {
+            criteria_value_1 = var.ops_root
+            criteria_value_2 = data.internal.slug.value
+        })
     }
     outcome "success" {
         next = step.resolve_base
@@ -261,11 +198,10 @@ step "resolve_base" {
     target  = adapter.shell.repo
     timeout = "120s"
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            git -C '${var.repo_dir}' fetch --all --tags --quiet
-            printf '%s' "$(git -C '${var.repo_dir}' rev-parse 'origin/${var.base_branch}')"
-        SHELL
+        command = templatefile("./scripts/resolve_base.sh.tftpl", {
+            criteria_value_1 = var.repo_dir
+            criteria_value_2 = var.base_branch
+        })
     }
     outcome "success" {
         next = step.write_context
@@ -289,31 +225,17 @@ step "resolve_base" {
 step "write_context" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            ev='${data.internal.run_dir.value}/evidence'
-            mkdir -p "$ev"
-            gate='${var.ci_gate_cmd}'
-            verify='${var.verify_cmd}'
-            {
-                printf '# Run context\n\n'
-                printf -- '- repository: %s\n' '${var.repo_dir}'
-                printf -- '- remote: %s\n' "$(git -C '${var.repo_dir}' remote get-url origin 2>/dev/null || echo '<none>')"
-                printf -- '- base branch: %s\n' '${var.base_branch}'
-                printf -- '- base SHA: %s\n' '${data.internal.base_sha.value}'
-                printf -- '- work branch: %s\n' '${data.internal.branch.value}'
-                printf -- '- worktree: %s\n' '${var.worktree_dir}'
-                printf -- '- evidence: %s\n' "$ev"
-                printf -- '- gate command: %s\n' "$${gate:-<none configured>}"
-                printf -- '- verify command: %s\n' "$${verify:-<none configured>}"
-                printf -- '- started at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                printf '## Hints from the operator\n\n'
-                cat <<'____CRITERIA_EOF____'
-${var.hints}
-____CRITERIA_EOF____
-            } > "$ev/context.md"
-            cat "$ev/context.md"
-        SHELL
+        command = templatefile("./scripts/write_context.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.ci_gate_cmd
+            criteria_value_3 = var.verify_cmd
+            criteria_value_4 = var.repo_dir
+            criteria_value_5 = var.base_branch
+            criteria_value_6 = data.internal.base_sha.value
+            criteria_value_7 = data.internal.branch.value
+            criteria_value_8 = var.worktree_dir
+            criteria_value_9 = var.hints
+        })
     }
     outcome "success" { next = step.setup_worktree }
     outcome "failure" { next = state.failed }
@@ -329,37 +251,13 @@ step "setup_worktree" {
     target  = adapter.shell.repo
     timeout = "120s"
     input {
-        command = <<-SHELL
-            set -euo pipefail; exec 2>&1
-            branch='${data.internal.branch.value}'
-            base='${var.base_branch}'
-            wt='${var.worktree_dir}'
-            echo "branch=$branch base=$base worktree=$wt"
-
-            git -C '${var.repo_dir}' worktree prune 2>&1 || true
-
-            # Reuse a worktree already at this path (resume case). Ask git rather
-            # than string-matching paths, which differ under symlinks (/tmp vs
-            # /private/tmp on macOS).
-            if [ -d "$wt" ]; then
-                if git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                    echo "reusing worktree at $wt (on '$(git -C "$wt" branch --show-current)')"
-                    exit 0
-                fi
-                echo "path $wt exists but is not a git worktree"
-                exit 1
-            fi
-
-            mkdir -p "$(dirname "$wt")"
-            if git -C '${var.repo_dir}' show-ref --verify --quiet "refs/heads/$branch"; then
-                git -C '${var.repo_dir}' worktree add --force "$wt" "$branch"
-            elif git -C '${var.repo_dir}' show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-                git -C '${var.repo_dir}' worktree add --force -b "$branch" "$wt" "origin/$branch"
-            else
-                git -C '${var.repo_dir}' worktree add --force -b "$branch" "$wt" '${data.internal.base_sha.value}'
-            fi
-            echo "worktree_ready=$wt on_branch=$(git -C "$wt" branch --show-current)"
-        SHELL
+        command = templatefile("./scripts/setup_worktree.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = var.base_branch
+            criteria_value_3 = var.worktree_dir
+            criteria_value_4 = var.repo_dir
+            criteria_value_5 = data.internal.base_sha.value
+        })
     }
     outcome "success" { next = step.record_run_base }
     outcome "failure" { next = state.failed }
@@ -389,7 +287,7 @@ step "record_run_base" {
 
 step "intake_review" {
     target      = adapter.copilot.manager
-    max_visits  = 2
+    max_visits  = var.max_intake_visits
     allow_tools = ["*"]
 
     input {
@@ -451,7 +349,7 @@ step "intake_review" {
 
 step "triage_worklist" {
     target      = adapter.copilot.triage
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -513,7 +411,7 @@ step "triage_worklist" {
 
 step "review_no_action" {
     target      = adapter.copilot.manager
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -581,7 +479,7 @@ step "review_no_action" {
 
 step "review_worklist" {
     target      = adapter.copilot.manager
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -675,51 +573,25 @@ step "review_worklist" {
 
 step "run_devops_worker" {
     target     = subworkflow.devops_worker
-    max_visits = 5
+    max_visits = var.max_worker_cycles
     outcome "success" {
-        next = switch.route_worker
+        next = step.run_verify
         write {
             target = data.internal.worker_summary.value
             value  = try(subworkflow.summary, "")
         }
     }
     outcome "failure" {
-        next = switch.route_worker
+        next = step.write_ops_report
         write {
             target = data.internal.worker_summary.value
-            // A child that dies before flushing outputs has no `summary`
-            // attribute at all — try() keeps the failure path from crashing the
-            // whole run while evaluating this write.
             value  = try(subworkflow.summary, "")
         }
-    }
-}
-
-// Engine bug workaround: a subworkflow's success=false is not observed by the
-// parent, so the child's status output is checked explicitly.
-switch "route_worker" {
-    match {
-        condition = try(steps.run_devops_worker.status, "") == "ok"
-        next      = step.run_verify
-    }
-    default { next = step.mark_worker_failed }
-}
-
-// The worker never reached its own success path — the agent gave up, the gate
-// never went green within the child's budget, or the session died. The commits
-// it did make are left in the worktree and the run stops; sending a broken cycle
-// on to state validation only spends two more agent turns to conclude the same.
-step "mark_worker_failed" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.write_ops_report
         write {
             target = data.internal.verdict.value
             value  = "worker_failed"
         }
     }
-    outcome "failure" { next = step.write_ops_report }
 }
 
 // The expensive proof, run deterministically rather than by the agent that
@@ -729,32 +601,10 @@ step "run_verify" {
     target  = adapter.shell.wt
     timeout = "1800s"
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            ev='${data.internal.run_dir.value}/evidence'
-            mkdir -p "$ev"
-            log="$ev/verify.log"
-            if [ -z '${var.verify_cmd}' ]; then
-                {
-                    printf '# Verification — SKIPPED\n\n'
-                    printf 'No verify_cmd was configured. Nothing in this run\n'
-                    printf 'demonstrates that the change works; it shows only\n'
-                    printf 'that the change was made and the gate passed.\n'
-                } > "$log"
-                echo "verify skipped"
-                exit 0
-            fi
-            {
-                printf '# Verification\n\n'
-                printf -- '- command: %s\n' '${var.verify_cmd}'
-                printf -- '- ran at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            } > "$log"
-            ${var.verify_cmd} >> "$log" 2>&1
-            rc=$?
-            printf '\n- exit: %s\n' "$rc" >> "$log"
-            echo "verify exit=$rc (log: $log)"
-            exit 0
-        SHELL
+        command = templatefile("./scripts/run_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.verify_cmd
+        })
     }
     outcome "success" { next = step.validate_state }
     outcome "failure" { next = step.validate_state }
@@ -768,7 +618,7 @@ step "run_verify" {
 
 step "validate_state" {
     target      = adapter.copilot.triage
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -839,7 +689,7 @@ step "validate_state" {
 
 step "final_review" {
     target      = adapter.copilot.manager
-    max_visits  = 6
+    max_visits  = var.max_final_review_visits
     allow_tools = ["*"]
 
     input {
@@ -893,6 +743,10 @@ step "final_review" {
     outcome "approved" {
         next = switch.route_delivery
         write {
+            target = data.internal.verdict.value
+            value  = var.deliver == "none" ? "completed_local" : ""
+        }
+        write {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
@@ -939,44 +793,26 @@ step "final_review" {
 switch "route_delivery" {
     match {
         condition = var.deliver == "none"
-        next      = step.mark_local
+        next      = step.write_ops_report
     }
     default { next = step.push_branch }
-}
-
-step "mark_local" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.write_ops_report
-        write {
-            target = data.internal.verdict.value
-            value  = "completed_local"
-        }
-    }
-    outcome "failure" { next = step.write_ops_report }
 }
 
 step "push_branch" {
     target  = adapter.shell.wt
     timeout = "120s"
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            branch='${data.internal.branch.value}'
-            # Do not discard stderr: a rejected push (no write access, protected
-            # branch, non-fast-forward) is otherwise reduced to a bare exit 128
-            # with no indication of the cause.
-            if ! out=$(git push -u origin "$branch" 2>&1); then
-                echo "push_failed=true branch=$branch"
-                echo "$out"
-                exit 1
-            fi
-            echo "pushed=$branch"
-            echo "$out"
-        SHELL
+        command = templatefile("./scripts/push_branch.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+        })
     }
-    outcome "success" { next = switch.route_pr }
+    outcome "success" {
+        next = switch.route_pr
+        write {
+            target = data.internal.verdict.value
+            value  = "pushed"
+        }
+    }
     outcome "failure" {
         next = step.write_ops_report
         write {
@@ -991,20 +827,7 @@ switch "route_pr" {
         condition = var.deliver == "pr"
         next      = step.open_pr
     }
-    default { next = step.mark_pushed }
-}
-
-step "mark_pushed" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.write_ops_report
-        write {
-            target = data.internal.verdict.value
-            value  = "pushed"
-        }
-    }
-    outcome "failure" { next = step.write_ops_report }
+    default { next = step.write_ops_report }
 }
 
 // Opens the PR and stops. Nothing here merges: review and merge belong to a
@@ -1014,69 +837,29 @@ step "open_pr" {
     target  = adapter.shell.wt
     timeout = "120s"
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            branch='${data.internal.branch.value}'
-            title='${data.internal.slug.value}'
-
-            existing=$(gh pr view "$branch" --json url,state 2>/dev/null || true)
-            if [ -n "$existing" ]; then
-                url=$(printf '%s' "$existing" | jq -r '.url')
-                st=$(printf '%s' "$existing" | jq -r '.state')
-                if [ "$st" = "OPEN" ]; then
-                    printf '%s' "$url" | tr -d '\n'
-                    exit 0
-                fi
-            fi
-
-            body_file=$(mktemp)
-            {
-                cat '${data.internal.run_dir.value}/evidence/report.md'
-                printf '\n\n---\n\n'
-                printf 'Produced by devops_triage_v1. Evidence (discovery\n'
-                printf 'artifacts, work list, state report, verification log):\n\n'
-                printf '    %s/evidence\n' '${data.internal.run_dir.value}'
-            } > "$body_file"
-
-            if ! out=$(gh pr create \
-                --base '${var.base_branch}' \
-                --head "$branch" \
-                --title "$title" \
-                --body-file "$body_file" 2>&1); then
-                echo "pr_create_failed=true branch=$branch"
-                echo "$out"
-                rm -f "$body_file"
-                exit 1
-            fi
-            rm -f "$body_file"
-            printf '%s' "$out" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'
-        SHELL
+        command = templatefile("./scripts/open_pr.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = data.internal.slug.value
+            criteria_value_3 = data.internal.run_dir.value
+            criteria_value_4 = var.base_branch
+        })
     }
     outcome "success" {
-        next = step.mark_pr_opened
+        next = step.write_ops_report
         write {
             target = data.internal.pr_url.value
             value  = output.stdout
         }
-    }
-    // The branch is already pushed at this point, so a failed PR creation loses
-    // nothing — it is recorded and the run concludes as `pushed`.
-    outcome "failure" {
-        next = step.mark_pushed
-    }
-}
-
-step "mark_pr_opened" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.write_ops_report
         write {
             target = data.internal.verdict.value
             value  = "pr_opened"
         }
     }
-    outcome "failure" { next = step.write_ops_report }
+    // The branch is already pushed at this point, so a failed PR creation loses
+    // nothing — it is recorded and the run concludes as `pushed`.
+    outcome "failure" {
+        next = step.write_ops_report
+    }
 }
 
 // ── Run record ───────────────────────────────────────────────────────────────
@@ -1088,38 +871,18 @@ step "mark_pr_opened" {
 step "write_ops_report" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            ev='${data.internal.run_dir.value}/evidence'
-
-            # The header is built with printf so $(date) still runs, but the
-            # manager's reasoning goes through a QUOTED heredoc delimiter. It is
-            # agent-authored text: with an unquoted delimiter the shell
-            # command-substitutes any backticks or $(...) it contains and splices
-            # the output into the report. HCL still interpolates the value in —
-            # that happens before the shell sees it — but the shell then treats
-            # every byte as literal.
-            {
-                printf '# Ops run report\n\n'
-                printf -- '- verdict: %s\n' '${data.internal.verdict.value}'
-                printf -- '- triage state: %s\n' '${data.internal.triage_state.value}'
-                printf -- '- branch: %s (from %s @ %s)\n' '${data.internal.branch.value}' '${var.base_branch}' '${data.internal.base_sha.value}'
-                printf -- '- worktree: %s\n' '${var.worktree_dir}'
-                printf -- '- pull request: %s\n' '${data.internal.pr_url.value}'
-                printf -- '- concluded at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                printf '## Request\n\n'
-                cat "$ev/report.md"
-                printf '\n## Manager reasoning\n\n'
-                cat <<'____CRITERIA_EOF____'
-${data.internal.manager_feedback.value}
-____CRITERIA_EOF____
-                printf '\n## Last worker cycle\n\n'
-                cat <<'____CRITERIA_EOF____'
-${data.internal.worker_summary.value}
-____CRITERIA_EOF____
-            } > "$ev/ops-report.md"
-            cat "$ev/ops-report.md"
-        SHELL
+        command = templatefile("./scripts/write_ops_report.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = data.internal.verdict.value
+            criteria_value_3 = data.internal.triage_state.value
+            criteria_value_4 = data.internal.branch.value
+            criteria_value_5 = var.base_branch
+            criteria_value_6 = data.internal.base_sha.value
+            criteria_value_7 = var.worktree_dir
+            criteria_value_8 = data.internal.pr_url.value
+            criteria_value_9 = data.internal.manager_feedback.value
+            criteria_value_10 = data.internal.worker_summary.value
+        })
     }
     outcome "success" { next = step.teardown }
     outcome "failure" { next = step.teardown }
@@ -1134,34 +897,12 @@ ____CRITERIA_EOF____
 step "teardown" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            verdict='${data.internal.verdict.value}'
-            wt='${var.worktree_dir}'
-            keep=yes
-            case "$verdict" in
-                pr_opened|pushed)
-                    keep=no
-                    ;;
-                insufficient_report|no_action_needed|worklist_rejected|needs_human_at_intake|needs_human_at_triage|needs_human_at_worklist)
-                    # These conclude before any work cycle runs, so the worktree
-                    # is an untouched checkout — unless an agent wrote in it
-                    # despite being told not to, which is worth keeping to look at.
-                    if [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
-                        keep=no
-                    fi
-                    ;;
-            esac
-            if [ "$keep" = "no" ]; then
-                git -C '${var.repo_dir}' worktree remove --force "$wt" 2>/dev/null || true
-                git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
-                echo "removed worktree $wt"
-            else
-                echo "kept worktree $wt — it holds the only copy of this run's commits"
-            fi
-            echo "evidence retained at ${data.internal.run_dir.value}/evidence"
-            exit 0
-        SHELL
+        command = templatefile("./scripts/teardown.sh.tftpl", {
+            criteria_value_1 = data.internal.verdict.value
+            criteria_value_2 = var.worktree_dir
+            criteria_value_3 = var.repo_dir
+            criteria_value_4 = data.internal.run_dir.value
+        })
     }
     outcome "success" { next = switch.route_final }
     outcome "failure" { next = switch.route_final }

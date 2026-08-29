@@ -1,6 +1,7 @@
 workflow {
     name          = "qa_triage_v1"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "read_report"
     target_state  = "workstream_published"
 
@@ -60,6 +61,15 @@ data "internal" "verdict" {
     value = ""
 }
 
+// Absolute path of the published workstream file, set by publish_workstream.
+// Empty when the run produced no workstream. Exposed as an output so a parent
+// workflow (linear_intake_v1) can hand it to workstream_handler_v1 without
+// re-deriving the slug.
+data "internal" "workstream_file" {
+    type  = string
+    value = ""
+}
+
 // ── Reproduction subworkflows ────────────────────────────────────────────────
 // Declared once per ref rather than iterated: the two runs take different refs
 // and different worktrees, and keeping them separate makes the routing between
@@ -78,6 +88,7 @@ subworkflow "repro_main" {
         repro_workflow_dir = var.repro_workflow_dir
         build_cmd          = var.build_cmd
         test_cmd           = var.test_cmd
+        max_visits         = var.max_repro_visits
         investigator       = var.investigator
     }
 }
@@ -95,6 +106,7 @@ subworkflow "repro_stable" {
         repro_workflow_dir = var.repro_workflow_dir
         build_cmd          = var.build_cmd
         test_cmd           = var.test_cmd
+        max_visits         = var.max_repro_visits
         investigator       = var.investigator
     }
 }
@@ -104,14 +116,9 @@ subworkflow "repro_stable" {
 step "read_report" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            if [ ! -f '${var.bug_report_file}' ]; then
-                echo "bug report not found: ${var.bug_report_file}" >&2
-                exit 1
-            fi
-            cat '${var.bug_report_file}'
-        SHELL
+        command = templatefile("./scripts/read_report.sh.tftpl", {
+            criteria_value_1 = var.bug_report_file
+        })
     }
     outcome "success" { next = step.prepare_workspace }
     outcome "failure" { next = state.failed }
@@ -120,35 +127,11 @@ step "read_report" {
 step "prepare_workspace" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            root='${var.triage_root}'
-            case "$root" in
-                '${var.repo_dir}'|'${var.repo_dir}'/*)
-                    echo "triage_root must be outside the repository under test: $root" >&2
-                    exit 1
-                    ;;
-            esac
-            mkdir -p "$root"
-            slug=$(basename '${var.bug_report_file}')
-            slug="$${slug%.*}"
-            run_dir="$root/$slug"
-
-            # A previous triage of the same report must not contaminate this one.
-            # Worktrees are git-registered, so prune before removing the tree.
-            if [ -d "$run_dir/wt" ]; then
-                for wt in "$run_dir"/wt/*; do
-                    [ -d "$wt" ] || continue
-                    git -C '${var.repo_dir}' worktree remove --force "$wt" 2>/dev/null || true
-                done
-            fi
-            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
-            rm -rf "$run_dir"
-
-            mkdir -p "$run_dir/evidence" "$run_dir/wt"
-            cp '${var.bug_report_file}' "$run_dir/evidence/report.md"
-            printf '%s' "$run_dir"
-        SHELL
+        command = templatefile("./scripts/prepare_workspace.sh.tftpl", {
+            criteria_value_1 = var.triage_root
+            criteria_value_2 = var.repo_dir
+            criteria_value_3 = var.bug_report_file
+        })
     }
     outcome "success" {
         next = step.resolve_main_ref
@@ -165,13 +148,10 @@ step "prepare_workspace" {
 step "resolve_main_ref" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            git -C '${var.repo_dir}' fetch --all --tags --quiet
-            # printf, not a bare rev-parse: the trailing newline is captured into
-            # output.stdout and then interpolated into evidence and git refs.
-            printf '%s' "$(git -C '${var.repo_dir}' rev-parse '${var.main_ref}')"
-        SHELL
+        command = templatefile("./scripts/resolve_main_ref.sh.tftpl", {
+            criteria_value_1 = var.repo_dir
+            criteria_value_2 = var.main_ref
+        })
     }
     outcome "success" {
         next = step.resolve_stable_ref
@@ -188,25 +168,10 @@ step "resolve_main_ref" {
 step "resolve_stable_ref" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            if [ -n '${var.stable_ref}' ]; then
-                printf '%s' '${var.stable_ref}'
-                exit 0
-            fi
-            git -C '${var.repo_dir}' tag --list \
-                | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
-                | sed 's/^v//' \
-                | sort -t. -k1,1n -k2,2n -k3,3n \
-                | tail -1 \
-                | while read -r v; do
-                    if git -C '${var.repo_dir}' rev-parse "v$v" >/dev/null 2>&1; then
-                        printf 'v%s' "$v"
-                    else
-                        printf '%s' "$v"
-                    fi
-                done
-        SHELL
+        command = templatefile("./scripts/resolve_stable_ref.sh.tftpl", {
+            criteria_value_1 = var.stable_ref
+            criteria_value_2 = var.repo_dir
+        })
     }
     outcome "success" {
         next = step.record_refs
@@ -221,20 +186,14 @@ step "resolve_stable_ref" {
 step "record_refs" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            cat > '${data.internal.run_dir.value}/evidence/refs.md' <<____CRITERIA_EOF____
-# Refs under test
-
-- requested matrix: ${var.test_refs}
-- main ref: ${var.main_ref}
-- main SHA: ${data.internal.main_sha.value}
-- stable ref: ${data.internal.stable_tag.value}
-- resolved at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-- provided repro workflow: ${var.repro_workflow_dir}
-____CRITERIA_EOF____
-            echo "refs recorded"
-        SHELL
+        command = templatefile("./scripts/record_refs.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.test_refs
+            criteria_value_3 = var.main_ref
+            criteria_value_4 = data.internal.main_sha.value
+            criteria_value_5 = data.internal.stable_tag.value
+            criteria_value_6 = var.repro_workflow_dir
+        })
     }
     outcome "success" { next = step.setup_scratch_worktree }
     outcome "failure" { next = state.failed }
@@ -253,16 +212,11 @@ ____CRITERIA_EOF____
 step "setup_scratch_worktree" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            scratch='${var.triage_root}/scratch'
-            git -C '${var.repo_dir}' worktree remove --force "$scratch" 2>/dev/null || true
-            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
-            rm -rf "$scratch"
-            mkdir -p "$(dirname "$scratch")"
-            git -C '${var.repo_dir}' worktree add --detach "$scratch" '${data.internal.main_sha.value}'
-            echo "scratch worktree at $scratch ($(git -C "$scratch" rev-parse --short HEAD))"
-        SHELL
+        command = templatefile("./scripts/setup_scratch_worktree.sh.tftpl", {
+            criteria_value_1 = var.triage_root
+            criteria_value_2 = var.repo_dir
+            criteria_value_3 = data.internal.main_sha.value
+        })
     }
     outcome "success" { next = step.intake_review }
     outcome "failure" { next = state.failed }
@@ -275,7 +229,7 @@ step "setup_scratch_worktree" {
 
 step "intake_review" {
     target      = adapter.copilot.supervisor
-    max_visits  = 2
+    max_visits  = var.max_intake_visits
     allow_tools = ["*"]
 
     input {
@@ -305,10 +259,14 @@ step "intake_review" {
         }
     }
     outcome "needs_human" {
-        next = state.needs_human
+        next = step.write_triage_report
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_intake"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
         }
     }
     outcome "failure" { next = state.failed }
@@ -319,7 +277,7 @@ step "intake_review" {
 
 step "plan_repro" {
     target      = adapter.copilot.investigator
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -342,7 +300,17 @@ step "plan_repro" {
     }
 
     outcome "plan_ready"  { next = step.review_plan }
-    outcome "need_help"   { next = state.needs_human }
+    outcome "need_help" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_plan"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
     outcome "failure"     { next = state.failed }
     outcome "default"     { next = state.failed }
 }
@@ -351,7 +319,7 @@ step "plan_repro" {
 
 step "review_plan" {
     target      = adapter.copilot.supervisor
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -447,19 +415,9 @@ switch "route_stable_available" {
 step "note_no_stable" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            cat > '${data.internal.run_dir.value}/evidence/run-stable.md' <<____CRITERIA_EOF____
-# stable — SKIPPED
-
-No non-prerelease semver tag was found in this repository, and var.stable_ref
-was not set. The stable arm of the matrix did not run.
-
-Any verdict from this triage rests on the mainline result alone and cannot
-distinguish a live bug from a regression introduced since the last release.
-____CRITERIA_EOF____
-            echo "stable skipped"
-        SHELL
+        command = templatefile("./scripts/note_no_stable.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+        })
     }
     outcome "success" { next = step.aggregate_evidence }
     outcome "failure" { next = state.failed }
@@ -486,21 +444,14 @@ step "run_repro_stable" {
 step "aggregate_evidence" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            ev='${data.internal.run_dir.value}/evidence'
-            cat > "$ev/summary.md" <<____CRITERIA_EOF____
-# Triage evidence summary
-
-- matrix requested: ${var.test_refs}
-- main (${data.internal.main_sha.value}): ${data.internal.repro_main.value}
-- stable (${data.internal.stable_tag.value}): ${data.internal.repro_stable.value}
-
-Artifacts in this directory:
-____CRITERIA_EOF____
-            ls -1 "$ev" | sed 's/^/- /' >> "$ev/summary.md"
-            cat "$ev/summary.md"
-        SHELL
+        command = templatefile("./scripts/aggregate_evidence.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.test_refs
+            criteria_value_3 = data.internal.main_sha.value
+            criteria_value_4 = data.internal.repro_main.value
+            criteria_value_5 = data.internal.stable_tag.value
+            criteria_value_6 = data.internal.repro_stable.value
+        })
     }
     outcome "success" { next = step.assert_repo_clean }
     outcome "failure" { next = state.failed }
@@ -518,22 +469,10 @@ ____CRITERIA_EOF____
 step "assert_repo_clean" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            dirty=$(git -C '${var.repo_dir}' status --porcelain 2>/dev/null || true)
-            if [ -n "$dirty" ]; then
-                {
-                    printf '# Repository was modified during triage\n\n'
-                    printf 'Triage treats %s as read-only. It is dirty:\n\n' '${var.repo_dir}'
-                    printf '%s\n' "$dirty"
-                    printf '\nAn agent wrote into the repository under test. Evidence from this\n'
-                    printf 'run is not trustworthy: the trees it measured were not clean checkouts.\n'
-                    printf 'Nothing was reverted — inspect and clean up manually.\n'
-                } | tee '${data.internal.run_dir.value}/evidence/repo-dirty.md' >&2
-                exit 1
-            fi
-            echo "repository clean"
-        SHELL
+        command = templatefile("./scripts/assert_repo_clean.sh.tftpl", {
+            criteria_value_1 = var.repo_dir
+            criteria_value_2 = data.internal.run_dir.value
+        })
     }
     outcome "success" { next = step.verdict }
     outcome "failure" {
@@ -553,7 +492,7 @@ step "assert_repo_clean" {
 
 step "verdict" {
     target      = adapter.copilot.supervisor
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -577,9 +516,10 @@ step "verdict" {
             Apply the verdict matrix and the four evidence tests from your
             instructions. Judge only what the evidence shows.
 
-            Test 4 is the one this workflow most often gets wrong. If deciding
-            "defect or intended design" requires design intent you do not have,
-            return `needs_human` — do not resolve the ambiguity yourself.
+            Test 4 is the one this workflow most often gets wrong. Existing
+            implementation and passing tests establish current behavior, not
+            intent. Escalate only when authoritative user-visible contracts
+            conflict or the report does not state required observable behavior.
 
             Call submit_outcome with `reproduced`, `regression`, `already_fixed`,
             `not_reproduced`, `insufficient_evidence`, or `needs_human`.
@@ -638,10 +578,14 @@ step "verdict" {
         }
     }
     outcome "needs_human" {
-        next = state.needs_human
+        next = step.write_triage_report
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_verdict"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
         }
     }
     outcome "failure" { next = state.failed }
@@ -652,7 +596,7 @@ step "verdict" {
 
 step "draft_workstream" {
     target      = adapter.copilot.investigator
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -678,13 +622,27 @@ step "draft_workstream" {
 
     outcome "draft_ready"  { next = step.approve_workstream }
     outcome "needs_design" {
-        next = state.needs_human
+        next = step.write_triage_report
         write {
             target = data.internal.verdict.value
             value  = "needs_design_decision"
         }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
     }
-    outcome "need_help" { next = state.needs_human }
+    outcome "need_help" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.verdict.value
+            value  = "needs_human_at_draft"
+        }
+        write {
+            target = data.internal.supervisor_feedback.value
+            value  = output.reason
+        }
+    }
     outcome "failure"   { next = state.failed }
     outcome "default"   { next = state.failed }
 }
@@ -693,7 +651,7 @@ step "draft_workstream" {
 
 step "approve_workstream" {
     target      = adapter.copilot.supervisor
-    max_visits  = 3
+    max_visits  = var.max_refine_visits
     allow_tools = ["*"]
 
     input {
@@ -741,22 +699,19 @@ step "approve_workstream" {
 step "publish_workstream" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            draft='${data.internal.run_dir.value}/evidence/workstream-draft.md'
-            if [ ! -s "$draft" ]; then
-                echo "approved draft is missing or empty: $draft" >&2
-                exit 1
-            fi
-            mkdir -p '${var.workstream_out_dir}'
-            slug=$(basename '${var.bug_report_file}')
-            slug="$${slug%.*}"
-            out='${var.workstream_out_dir}'"/$slug.md"
-            cp "$draft" "$out"
-            echo "$out"
-        SHELL
+        command = templatefile("./scripts/publish_workstream.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.workstream_out_dir
+            criteria_value_3 = var.bug_report_file
+        })
     }
-    outcome "success" { next = step.write_triage_report }
+    outcome "success" {
+        next = step.write_triage_report
+        write {
+            target = data.internal.workstream_file.value
+            value  = output.stdout
+        }
+    }
     outcome "failure" { next = state.failed }
 }
 
@@ -766,34 +721,18 @@ step "publish_workstream" {
 step "write_triage_report" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            ev='${data.internal.run_dir.value}/evidence'
-
-            # The header is built with printf so $(date) still runs, but the
-            # supervisor's reasoning goes through a QUOTED heredoc delimiter.
-            # It is agent-authored text: with an unquoted delimiter the shell
-            # command-substitutes any backticks or $(...) it contains and
-            # splices the output into the report — verified executing `make
-            # build` from a supervisor's prose. Quoted, HCL still interpolates
-            # the value in (that happens before the shell sees it) but the
-            # shell treats every byte as literal.
-            {
-                printf '# Triage report\n\n'
-                printf -- '- report: %s\n' '${var.bug_report_file}'
-                printf -- '- verdict: %s\n' '${data.internal.verdict.value}'
-                printf -- '- matrix requested: %s\n' '${var.test_refs}'
-                printf -- '- main (%s): %s\n' '${data.internal.main_sha.value}' '${data.internal.repro_main.value}'
-                printf -- '- stable (%s): %s\n' '${data.internal.stable_tag.value}' '${data.internal.repro_stable.value}'
-                printf -- '- provided repro workflow: %s\n' '${var.repro_workflow_dir}'
-                printf -- '- concluded at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                printf '## Supervisor reasoning\n\n'
-                cat <<'____CRITERIA_EOF____'
-${data.internal.supervisor_feedback.value}
-____CRITERIA_EOF____
-            } > "$ev/triage-report.md"
-            cat "$ev/triage-report.md"
-        SHELL
+        command = templatefile("./scripts/write_triage_report.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.bug_report_file
+            criteria_value_3 = data.internal.verdict.value
+            criteria_value_4 = var.test_refs
+            criteria_value_5 = data.internal.main_sha.value
+            criteria_value_6 = data.internal.repro_main.value
+            criteria_value_7 = data.internal.stable_tag.value
+            criteria_value_8 = data.internal.repro_stable.value
+            criteria_value_9 = var.repro_workflow_dir
+            criteria_value_10 = data.internal.supervisor_feedback.value
+        })
     }
     outcome "success" { next = step.teardown }
     outcome "failure" { next = state.failed }
@@ -803,23 +742,11 @@ ____CRITERIA_EOF____
 step "teardown" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            run_dir='${data.internal.run_dir.value}'
-            if [ -d "$run_dir/wt" ]; then
-                for wt in "$run_dir"/wt/*; do
-                    [ -d "$wt" ] || continue
-                    git -C '${var.repo_dir}' worktree remove --force "$wt" 2>/dev/null || true
-                done
-            fi
-            # The scratch worktree is expected to be dirty — the triage team was
-            # free to experiment in it. --force discards whatever they left.
-            scratch='${var.triage_root}/scratch'
-            git -C '${var.repo_dir}' worktree remove --force "$scratch" 2>/dev/null || true
-            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
-            rm -rf "$run_dir/wt" "$scratch"
-            echo "evidence retained at $run_dir/evidence"
-        SHELL
+        command = templatefile("./scripts/teardown.sh.tftpl", {
+            criteria_value_1 = data.internal.run_dir.value
+            criteria_value_2 = var.repo_dir
+            criteria_value_3 = var.triage_root
+        })
     }
     outcome "success" { next = switch.route_final }
     outcome "failure" { next = switch.route_final }
@@ -829,6 +756,10 @@ switch "route_final" {
     match {
         condition = data.internal.verdict.value == "reproduced" || data.internal.verdict.value == "regression"
         next      = state.workstream_published
+    }
+    match {
+        condition = startswith(data.internal.verdict.value, "needs_human_") || data.internal.verdict.value == "needs_design_decision"
+        next      = state.needs_human
     }
     default { next = state.closed_no_workstream }
 }
@@ -856,4 +787,21 @@ state "needs_human" {
 state "failed" {
     terminal = true
     success  = false
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+// Declared for parent workflows (linear_intake_v1). verdict is empty when the
+// run died before the intake or verdict gate recorded one; workstream_file is
+// empty whenever no workstream was published. Parents must read both with
+// try() on success AND failure outcomes — see
+// workstreams/branch-evaluated-reports-wrong-condition-text.md.
+
+output "verdict" {
+    type  = string
+    value = data.internal.verdict.value
+}
+
+output "workstream_file" {
+    type  = string
+    value = data.internal.workstream_file.value
 }

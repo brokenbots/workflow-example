@@ -8,18 +8,6 @@ adapter "shell" "sh" {
     environment = shell.worktree
 }
 
-adapter "noop" "default" {
-    source  = "ghcr.io/brokenbots/criteria-adapter-noop"
-    version = "0.5.2"
-    // noop >= 0.5.2 holds its Log stream open, so idle sessions no longer die
-    // of a false heartbeat stall (verified A/B against 0.5.1 and 0.5.2).
-    // on_crash is now belt-and-braces only: the host still arms its stall
-    // detector against any adapter that goes quiet, and that host-side gap is
-    // unfixed (see workstreams/fix-idle-adapter-session-heartbeat-stall.md).
-    // Safe to drop once that lands.
-    on_crash = "respawn"
-}
-
 // PR review runs on the copilot harness, resolving through the local Ollama
 // endpoint. glm-5.2 is the review model.
 adapter "copilot" "pr_reviewer" {

@@ -50,3 +50,51 @@ variable "coordinator_gh_user" {
     type        = string
     default     = ""
 }
+
+variable "max_pr_poll_visits" {
+    description = "Maximum PR status checks and corresponding backoff cycles before failing."
+    type        = number
+    default     = 30
+}
+
+variable "max_feedback_visits" {
+    description = "Maximum coordinator attempts when triaging PR feedback."
+    type        = number
+    default     = 10
+}
+
+variable "max_pair_cycles" {
+    description = "Maximum pair-programming reruns used to address PR feedback."
+    type        = number
+    default     = 5
+}
+
+variable "max_branch_repair_visits" {
+    description = "Maximum branch-repair agent attempts in branch_manager."
+    type        = number
+    default     = 3
+}
+
+variable "max_pair_agent_visits" {
+    description = "Maximum attempts for each developer and reviewer gate in pair_programming_loop."
+    type        = number
+    default     = 10
+}
+
+variable "max_reviewer_poll_visits" {
+    description = "Maximum PR status checks in pr_reviewer_loop."
+    type        = number
+    default     = 60
+}
+
+variable "max_reviewer_backoff_visits" {
+    description = "Maximum CI backoff cycles in pr_reviewer_loop."
+    type        = number
+    default     = 30
+}
+
+variable "max_review_visits" {
+    description = "Maximum PR reviewer agent attempts."
+    type        = number
+    default     = 5
+}

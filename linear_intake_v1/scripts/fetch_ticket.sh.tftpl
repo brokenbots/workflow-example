@@ -1,0 +1,43 @@
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
+set -euo pipefail
+command -v curl jq >/dev/null
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+
+# The ticket id becomes a directory name and a JSON string.
+# Reject anything outside Linear's identifier shape up front.
+case "$ticket_id" in
+    ''|*[!A-Za-z0-9-]*)
+        echo "ticket_id fails identifier validation: '$ticket_id'" >&2
+        exit 1
+        ;;
+esac
+
+run_dir="$intake_root/$ticket_id"
+mkdir -p "$run_dir/workstreams"
+
+# Linear's issue(id:) accepts the human identifier ("CRI-32") in
+# place of the UUID.
+http=$(curl -sS -o "$run_dir/ticket.json" -w '%{http_code}' \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'query($id: String!) { issue(id: $id) { id identifier title description url state { name type } team { id } labels { nodes { id name } } comments { nodes { id body createdAt user { name displayName } } } } }' \
+        --arg id "$ticket_id" \
+        '{query: $q, variables: {id: $id}}')" \
+    https://api.linear.app/graphql)
+
+if [ "$http" != "200" ]; then
+    echo "Linear API returned HTTP $http for ticket $ticket_id" >&2
+    cat "$run_dir/ticket.json" >&2
+    exit 1
+fi
+
+# GraphQL reports application errors in-band with HTTP 200.
+if [ "$(jq -r '.data.issue.id // empty' "$run_dir/ticket.json")" = "" ]; then
+    echo "Linear ticket not found: $ticket_id" >&2
+    jq -c '.errors // empty' "$run_dir/ticket.json" >&2 || true
+    exit 1
+fi
+
+jq -r '.data.issue | "fetched \(.identifier): \(.title) [state: \(.state.name)]"' "$run_dir/ticket.json"

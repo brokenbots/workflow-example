@@ -1,0 +1,18 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+run_dir="$criteria_value_1"
+if [ -d "$run_dir/wt" ]; then
+    for wt in "$run_dir"/wt/*; do
+        [ -d "$wt" ] || continue
+        git -C "$criteria_value_2" worktree remove --force "$wt" 2>/dev/null || true
+    done
+fi
+# The scratch worktree is expected to be dirty — the triage team was
+# free to experiment in it. --force discards whatever they left.
+scratch="$criteria_value_3/scratch"
+git -C "$criteria_value_2" worktree remove --force "$scratch" 2>/dev/null || true
+git -C "$criteria_value_2" worktree prune 2>/dev/null || true
+rm -rf "$run_dir/wt" "$scratch"
+echo "evidence retained at $run_dir/evidence"

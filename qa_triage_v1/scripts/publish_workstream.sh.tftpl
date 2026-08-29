@@ -1,0 +1,17 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+draft="$criteria_value_1/evidence/workstream-draft.md"
+if [ ! -s "$draft" ]; then
+    echo "approved draft is missing or empty: $draft" >&2
+    exit 1
+fi
+mkdir -p "$criteria_value_2"
+slug=$(basename "$criteria_value_3")
+slug="${slug%.*}"
+out="$criteria_value_2/$slug.md"
+cp "$draft" "$out"
+# printf, not echo: a trailing newline would be captured into
+# output.stdout and then interpolated into paths by the parent.
+printf '%s' "$out"

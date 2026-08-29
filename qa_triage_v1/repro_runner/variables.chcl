@@ -58,6 +58,12 @@ variable "test_cmd" {
     default     = ""
 }
 
+variable "max_visits" {
+    description = "Maximum investigator attempts for this reproduction arm."
+    type        = number
+    default     = 3
+}
+
 // Always supplied by the parent. The default exists so this subworkflow
 // compiles standalone: adapter config must be known at compile time, and a
 // required object variable leaves it unknown.

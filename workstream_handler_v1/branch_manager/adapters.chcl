@@ -21,18 +21,6 @@ adapter "shell" "repo" {
     environment = shell.primary
 }
 
-adapter "noop" "default" {
-    source  = "ghcr.io/brokenbots/criteria-adapter-noop"
-    version = "0.5.2"
-    // noop >= 0.5.2 holds its Log stream open, so idle sessions no longer die
-    // of a false heartbeat stall (verified A/B against 0.5.1 and 0.5.2).
-    // on_crash is now belt-and-braces only: the host still arms its stall
-    // detector against any adapter that goes quiet, and that host-side gap is
-    // unfixed (see workstreams/fix-idle-adapter-session-heartbeat-stall.md).
-    // Safe to drop once that lands.
-    on_crash = "respawn"
-}
-
 adapter "copilot" "branch_repair" {
     environment = shell.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"

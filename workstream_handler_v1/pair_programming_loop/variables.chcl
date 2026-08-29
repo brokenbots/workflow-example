@@ -41,6 +41,12 @@ variable "branch_notes" {
     default     = ""
 }
 
+variable "max_agent_visits" {
+    type        = number
+    description = "Maximum attempts for each developer and reviewer gate."
+    default     = 10
+}
+
 variable "developer" {
     type = object({
         model            = string

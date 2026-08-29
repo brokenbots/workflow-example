@@ -1,0 +1,39 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -uo pipefail
+branch="$criteria_value_1"
+title="$criteria_value_2"
+
+existing=$(gh pr view "$branch" --json url,state 2>/dev/null || true)
+if [ -n "$existing" ]; then
+    url=$(printf '%s' "$existing" | jq -r '.url')
+    st=$(printf '%s' "$existing" | jq -r '.state')
+    if [ "$st" = "OPEN" ]; then
+        printf '%s' "$url" | tr -d '\n'
+        exit 0
+    fi
+fi
+
+body_file=$(mktemp)
+{
+    cat "$criteria_value_3/evidence/report.md"
+    printf '\n\n---\n\n'
+    printf 'Produced by devops_triage_v1. Evidence (discovery\n'
+    printf 'artifacts, work list, state report, verification log):\n\n'
+    printf '    %s/evidence\n' "$criteria_value_3"
+} > "$body_file"
+
+if ! out=$(gh pr create \
+    --base "$criteria_value_4" \
+    --head "$branch" \
+    --title "$title" \
+    --body-file "$body_file" 2>&1); then
+    echo "pr_create_failed=true branch=$branch"
+    echo "$out"
+    rm -f "$body_file"
+    exit 1
+fi
+rm -f "$body_file"
+printf '%s' "$out" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'

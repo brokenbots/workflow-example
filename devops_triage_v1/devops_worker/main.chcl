@@ -1,21 +1,13 @@
 workflow {
     name          = "devops_worker"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "assert_worktree"
     target_state  = "done"
 
     policy {
         max_total_steps = 80
     }
-}
-
-// "ok" only on the paths the parent should treat as a completed cycle; empty
-// otherwise. Mirrors the workaround used in workstream_handler_v1 and
-// qa_triage_v1 — a subworkflow's success=false is not observed by the parent, so
-// status is checked explicitly.
-data "internal" "status" {
-    type  = string
-    value = ""
 }
 
 // The executing agent's account of this cycle, returned to the parent for the
@@ -54,45 +46,12 @@ step "assert_worktree" {
     target  = adapter.shell.wt
     timeout = "30s"
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            expected='${var.branch}'
-            current=$(git branch --show-current)
-            if [ "$current" != "$expected" ]; then
-                echo "expected branch '$expected' but worktree is on '$current'" >&2
-                exit 1
-            fi
-            echo "on_branch=$current"
-        SHELL
+        command = templatefile("./scripts/assert_worktree.sh.tftpl", {
+            criteria_value_1 = var.branch
+        })
     }
-    outcome "success" { next = switch.route_brief }
-    outcome "failure" { next = state.failed }
-}
-
-// The empty-brief guard is an HCL condition, NOT a shell test.
-//
-// It was `[ -z '${var.brief}' ]` inside the step above, and that killed a real
-// run: the brief is manager-authored prose, an apostrophe in it closed the
-// single quote, and a later `(` parsed as a shell token —
-// `sh: -c: line 13: syntax error near unexpected token '('`.
-//
-// The rule the rest of this workflow already follows for agent text going into
-// a FILE (always a quoted heredoc) applies just as much to agent text going onto
-// a COMMAND LINE. The safest version is not to put it there at all: HCL compares
-// the value without a shell ever seeing it.
-switch "route_brief" {
-    match {
-        condition = var.brief == ""
-        next      = state.failed
-    }
-    default { next = step.init_prompt }
-}
-
-step "init_prompt" {
-    target = adapter.noop.default
-    input  {}
     outcome "success" {
-        next = step.execute
+        next = switch.route_brief
         write {
             target = data.internal.agent_prompt.value
             value  = <<-PROMPT
@@ -124,6 +83,25 @@ step "init_prompt" {
     outcome "failure" { next = state.failed }
 }
 
+// The empty-brief guard is an HCL condition, NOT a shell test.
+//
+// It was `[ -z '${var.brief}' ]` inside the step above, and that killed a real
+// run: the brief is manager-authored prose, an apostrophe in it closed the
+// single quote, and a later `(` parsed as a shell token —
+// `sh: -c: line 13: syntax error near unexpected token '('`.
+//
+// The rule the rest of this workflow already follows for agent text going into
+// a FILE (always a quoted heredoc) applies just as much to agent text going onto
+// a COMMAND LINE. The safest version is not to put it there at all: HCL compares
+// the value without a shell ever seeing it.
+switch "route_brief" {
+    match {
+        condition = var.brief == ""
+        next      = state.failed
+    }
+    default { next = step.execute }
+}
+
 // ── Execute ──────────────────────────────────────────────────────────────────
 //
 // max_visits bounds the execute <-> gate cycle within this one worker run. The
@@ -132,7 +110,7 @@ step "init_prompt" {
 
 step "execute" {
     target      = adapter.copilot.devops
-    max_visits  = 8
+    max_visits  = var.max_visits
     allow_tools = ["*"]
 
     input {
@@ -168,21 +146,10 @@ step "execute" {
 step "write_work_log" {
     target = adapter.shell.wt
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            mkdir -p '${var.evidence_dir}'
-            {
-                printf '\n## Work cycle — %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                # QUOTED delimiter: this is agent-authored text, and an unquoted
-                # heredoc would command-substitute any backticks or $(...) it
-                # contains and splice the output into the log. HCL still
-                # interpolates the value in before the shell sees it.
-                cat <<'____CRITERIA_EOF____'
-${data.internal.summary.value}
-____CRITERIA_EOF____
-            } >> '${var.evidence_dir}/work-log.md'
-            echo "work log appended"
-        SHELL
+        command = templatefile("./scripts/write_work_log.sh.tftpl", {
+            criteria_value_1 = var.evidence_dir
+            criteria_value_2 = data.internal.summary.value
+        })
     }
     outcome "success" { next = step.commit_cycle }
     outcome "failure" { next = step.commit_cycle }
@@ -202,23 +169,10 @@ step "commit_cycle" {
     target  = adapter.shell.wt
     timeout = "60s"
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            if [ -z "$(git status --porcelain)" ]; then
-                echo "no_changes=true"
-                exit 0
-            fi
-            base='${var.base_branch}'
-            n=$(git rev-list --count "origin/$base..HEAD" 2>/dev/null || echo 0)
-            n=$((n + 1))
-            git add -A
-            if ! out=$(git commit -m "ops: ${var.branch} cycle $n" 2>&1); then
-                echo "commit_failed=true"
-                echo "$out"
-                exit 1
-            fi
-            echo "committed=$(git rev-parse --short HEAD) cycle=$n"
-        SHELL
+        command = templatefile("./scripts/commit_cycle.sh.tftpl", {
+            criteria_value_1 = var.base_branch
+            criteria_value_2 = var.branch
+        })
     }
     outcome "success" { next = switch.route_gate }
     outcome "failure" { next = switch.route_gate }
@@ -227,11 +181,11 @@ step "commit_cycle" {
 switch "route_gate" {
     match {
         condition = data.internal.blocked.value == "yes"
-        next      = step.mark_done
+        next      = state.done
     }
     match {
         condition = var.ci_gate_cmd == ""
-        next      = step.mark_done
+        next      = state.done
     }
     default { next = step.ci_gate }
 }
@@ -247,7 +201,7 @@ step "ci_gate" {
         command = var.ci_gate_cmd
     }
 
-    outcome "success" { next = step.mark_done }
+    outcome "success" { next = state.done }
 
     outcome "failure" {
         next = step.execute
@@ -256,32 +210,6 @@ step "ci_gate" {
             value  = "The gate command `${var.ci_gate_cmd}` is failing on branch ${var.branch}. Fix it. Everything you changed so far is already committed — keep going from here, do not start over.\n\nstdout:\n${output.stdout}\n\nstderr:\n${output.stderr}\n\nDo NOT run git commit, git push, git tag, or gh release. Call submit_outcome with `work_done` or `blocked`."
         }
     }
-}
-
-// ── Completion ───────────────────────────────────────────────────────────────
-
-// Stamp status="ok" and flush the snapshot before the terminal state so the
-// parent's route switch can read it (engine bug: DataStore writes are not
-// included in finalVars without an intervening step — mirrors branch_manager
-// and pair_programming_loop).
-step "mark_done" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.finish
-        write {
-            target = data.internal.status.value
-            value  = "ok"
-        }
-    }
-    outcome "failure" { next = step.finish }
-}
-
-step "finish" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" { next = state.done }
-    outcome "failure" { next = state.done }
 }
 
 state "done" {
@@ -298,11 +226,6 @@ state "failed" {
 // `subworkflow.<name>` — without these blocks the parent's
 // try(subworkflow.summary, "") silently takes the fallback and every cycle
 // reports nothing regardless of what actually happened.
-output "status" {
-    type  = string
-    value = data.internal.status.value
-}
-
 output "summary" {
     type  = string
     value = data.internal.summary.value

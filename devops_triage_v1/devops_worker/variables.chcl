@@ -53,6 +53,12 @@ variable "ci_gate_cmd" {
     default     = ""
 }
 
+variable "max_visits" {
+    description = "Maximum executor attempts within this worker cycle."
+    type        = number
+    default     = 8
+}
+
 variable "devops" {
     type = object({
         model            = string

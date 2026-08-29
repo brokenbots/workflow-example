@@ -1,0 +1,19 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+            set -euo pipefail
+            ev="$criteria_value_1/evidence"
+            cat > "$ev/summary.md" <<____CRITERIA_EOF____
+# Triage evidence summary
+
+- matrix requested: $criteria_value_2
+- main ($criteria_value_3): $criteria_value_4
+- stable ($criteria_value_5): $criteria_value_6
+
+Artifacts in this directory:
+____CRITERIA_EOF____
+            ls -1 "$ev" | sed 's/^/- /' >> "$ev/summary.md"
+            cat "$ev/summary.md"

@@ -1,0 +1,455 @@
+workflow {
+    name             = "linear_intake_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "fetch_ticket"
+    target_state     = "handler_complete"
+
+    policy {
+        max_total_steps = 80
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// qa_triage_v1's verdict, captured from its declared output in run_qa_triage.
+// Empty means triage died before its intake or verdict gate recorded one — an
+// infrastructure failure, not a finding, and it must route to a human rather
+// than be mistaken for "no bug".
+data "internal" "verdict" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the workstream file qa_triage_v1 published, captured from
+// its declared output. Empty when it produced none. Checked before routing to
+// the handler and handed to workstream_handler_v1 as-is.
+data "internal" "workstream_file" {
+    type  = string
+    value = ""
+}
+
+// URL of the PR the handler merged, for the closing Linear comment.
+data "internal" "pr_url" {
+    type  = string
+    value = ""
+}
+
+// ── Subworkflows ─────────────────────────────────────────────────────────────
+// Both are siblings of this directory, referenced by relative path and locked
+// recursively by `criteria adapter lock` from this directory.
+
+subworkflow "qa_triage" {
+    source = "../qa_triage_v1"
+    input = {
+        // The report basename is load-bearing: qa_triage_v1 derives its run
+        // slug from it, so its evidence lands at <triage_root>/<ticket_id>/
+        // and its published workstream at <workstream_out_dir>/<ticket_id>.md.
+        bug_report_file    = "${var.intake_root}/${var.ticket_id}/${var.ticket_id}.md"
+        repo_dir           = var.repo_dir
+        triage_root        = var.triage_root
+        workstream_out_dir = "${var.intake_root}/${var.ticket_id}/workstreams"
+        build_cmd          = var.build_cmd
+        test_cmd           = var.test_cmd
+        test_refs          = var.test_refs
+        main_ref           = var.main_ref
+        stable_ref         = var.stable_ref
+        repro_workflow_dir = var.repro_workflow_dir
+        design_intent_file = var.design_intent_file
+        investigator       = var.investigator
+        supervisor         = var.supervisor
+    }
+}
+
+subworkflow "handler" {
+    source = "../workstream_handler_v1"
+    input = {
+        workstream_file = data.internal.workstream_file.value
+        repo_dir        = var.repo_dir
+        // branch_manager creates the worktree itself; this workflow only
+        // chooses where it lives.
+        worktree_dir        = "${var.intake_root}/${var.ticket_id}/worktree"
+        base_branch         = var.base_branch
+        ci_gate_cmd         = var.ci_gate_cmd
+        allow_dirty         = var.allow_dirty
+        reviewer_gh_user    = var.reviewer_gh_user
+        coordinator_gh_user = var.coordinator_gh_user
+    }
+}
+
+// ── Intake: Linear -> classified artifact ────────────────────────────────────
+
+// All Linear I/O is the GraphQL API via curl. The in-tree criteria mcp adapter
+// was rejected for this workflow: it is stdio-only, has no output schema (tool
+// results never reach the workflow as data), and gates every tool call on a
+// host permission decision.
+//
+// GraphQL request bodies are assembled with jq -n --arg, never string
+// interpolation, so ticket content and user-supplied variables cannot break
+// the JSON.
+step "fetch_ticket" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/fetch_ticket.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id = var.ticket_id
+        })
+    }
+    outcome "success" { next = step.classify_ticket }
+    outcome "failure" { next = state.ticket_not_found }
+}
+
+// The intake agent reconstructs process state from the freshly fetched Linear
+// issue on every run. Bugs become reports for QA unless an earlier comment
+// records explicit QA confirmation; features and confirmed bugs become
+// workstreams directly. Terminal Linear states are left untouched.
+step "classify_ticket" {
+    target      = adapter.copilot.intake_classifier
+    max_visits  = var.max_agent_visits
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            Classify Linear ticket ${var.ticket_id} as a bug or feature request.
+
+            Ticket JSON: ${var.intake_root}/${var.ticket_id}/ticket.json
+            Bug report path: ${var.intake_root}/${var.ticket_id}/${var.ticket_id}.md
+            Feature workstream path: ${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md
+            Repository under work: ${var.repo_dir}
+            Human-question note path: ${var.intake_root}/${var.ticket_id}/intake-notes.md
+
+            Treat the ticket state and chronological comments as the durable
+            process history. Rebuild the selected artifact from the complete
+            fetched issue; do not trust or reuse a file left by an earlier run.
+
+            Follow your system prompt. Call submit_outcome with `bug_written`,
+            `confirmed_bug_written`, `feature_written`, `already_complete`, or
+            `needs_human`.
+        PROMPT
+    }
+
+    outcome "bug_written" { next = step.set_bug_label }
+    outcome "confirmed_bug_written" {
+        next = step.set_confirmed_bug_label
+        write {
+            target = data.internal.verdict.value
+            value  = "confirmed_bug"
+        }
+        write {
+            target = data.internal.workstream_file.value
+            value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"
+        }
+    }
+    outcome "feature_written" {
+        next = step.set_feature_label
+        write {
+            target = data.internal.verdict.value
+            value  = "feature"
+        }
+        write {
+            target = data.internal.workstream_file.value
+            value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"
+        }
+    }
+    outcome "already_complete" { next = state.already_complete }
+    outcome "needs_human"      { next = step.comment_unusable_ticket }
+    outcome "failure"     { next = state.failed }
+    outcome "default"     { next = state.failed }
+}
+
+step "set_bug_label" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_classification_label.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_bug_label
+            criteria_value_4 = var.linear_feature_label
+        })
+    }
+    outcome "success" { next = step.run_qa_triage }
+    outcome "failure" { next = state.failed }
+}
+
+step "set_feature_label" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_classification_label.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_feature_label
+            criteria_value_4 = var.linear_bug_label
+        })
+    }
+    outcome "success" { next = step.comment_handler_started }
+    outcome "failure" { next = state.failed }
+}
+
+step "set_confirmed_bug_label" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_classification_label.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_bug_label
+            criteria_value_4 = var.linear_feature_label
+        })
+    }
+    outcome "success" { next = step.comment_handler_started }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Triage ───────────────────────────────────────────────────────────────────
+
+// Capture the child's declared outputs on both outcomes. A needs-human result
+// exits through a failure terminal but still publishes a meaningful verdict;
+// an engine failure exposes typed null outputs, which retain the empty defaults.
+step "run_qa_triage" {
+    target = subworkflow.qa_triage
+
+    outcome "success" {
+        next = switch.route_qa_result
+        write {
+            target = data.internal.verdict.value
+            value  = subworkflow.verdict
+        }
+        write {
+            target = data.internal.workstream_file.value
+            value  = subworkflow.workstream_file
+        }
+    }
+    outcome "failure" {
+        next = switch.route_qa_result
+        write {
+            target = data.internal.verdict.value
+            value  = subworkflow.verdict
+        }
+        write {
+            target = data.internal.workstream_file.value
+            value  = subworkflow.workstream_file
+        }
+    }
+}
+
+// An empty verdict means triage crashed before its intake or verdict gate —
+// there is nothing to review. A needs_human verdict is different: it is a
+// recorded finding with the supervisor's reasoning in the subworkflow run,
+// and it routes straight to the needs-human Linear path. Everything else
+// gets an independent review before anything touches Linear or the handler.
+switch "route_qa_result" {
+    match {
+        condition = data.internal.verdict.value == ""
+        next      = step.comment_triage_failed
+    }
+    match {
+        condition = startswith(data.internal.verdict.value, "needs_human_") || data.internal.verdict.value == "needs_design_decision"
+        next      = step.comment_needs_human
+    }
+    default { next = step.review_qa_output }
+}
+
+step "review_qa_output" {
+    target      = adapter.copilot.triage_reviewer
+    max_visits  = var.max_agent_visits
+    allow_tools = ["*"]
+
+    input {
+        prompt = <<-PROMPT
+            Review a completed QA triage run and decide the routing for Linear ticket ${var.ticket_id}.
+
+            Triage report: ${var.triage_root}/${var.ticket_id}/evidence/triage-report.md
+            Evidence directory: ${var.triage_root}/${var.ticket_id}/evidence/
+            Verdict recorded by triage: ${data.internal.verdict.value}
+            Workstream file (empty means none was produced): ${data.internal.workstream_file.value}
+
+            Follow your system prompt. Before submitting, write your reasoning
+            to: ${var.intake_root}/${var.ticket_id}/review-notes.md
+
+            Call submit_outcome with `valid_run_handler`, `invalid_close`, or
+            `needs_human`.
+        PROMPT
+    }
+
+    outcome "valid_run_handler" { next = switch.route_handler }
+    outcome "invalid_close"     { next = step.comment_invalid }
+    outcome "needs_human"       { next = step.comment_needs_human }
+    outcome "failure"           { next = step.comment_triage_failed }
+    outcome "default"           { next = step.comment_triage_failed }
+}
+
+// The reviewer ruled the finding valid, but the handler needs a workstream
+// file on disk. A missing file here means triage and the reviewer disagree —
+// exactly the kind of contradiction a human should see.
+switch "route_handler" {
+    match {
+        condition = data.internal.workstream_file.value != ""
+        next      = step.comment_handler_started
+    }
+    default { next = step.comment_needs_human }
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+step "run_handler" {
+    target = subworkflow.handler
+
+    outcome "success" {
+        next = step.comment_handler_done
+        write {
+            target = data.internal.pr_url.value
+            value  = subworkflow.pr_url
+        }
+    }
+    outcome "failure" { next = step.comment_handler_failed }
+}
+
+// ── Linear writes ────────────────────────────────────────────────────────────
+// Every comment body is assembled with jq -n --arg / --rawfile. Agent-authored
+// notes reach the API as a file payload, never through shell interpolation —
+// an apostrophe or $(...) in agent prose must not be able to break or hijack
+// the command.
+
+step "comment_unusable_ticket" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_unusable_ticket.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "comment_triage_failed" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_triage_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "comment_invalid" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_invalid.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.verdict.value
+            criteria_value_4 = var.triage_root
+            criteria_value_5 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "comment_needs_human" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_needs_human.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.triage_root
+            criteria_value_4 = data.internal.verdict.value
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "comment_handler_started" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_handler_started.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.verdict.value
+        })
+    }
+    outcome "success" { next = step.run_handler }
+    outcome "failure" { next = state.failed }
+}
+
+step "comment_handler_done" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_handler_done.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.pr_url.value
+        })
+    }
+    outcome "success" { next = state.handler_complete }
+    outcome "failure" { next = state.failed }
+}
+
+step "comment_handler_failed" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/comment_handler_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = var.triage_root
+            criteria_value_5 = var.linear_review_state
+            criteria_value_6 = data.internal.verdict.value
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = state.failed }
+}
+
+// Linear states are per-team and referenced by id in mutations, so the
+// configured name is resolved against the ticket's own team. An unknown name
+// fails loudly here rather than silently leaving the ticket unmoved.
+// NOTE: workflowStates' team filter takes ID, not String — declaring the
+// variable String! fails GraphQL validation with a bare HTTP 400.
+step "set_review_state" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = state.awaiting_human }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+state "handler_complete" {
+    terminal = true
+    success  = true
+}
+
+state "already_complete" {
+    terminal = true
+    success  = true
+}
+
+// Not a failure. A run that ends by asking a human to decide — unusable
+// ticket, invalid finding, ambiguous triage, handler failure — is a
+// legitimate and useful conclusion: the ticket carries the context and sits
+// in the review state.
+state "awaiting_human" {
+    terminal = true
+    success  = true
+}
+
+state "ticket_not_found" {
+    terminal = true
+    success  = false
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

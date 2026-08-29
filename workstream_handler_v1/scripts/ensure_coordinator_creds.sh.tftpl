@@ -1,0 +1,16 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -euo pipefail
+target="$criteria_value_1"
+if [ -n "$target" ]; then
+    gh auth switch --user "$target" >/dev/null 2>&1 || true
+fi
+active=$(gh api user --jq '.login' 2>/dev/null || echo "")
+if [ -n "$target" ] && [ "$active" != "$target" ]; then
+    echo "failed to activate coordinator gh user '$target' (active='$active')" >&2
+    exit 1
+fi
+if [ -z "$active" ]; then
+    echo "no active gh user and no coordinator_gh_user configured" >&2
+    exit 1
+fi
+printf '%s' "$active"

@@ -1,6 +1,7 @@
 workflow {
     name          = "pr_reviewer_loop"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "resolve_pr_number"
     target_state  = "approved"
 
@@ -22,10 +23,8 @@ data "internal" "_status_output" {
     value = ""
 }
 
-// Review result written before entering a terminal state so the parent's
-// route_pr_reviewer_loop switch can inspect it.
-// Engine bug workaround: subworkflow success=false is not reliably propagated
-// to the parent outcome handler — the parent reads this output directly.
+// Review result distinguishes approval, requested changes, and failed checks
+// for the parent's routing decision.
 data "internal" "review_result" {
     type  = string
     value = ""
@@ -38,16 +37,9 @@ data "internal" "review_result" {
 step "resolve_pr_number" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            url='${var.pr_url}'
-            if [ -n "$url" ]; then
-                printf '%s' "$url" | grep -oE 'pull/[0-9]+' | cut -d/ -f2 | tail -1 | tr -d '\n'
-            else
-                branch=$(git branch --show-current)
-                gh pr view "$branch" --json number --jq '.number' | tr -d '\n'
-            fi
-        SHELL
+        command = templatefile("./scripts/resolve_pr_number.sh.tftpl", {
+            criteria_value_1 = var.pr_url
+        })
     }
     outcome "success" {
         next = step.check_pr_status
@@ -72,127 +64,21 @@ step "resolve_pr_number" {
 step "check_pr_status" {
     target     = adapter.shell.sh
     timeout    = "120s"
-    max_visits = 60
+    max_visits = var.max_poll_visits
     input {
-        command = <<-SHELL
-            set -eu
-            pr='${data.internal._pr_number.value}'
-
-            pr_state=$(gh pr view "$pr" --json state --jq '.state')
-            if [ "$pr_state" = "MERGED" ]; then
-                echo "status:merged"
-                echo "pr_number=$pr"
-                exit 0
-            fi
-            if [ "$pr_state" = "CLOSED" ]; then
-                echo "status:error closed pr=$pr" >&2
-                exit 1
-            fi
-
-            # Every check must be green before merge, so inspect ALL checks —
-            # not just --required. A check GitHub does not mark required can
-            # still block the merge, and treating "not required" as "ignorable"
-            # is how a red security scan reaches merge_pr.
-            checks_rc=0
-            checks_json=$(gh pr checks "$pr" --json bucket,name,state,workflow 2>&1) || checks_rc=$?
-
-            # exit 8 / "no checks reported" means CI has not registered check
-            # runs yet (common right after a push) — pending, not failed.
-            if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
-                echo "status:pending"
-                echo "pr_number=$pr"
-                echo "checks=not_yet_reported"
-                exit 0
-            fi
-
-            # Classify from buckets rather than the exit code alone: gh exits
-            # non-zero for failures but cannot distinguish "still running".
-            any_failing=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "fail")] | length' 2>/dev/null || echo "0")
-            any_pending=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "pending")] | length' 2>/dev/null || echo "0")
-            if [ "$any_pending" -gt 0 ] && [ "$any_failing" -eq 0 ]; then
-                echo "status:pending"
-                echo "pr_number=$pr"
-                printf '%s\n' "$checks_json" | jq -r '.[] | select(.bucket == "pending") | "pending_check=\(.name)"' 2>/dev/null || true
-                exit 0
-            fi
-            if [ "$any_failing" -gt 0 ]; then
-                echo "status:checks_failed"
-                echo "pr_number=$pr"
-                printf '%s\n' "$checks_json" | jq -r '.[] | select(.bucket == "fail") | "failing_check=\(.name)"' 2>/dev/null || true
-                exit 0
-            fi
-            if [ "$checks_rc" -ne 0 ]; then
-                echo "status:checks_failed"
-                echo "pr_number=$pr"
-                printf '%s\n' "$checks_json"
-                exit 0
-            fi
-
-            owner=$(gh repo view --json owner --jq '.owner.login')
-            repo=$(gh repo view --json name --jq '.name')
-            review_decision=$(gh pr view "$pr" --json reviewDecision --jq '.reviewDecision // "REVIEW_REQUIRED"')
-
-            # Viewer-agnostic approval check (mirrors the parent's check_pr):
-            # reviewDecision comes back empty for the PR author, and on repos
-            # with no required-reviews rule, so an already-approved head would
-            # otherwise be sent back for a full re-review every cycle. Match
-            # approvals against the CURRENT head SHA only — an approval of an
-            # earlier commit must not count for code pushed after it.
-            if [ -z "$review_decision" ] || [ "$review_decision" = "REVIEW_REQUIRED" ]; then
-                head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
-                if [ -n "$head_sha" ]; then
-                    approved_head=$(gh api "repos/$owner/$repo/pulls/$pr/reviews" \
-                        --jq "[.[] | select(.state == \"APPROVED\") | select(.commit_id == \"$head_sha\")] | length" 2>/dev/null || echo "0")
-                    if [ "$approved_head" -gt 0 ]; then
-                        review_decision="APPROVED"
-                    fi
-                fi
-            fi
-
-            threads_json=$(gh api graphql \
-                -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated}}}}}' \
-                -f owner="$owner" \
-                -f repo="$repo" \
-                -F number="$pr")
-            unresolved=$(printf '%s' "$threads_json" | \
-                jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select((.isOutdated|not) and (.isResolved|not))] | length')
-
-            if [ "$review_decision" = "CHANGES_REQUESTED" ]; then
-                echo "status:changes_requested"
-                echo "pr_number=$pr"
-                echo "review_decision=$review_decision"
-                echo "unresolved_threads=$unresolved"
-                exit 0
-            fi
-
-            if [ "$review_decision" = "APPROVED" ] && [ "$unresolved" -eq 0 ]; then
-                echo "status:approved"
-                echo "pr_number=$pr"
-                echo "review_decision=$review_decision"
-                echo "checks=passed"
-                exit 0
-            fi
-
-            if [ "$unresolved" -gt 0 ]; then
-                echo "status:threads_open"
-                echo "pr_number=$pr"
-                echo "unresolved_threads=$unresolved"
-                exit 0
-            fi
-
-            echo "status:ready"
-            echo "pr_number=$pr"
-            echo "review_decision=$review_decision"
-            echo "checks=passed"
-            printf '%s\n' "$checks_json" | \
-                jq -r 'group_by(.bucket) | map([.[0].bucket, (length|tostring)] | join("=")) | .[]' 2>/dev/null || true
-        SHELL
+        command = templatefile("./scripts/check_pr_status.sh.tftpl", {
+            criteria_value_1 = data.internal._pr_number.value
+        })
     }
     outcome "success" {
         next = switch.route_pr_status
         write {
             target = data.internal._status_output.value
             value  = output.stdout
+        }
+        write {
+            target = data.internal.review_result.value
+            value  = startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : "")
         }
     }
     outcome "failure" { next = state.failed }
@@ -201,11 +87,11 @@ step "check_pr_status" {
 switch "route_pr_status" {
     match {
         condition = startswith(steps.check_pr_status.stdout, "status:merged")
-        next      = step.mark_approved
+        next      = state.approved
     }
     match {
         condition = startswith(steps.check_pr_status.stdout, "status:approved")
-        next      = step.mark_approved
+        next      = state.approved
     }
     match {
         condition = startswith(steps.check_pr_status.stdout, "status:ready")
@@ -225,7 +111,7 @@ switch "route_pr_status" {
     }
     match {
         condition = startswith(steps.check_pr_status.stdout, "status:checks_failed")
-        next      = step.mark_checks_failed
+        next      = state.checks_failed
     }
     default { next = state.failed }
 }
@@ -235,7 +121,7 @@ switch "route_pr_status" {
 step "backoff" {
     target     = adapter.shell.sh
     timeout    = "300s"
-    max_visits = 30
+    max_visits = var.max_backoff_visits
     input {
         command = "echo 'CI pending — sleeping ${var.ci_backoff_seconds}s'; sleep ${var.ci_backoff_seconds}"
     }
@@ -252,7 +138,7 @@ step "backoff" {
 step "pr_review" {
     target      = adapter.copilot.pr_reviewer
     allow_tools = ["*"]
-    max_visits  = 5
+    max_visits  = var.max_review_visits
 
     input {
         prompt = <<-EOT
@@ -291,84 +177,22 @@ step "pr_review" {
         EOT
     }
 
-    outcome "approve"           { next = step.mark_approved }
-    outcome "changes_requested" { next = step.mark_changes_requested }
-    outcome "failure"           { next = state.failed }
-    outcome "default"           { next = state.failed }
-}
-
-// ── Terminal-state markers ────────────────────────────────────────────────────
-// Write review_result before entering the terminal state so the parent's
-// route_pr_reviewer_loop switch can read it regardless of whether the engine
-// correctly propagates the subworkflow success flag.
-
-step "mark_approved" {
-    target = adapter.shell.sh
-    input  { command = "printf 'approved'" }
-    outcome "success" {
-        next = step.finish_approved
+    outcome "approve" {
+        next = state.approved
         write {
             target = data.internal.review_result.value
-            value  = output.stdout
+            value  = "approved"
         }
     }
-    outcome "failure" { next = state.approved }
-}
-
-// Noop step forces SeedDataSnapshot before the terminal state so that
-// data.internal.review_result is flushed into childSt.Vars before runSubworkflow
-// reads it back to evaluate the review_result output. Without this, the
-// snapshot seeded at mark_approved's entry is stale (pre-write) and the
-// parent's route_pr_reviewer_loop switch sees review_result = "".
-// Mirrors the mark_done → finish → done pattern in branch_manager.
-step "finish_approved" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" { next = state.approved }
-    outcome "failure" { next = state.approved }
-}
-
-// Red CI is reported as a distinct verdict rather than an unexplained failure:
-// the parent routes it to coordinator triage so the developer is briefed to fix
-// the build, instead of spending a review pass on code CI has already rejected.
-step "mark_checks_failed" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.finish_checks_failed
-        write {
-            target = data.internal.review_result.value
-            value  = "checks_failed"
-        }
-    }
-    outcome "failure" { next = state.checks_failed }
-}
-
-step "finish_checks_failed" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" { next = state.checks_failed }
-    outcome "failure" { next = state.checks_failed }
-}
-
-step "mark_changes_requested" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.finish_changes_requested
+    outcome "changes_requested" {
+        next = state.changes_requested
         write {
             target = data.internal.review_result.value
             value  = "changes_requested"
         }
     }
-    outcome "failure" { next = state.changes_requested }
-}
-
-step "finish_changes_requested" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" { next = state.changes_requested }
-    outcome "failure" { next = state.changes_requested }
+    outcome "failure"           { next = state.failed }
+    outcome "default"           { next = state.failed }
 }
 
 // ── Terminal states ───────────────────────────────────────────────────────────

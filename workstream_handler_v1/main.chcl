@@ -1,6 +1,7 @@
 workflow {
     name          = "workstream_handler_v1"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "read_workstream"
     target_state  = "done"
 
@@ -34,11 +35,6 @@ data "internal" "developer_feedback" {
     value = ""
 }
 
-data "internal" "status" {
-    type  = string
-    value = ""
-}
-
 data "internal" "review_result" {
     type  = string
     value = ""
@@ -60,6 +56,7 @@ subworkflow "branch_manager" {
         base_branch     = var.base_branch
         repo_dir        = var.repo_dir
         worktree_dir    = var.worktree_dir
+        max_repair_visits = var.max_branch_repair_visits
     }
 }
 
@@ -69,6 +66,9 @@ subworkflow "pr_reviewer_loop" {
         pr_url          = data.internal.pr_url.value
         workstream_file = var.workstream_file
         worktree_dir    = var.worktree_dir
+        max_poll_visits    = var.max_reviewer_poll_visits
+        max_backoff_visits = var.max_reviewer_backoff_visits
+        max_review_visits  = var.max_review_visits
     }
 }
 
@@ -81,6 +81,7 @@ subworkflow "pair_programming_loop" {
         allow_dirty     = var.allow_dirty
         branch_notes    = data.internal.branch_notes.value
         worktree_dir    = var.worktree_dir
+        max_agent_visits = var.max_pair_agent_visits
     }
 }
 
@@ -95,6 +96,7 @@ subworkflow "pair_programming_loop_feedback" {
         allow_dirty              = var.allow_dirty
         branch_notes             = data.internal.branch_notes.value
         worktree_dir             = var.worktree_dir
+        max_agent_visits         = var.max_pair_agent_visits
     }
 }
 
@@ -114,7 +116,7 @@ step "read_workstream" {
 step "run_branch_manager" {
     target = subworkflow.branch_manager
     outcome "success" {
-        next = switch.route_branch_manager
+        next = step.ensure_coordinator_creds
         write {
             target = data.internal.branch.value
             value  = subworkflow.branch
@@ -127,18 +129,6 @@ step "run_branch_manager" {
     outcome "failure" { next = state.failed }
 }
 
-// Engine bug workaround: subworkflow success=false is ignored; check the
-// status output explicitly to catch branch_manager failures.
-switch "route_branch_manager" {
-    match {
-        condition = try(steps.run_branch_manager.status, "") == "ok"
-        next      = step.ensure_coordinator_creds
-    }
-    default {
-        next = state.failed
-    }
-}
-
 // Activate the coordinator GitHub identity before any coordinator operation
 // (PR status checks, PR creation, developer loop, triage, merge). Resolves the
 // effective coordinator account into _coordinator_user so it can be restored
@@ -147,23 +137,9 @@ switch "route_branch_manager" {
 step "ensure_coordinator_creds" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            target='${var.coordinator_gh_user}'
-            if [ -n "$target" ]; then
-                gh auth switch --user "$target" >/dev/null 2>&1 || true
-            fi
-            active=$(gh api user --jq '.login' 2>/dev/null || echo "")
-            if [ -n "$target" ] && [ "$active" != "$target" ]; then
-                echo "failed to activate coordinator gh user '$target' (active='$active')" >&2
-                exit 1
-            fi
-            if [ -z "$active" ]; then
-                echo "no active gh user and no coordinator_gh_user configured" >&2
-                exit 1
-            fi
-            printf '%s' "$active"
-        SHELL
+        command = templatefile("./scripts/ensure_coordinator_creds.sh.tftpl", {
+            criteria_value_1 = var.coordinator_gh_user
+        })
     }
     outcome "success" {
         next = step.check_pr
@@ -190,72 +166,9 @@ step "ensure_coordinator_creds" {
 
 step "check_pr" {
     target     = adapter.shell.sh
-    max_visits = 30
+    max_visits = var.max_pr_poll_visits
     input {
-        command = <<-SHELL
-            set -eu
-            branch=$(git branch --show-current)
-            pr_json=$(gh pr view "$branch" --json number,state,reviewDecision,url 2>/dev/null || echo "")
-            if [ -z "$pr_json" ]; then
-                echo "status:no_pr"
-                exit 0
-            fi
-            state=$(printf '%s' "$pr_json" | jq -r '.state')
-            if [ "$state" = "MERGED" ]; then echo "status:merged"; exit 0; fi
-            if [ "$state" = "CLOSED" ]; then echo "status:closed"; exit 0; fi
-
-            review_decision=$(printf '%s' "$pr_json" | jq -r '.reviewDecision // "REVIEW_REQUIRED"')
-            number=$(printf '%s' "$pr_json" | jq -r '.number')
-
-            # Viewer-agnostic approval check: PR author sees empty reviewDecision.
-            # Fall back to the REST API reviews list to detect any APPROVED review.
-            if [ -z "$review_decision" ] || [ "$review_decision" = "REVIEW_REQUIRED" ]; then
-                owner=$(gh repo view --json owner --jq '.owner.login')
-                repo=$(gh repo view --json name --jq '.name')
-                approved_count=$(gh api "repos/$owner/$repo/pulls/$number/reviews" --jq '[.[] | select(.state == "APPROVED")] | length' 2>/dev/null || echo "0")
-                if [ "$approved_count" -gt 0 ]; then
-                    review_decision="APPROVED"
-                fi
-            fi
-
-            # Inspect ALL checks, not just --required: every gate must be green
-            # before merge, and a non-required red check still blocks it.
-            checks_rc=0
-            checks_json=$(gh pr checks "$number" --json bucket,name,state 2>&1) || checks_rc=$?
-            if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
-                # CI hasn't registered check runs yet (common right after PR
-                # creation / push) — pending, not failed.
-                echo "status:pending"
-                exit 0
-            elif [ "$checks_rc" -ne 0 ] && ! printf '%s' "$checks_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-                # Non-zero with output that isn't the checks array — a real error.
-                echo "status:checks_failed"
-                exit 0
-            else
-                any_failing=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "fail")] | length' 2>/dev/null || echo "0")
-                any_pending=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "pending")] | length' 2>/dev/null || echo "0")
-                if [ "$any_failing" -gt 0 ]; then echo "status:checks_failed"; exit 0; fi
-                if [ "$any_pending" -gt 0 ]; then echo "status:pending"; exit 0; fi
-            fi
-
-            owner=$(gh repo view --json owner --jq '.owner.login')
-            repo=$(gh repo view --json name --jq '.name')
-            threads_json=$(gh api graphql \
-                -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved isOutdated}}}}}' \
-                -f owner="$owner" \
-                -f repo="$repo" \
-                -F number="$number")
-            unresolved=$(printf '%s' "$threads_json" | \
-                jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select((.isOutdated|not) and (.isResolved|not))] | length')
-
-            if [ "$review_decision" = "APPROVED" ] && [ "$unresolved" -eq 0 ]; then
-                echo "status:ready"
-            elif [ "$review_decision" = "CHANGES_REQUESTED" ] || [ "$unresolved" -gt 0 ]; then
-                echo "status:needs_work"
-            else
-                echo "status:open"
-            fi
-        SHELL
+        command = templatefile("./scripts/check_pr.sh.tftpl", {})
     }
     outcome "success" { next = switch.route_pr }
     outcome "failure" { next = state.failed }
@@ -286,7 +199,7 @@ switch "route_pr" {
 step "backoff_pr" {
     target     = adapter.shell.sh
     timeout    = "300s"
-    max_visits = 30
+    max_visits = var.max_pr_poll_visits
     input {
         command = "echo 'CI pending — sleeping 60s'; sleep 60"
     }
@@ -330,31 +243,8 @@ switch "route_pr_action" {
 
 step "run_pair_programming_loop" {
     target = subworkflow.pair_programming_loop
-    outcome "success" {
-        next = switch.route_pair_programming
-        write {
-            target = data.internal.status.value
-            value  = subworkflow.status
-        }
-    }
-    outcome "failure" {
-        next = switch.route_pair_programming
-        write {
-            target = data.internal.status.value
-            // A child that dies before flushing outputs has no `status`
-            // attribute at all — try() keeps the failure path from crashing
-            // the whole run while evaluating this write.
-            value  = try(subworkflow.status, "")
-        }
-    }
-}
-
-switch "route_pair_programming" {
-    match {
-        condition = try(steps.run_pair_programming_loop.status, "") == "ok"
-        next      = step.create_pr
-    }
-    default { next = state.failed }
+    outcome "success" { next = step.create_pr }
+    outcome "failure" { next = state.failed }
 }
 
 // Create a PR from the current branch; idempotent — reuses existing PR if present.
@@ -362,44 +252,10 @@ switch "route_pair_programming" {
 step "create_pr" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            branch=$(git branch --show-current)
-            # Clean title: strip any trailing annotations, convert hyphens to spaces
-            title=$(printf '%s' "$branch" | sed 's/-approved$//i; s/-reviewed$//i; s/-draft$//i' | tr '-' ' ')
-
-            # Reuse only an active OPEN PR.  Closed or merged PRs get a fresh one.
-            existing_json=$(gh pr view "$branch" --json url,state 2>/dev/null || true)
-            existing_url=""
-            existing_state=""
-            if [ -n "$existing_json" ]; then
-                existing_url=$(printf '%s' "$existing_json" | jq -r '.url')
-                existing_state=$(printf '%s' "$existing_json" | jq -r '.state')
-            fi
-
-            if [ -n "$existing_url" ] && [ "$existing_state" = "OPEN" ]; then
-                printf '%s' "$existing_url" | tr -d '\n'
-            else
-                # Do not discard stderr here: a rejected push (no write access,
-                # protected branch, non-fast-forward) is otherwise reduced to a
-                # bare exit 128 with no indication of the cause.
-                if ! push_err=$(git push -u origin "$branch" 2>&1); then
-                    echo "push_failed=true branch=$branch"
-                    echo "push_error=$push_err"
-                    exit 1
-                fi
-                pr_url=$(gh pr create \
-                    --base '${var.base_branch}' \
-                    --head "$branch" \
-                    --title "$title" \
-                    --body "$(cat '${var.workstream_file}')" 2>&1) || {
-                    echo "pr_create_failed=true branch=$branch"
-                    echo "pr_create_error=$pr_url"
-                    exit 1
-                }
-                printf '%s' "$pr_url" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'
-            fi
-        SHELL
+        command = templatefile("./scripts/create_pr.sh.tftpl", {
+            criteria_value_1 = var.base_branch
+            criteria_value_2 = var.workstream_file
+        })
     }
     timeout = "60s"
     outcome "success" {
@@ -430,25 +286,17 @@ switch "route_reviewer_creds" {
 step "switch_to_reviewer" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            target='${var.reviewer_gh_user}'
-            gh auth switch --user "$target" >/dev/null 2>&1 || true
-            active=$(gh api user --jq '.login' 2>/dev/null || echo "")
-            if [ "$active" != "$target" ]; then
-                echo "failed to activate reviewer gh user '$target' (active='$active')" >&2
-                exit 1
-            fi
-            echo "active gh user: $active (reviewer)"
-        SHELL
+        command = templatefile("./scripts/switch_to_reviewer.sh.tftpl", {
+            criteria_value_1 = var.reviewer_gh_user
+        })
     }
     outcome "success" { next = step.run_pr_reviewer_loop }
     outcome "failure" { next = state.failed }
 }
 
-// Engine bug workaround: subworkflow success=false is ignored (same bug as
-// run_branch_manager). Route both outcomes through restore_coordinator_creds
-// then route_pr_reviewer_loop, checking the review_result output directly.
+// Restore coordinator credentials on both outcomes before routing the review
+// result. A failed child has no actionable review verdict and falls through to
+// the terminal failure route below.
 step "run_pr_reviewer_loop" {
     target = subworkflow.pr_reviewer_loop
     outcome "success" {
@@ -475,21 +323,9 @@ step "run_pr_reviewer_loop" {
 step "restore_coordinator_creds" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            target='${data.internal._coordinator_user.value}'
-            if [ -z "$target" ]; then
-                echo "coordinator user unknown; cannot restore" >&2
-                exit 1
-            fi
-            gh auth switch --user "$target" >/dev/null 2>&1 || true
-            active=$(gh api user --jq '.login' 2>/dev/null || echo "")
-            if [ "$active" != "$target" ]; then
-                echo "failed to restore coordinator gh user '$target' (active='$active')" >&2
-                exit 1
-            fi
-            echo "active gh user: $active (coordinator)"
-        SHELL
+        command = templatefile("./scripts/restore_coordinator_creds.sh.tftpl", {
+            criteria_value_1 = data.internal._coordinator_user.value
+        })
     }
     outcome "success" { next = switch.route_pr_reviewer_loop }
     outcome "failure" { next = state.failed }
@@ -527,49 +363,9 @@ step "merge_pr" {
     target  = adapter.shell.sh
     timeout = "60s"
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            pr=$(printf '%s' '${data.internal.pr_url.value}' | grep -oE 'pull/[0-9]+' | cut -d/ -f2 | tail -1 | tr -d '\n')
-            owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "")
-            repo=$(gh repo view --json name --jq '.name' 2>/dev/null || echo "")
-
-            # Capture stderr rather than discarding it: a merge can be refused for
-            # reasons the operator cannot guess from an exit code alone (branch
-            # protection, unresolved conversations, stale approval). Swallowing it
-            # turns a precise GitHub error into a bare "merge_failed".
-            merge_rc=0
-            merge_err=$(gh pr merge "$pr" --squash --delete-branch 2>&1) || merge_rc=$?
-
-            if [ "$merge_rc" -eq 0 ]; then
-                echo "merged=true pr=$pr"
-                exit 0
-            fi
-
-            # gh may return non-zero even after the merge succeeds (branch deletion race, etc.)
-            # Treat as success if GitHub says the PR is already merged.
-            state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null || echo "")
-            if [ "$state" = "MERGED" ]; then
-                echo "already_merged=true pr=$pr"
-                exit 0
-            fi
-
-            echo "merge_failed=true pr=$pr"
-            echo "merge_error=$merge_err"
-
-            # Report the mergeability facts the error alone may not name, so the
-            # coordinator can act without a human reproducing the merge by hand.
-            gh pr view "$pr" --json mergeStateStatus,mergeable,reviewDecision \
-                --jq '"merge_state=\(.mergeStateStatus) mergeable=\(.mergeable) review_decision=\(.reviewDecision)"' 2>&1 || true
-
-            unresolved=$(gh api graphql -f query="
-                { repository(owner: \"$owner\", name: \"$repo\") {
-                    pullRequest(number: $pr) {
-                      reviewThreads(first: 50) { nodes { isResolved } }
-                    } } }" \
-                --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "unknown")
-            echo "unresolved_threads=$unresolved"
-            exit 1
-        SHELL
+        command = templatefile("./scripts/merge_pr.sh.tftpl", {
+            criteria_value_1 = data.internal.pr_url.value
+        })
     }
     outcome "success" { next = step.teardown_worktree }
     // A refused merge is usually actionable, not terminal: an unresolved review
@@ -595,34 +391,10 @@ step "teardown_worktree" {
     target  = adapter.shell.repo
     timeout = "30s"
     input {
-        command = <<-SHELL
-            set -uo pipefail; exec 2>&1
-            wt='${var.worktree_dir}'
-            branch='${data.internal.branch.value}'
-            git worktree remove --force "$wt" 2>&1 || true
-            git worktree prune 2>&1 || true
-            echo "removed worktree $wt"
-
-            # Delete the local branch, but only once its PR is actually merged.
-            # The PR state is the authority, not git: PRs here are squash-merged,
-            # which leaves the branch's own commits outside main's history, so
-            # `git branch -d` refuses and `git branch --merged` cannot see them.
-            # Without this, every run leaves a branch behind forever — 16 had
-            # accumulated before it was noticed.
-            #
-            # -D is safe *only* because the MERGED check gates it. Never move
-            # this deletion outside that guard.
-            if [ -n "$branch" ]; then
-                state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
-                if [ "$state" = "MERGED" ]; then
-                    git branch -D "$branch" 2>&1 || true
-                    echo "deleted merged branch $branch"
-                else
-                    echo "kept branch $branch (PR state: $${state:-unknown}) — not merged, nothing discarded"
-                fi
-            fi
-            git fetch --prune --quiet 2>&1 || true
-        SHELL
+        command = templatefile("./scripts/teardown_worktree.sh.tftpl", {
+            criteria_value_1 = var.worktree_dir
+            criteria_value_2 = data.internal.branch.value
+        })
     }
     outcome "success" { next = state.done }
     outcome "failure" { next = state.done }
@@ -639,7 +411,7 @@ step "teardown_worktree" {
 
 step "triage_pr_feedback" {
     target      = adapter.copilot.coordinator
-    max_visits  = 10
+    max_visits  = var.max_feedback_visits
     allow_tools = ["*"]
 
     input {
@@ -685,30 +457,9 @@ step "triage_pr_feedback" {
 // that never converges fails the run instead of looping indefinitely.
 step "run_pair_programming_loop_with_feedback" {
     target     = subworkflow.pair_programming_loop_feedback
-    max_visits = 5
-    outcome "success" {
-        next = switch.route_pair_programming_feedback
-        write {
-            target = data.internal.status.value
-            value  = subworkflow.status
-        }
-    }
-    outcome "failure" {
-        next = switch.route_pair_programming_feedback
-        write {
-            target = data.internal.status.value
-            // try(): a child that dies early exposes no outputs at all.
-            value  = try(subworkflow.status, "")
-        }
-    }
-}
-
-switch "route_pair_programming_feedback" {
-    match {
-        condition = try(steps.run_pair_programming_loop_with_feedback.status, "") == "ok"
-        next      = step.validate_developer_response
-    }
-    default { next = state.failed }
+    max_visits = var.max_pair_cycles
+    outcome "success" { next = step.validate_developer_response }
+    outcome "failure" { next = state.failed }
 }
 
 // Coordinator inspects the developer's commits against the brief it wrote.

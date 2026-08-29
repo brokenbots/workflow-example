@@ -137,14 +137,9 @@ criteria compile qa_triage_v1
 
 ## Gotchas hit while building this
 
-- **`max_visits` must be a compile-time literal.** A variable reference is
-  rejected. The retry budgets are inline in `main.chcl`.
 - **Every variable referenced from adapter config needs a default.** A required
-  variable leaves the config unknown at compile time. Worse, that currently
-  crashes the compiler — `panic: value is unknown` from
-  `validateSchemaAttrs`, with a Go stack trace and no source location. Both
-  `repo_dir` and `worktree_dir` default to `""` for this reason and are always
-  passed at apply time.
+  variable leaves the config unknown at compile time, so `repo_dir` and
+  `worktree_dir` default to `""` and are always passed at apply time.
 - **Shell parameter expansion collides with HCL interpolation.** `${slug%.*}`
   inside a heredoc is parsed by HCL. Escape it as `$${slug%.*}`.
 - `.triage/` under the repo holds throwaway worktrees and evidence — add it to

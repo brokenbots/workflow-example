@@ -1,6 +1,7 @@
 workflow {
     name          = "branch_manager"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "resolve_branch"
     target_state  = "done"
 
@@ -21,13 +22,6 @@ data "internal" "triage_context" {
     value = ""
 }
 
-// Set to "ok" only on the success path; empty on failure.
-// Workaround for engine bug: subworkflow success=false is ignored by parent.
-data "internal" "status" {
-    type  = string
-    value = ""
-}
-
 // Human-readable note describing any uncommitted work that was stashed to allow
 // a rebase and then restored to the working tree. Reported up to the parent so
 // the developer can be informed. Empty when nothing was stashed.
@@ -41,14 +35,10 @@ data "internal" "stash_report" {
 step "resolve_branch" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            if [ -n '${var.branch}' ]; then
-                printf '%s' '${var.branch}'
-            else
-                printf '%s' "$(basename '${var.workstream_file}' .md)"
-            fi
-        SHELL
+        command = templatefile("./scripts/resolve_branch.sh.tftpl", {
+            criteria_value_1 = var.branch
+            criteria_value_2 = var.workstream_file
+        })
     }
     outcome "success" {
         next = step.setup_worktree
@@ -77,55 +67,11 @@ step "setup_worktree" {
     target  = adapter.shell.repo
     timeout = "60s"
     input {
-        command = <<-SHELL
-            set -euo pipefail; exec 2>&1
-            branch='${data.internal._branch.value}'
-            base='${var.base_branch}'
-            wt='${var.worktree_dir}'
-            echo "branch=$branch base=$base worktree=$wt"
-
-            git fetch origin 2>&1 || true
-            git worktree prune 2>&1 || true
-
-            # Reuse a worktree already present at this path (resume case). Detect by
-            # asking git directly rather than string-matching paths, which differ
-            # under symlinks (e.g. /tmp vs /private/tmp on macOS).
-            if [ -d "$wt" ]; then
-                if git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                    echo "reusing existing worktree at $wt (on '$(git -C "$wt" branch --show-current)')"
-                    exit 0
-                fi
-                echo "path $wt exists but is not a git worktree"
-                exit 1
-            fi
-
-            if git show-ref --verify --quiet "refs/heads/$branch"; then
-                git worktree add --force "$wt" "$branch"
-            elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-                git worktree add --force -b "$branch" "$wt" "origin/$branch"
-            elif git show-ref --verify --quiet "refs/remotes/origin/$base"; then
-                git worktree add --force -b "$branch" "$wt" "origin/$base"
-            else
-                echo "base_branch_remote_not_found=true using local base as-is"
-                git worktree add --force -b "$branch" "$wt" "$base"
-            fi
-
-            # If the worktree lives inside the repo, keep it out of the operator's
-            # git status via the repo-local exclude (no tracked-file changes).
-            # Canonicalize both paths so the prefix test survives symlinks
-            # (e.g. /tmp vs /private/tmp on macOS).
-            top=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
-            top_real=$(cd "$top" 2>/dev/null && pwd -P || echo "$top")
-            wt_real=$(cd "$wt" 2>/dev/null && pwd -P || echo "$wt")
-            case "$wt_real" in
-                "$top_real"/*)
-                    rel="$${wt_real#$top_real/}"
-                    excl=$(git rev-parse --git-path info/exclude)
-                    grep -qxF "/$rel" "$excl" 2>/dev/null || printf '/%s\n' "$rel" >> "$excl"
-                    ;;
-            esac
-            echo "worktree_ready=$wt on_branch=$branch"
-        SHELL
+        command = templatefile("./scripts/setup_worktree.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+            criteria_value_3 = var.worktree_dir
+        })
     }
     outcome "success" { next = step.validate_base_branch }
     outcome "failure" {
@@ -149,33 +95,10 @@ step "setup_worktree" {
 step "validate_base_branch" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail; exec 2>&1
-            branch='${data.internal._branch.value}'
-            base='${var.base_branch}'
-            echo "branch=$branch base=$base"
-
-            unique=$(git log --format='%H' "origin/$base..$branch" 2>/dev/null \
-                     || git log --format='%H' "$base..$branch")
-
-            if [ -z "$unique" ]; then
-                echo "base_ok=true no_unique_commits"
-                exit 0
-            fi
-
-            oldest=$(printf '%s' "$unique" | tail -1)
-            parent=$(git rev-parse "$${oldest}^" 2>/dev/null || git rev-parse "$oldest")
-            echo "oldest_unique_commit=$oldest"
-            echo "fork_point=$parent"
-
-            if git merge-base --is-ancestor "$parent" "$base" 2>/dev/null; then
-                echo "base_ok=true"
-                exit 0
-            fi
-
-            echo "base_mismatch=true expected=$base"
-            exit 1
-        SHELL
+        command = templatefile("./scripts/validate_base_branch.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
     }
     outcome "success" { next = switch.route_base_validation }
     outcome "failure" { next = switch.route_base_validation }
@@ -199,17 +122,10 @@ switch "route_base_validation" {
 step "check_rebase_needed" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            branch='${data.internal._branch.value}'
-            base='${var.base_branch}'
-            behind=$(git rev-list --count "$branch..origin/$base" 2>/dev/null || echo "0")
-            echo "commits_behind=$behind"
-            if [ "$behind" -gt 0 ]; then
-                exit 1
-            fi
-            exit 0
-        SHELL
+        command = templatefile("./scripts/check_rebase_needed.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
     }
     outcome "success" { next = switch.route_rebase_needed }
     outcome "failure" { next = switch.route_rebase_needed }
@@ -230,20 +146,10 @@ switch "route_rebase_needed" {
 step "rebase_branch" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail; exec 2>&1
-            branch='${data.internal._branch.value}'
-            base='${var.base_branch}'
-            # Already on $branch inside the isolated worktree — no checkout needed.
-            # Stash any uncommitted work (incl. untracked) so the rebase can run
-            # on a clean tree; restore_stash pops it back onto the rebased branch.
-            if [ -n "$(git status --porcelain)" ]; then
-                git stash push -u -m criteria-branch-manager-wip
-                echo "stashed uncommitted changes before rebase"
-            fi
-            echo "rebasing $branch onto origin/$base..."
-            git rebase "origin/$base"
-        SHELL
+        command = templatefile("./scripts/rebase_branch.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
     }
     timeout = "60s"
     outcome "success" { next = step.restore_stash }
@@ -270,55 +176,9 @@ step "skip_merged_rebase_commits" {
     target  = adapter.shell.sh
     timeout = "60s"
     input {
-        command = <<-SHELL
-            exec 2>&1
-            set -u
-            base='${var.base_branch}'
-            # Resolve rebase-state dirs via git: in a linked worktree they live under
-            # the per-worktree gitdir, not a literal .git/ in the working tree.
-            rm=$(git rev-parse --git-path rebase-merge)
-            ra=$(git rev-parse --git-path rebase-apply)
-            MAX_SKIPS=20
-            skips=0
-            while [ "$skips" -lt "$MAX_SKIPS" ]; do
-                if [ ! -d "$rm" ] && [ ! -d "$ra" ]; then
-                    echo "status=completed skips=$skips"
-                    exit 0
-                fi
-                rebase_head=""
-                if [ -f "$rm/stopped-sha" ]; then
-                    rebase_head=$(cat "$rm/stopped-sha")
-                elif [ -f "$ra/original-commit" ]; then
-                    rebase_head=$(cat "$ra/original-commit")
-                fi
-                if [ -z "$rebase_head" ]; then
-                    echo "status=error cannot identify stalled commit"
-                    exit 1
-                fi
-                msg=$(git log --format='%s' -1 "$rebase_head" 2>/dev/null || echo unknown)
-                echo "rebase stalled at: $rebase_head ($msg)"
-                if git merge-base --is-ancestor "$rebase_head" "origin/$base" 2>/dev/null; then
-                    echo "commit already in origin/$base — skipping"
-                    prev="$rebase_head"
-                    git rebase --skip 2>&1 || true
-                    skips=$((skips + 1))
-                    # Safety: if we're still on the same commit the skip had no effect
-                    if [ -f "$rm/stopped-sha" ] && \
-                       [ "$(cat "$rm/stopped-sha")" = "$prev" ]; then
-                        echo "status=error skip had no effect on $prev"
-                        git rebase --abort 2>/dev/null || true
-                        exit 1
-                    fi
-                else
-                    echo "status=genuine_conflict commit $rebase_head not in origin/$base"
-                    git rebase --abort 2>/dev/null || true
-                    exit 1
-                fi
-            done
-            echo "status=error exceeded max skips ($MAX_SKIPS)"
-            git rebase --abort 2>/dev/null || true
-            exit 1
-        SHELL
+        command = templatefile("./scripts/skip_merged_rebase_commits.sh.tftpl", {
+            criteria_value_1 = var.base_branch
+        })
     }
     outcome "success" { next = step.restore_stash }
     outcome "failure" {
@@ -335,20 +195,10 @@ step "skip_merged_rebase_commits" {
 step "rebase_onto_base" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail; exec 2>&1
-            branch='${data.internal._branch.value}'
-            base='${var.base_branch}'
-            # Already on $branch inside the isolated worktree — no checkout needed.
-            # Stash uncommitted work so the rebase can run; restore_stash pops it back.
-            if [ -n "$(git status --porcelain)" ]; then
-                git stash push -u -m criteria-branch-manager-wip
-                echo "stashed uncommitted changes before rebase"
-            fi
-            fork_point=$(git merge-base HEAD "origin/$base")
-            echo "rebase --onto origin/$base from fork_point=$fork_point"
-            git rebase --onto "origin/$base" "$fork_point"
-        SHELL
+        command = templatefile("./scripts/rebase_onto_base.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
     }
     timeout = "60s"
     outcome "success" { next = step.restore_stash }
@@ -369,15 +219,12 @@ step "rebase_onto_base" {
 step "checkout_branch" {
     target = adapter.shell.sh
     input {
-        command = <<-SHELL
-            set -euo pipefail; exec 2>&1
-            branch='${data.internal._branch.value}'
-            git pull --ff-only origin "$branch" 2>/dev/null || true
-            echo "on_branch=$(git branch --show-current)"
-        SHELL
+        command = templatefile("./scripts/checkout_branch.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+        })
     }
     timeout = "15s"
-    outcome "success" { next = step.mark_done }
+    outcome "success" { next = state.done }
     outcome "failure" {
         next = step.branch_triage_agent
         write {
@@ -396,7 +243,7 @@ step "checkout_branch" {
 step "branch_triage_agent" {
     target      = adapter.copilot.branch_repair
     allow_tools = ["*"]
-    max_visits  = 3
+    max_visits  = var.max_repair_visits
 
     input {
         prompt = <<-EOT
@@ -443,7 +290,7 @@ step "branch_triage_agent" {
         EOT
     }
 
-    outcome "success"     { next = step.mark_done }
+    outcome "success"     { next = state.done }
     outcome "needs_human" { next = state.needs_human }
     outcome "failed"      { next = state.failed }
     // "failure" is the copilot adapter's built-in outcome when the provider is
@@ -466,21 +313,10 @@ step "restore_stash" {
     target  = adapter.shell.sh
     timeout = "30s"
     input {
-        command = <<-SHELL
-            set -uo pipefail; exec 2>&1
-            if git stash list | head -1 | grep -q 'criteria-branch-manager-wip'; then
-                if git stash pop >/dev/null 2>&1; then
-                    printf 'Note: uncommitted work was present before the rebase. It was stashed to allow the rebase and has been restored to the working tree — the changes listed below include that restored work.'
-                else
-                    echo "stash_pop_conflict=true: the rebase succeeded but restoring the pre-rebase work hit a conflict; manual resolution required"
-                    git status --porcelain
-                    exit 1
-                fi
-            fi
-        SHELL
+        command = templatefile("./scripts/restore_stash.sh.tftpl", {})
     }
     outcome "success" {
-        next = step.mark_done
+        next = state.done
         write {
             target = data.internal.stash_report.value
             value  = output.stdout
@@ -496,29 +332,6 @@ step "restore_stash" {
 }
 
 // ── Mark success ──────────────────────────────────────────────────────────────
-
-// All success paths funnel here to stamp status="ok" before terminating.
-// Required because the engine ignores subworkflow success=false at the parent.
-
-step "mark_done" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" {
-        next = step.finish
-        write {
-            target = data.internal.status.value
-            value  = "ok"
-        }
-    }
-    outcome "failure" { next = step.finish }
-}
-
-step "finish" {
-    target = adapter.noop.default
-    input  {}
-    outcome "success" { next = state.done }
-    outcome "failure" { next = state.done }
-}
 
 // ── Terminal states ───────────────────────────────────────────────────────────
 
@@ -545,11 +358,6 @@ output "branch" {
 output "base_branch" {
     type  = string
     value = var.base_branch
-}
-
-output "status" {
-    type  = string
-    value = data.internal.status.value
 }
 
 output "stash_report" {

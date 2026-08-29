@@ -1,0 +1,11 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail
+run_dir="$criteria_value_1/$criteria_value_2"
+# Evidence from a previous run of the same request must not be read as
+# evidence for this one. The directory is replaced, not merged.
+rm -rf "$run_dir"
+mkdir -p "$run_dir/evidence"
+cp "$criteria_value_1/.staging/report.md" "$run_dir/evidence/report.md"
+rm -f "$criteria_value_1/.staging/report.md"
+printf '%s' "$run_dir"

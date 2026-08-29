@@ -1,0 +1,11 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+scratch="$criteria_value_1/scratch"
+git -C "$criteria_value_2" worktree remove --force "$scratch" 2>/dev/null || true
+git -C "$criteria_value_2" worktree prune 2>/dev/null || true
+rm -rf "$scratch"
+mkdir -p "$(dirname "$scratch")"
+git -C "$criteria_value_2" worktree add --detach "$scratch" "$criteria_value_3"
+echo "scratch worktree at $scratch ($(git -C "$scratch" rev-parse --short HEAD))"

@@ -21,6 +21,24 @@ variable "ci_backoff_seconds" {
     default     = 60
 }
 
+variable "max_poll_visits" {
+    type        = number
+    description = "Maximum PR status checks before failing."
+    default     = 60
+}
+
+variable "max_backoff_visits" {
+    type        = number
+    description = "Maximum CI backoff cycles before failing."
+    default     = 30
+}
+
+variable "max_review_visits" {
+    type        = number
+    description = "Maximum PR reviewer agent attempts."
+    default     = 5
+}
+
 // PR reviewer runs on the copilot adapter, resolving through the local Ollama
 // endpoint. glm-5.2:cloud is the review model.
 variable "pr_reviewer" {

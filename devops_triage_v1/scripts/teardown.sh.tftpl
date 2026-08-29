@@ -1,0 +1,30 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -uo pipefail
+verdict="$criteria_value_1"
+wt="$criteria_value_2"
+keep=yes
+case "$verdict" in
+    pr_opened|pushed)
+        keep=no
+        ;;
+    insufficient_report|no_action_needed|worklist_rejected|needs_human_at_intake|needs_human_at_triage|needs_human_at_worklist)
+        # These conclude before any work cycle runs, so the worktree
+        # is an untouched checkout — unless an agent wrote in it
+        # despite being told not to, which is worth keeping to look at.
+        if [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+            keep=no
+        fi
+        ;;
+esac
+if [ "$keep" = "no" ]; then
+    git -C "$criteria_value_3" worktree remove --force "$wt" 2>/dev/null || true
+    git -C "$criteria_value_3" worktree prune 2>/dev/null || true
+    echo "removed worktree $wt"
+else
+    echo "kept worktree $wt — it holds the only copy of this run's commits"
+fi
+echo "evidence retained at $criteria_value_4/evidence"
+exit 0

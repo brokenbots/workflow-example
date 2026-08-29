@@ -1,0 +1,40 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+criteria_value_7={{ .criteria_value_7 | shellquote }}
+criteria_value_8={{ .criteria_value_8 | shellquote }}
+criteria_value_9={{ .criteria_value_9 | shellquote }}
+criteria_value_10={{ .criteria_value_10 | shellquote }}
+            set -euo pipefail
+            ev="$criteria_value_1/evidence"
+
+            # The header is built with printf so $(date) still runs, but the
+            # manager's reasoning goes through a QUOTED heredoc delimiter. It is
+            # agent-authored text: with an unquoted delimiter the shell
+            # command-substitutes any backticks or $(...) it contains and splices
+            # the output into the report. HCL still interpolates the value in —
+            # that happens before the shell sees it — but the shell then treats
+            # every byte as literal.
+            {
+                printf '# Ops run report\n\n'
+                printf -- '- verdict: %s\n' "$criteria_value_2"
+                printf -- '- triage state: %s\n' "$criteria_value_3"
+                printf -- '- branch: %s (from %s @ %s)\n' "$criteria_value_4" "$criteria_value_5" "$criteria_value_6"
+                printf -- '- worktree: %s\n' "$criteria_value_7"
+                printf -- '- pull request: %s\n' "$criteria_value_8"
+                printf -- '- concluded at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                printf '## Request\n\n'
+                cat "$ev/report.md"
+                printf '\n## Manager reasoning\n\n'
+                cat <<____CRITERIA_EOF____
+$criteria_value_9
+____CRITERIA_EOF____
+                printf '\n## Last worker cycle\n\n'
+                cat <<____CRITERIA_EOF____
+$criteria_value_10
+____CRITERIA_EOF____
+            } > "$ev/ops-report.md"
+            cat "$ev/ops-report.md"

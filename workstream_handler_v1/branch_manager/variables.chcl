@@ -28,6 +28,12 @@ variable "worktree_dir" {
     default     = ""
 }
 
+variable "max_repair_visits" {
+    type        = number
+    description = "Maximum attempts for the branch repair agent."
+    default     = 3
+}
+
 variable "repair_agent" {
     type = object({
         model            = string

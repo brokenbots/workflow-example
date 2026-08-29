@@ -1,0 +1,23 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -uo pipefail
+log="$criteria_value_1/provided-$criteria_value_2.log"
+mkdir -p "$criteria_value_1"
+{
+    echo "# provided reproduction — $criteria_value_2 ($criteria_value_3)"
+    echo "# source: $criteria_value_4"
+    echo
+} > "$log"
+
+if [ -d "$criteria_value_4" ] && ls "$criteria_value_4"/*.chcl >/dev/null 2>&1; then
+    criteria apply "$criteria_value_4" >> "$log" 2>&1
+elif [ -x "$criteria_value_4" ]; then
+    "$criteria_value_4" >> "$log" 2>&1
+else
+    echo "provided path is neither a criteria workflow directory nor an executable" >> "$log"
+    exit 2
+fi
+rc=$?
+echo "provided reproduction exit=$rc (log: $log)"

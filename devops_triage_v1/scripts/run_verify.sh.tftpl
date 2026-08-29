@@ -1,0 +1,26 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -uo pipefail
+ev="$criteria_value_1/evidence"
+mkdir -p "$ev"
+log="$ev/verify.log"
+if [ -z "$criteria_value_2" ]; then
+    {
+        printf '# Verification — SKIPPED\n\n'
+        printf 'No verify_cmd was configured. Nothing in this run\n'
+        printf 'demonstrates that the change works; it shows only\n'
+        printf 'that the change was made and the gate passed.\n'
+    } > "$log"
+    echo "verify skipped"
+    exit 0
+fi
+{
+    printf '# Verification\n\n'
+    printf -- '- command: %s\n' "$criteria_value_2"
+    printf -- '- ran at: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$log"
+$criteria_value_2 >> "$log" 2>&1
+rc=$?
+printf '\n- exit: %s\n' "$rc" >> "$log"
+echo "verify exit=$rc (log: $log)"
+exit 0

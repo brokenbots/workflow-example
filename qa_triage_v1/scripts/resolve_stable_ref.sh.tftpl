@@ -1,0 +1,19 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail
+if [ -n "$criteria_value_1" ]; then
+    printf '%s' "$criteria_value_1"
+    exit 0
+fi
+git -C "$criteria_value_2" tag --list \
+    | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sed 's/^v//' \
+    | sort -t. -k1,1n -k2,2n -k3,3n \
+    | tail -1 \
+    | while read -r v; do
+        if git -C "$criteria_value_2" rev-parse "v$v" >/dev/null 2>&1; then
+            printf 'v%s' "$v"
+        else
+            printf '%s' "$v"
+        fi
+    done

@@ -356,10 +356,7 @@ criteria compile devops_triage_v1
 ```
 
 `adapter lock` recurses into subworkflows as of criteria #288 — the root
-invocation reports `locked 2 workflow(s)` and covers `devops_worker`. Check that
-line: on an older binary it locks only the root, and a subworkflow with no
-lockfile fails at run time with `adapter "<name>" not found` at the moment the
-run first enters it.
+invocation reports `locked 2 workflow(s)` and covers `devops_worker`.
 
 ## Pins (as of 2026-08-01)
 
@@ -367,7 +364,6 @@ run first enters it.
 |---|---|---|
 | copilot | `ghcr.io/brokenbots/criteria-adapter-copilot` | `0.5.4` |
 | shell | `ghcr.io/brokenbots/criteria-adapter-shell` | `0.5.2` |
-| noop | `ghcr.io/brokenbots/criteria-adapter-noop` | `0.5.2` |
 
 Every agent role resolves through the local Ollama endpoint
 (`http://localhost:11434/v1`, `responses` wire API):
@@ -395,12 +391,10 @@ reads for the manager.
 
 ## Gotchas carried over from the other workflows
 
-- **`max_visits` must be a compile-time literal.** A variable reference is
-  rejected, so every retry budget is inline in `main.chcl`.
 - **Every variable referenced from adapter config needs a default.** A required
-  variable leaves the config unknown at compile time and crashes the compiler
-  (`panic: value is unknown`). `repo_dir` and `worktree_dir` default to `""` for
-  this reason; `stage_report` rejects an empty `worktree_dir` at run time instead.
+  variable leaves the config unknown at compile time. `repo_dir` and
+  `worktree_dir` default to `""` for this reason; `stage_report` rejects an empty
+  `worktree_dir` at run time instead.
 - **Shell parameter expansion collides with HCL interpolation.** `${slug%.*}`
   inside a heredoc is parsed by HCL — escape it as `$${slug%.*}`.
 - **Operator- and agent-authored text goes through a QUOTED heredoc delimiter.**
@@ -416,7 +410,3 @@ reads for the manager.
   guard is now `switch "route_brief"` with `condition = var.brief == ""`, and no
   shell ever sees the value. Writing such text to a *file* via a quoted heredoc
   is still fine; that is a different context with a real escape.
-- **A subworkflow's `success = false` is not observed by the parent.** Both child
-  workflows stamp a `status` output and the parent switches on that.
-- **`data` writes are not flushed into a child's final vars without an
-  intervening step.** Hence `mark_done → finish → done` in `devops_worker`.

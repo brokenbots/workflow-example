@@ -1,0 +1,49 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+            set -euo pipefail
+            wt="$criteria_value_1"
+            if [ -z "$wt" ]; then
+                echo "worktree_dir is required: every agent in this workflow writes there, and an empty value points them at the process working directory" >&2
+                exit 1
+            fi
+            if [ "$wt" = "$criteria_value_2" ]; then
+                echo "worktree_dir must not be the primary tree: $wt" >&2
+                exit 1
+            fi
+
+            root="$criteria_value_3"
+            case "$root" in
+                "$criteria_value_2"|"$criteria_value_2"/*)
+                    echo "ops_root must be outside the repository under work: $root" >&2
+                    exit 1
+                    ;;
+            esac
+
+            file="$criteria_value_4"
+            staged="$root/.staging/report.md"
+            mkdir -p "$root/.staging"
+            rm -f "$staged"
+
+            if [ -n "$file" ]; then
+                if [ ! -f "$file" ]; then
+                    echo "ops report not found: $file" >&2
+                    exit 1
+                fi
+                cp "$file" "$staged"
+            else
+                # report_text is expanded from one shell variable. Its contents
+                # are not recursively evaluated, so backticks and $(...) remain
+                # literal input rather than executable shell syntax.
+                cat > "$staged" <<____CRITERIA_EOF____
+$criteria_value_5
+____CRITERIA_EOF____
+            fi
+
+            if [ ! -s "$staged" ]; then
+                echo "no request supplied: set exactly one of ops_report_file or report_text" >&2
+                exit 1
+            fi
+            cat "$staged"

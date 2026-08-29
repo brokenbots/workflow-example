@@ -1,0 +1,54 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -uo pipefail
+pr=$(printf '%s' "$criteria_value_1" | grep -oE 'pull/[0-9]+' | cut -d/ -f2 | tail -1 | tr -d '\n')
+owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "")
+repo=$(gh repo view --json name --jq '.name' 2>/dev/null || echo "")
+
+if [ -z "$pr" ]; then
+    echo "merge_failed=true pr=<missing>"
+    echo "merge_error=could not parse pull request number from $criteria_value_1"
+    exit 1
+fi
+
+# Capture stderr rather than discarding it: a merge can be refused for
+# reasons the operator cannot guess from an exit code alone (branch
+# protection, unresolved conversations, stale approval). Swallowing it
+# turns a precise GitHub error into a bare "merge_failed".
+merge_rc=0
+merge_err=$(gh pr merge "$pr" --squash --delete-branch 2>&1) || merge_rc=$?
+
+if [ "$merge_rc" -eq 0 ]; then
+    echo "merged=true pr=$pr"
+    exit 0
+fi
+
+# gh may return non-zero even after the merge succeeds (branch deletion race, etc.)
+# Treat as success if GitHub says the PR is already merged.
+state=$(gh pr view "$pr" --json state --jq '.state' 2>/dev/null || echo "")
+if [ "$state" = "MERGED" ]; then
+    echo "already_merged=true pr=$pr"
+    exit 0
+fi
+
+echo "merge_failed=true pr=$pr"
+echo "merge_error=$merge_err"
+
+# Report the mergeability facts the error alone may not name, so the
+# coordinator can act without a human reproducing the merge by hand.
+gh pr view "$pr" --json mergeStateStatus,mergeable,reviewDecision \
+    --jq '"merge_state=\(.mergeStateStatus) mergeable=\(.mergeable) review_decision=\(.reviewDecision)"' 2>&1 || true
+
+unresolved=$(gh api graphql \
+        -f query='query($owner: String!, $repo: String!, $pr: Int!) {
+            repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                    reviewThreads(first: 50) { nodes { isResolved } }
+                }
+            }
+        }' \
+        -F owner="$owner" \
+        -F repo="$repo" \
+        -F pr="$pr" \
+    --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "unknown")
+echo "unresolved_threads=$unresolved"
+exit 1

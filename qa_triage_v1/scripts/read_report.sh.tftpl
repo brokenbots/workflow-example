@@ -1,0 +1,7 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -euo pipefail
+if [ ! -f "$criteria_value_1" ]; then
+    echo "bug report not found: $criteria_value_1" >&2
+    exit 1
+fi
+cat "$criteria_value_1"

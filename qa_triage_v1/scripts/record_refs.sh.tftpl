@@ -1,0 +1,18 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+            set -euo pipefail
+            cat > "$criteria_value_1/evidence/refs.md" <<____CRITERIA_EOF____
+# Refs under test
+
+- requested matrix: $criteria_value_2
+- main ref: $criteria_value_3
+- main SHA: $criteria_value_4
+- stable ref: $criteria_value_5
+- resolved at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- provided repro workflow: $criteria_value_6
+____CRITERIA_EOF____
+            echo "refs recorded"

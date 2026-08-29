@@ -1,20 +1,13 @@
 workflow {
     name          = "repro_runner"
     version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
     initial_state = "prepare_worktree"
     target_state  = "done"
 
     policy {
         max_total_steps = 60
     }
-}
-
-// "ok" only on the success path; empty on failure. Mirrors the workaround used
-// in workstream_handler_v1 — a subworkflow's success=false is not observed by
-// the parent, so status is checked explicitly.
-data "internal" "status" {
-    type  = string
-    value = ""
 }
 
 // This arm's result: "yes" | "no" | "inconclusive".
@@ -38,18 +31,20 @@ data "internal" "baseline_health" {
 step "prepare_worktree" {
     target = adapter.shell.repo
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            git -C '${var.repo_dir}' worktree remove --force '${var.worktree_dir}' 2>/dev/null || true
-            git -C '${var.repo_dir}' worktree prune 2>/dev/null || true
-            rm -rf '${var.worktree_dir}'
-            mkdir -p "$(dirname '${var.worktree_dir}')"
-            git -C '${var.repo_dir}' worktree add --detach '${var.worktree_dir}' '${var.ref}'
-            git -C '${var.worktree_dir}' rev-parse HEAD
-        SHELL
+        command = templatefile("./scripts/prepare_worktree.sh.tftpl", {
+            criteria_value_1 = var.repo_dir
+            criteria_value_2 = var.worktree_dir
+            criteria_value_3 = var.ref
+        })
     }
     outcome "success" { next = switch.route_build }
-    outcome "failure" { next = step.mark_inconclusive }
+    outcome "failure" {
+        next = state.done
+        write {
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
+        }
+    }
 }
 
 switch "route_build" {
@@ -65,15 +60,11 @@ switch "route_build" {
 step "build" {
     target = adapter.shell.wt
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            log='${var.evidence_dir}/build-${var.ref_label}.log'
-            mkdir -p '${var.evidence_dir}'
-            ${var.build_cmd} > "$log" 2>&1
-            rc=$?
-            echo "build exit=$rc (log: $log)"
-            exit $rc
-        SHELL
+        command = templatefile("./scripts/build.sh.tftpl", {
+            criteria_value_1 = var.evidence_dir
+            criteria_value_2 = var.ref_label
+            criteria_value_3 = var.build_cmd
+        })
     }
     outcome "success" { next = switch.route_baseline_tests }
     outcome "failure" { next = step.mark_build_failed }
@@ -82,23 +73,28 @@ step "build" {
 step "mark_build_failed" {
     target = adapter.shell.wt
     input {
-        command = <<-SHELL
-            set -euo pipefail
-            cat > '${var.evidence_dir}/run-${var.ref_label}.md' <<____CRITERIA_EOF____
-# ${var.ref_label} — INCONCLUSIVE (build failed)
-
-- ref: ${var.ref} (${var.ref_display})
-- build command: ${var.build_cmd}
-- build log: ${var.evidence_dir}/build-${var.ref_label}.log
-
-The tree does not build at this ref, so no reproduction was attempted. This is
-NOT evidence that the bug is absent.
-____CRITERIA_EOF____
-            echo "build failed at ${var.ref_label}"
-        SHELL
+        command = templatefile("./scripts/mark_build_failed.sh.tftpl", {
+            criteria_value_1 = var.evidence_dir
+            criteria_value_2 = var.ref_label
+            criteria_value_3 = var.ref
+            criteria_value_4 = var.ref_display
+            criteria_value_5 = var.build_cmd
+        })
     }
-    outcome "success" { next = step.mark_inconclusive }
-    outcome "failure" { next = step.mark_inconclusive }
+    outcome "success" {
+        next = state.done
+        write {
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
+        }
+    }
+    outcome "failure" {
+        next = state.done
+        write {
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
+        }
+    }
 }
 
 switch "route_baseline_tests" {
@@ -115,14 +111,11 @@ switch "route_baseline_tests" {
 step "baseline_tests" {
     target = adapter.shell.wt
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            log='${var.evidence_dir}/baseline-${var.ref_label}.log'
-            mkdir -p '${var.evidence_dir}'
-            ${var.test_cmd} > "$log" 2>&1
-            rc=$?
-            if [ $rc -eq 0 ]; then printf 'clean'; else printf 'already_failing'; fi
-        SHELL
+        command = templatefile("./scripts/baseline_tests.sh.tftpl", {
+            criteria_value_1 = var.evidence_dir
+            criteria_value_2 = var.ref_label
+            criteria_value_3 = var.test_cmd
+        })
     }
     outcome "success" {
         next = switch.route_provided_workflow
@@ -156,27 +149,12 @@ switch "route_provided_workflow" {
 step "run_provided_workflow" {
     target = adapter.shell.wt
     input {
-        command = <<-SHELL
-            set -uo pipefail
-            log='${var.evidence_dir}/provided-${var.ref_label}.log'
-            mkdir -p '${var.evidence_dir}'
-            {
-                echo "# provided reproduction — ${var.ref_label} (${var.ref_display})"
-                echo "# source: ${var.repro_workflow_dir}"
-                echo
-            } > "$log"
-
-            if [ -d '${var.repro_workflow_dir}' ] && ls '${var.repro_workflow_dir}'/*.chcl >/dev/null 2>&1; then
-                criteria apply '${var.repro_workflow_dir}' >> "$log" 2>&1
-            elif [ -x '${var.repro_workflow_dir}' ]; then
-                '${var.repro_workflow_dir}' >> "$log" 2>&1
-            else
-                echo "provided path is neither a criteria workflow directory nor an executable" >> "$log"
-                exit 2
-            fi
-            rc=$?
-            echo "provided reproduction exit=$rc (log: $log)"
-        SHELL
+        command = templatefile("./scripts/run_provided_workflow.sh.tftpl", {
+            criteria_value_1 = var.evidence_dir
+            criteria_value_2 = var.ref_label
+            criteria_value_3 = var.ref_display
+            criteria_value_4 = var.repro_workflow_dir
+        })
     }
     outcome "success" { next = step.execute_plan }
     outcome "failure" { next = step.execute_plan }
@@ -184,7 +162,7 @@ step "run_provided_workflow" {
 
 step "execute_plan" {
     target      = adapter.copilot.investigator
-    max_visits  = 3
+    max_visits  = var.max_visits
     allow_tools = ["*"]
 
     input {
@@ -209,66 +187,48 @@ step "execute_plan" {
         PROMPT
     }
 
-    outcome "reproduced"     { next = step.mark_reproduced }
-    outcome "not_reproduced" { next = step.mark_not_reproduced }
-    outcome "inconclusive"   { next = step.mark_inconclusive }
-    outcome "need_help"      { next = step.mark_inconclusive }
-    outcome "failure"        { next = step.mark_inconclusive }
-    outcome "default"        { next = step.mark_inconclusive }
-}
-
-step "mark_reproduced" {
-    target = adapter.noop.default
-    outcome "success" {
-        next = step.finish
+    outcome "reproduced" {
+        next = state.done
         write {
             target = data.internal.reproduced.value
             value  = "yes"
         }
-        write {
-            target = data.internal.status.value
-            value  = "ok"
-        }
     }
-    outcome "failure" { next = state.failed }
-}
-
-step "mark_not_reproduced" {
-    target = adapter.noop.default
-    outcome "success" {
-        next = step.finish
+    outcome "not_reproduced" {
+        next = state.done
         write {
             target = data.internal.reproduced.value
             value  = "no"
         }
-        write {
-            target = data.internal.status.value
-            value  = "ok"
-        }
     }
-    outcome "failure" { next = state.failed }
-}
-
-step "mark_inconclusive" {
-    target = adapter.noop.default
-    outcome "success" {
-        next = step.finish
+    outcome "inconclusive" {
+        next = state.done
         write {
             target = data.internal.reproduced.value
             value  = "inconclusive"
         }
+    }
+    outcome "need_help" {
+        next = state.done
         write {
-            target = data.internal.status.value
-            value  = "ok"
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
         }
     }
-    outcome "failure" { next = state.failed }
-}
-
-step "finish" {
-    target = adapter.noop.default
-    outcome "success" { next = state.done }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.done
+        write {
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
+        }
+    }
+    outcome "default" {
+        next = state.done
+        write {
+            target = data.internal.reproduced.value
+            value  = "inconclusive"
+        }
+    }
 }
 
 state "done" {
@@ -276,20 +236,10 @@ state "done" {
     success  = true
 }
 
-state "failed" {
-    terminal = true
-    success  = false
-}
-
 // Declared outputs. `data "internal"` alone is NOT visible to the parent as
 // `subworkflow.<name>` — without these blocks the parent's
 // try(subworkflow.reproduced, "inconclusive") silently takes the fallback and
 // every arm reports "inconclusive" regardless of what actually happened.
-output "status" {
-    type  = string
-    value = data.internal.status.value
-}
-
 output "reproduced" {
     type  = string
     value = data.internal.reproduced.value
