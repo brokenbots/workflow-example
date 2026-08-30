@@ -1,31 +1,33 @@
-environment "shell" "worktree" {
+environment "sandbox" "worktree" {
     working_directory = var.worktree_dir
+    network = {
+        allow = ["*"]
+    }
 }
 
-environment "shell" "primary" {
+environment "sandbox" "primary" {
     working_directory = var.repo_dir
+    network = {
+        allow = ["*"]
+    }
 }
 
 adapter "copilot" "coordinator" {
-    environment = shell.worktree
+    environment = sandbox.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     //
-    // Deliberately NOT named GITHUB_TOKEN in the host environment: a bare
-    // GITHUB_TOKEN exported by the operator is inherited by every adapter
-    // subprocess and by the agent's own tool shell, where it overrides both the
-    // per-adapter secret and the active `gh` account. That silently collapses
-    // the workflow's two-identity separation — the reviewer ends up acting as
-    // the PR author and GitHub rejects the approval. Each role therefore reads
-    // a distinctly named variable; see workflows/pr_reviewer_loop/adapters.chcl.
+    // The sandbox strips both source-token variables before adapter launch.
+    // Only the non-review identity is reintroduced into this session.
     secrets {
-        GITHUB_TOKEN = "env:COORDINATOR_GITHUB_TOKEN"
+        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
     }
     config {
         model             = "minimax-m3:cloud"
         system_prompt     = file("./agents/coordinator.md")
-        provider_base_url = "http://localhost:11434/v1"
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : "http://localhost:11434/v1"
         provider_wire_api = "responses"
         working_directory = var.worktree_dir
     }
@@ -35,7 +37,10 @@ adapter "copilot" "coordinator" {
 adapter "shell" "sh" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.2"
-    environment = shell.worktree
+    environment = sandbox.worktree
+    secrets {
+        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+    }
 }
 
 // Runs in the repo's primary working tree: worktree lifecycle (read workstream,
@@ -43,5 +48,18 @@ adapter "shell" "sh" {
 adapter "shell" "repo" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.2"
-    environment = shell.primary
+    environment = sandbox.primary
+    secrets {
+        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+    }
+}
+
+// Linear status updates do not receive either GitHub token.
+adapter "shell" "linear" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = sandbox.worktree
+    secrets {
+        LINEAR_API_KEY = "env:LINEAR_API_KEY"
+    }
 }

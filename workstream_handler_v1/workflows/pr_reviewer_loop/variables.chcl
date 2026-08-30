@@ -39,6 +39,12 @@ variable "max_review_visits" {
     default     = 5
 }
 
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the PR reviewer agent."
+    type        = string
+    default     = ""
+}
+
 // PR reviewer runs on the copilot adapter, resolving through the local Ollama
 // endpoint. glm-5.2:cloud is the review model.
 variable "pr_reviewer" {

@@ -3,8 +3,26 @@ variable "workstream_file" {
     type        = string
 }
 
+variable "ticket_id" {
+    description = "Linear ticket identifier associated with this workstream. When set, the ticket is moved to linear_review_state before each PR review. Empty disables Linear updates for standalone runs."
+    type        = string
+    default     = ""
+}
+
+variable "linear_review_state" {
+    description = "Linear workflow state to set before PR review, resolved by name against the ticket's team."
+    type        = string
+    default     = "In Review"
+}
+
 variable "repo_dir" {
     description = "Absolute path of the repo's primary working tree. Worktree lifecycle steps (git fetch / worktree add / worktree remove) run here. The operator's main checkout is fine — git worktree add only reads its .git. Empty = run in the process working directory (no isolation)."
+    type        = string
+    default     = ""
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for every agent in this workflow and its subworkflows."
     type        = string
     default     = ""
 }
@@ -37,18 +55,6 @@ variable "allow_dirty" {
     description = "allow the paired programming loop to run even if the working tree has uncommitted changes"
     type        = bool
     default     = false
-}
-
-variable "reviewer_gh_user" {
-    description = "GitHub username for the reviewer role (must be pre-configured via gh auth login). The workflow switches to this account — and verifies it is active — before the PR review loop, so the reviewer is distinct from the coordinator. Leave empty to skip reviewer credential switching."
-    type        = string
-    default     = ""
-}
-
-variable "coordinator_gh_user" {
-    description = "GitHub username for the coordinator role: PR creation, feedback triage, thread responses, and merge (must be pre-configured via gh auth login). The workflow switches to — and verifies — this account at the start and again after every PR review loop, so coordinator operations never run under the reviewer identity even if a previous run left gh on the wrong account. Leave empty to fall back to whichever account is active at startup."
-    type        = string
-    default     = ""
 }
 
 variable "max_pr_poll_visits" {

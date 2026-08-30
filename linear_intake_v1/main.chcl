@@ -58,22 +58,24 @@ subworkflow "qa_triage" {
         design_intent_file = var.design_intent_file
         investigator       = var.investigator
         supervisor         = var.supervisor
+        provider_base_url  = var.provider_base_url
     }
 }
 
 subworkflow "handler" {
     source = "../workstream_handler_v1"
     input = {
-        workstream_file = data.internal.workstream_file.value
-        repo_dir        = var.repo_dir
+        ticket_id          = var.ticket_id
+        linear_review_state = var.linear_review_state
+        workstream_file     = data.internal.workstream_file.value
+        repo_dir            = var.repo_dir
         // branch_manager creates the worktree itself; this workflow only
         // chooses where it lives.
         worktree_dir        = "${var.intake_root}/${var.ticket_id}/worktree"
         base_branch         = var.base_branch
         ci_gate_cmd         = var.ci_gate_cmd
         allow_dirty         = var.allow_dirty
-        reviewer_gh_user    = var.reviewer_gh_user
-        coordinator_gh_user = var.coordinator_gh_user
+        provider_base_url   = var.provider_base_url
     }
 }
 
@@ -153,6 +155,19 @@ step "set_bug_label" {
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.linear_bug_label
             criteria_value_4 = var.linear_feature_label
+        })
+    }
+    outcome "success" { next = step.set_triage_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "set_triage_state" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_triage_state
         })
     }
     outcome "success" { next = step.run_qa_triage }
@@ -353,6 +368,19 @@ step "comment_handler_started" {
             criteria_value_3 = data.internal.verdict.value
         })
     }
+    outcome "success" { next = step.set_work_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "set_work_state" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_work_state
+        })
+    }
     outcome "success" { next = step.run_handler }
     outcome "failure" { next = state.failed }
 }
@@ -364,6 +392,19 @@ step "comment_handler_done" {
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.pr_url.value
+        })
+    }
+    outcome "success" { next = step.set_done_state }
+    outcome "failure" { next = state.failed }
+}
+
+step "set_done_state" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_done_state
         })
     }
     outcome "success" { next = state.handler_complete }

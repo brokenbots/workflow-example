@@ -22,6 +22,12 @@ variable "repo_dir" {
     default     = ""
 }
 
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the investigator agent."
+    type        = string
+    default     = ""
+}
+
 // Defaults to "" for the same compile-time reason as repo_dir. Always
 // supplied by the parent.
 variable "worktree_dir" {

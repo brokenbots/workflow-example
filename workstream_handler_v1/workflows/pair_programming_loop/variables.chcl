@@ -47,6 +47,12 @@ variable "max_agent_visits" {
     default     = 10
 }
 
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the developer and reviewer agents."
+    type        = string
+    default     = ""
+}
+
 variable "developer" {
     type = object({
         model            = string

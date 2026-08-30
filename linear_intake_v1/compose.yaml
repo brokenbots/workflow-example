@@ -1,0 +1,32 @@
+services:
+  linear-intake:
+    build:
+      context: ..
+      dockerfile: linear_intake_v1/Dockerfile
+    environment:
+      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY}
+      WORKFLOW_GITHUB_TOKEN: ${WORKFLOW_GITHUB_TOKEN:?set WORKFLOW_GITHUB_TOKEN}
+      REVIEWER_GITHUB_TOKEN: ${REVIEWER_GITHUB_TOKEN:?set REVIEWER_GITHUB_TOKEN}
+      TICKET_ID: ${TICKET_ID:?set TICKET_ID}
+      REPO_URL: ${REPO_URL:?set REPO_URL}
+      LINEAR_REVIEW_STATE: ${LINEAR_REVIEW_STATE:-In Review}
+      LINEAR_TRIAGE_STATE: ${LINEAR_TRIAGE_STATE:-Triage}
+      LINEAR_WORK_STATE: ${LINEAR_WORK_STATE:-In Progress}
+      LINEAR_DONE_STATE: ${LINEAR_DONE_STATE:-Done}
+      BASE_BRANCH: ${BASE_BRANCH:-main}
+      BUILD_CMD: ${BUILD_CMD:-}
+      TEST_CMD: ${TEST_CMD:-}
+      CI_GATE_CMD: ${CI_GATE_CMD:-}
+      TEST_REFS: ${TEST_REFS:-both}
+      MAIN_REF: ${MAIN_REF:-origin/main}
+      STABLE_REF: ${STABLE_REF:-}
+      DESIGN_INTENT_FILE: ${DESIGN_INTENT_FILE:-}
+      REPRO_WORKFLOW_DIR: ${REPRO_WORKFLOW_DIR:-}
+      ALLOW_DIRTY: ${ALLOW_DIRTY:-false}
+      MAX_AGENT_VISITS: ${MAX_AGENT_VISITS:-2}
+      PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-http://host.docker.internal:11434/v1}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    security_opt:
+      # Criteria creates per-adapter namespaces and installs its own seccomp filter.
+      - seccomp=unconfined

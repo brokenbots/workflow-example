@@ -9,6 +9,12 @@ variable "max_agent_visits" {
     default     = 2
 }
 
+variable "provider_base_url" {
+    description = "Optional provider base URL override for every agent in the composed workflow. Empty preserves each agent's configured URL."
+    type        = string
+    default     = ""
+}
+
 // Defaults to "" rather than being required: it is referenced from adapter
 // config, which must be resolvable at compile time. A required variable leaves
 // it unknown and the compile fails. Always pass it at apply time.
@@ -32,6 +38,24 @@ variable "linear_review_state" {
     description = "Name of the Linear workflow state the ticket is moved to whenever the run cannot proceed autonomously: unusable ticket, invalid finding, ambiguous triage, or a crashed/failed subworkflow. Resolved by name against the ticket's team (must exist there — e.g. Linear's default \"In Review\", or a custom state like \"Human Review\"); an unknown name fails the run loudly."
     type        = string
     default     = "In Review"
+}
+
+variable "linear_triage_state" {
+    description = "Name of the Linear workflow state set before QA verification begins. Resolved against the ticket's team."
+    type        = string
+    default     = "Triage"
+}
+
+variable "linear_work_state" {
+    description = "Name of the Linear workflow state set immediately before implementation begins. Resolved against the ticket's team."
+    type        = string
+    default     = "In Progress"
+}
+
+variable "linear_done_state" {
+    description = "Name of the Linear workflow state set after the implementation PR has merged. Resolved against the ticket's team."
+    type        = string
+    default     = "Done"
 }
 
 variable "linear_bug_label" {
@@ -116,18 +140,6 @@ variable "allow_dirty" {
     description = "workstream_handler_v1: allow the pair programming loop to run even if the working tree has uncommitted changes."
     type        = bool
     default     = false
-}
-
-variable "reviewer_gh_user" {
-    description = "workstream_handler_v1: GitHub username for the reviewer role (must be pre-configured via gh auth login). Leave empty to skip reviewer credential switching."
-    type        = string
-    default     = ""
-}
-
-variable "coordinator_gh_user" {
-    description = "workstream_handler_v1: GitHub username for the coordinator role: PR creation, feedback triage, thread responses, and merge (must be pre-configured via gh auth login). Leave empty to fall back to whichever account is active at startup."
-    type        = string
-    default     = ""
 }
 
 // ── Agent configs ────────────────────────────────────────────────────────────

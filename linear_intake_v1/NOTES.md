@@ -23,11 +23,8 @@ or canceled Linear state types stop without changing the issue.
 
 ```sh
 export LINEAR_API_KEY=lin_api_...
-export INTAKE_GITHUB_TOKEN=...           # copilot adapter auth for this workflow's agents
-export TRIAGE_GITHUB_TOKEN=...           # qa_triage_v1's agents (investigator, supervisor)
-# workstream_handler_v1 (only reached on valid findings):
-export COORDINATOR_GITHUB_TOKEN=...      # handler root, branch_manager, pair_programming_loop
-export REVIEWER_GITHUB_TOKEN=...         # pr_reviewer_loop
+export WORKFLOW_GITHUB_TOKEN=...          # all GitHub work except PR review
+export REVIEWER_GITHUB_TOKEN=...          # dedicated PR reviewer identity
 
 criteria adapter lock linear_intake_v1   # recursive: locks this dir, both
                                          # subworkflows, and their subworkflows
@@ -36,15 +33,70 @@ criteria apply linear_intake_v1 \
   --var-file varfiles/linear_intake_v1.chcl
 ```
 
-A missing handler token fails the run at `run_handler` with
-`adapter "coordinator" secret "GITHUB_TOKEN": ... "COORDINATOR_GITHUB_TOKEN" is
-not set` and routes the ticket to the review state with a failure comment —
-annoying but safe. The GitHub identities behind those tokens must match
-`coordinator_gh_user` / `reviewer_gh_user` (the handler verifies the active
-`gh auth` account against them).
+A missing token fails at the first adapter that needs it and routes the ticket
+to the review state with a failure comment. Startup resolves both tokens through
+`gh api user` and rejects them when they identify the same account.
 
 Host requirements: `curl`, `jq`, and the subworkflows' own requirements
 (git, gh, build/test tooling for the repo under test).
+
+### Container
+
+The container is the primary operator interface. Copy `.env.example` to a
+private env file, set the three credentials, `TICKET_ID`, and `REPO_URL`,
+then run the ticket workflow with:
+
+```sh
+docker compose --env-file linear_intake_v1/.env \
+  -f linear_intake_v1/compose.yaml run --rm linear-intake
+```
+
+The default Compose run uses no mounts. The entrypoint verifies both identities
+without storing either credential, clones `REPO_URL` to `/repo` with a
+one-command `GH_TOKEN` assignment using the non-review token, writes only
+non-secret workflow settings to a temporary JSON varfile, and runs
+`linear_intake_v1`. A custom deployment
+may instead mount an existing checkout at `REPO_DIR`; cloning is skipped when
+that path is already a Git repository. Without a `/data` volume, run artifacts
+are intentionally ephemeral. Extend the Dockerfile when the target repository
+needs build tools beyond the included Go/Make toolchain.
+`PROVIDER_BASE_URL` defaults to the host's Ollama-compatible endpoint through
+`host.docker.internal` and is passed to every agent in the composed workflow.
+The Dockerfile downloads the architecture-specific Criteria v0.5.9 release,
+verifies its published SHA-256 digest, and installs its bundled adapters. It
+source-builds only the Criteria executable from the pinned v0.5.9 commit with a
+small compatibility patch that passes the resolved OCI adapter path to the
+Linux sandbox shim and retains the container network namespace when policy
+allows egress. Without it, v0.5.9 attempts to execute an empty path and creates
+an empty network namespace. Both amd64 and arm64 builds are supported.
+The Docker build runs `criteria adapter lock` recursively. Adapter references
+and versions come only from the workflow declarations; Criteria verifies their
+signatures and lockfile digests and populates the image's OCI cache. No adapter
+source build or unsigned adapter install is used. Compose sets only
+`seccomp=unconfined` so Criteria can create its nested namespaces; each adapter
+then runs under Criteria's own narrower seccomp policy.
+
+All workflow execution environments use Criteria's sandbox runtime. It scrubs
+token-like host variables before launching an adapter, then the secret channel
+injects only the names declared on that adapter. Coordinator shell and Copilot
+adapters receive `WORKFLOW_GITHUB_TOKEN` as `GH_TOKEN`/`GITHUB_TOKEN`; the PR
+review child receives only `REVIEWER_GITHUB_TOKEN`; the Linear status adapter
+receives only `LINEAR_API_KEY`. No `gh auth login` or identity switching is used.
+
+The executable regression workflow at `tests/credential_isolation` uses
+sentinel values to verify both adapter roles receive their own `GH_TOKEN` and
+cannot see `WORKFLOW_GITHUB_TOKEN`, `REVIEWER_GITHUB_TOKEN`, or
+`LINEAR_API_KEY` from the host environment:
+
+```sh
+docker run --rm --security-opt seccomp=unconfined \
+  --entrypoint /usr/local/bin/criteria \
+  -e LINEAR_API_KEY=linear-sentinel \
+  -e WORKFLOW_GITHUB_TOKEN=workflow-sentinel \
+  -e REVIEWER_GITHUB_TOKEN=reviewer-sentinel \
+  linear_intake_v1-linear-intake:latest \
+  apply /workflows/linear_intake_v1/tests/credential_isolation
+```
 
 ## Layout
 
@@ -86,10 +138,17 @@ permission decision.
   Linear's built-in "In Review"; set it to a custom state (e.g. "Human
   Review") only if that state exists on the team. An unknown name fails the
   step loudly.
-- `LINEAR_API_KEY` must be exported before `criteria apply`. The adapter block
-  also declares it under `secrets`, but whether the shell adapter surfaces
-  declared secrets as command env vars is unverified — export is the reliable
-  path. The key is never interpolated into step input.
+- Classified bugs move to `linear_triage_state` before `qa_triage_v1` starts,
+  so Linear reports `Triage` throughout verification.
+- The parent moves accepted work to `linear_work_state` before invoking the
+  handler and to `linear_done_state` after the handler reports a merged PR.
+- Before every initial PR review or re-review, `workstream_handler_v1` resolves
+  the same state against the ticket's team and moves the ticket there. This
+  keeps Linear in review while GitHub is in review, including feedback cycles.
+- `LINEAR_API_KEY` must be exported before `criteria apply`. The adapter resolves
+  it from the host environment and injects it into the shell command through
+  the secret channel after sandbox scrubbing. The key is never interpolated
+  into step input.
 
 ## Couplings to be aware of
 

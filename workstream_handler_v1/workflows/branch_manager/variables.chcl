@@ -34,6 +34,12 @@ variable "max_repair_visits" {
     default     = 3
 }
 
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the branch repair agent."
+    type        = string
+    default     = ""
+}
+
 variable "repair_agent" {
     type = object({
         model            = string

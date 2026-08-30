@@ -1,0 +1,45 @@
+workflow {
+    name             = "credential_isolation"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "workflow_identity"
+    target_state     = "passed"
+}
+
+step "workflow_identity" {
+    target = adapter.shell.workflow
+    input {
+        command = <<-EOT
+            test "$GH_TOKEN" = "workflow-sentinel"
+            test -z "$${WORKFLOW_GITHUB_TOKEN+x}"
+            test -z "$${REVIEWER_GITHUB_TOKEN+x}"
+            test -z "$${LINEAR_API_KEY+x}"
+        EOT
+    }
+    outcome "success" { next = step.reviewer_identity }
+    outcome "failure" { next = state.failed }
+}
+
+step "reviewer_identity" {
+    target = adapter.shell.reviewer
+    input {
+        command = <<-EOT
+            test "$GH_TOKEN" = "reviewer-sentinel"
+            test -z "$${WORKFLOW_GITHUB_TOKEN+x}"
+            test -z "$${REVIEWER_GITHUB_TOKEN+x}"
+            test -z "$${LINEAR_API_KEY+x}"
+        EOT
+    }
+    outcome "success" { next = state.passed }
+    outcome "failure" { next = state.failed }
+}
+
+state "passed" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

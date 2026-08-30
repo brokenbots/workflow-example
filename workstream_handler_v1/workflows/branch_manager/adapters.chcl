@@ -1,16 +1,25 @@
-environment "shell" "worktree" {
+environment "sandbox" "worktree" {
     working_directory = var.worktree_dir
+    network = {
+        allow = ["*"]
+    }
 }
 
-environment "shell" "primary" {
+environment "sandbox" "primary" {
     working_directory = var.repo_dir
+    network = {
+        allow = ["*"]
+    }
 }
 
 // Branch-scoped git ops run inside the isolated worktree.
 adapter "shell" "sh" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.2"
-    environment = shell.worktree
+    environment = sandbox.worktree
+    secrets {
+        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+    }
 }
 
 // Worktree lifecycle (fetch, worktree add) runs in the repo's primary tree —
@@ -18,23 +27,27 @@ adapter "shell" "sh" {
 adapter "shell" "repo" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.2"
-    environment = shell.primary
+    environment = sandbox.primary
+    secrets {
+        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+    }
 }
 
 adapter "copilot" "branch_repair" {
-    environment = shell.worktree
+    environment = sandbox.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
-        GITHUB_TOKEN = "env:COORDINATOR_GITHUB_TOKEN"
+        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
     }
     config {
         model             = var.repair_agent.model
         max_turns         = "${var.repair_agent.max_turns}"
         reasoning_effort  = var.repair_agent.reasoning_effort
         system_prompt     = file("./agents/branch-repair.md")
-        provider_base_url = var.repair_agent.provider.base_url
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.repair_agent.provider.base_url
         provider_wire_api = var.repair_agent.provider.wire_api
         working_directory = var.worktree_dir
     }

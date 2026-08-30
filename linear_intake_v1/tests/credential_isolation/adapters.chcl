@@ -1,0 +1,21 @@
+environment "sandbox" "probe" {
+    working_directory = "/tmp"
+}
+
+adapter "shell" "workflow" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = sandbox.probe
+    secrets {
+        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+    }
+}
+
+adapter "shell" "reviewer" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = sandbox.probe
+    secrets {
+        GH_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
+    }
+}

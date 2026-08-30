@@ -1,26 +1,33 @@
-environment "shell" "worktree" {
+environment "sandbox" "worktree" {
     working_directory = var.worktree_dir
+    network = {
+        allow = ["*"]
+    }
 }
 
 adapter "shell" "sh" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.2"
-    environment = shell.worktree
+    environment = sandbox.worktree
+    secrets {
+        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+    }
 }
 
 adapter "copilot" "developer" {
-    environment = shell.worktree
+    environment = sandbox.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
-        GITHUB_TOKEN = "env:COORDINATOR_GITHUB_TOKEN"
+        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
     }
     config {
         model             = var.developer.model
         max_turns         = "${var.developer.max_turns}"
         system_prompt     = file("./agents/developer.md")
-        provider_base_url = var.developer.provider.base_url
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.developer.provider.base_url
         provider_wire_api = var.developer.provider.wire_api
         working_directory = var.worktree_dir
     }
@@ -29,19 +36,20 @@ adapter "copilot" "developer" {
 // Review runs on the copilot harness alongside the developer, resolving
 // through the local Ollama endpoint. glm-5.2 is the review model.
 adapter "copilot" "reviewer" {
-    environment = shell.worktree
+    environment = sandbox.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
-        GITHUB_TOKEN = "env:COORDINATOR_GITHUB_TOKEN"
+        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
     }
     config {
         model             = var.reviewer.model
         max_turns         = "${var.reviewer.max_turns}"
         reasoning_effort  = var.reviewer.reasoning_effort
         system_prompt     = file("./agents/reviewer.md")
-        provider_base_url = var.reviewer.provider.base_url
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.reviewer.provider.base_url
         provider_wire_api = var.reviewer.provider.wire_api
         working_directory = var.worktree_dir
     }

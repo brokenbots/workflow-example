@@ -40,15 +40,6 @@ data "internal" "review_result" {
     value = ""
 }
 
-// Effective coordinator GitHub account, resolved once by ensure_coordinator_creds:
-// var.coordinator_gh_user when set, otherwise whichever account was active at
-// startup. The reviewer loop switches away from this and restore_coordinator_creds
-// switches back to it, so coordinator operations always run under a known identity.
-data "internal" "_coordinator_user" {
-    type  = string
-    value = ""
-}
-
 subworkflow "branch_manager" {
     source = "./workflows/branch_manager"
     input = {
@@ -57,6 +48,7 @@ subworkflow "branch_manager" {
         repo_dir        = var.repo_dir
         worktree_dir    = var.worktree_dir
         max_repair_visits = var.max_branch_repair_visits
+        provider_base_url = var.provider_base_url
     }
 }
 
@@ -69,6 +61,7 @@ subworkflow "pr_reviewer_loop" {
         max_poll_visits    = var.max_reviewer_poll_visits
         max_backoff_visits = var.max_reviewer_backoff_visits
         max_review_visits  = var.max_review_visits
+        provider_base_url  = var.provider_base_url
     }
 }
 
@@ -82,6 +75,7 @@ subworkflow "pair_programming_loop" {
         branch_notes    = data.internal.branch_notes.value
         worktree_dir    = var.worktree_dir
         max_agent_visits = var.max_pair_agent_visits
+        provider_base_url = var.provider_base_url
     }
 }
 
@@ -97,6 +91,7 @@ subworkflow "pair_programming_loop_feedback" {
         branch_notes             = data.internal.branch_notes.value
         worktree_dir             = var.worktree_dir
         max_agent_visits         = var.max_pair_agent_visits
+        provider_base_url        = var.provider_base_url
     }
 }
 
@@ -116,7 +111,7 @@ step "read_workstream" {
 step "run_branch_manager" {
     target = subworkflow.branch_manager
     outcome "success" {
-        next = step.ensure_coordinator_creds
+        next = step.check_pr
         write {
             target = data.internal.branch.value
             value  = subworkflow.branch
@@ -124,28 +119,6 @@ step "run_branch_manager" {
         write {
             target = data.internal.branch_notes.value
             value  = subworkflow.stash_report
-        }
-    }
-    outcome "failure" { next = state.failed }
-}
-
-// Activate the coordinator GitHub identity before any coordinator operation
-// (PR status checks, PR creation, developer loop, triage, merge). Resolves the
-// effective coordinator account into _coordinator_user so it can be restored
-// after each reviewer loop. Switching to a configured coordinator_gh_user here
-// also self-heals a gh state left on the wrong account by a previous crashed run.
-step "ensure_coordinator_creds" {
-    target = adapter.shell.sh
-    input {
-        command = templatefile("./scripts/ensure_coordinator_creds.sh.tftpl", {
-            criteria_value_1 = var.coordinator_gh_user
-        })
-    }
-    outcome "success" {
-        next = step.check_pr
-        write {
-            target = data.internal._coordinator_user.value
-            value  = output.stdout
         }
     }
     outcome "failure" { next = state.failed }
@@ -270,24 +243,24 @@ step "create_pr" {
 
 // ── PR review loop ────────────────────────────────────────────────────────────
 
-// Switch gh credentials to the dedicated reviewer account so the PR is not
-// reviewed by the same user who opened it. Skip if reviewer_gh_user is unset.
-// Entry point for all reviewer invocations: initial review, re-review after fixes.
+// Entry point for all reviewer invocations: initial review and re-review after
+// fixes. The child workflow's adapters receive only REVIEWER_GITHUB_TOKEN.
 switch "route_reviewer_creds" {
     match {
-        condition = var.reviewer_gh_user != ""
-        next      = step.switch_to_reviewer
+        condition = var.ticket_id != ""
+        next      = step.set_linear_review_state
     }
     default { next = step.run_pr_reviewer_loop }
 }
 
-// Activate the reviewer identity and verify it took effect before the review
-// runs — a silent failure here would let the coordinator review its own PR.
-step "switch_to_reviewer" {
-    target = adapter.shell.sh
+// Keep Linear aligned with the delivery lifecycle. This step is idempotent and
+// runs before initial review and every re-review after developer changes.
+step "set_linear_review_state" {
+    target = adapter.shell.linear
     input {
-        command = templatefile("./scripts/switch_to_reviewer.sh.tftpl", {
-            criteria_value_1 = var.reviewer_gh_user
+        command = templatefile("./scripts/set_linear_review_state.sh.tftpl", {
+            criteria_value_1 = var.ticket_id
+            criteria_value_2 = var.linear_review_state
         })
     }
     outcome "success" { next = step.run_pr_reviewer_loop }
@@ -300,35 +273,20 @@ step "switch_to_reviewer" {
 step "run_pr_reviewer_loop" {
     target = subworkflow.pr_reviewer_loop
     outcome "success" {
-        next = step.restore_coordinator_creds
+        next = switch.route_pr_reviewer_loop
         write {
             target = data.internal.review_result.value
             value  = subworkflow.review_result
         }
     }
     outcome "failure" {
-        next = step.restore_coordinator_creds
+        next = switch.route_pr_reviewer_loop
         write {
             target = data.internal.review_result.value
             // try(): a child that dies early exposes no outputs at all.
             value  = try(subworkflow.review_result, "")
         }
     }
-}
-
-// Switch back to the coordinator identity (resolved by ensure_coordinator_creds)
-// before any coordinator operation runs, regardless of review outcome. Verify the
-// switch took effect — if we cannot restore the coordinator, fail hard rather than
-// risk running triage/merge/thread-responses under the reviewer account.
-step "restore_coordinator_creds" {
-    target = adapter.shell.sh
-    input {
-        command = templatefile("./scripts/restore_coordinator_creds.sh.tftpl", {
-            criteria_value_1 = data.internal._coordinator_user.value
-        })
-    }
-    outcome "success" { next = switch.route_pr_reviewer_loop }
-    outcome "failure" { next = state.failed }
 }
 
 switch "route_pr_reviewer_loop" {

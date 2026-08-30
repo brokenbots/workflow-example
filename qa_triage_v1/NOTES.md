@@ -101,7 +101,7 @@ Retry budgets are bounded at every gate (`max_visits`).
 ## Running it
 
 ```sh
-export TRIAGE_GITHUB_TOKEN="$(gh auth token)"
+export WORKFLOW_GITHUB_TOKEN="$(gh auth token)"
 
 criteria apply qa_triage_v1 \
   --var bug_report_file=/abs/path/to/report.md \

@@ -12,6 +12,12 @@ variable "repo_dir" {
     default     = ""
 }
 
+variable "provider_base_url" {
+    description = "Optional provider base URL override for all agents in this workflow and its reproduction subworkflows."
+    type        = string
+    default     = ""
+}
+
 // Deliberately OUTSIDE the repository under test. Two things depend on it:
 // agents bind their working directory here (see adapters.chcl), and evidence
 // plus throwaway worktrees are written here. Putting it inside the repo made
