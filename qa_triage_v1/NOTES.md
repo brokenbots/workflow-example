@@ -131,7 +131,7 @@ Locking is not recursive (see
 
 ```sh
 criteria adapter lock qa_triage_v1
-criteria adapter lock qa_triage_v1/repro_runner
+criteria adapter lock qa_triage_v1/workflows/repro_runner
 criteria compile qa_triage_v1
 ```
 

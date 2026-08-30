@@ -1,9 +1,0 @@
-criteria_value_1={{ .criteria_value_1 | shellquote }}
-set -euo pipefail
-url="$criteria_value_1"
-if [ -n "$url" ]; then
-    printf '%s' "$url" | grep -oE 'pull/[0-9]+' | cut -d/ -f2 | tail -1 | tr -d '\n'
-else
-    branch=$(git branch --show-current)
-    gh pr view "$branch" --json number --jq '.number' | tr -d '\n'
-fi

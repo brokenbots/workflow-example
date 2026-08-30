@@ -1,9 +1,0 @@
-criteria_value_1={{ .criteria_value_1 | shellquote }}
-set -euo pipefail
-expected=$(basename "$criteria_value_1" .md)
-current=$(git branch --show-current)
-if [ "$current" != "$expected" ]; then
-    echo "expected branch '$expected' but worktree is on '$current'" >&2
-    exit 1
-fi
-echo "on_branch=$current"

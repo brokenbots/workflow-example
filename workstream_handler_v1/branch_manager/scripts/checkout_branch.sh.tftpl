@@ -1,5 +1,0 @@
-criteria_value_1={{ .criteria_value_1 | shellquote }}
-set -euo pipefail; exec 2>&1
-branch="$criteria_value_1"
-git pull --ff-only origin "$branch" 2>/dev/null || true
-echo "on_branch=$(git branch --show-current)"

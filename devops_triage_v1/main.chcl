@@ -104,7 +104,7 @@ data "internal" "pr_url" {
 // the fourth defending them.
 
 subworkflow "devops_worker" {
-    source = "./devops_worker"
+    source = "./workflows/devops_worker"
     input = {
         brief         = data.internal.worker_brief.value
         worklist_file = "${data.internal.run_dir.value}/evidence/worklist.md"
@@ -291,21 +291,9 @@ step "intake_review" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 0 — INTAKE.
-
-            Request:       ${data.internal.run_dir.value}/evidence/report.md
-            Run context:   ${data.internal.run_dir.value}/evidence/context.md
-            Evidence dir:  ${data.internal.run_dir.value}/evidence
-
-            Decide only whether a devops engineer could begin work from this.
-            Do not diagnose. Do not read source code. Do not plan.
-
-            The request may be a single sentence. That is expected and is not a
-            defect in it — the triage agent discovers the specifics.
-
-            Call submit_outcome with `actionable`, `insufficient`, or `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/intake_review.md.tftpl", {
+            run_dir = data.internal.run_dir.value
+        })
     }
 
     outcome "actionable" { next = step.triage_worklist }
@@ -353,37 +341,16 @@ step "triage_worklist" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            PHASE: DISCOVERY AND WORK LIST.
-
-            Request:       ${data.internal.run_dir.value}/evidence/report.md
-            Run context:   ${data.internal.run_dir.value}/evidence/context.md
-            Evidence dir:  ${data.internal.run_dir.value}/evidence
-
-            Write the work list to
-            ${data.internal.run_dir.value}/evidence/worklist.md
-
-            The request may be a single line. Finding out what it refers to is
-            your job — nobody has run any queries for you. Save what you find
-            into the evidence directory as you go; a claim with no artifact
-            behind it will not survive the manager's review.
-
-            You are in a worktree at ${var.worktree_dir}, on branch
-            ${data.internal.branch.value}, cut from ${var.base_branch}
-            (${data.internal.base_sha.value}).
-
-            Gate command that will run after each work cycle: ${var.ci_gate_cmd}
-            Verification command that will run after the gate:  ${var.verify_cmd}
-
-            Manager feedback on your previous attempt (empty on the first pass):
-            ${data.internal.manager_feedback.value}
-
-            Investigate and specify. Do NOT fix anything, do not edit any file
-            outside the evidence directory, and do not change any remote state.
-
-            Call submit_outcome with `worklist_ready`, `no_action_needed`, or
-            `need_help`.
-        PROMPT
+        prompt = templatefile("./agents/triage_worklist.md.tftpl", {
+            run_dir          = data.internal.run_dir.value
+            worktree_dir     = var.worktree_dir
+            branch           = data.internal.branch.value
+            base_branch      = var.base_branch
+            base_sha         = data.internal.base_sha.value
+            ci_gate_cmd      = var.ci_gate_cmd
+            verify_cmd       = var.verify_cmd
+            manager_feedback = data.internal.manager_feedback.value
+        })
     }
 
     outcome "worklist_ready" { next = step.review_worklist }
@@ -415,31 +382,9 @@ step "review_no_action" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 1 — NO ACTION NEEDED.
-
-            Triage reports that this request needs no change. Its finding:
-            ${data.internal.run_dir.value}/evidence/no-action.md
-
-            Request:       ${data.internal.run_dir.value}/evidence/report.md
-            Run context:   ${data.internal.run_dir.value}/evidence/context.md
-            Evidence dir:  ${data.internal.run_dir.value}/evidence
-
-            This is the conclusion to be most sceptical of: it is also the
-            cheapest one for the agent that would otherwise have had to do the
-            work. Confirm it only if the evidence on disk shows it — that the
-            reported symptom does not occur, that it was already fixed and by
-            what, or that the behavior is deliberate and documented as such.
-
-            "I could not find a problem" is not the same as "there is no
-            problem". If triage did not look, send it back.
-
-            On `confirmed`, your reason is what the requester is told, and it is
-            the whole answer they get. Say what was checked, what was found, and
-            why no change follows.
-
-            Call submit_outcome with `confirmed`, `disputed`, or `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/review_no_action.md.tftpl", {
+            run_dir = data.internal.run_dir.value
+        })
     }
 
     outcome "confirmed" {
@@ -483,37 +428,9 @@ step "review_worklist" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 1 — WORK LIST.
-
-            Work list:     ${data.internal.run_dir.value}/evidence/worklist.md
-            Request:       ${data.internal.run_dir.value}/evidence/report.md
-            Run context:   ${data.internal.run_dir.value}/evidence/context.md
-            Evidence dir:  ${data.internal.run_dir.value}/evidence
-              — everything else in this directory was put there by triage during
-                discovery. It is what its claims must rest on.
-
-            Judge the work list. Do not execute it and do not rewrite it.
-
-            Check every claim about the current state against those artifacts. A
-            claim with nothing behind it was inferred from reading code, and a
-            plausible inference is not an observation.
-
-            On `worklist_approved`, your reason becomes the brief the executing
-            agent is launched with, and it is the only instruction that agent
-            receives. Write it as a directive, not as a verdict on the work list.
-
-            Remote-state changes: if the work list has a REMOTE CHANGES section,
-            that is the set of actions the executor may take outside this
-            worktree. It may take NONE of them unless your brief names them one
-            by one. Anything you do not name, it must report back instead of
-            doing. If an item needs an approval, a credential, or a decision that
-            is not yours, `needs_human` — do not delegate the judgement to the
-            executor by writing "do it if your token permits".
-
-            Call submit_outcome with `worklist_approved`, `worklist_revise`,
-            `worklist_reject`, or `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/review_worklist.md.tftpl", {
+            run_dir = data.internal.run_dir.value
+        })
     }
 
     outcome "worklist_approved" {
@@ -622,42 +539,13 @@ step "validate_state" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            PHASE: STATE VALIDATION.
-
-            Write your report to
-            ${data.internal.run_dir.value}/evidence/state-report.md
-
-            Work list:     ${data.internal.run_dir.value}/evidence/worklist.md
-            Request:       ${data.internal.run_dir.value}/evidence/report.md
-            Verification:  ${data.internal.run_dir.value}/evidence/verify.log
-            Work log:      ${data.internal.run_dir.value}/evidence/work-log.md
-            Evidence dir:  ${data.internal.run_dir.value}/evidence
-
-            The executing agent's own account of the cycle it just finished:
-            ${data.internal.worker_summary.value}
-
-            That account is a claim, not a result. Verify it against the diff
-            and against verify.log. Anything you cannot see in a diff or a log
-            did not happen.
-
-            THIS RUN'S WORK is everything after ${data.internal.run_base_sha.value}:
-              `git log ${data.internal.run_base_sha.value}..HEAD`
-              `git diff ${data.internal.run_base_sha.value}..HEAD`
-            That is the diff to judge, and the only one your "changes not in the
-            work list" section may draw on.
-
-            The branch may also carry earlier commits, back to
-            ${data.internal.base_sha.value} (${var.base_branch}). Those were
-            reviewed and approved by earlier runs. They are context, not scope.
-            Do not report them as unrequested, and do not propose reverting them.
-
-            Go item by item through the work list. Do NOT fix anything, do not
-            edit any file outside the evidence directory, and do not commit.
-
-            Call submit_outcome with `state_complete`, `state_incomplete`, or
-            `state_blocked`.
-        PROMPT
+        prompt = templatefile("./agents/validate_state.md.tftpl", {
+            run_dir        = data.internal.run_dir.value
+            worker_summary = data.internal.worker_summary.value
+            run_base_sha   = data.internal.run_base_sha.value
+            base_sha       = data.internal.base_sha.value
+            base_branch    = var.base_branch
+        })
     }
 
     outcome "state_complete" {
@@ -693,51 +581,14 @@ step "final_review" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 2 — FINAL. You alone decide whether this work is delivered.
-
-            State report:  ${data.internal.run_dir.value}/evidence/state-report.md
-            Work list:     ${data.internal.run_dir.value}/evidence/worklist.md
-            Request:       ${data.internal.run_dir.value}/evidence/report.md
-            Verification:  ${data.internal.run_dir.value}/evidence/verify.log
-            Evidence dir:  ${data.internal.run_dir.value}/evidence
-
-            Triage reports the state as: ${data.internal.triage_state.value}
-
-            Branch ${data.internal.branch.value}, cut from ${var.base_branch}
-            (${data.internal.base_sha.value}).
-
-            Read the diff yourself — and read the RIGHT one:
-              `git diff ${data.internal.run_base_sha.value}..HEAD`
-            That is what this run produced, and it is what you are judging.
-
-            If those two SHAs differ, the branch already carried work when this
-            run began — an earlier run against the same branch and pull request,
-            reviewed and approved at the time. **That work is settled.** It is
-            not in scope, it is not unrequested, and criterion 3 does not apply
-            to it. Never send a brief to revert it: doing so destroys work the
-            operator asked for, and the executing agent has no memory with which
-            to question the instruction.
-
-            The diff is not the whole run. If you authorized changes outside the
-            worktree at GATE 1, query their live state and confirm each landed as
-            authorized and no wider. Then read the executor's report and the
-            evidence directory for anything it changed that you did NOT
-            authorize — remote or on the host. None of that appears in a diff,
-            and this is the only gate positioned to catch it.
-
-            Nothing has been pushed. If you approve, the branch is pushed and
-            delivered by deterministic steps that ask you nothing further, so
-            this is the last point at which the work can be stopped.
-
-            On `needs_work`, your reason is the ENTIRE brief the next executing
-            agent receives — it is a fresh session with no memory of the cycle
-            you just reviewed. Name files, commands, and the required end state.
-            Do not write it as feedback on work the reader cannot remember doing.
-
-            Call submit_outcome with `approved`, `needs_work`, `reject`, or
-            `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/final_review.md.tftpl", {
+            run_dir      = data.internal.run_dir.value
+            triage_state = data.internal.triage_state.value
+            branch       = data.internal.branch.value
+            base_branch  = var.base_branch
+            base_sha     = data.internal.base_sha.value
+            run_base_sha = data.internal.run_base_sha.value
+        })
     }
 
     outcome "approved" {

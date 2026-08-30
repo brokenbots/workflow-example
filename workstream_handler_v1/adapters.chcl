@@ -18,7 +18,7 @@ adapter "copilot" "coordinator" {
     // per-adapter secret and the active `gh` account. That silently collapses
     // the workflow's two-identity separation — the reviewer ends up acting as
     // the PR author and GitHub rejects the approval. Each role therefore reads
-    // a distinctly named variable; see pr_reviewer_loop/adapters.chcl.
+    // a distinctly named variable; see workflows/pr_reviewer_loop/adapters.chcl.
     secrets {
         GITHUB_TOKEN = "env:COORDINATOR_GITHUB_TOKEN"
     }

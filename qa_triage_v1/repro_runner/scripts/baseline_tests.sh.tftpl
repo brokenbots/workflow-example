@@ -1,9 +1,0 @@
-criteria_value_1={{ .criteria_value_1 | shellquote }}
-criteria_value_2={{ .criteria_value_2 | shellquote }}
-criteria_value_3={{ .criteria_value_3 | shellquote }}
-set -uo pipefail
-log="$criteria_value_1/baseline-$criteria_value_2.log"
-mkdir -p "$criteria_value_1"
-$criteria_value_3 > "$log" 2>&1
-rc=$?
-if [ $rc -eq 0 ]; then printf 'clean'; else printf 'already_failing'; fi

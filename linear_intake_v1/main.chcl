@@ -109,23 +109,11 @@ step "classify_ticket" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            Classify Linear ticket ${var.ticket_id} as a bug or feature request.
-
-            Ticket JSON: ${var.intake_root}/${var.ticket_id}/ticket.json
-            Bug report path: ${var.intake_root}/${var.ticket_id}/${var.ticket_id}.md
-            Feature workstream path: ${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md
-            Repository under work: ${var.repo_dir}
-            Human-question note path: ${var.intake_root}/${var.ticket_id}/intake-notes.md
-
-            Treat the ticket state and chronological comments as the durable
-            process history. Rebuild the selected artifact from the complete
-            fetched issue; do not trust or reuse a file left by an earlier run.
-
-            Follow your system prompt. Call submit_outcome with `bug_written`,
-            `confirmed_bug_written`, `feature_written`, `already_complete`, or
-            `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/classify_ticket.md.tftpl", {
+            ticket_id  = var.ticket_id
+            intake_root = var.intake_root
+            repo_dir    = var.repo_dir
+        })
     }
 
     outcome "bug_written" { next = step.set_bug_label }
@@ -254,20 +242,13 @@ step "review_qa_output" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            Review a completed QA triage run and decide the routing for Linear ticket ${var.ticket_id}.
-
-            Triage report: ${var.triage_root}/${var.ticket_id}/evidence/triage-report.md
-            Evidence directory: ${var.triage_root}/${var.ticket_id}/evidence/
-            Verdict recorded by triage: ${data.internal.verdict.value}
-            Workstream file (empty means none was produced): ${data.internal.workstream_file.value}
-
-            Follow your system prompt. Before submitting, write your reasoning
-            to: ${var.intake_root}/${var.ticket_id}/review-notes.md
-
-            Call submit_outcome with `valid_run_handler`, `invalid_close`, or
-            `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/review_qa_output.md.tftpl", {
+            ticket_id       = var.ticket_id
+            triage_root     = var.triage_root
+            verdict         = data.internal.verdict.value
+            workstream_file = data.internal.workstream_file.value
+            intake_root     = var.intake_root
+        })
     }
 
     outcome "valid_run_handler" { next = switch.route_handler }

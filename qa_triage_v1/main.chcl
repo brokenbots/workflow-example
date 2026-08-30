@@ -76,7 +76,7 @@ data "internal" "workstream_file" {
 // them explicit rather than hidden in iteration state.
 
 subworkflow "repro_main" {
-    source = "./repro_runner"
+    source = "./workflows/repro_runner"
     input = {
         ref                = var.main_ref
         ref_label          = "main"
@@ -94,7 +94,7 @@ subworkflow "repro_main" {
 }
 
 subworkflow "repro_stable" {
-    source = "./repro_runner"
+    source = "./workflows/repro_runner"
     input = {
         ref                = data.internal.stable_tag.value
         ref_label          = "stable"
@@ -233,17 +233,9 @@ step "intake_review" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 0 — INTAKE.
-
-            Bug report: ${data.internal.run_dir.value}/evidence/report.md
-            Refs under test: ${data.internal.run_dir.value}/evidence/refs.md
-
-            Decide whether this report contains enough to attempt a reproduction.
-            Do not attempt the reproduction yourself. Do not read source code.
-
-            Call submit_outcome with `actionable`, `insufficient`, or `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/intake_review.md.tftpl", {
+            run_dir = data.internal.run_dir.value
+        })
     }
 
     outcome "actionable" { next = step.plan_repro }
@@ -281,22 +273,13 @@ step "plan_repro" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            Write the reproduction test plan to
-            ${data.internal.run_dir.value}/evidence/plan.md
-
-            Bug report: ${data.internal.run_dir.value}/evidence/report.md
-            Refs under test: ${data.internal.run_dir.value}/evidence/refs.md
-            Provided repro workflow (empty if none): ${var.repro_workflow_dir}
-            Build command: ${var.build_cmd}
-            Test command: ${var.test_cmd}
-
-            Supervisor feedback on your previous attempt (empty on first pass):
-            ${data.internal.supervisor_feedback.value}
-
-            Plan only. Do not execute anything yet. Do not modify the repository.
-            Call submit_outcome with `plan_ready` when plan.md is written.
-        PROMPT
+        prompt = templatefile("./agents/plan_repro.md.tftpl", {
+            run_dir             = data.internal.run_dir.value
+            repro_workflow_dir = var.repro_workflow_dir
+            build_cmd           = var.build_cmd
+            test_cmd            = var.test_cmd
+            supervisor_feedback = data.internal.supervisor_feedback.value
+        })
     }
 
     outcome "plan_ready"  { next = step.review_plan }
@@ -323,17 +306,10 @@ step "review_plan" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 1 — TEST PLAN.
-
-            Plan: ${data.internal.run_dir.value}/evidence/plan.md
-            Bug report: ${data.internal.run_dir.value}/evidence/report.md
-            Provided repro workflow (empty if none): ${var.repro_workflow_dir}
-
-            Judge the plan only. Do not execute it.
-
-            Call submit_outcome with `plan_approved`, `plan_revise`, or `plan_reject`.
-        PROMPT
+        prompt = templatefile("./agents/review_plan.md.tftpl", {
+            run_dir             = data.internal.run_dir.value
+            repro_workflow_dir = var.repro_workflow_dir
+        })
     }
 
     outcome "plan_approved" {
@@ -496,34 +472,14 @@ step "verdict" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 2 — VERDICT.
-
-            Evidence directory: ${data.internal.run_dir.value}/evidence
-            Start with summary.md, then read report.md, plan.md, refs.md, and
-            each run-<label>.md.
-
-            Reproduction results (authoritative — these are the subworkflow's
-            own reported outcomes; if summary.md disagrees with them, these win
-            and you must say so in your reason):
-              main   (${data.internal.main_sha.value}): ${data.internal.repro_main.value}
-              stable (${data.internal.stable_tag.value}): ${data.internal.repro_stable.value}
-
-            Design-intent file (empty if none supplied): ${var.design_intent_file}
-            When a path is given, read it BEFORE applying test 4. Behavior it
-            records as intended is not a defect, however strong the reproduction.
-
-            Apply the verdict matrix and the four evidence tests from your
-            instructions. Judge only what the evidence shows.
-
-            Test 4 is the one this workflow most often gets wrong. Existing
-            implementation and passing tests establish current behavior, not
-            intent. Escalate only when authoritative user-visible contracts
-            conflict or the report does not state required observable behavior.
-
-            Call submit_outcome with `reproduced`, `regression`, `already_fixed`,
-            `not_reproduced`, `insufficient_evidence`, or `needs_human`.
-        PROMPT
+        prompt = templatefile("./agents/verdict.md.tftpl", {
+            run_dir           = data.internal.run_dir.value
+            main_sha          = data.internal.main_sha.value
+            repro_main        = data.internal.repro_main.value
+            stable_tag        = data.internal.stable_tag.value
+            repro_stable      = data.internal.repro_stable.value
+            design_intent_file = var.design_intent_file
+        })
     }
 
     outcome "reproduced" {
@@ -600,24 +556,11 @@ step "draft_workstream" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            Draft the workstream file to
-            ${data.internal.run_dir.value}/evidence/workstream-draft.md
-
-            Verdict: ${data.internal.verdict.value}
-            Evidence directory: ${data.internal.run_dir.value}/evidence
-
-            Supervisor's verdict reasoning and any revision notes:
-            ${data.internal.supervisor_feedback.value}
-
-            Follow the workstream file contract in your instructions exactly.
-            Specify required behavior — never delegate a design decision back to
-            the implementer. If the fix requires a design decision you cannot
-            make from the evidence, call submit_outcome with `needs_design`
-            instead of guessing.
-
-            Call submit_outcome with `draft_ready` or `needs_design`.
-        PROMPT
+        prompt = templatefile("./agents/draft_workstream.md.tftpl", {
+            run_dir             = data.internal.run_dir.value
+            verdict             = data.internal.verdict.value
+            supervisor_feedback = data.internal.supervisor_feedback.value
+        })
     }
 
     outcome "draft_ready"  { next = step.approve_workstream }
@@ -655,22 +598,10 @@ step "approve_workstream" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-PROMPT
-            GATE 3 — FINAL. You alone authorize a workstream file.
-
-            Draft: ${data.internal.run_dir.value}/evidence/workstream-draft.md
-            Evidence directory: ${data.internal.run_dir.value}/evidence
-            Verdict: ${data.internal.verdict.value}
-
-            Verify every claim in the draft is supported by an artifact in the
-            evidence directory. A measurement in the draft that appears nowhere
-            in the evidence is disqualifying.
-
-            Reject any draft that designs a fix rather than specifying required
-            behavior.
-
-            Call submit_outcome with `approved`, `revise`, or `reject`.
-        PROMPT
+        prompt = templatefile("./agents/approve_workstream.md.tftpl", {
+            run_dir = data.internal.run_dir.value
+            verdict = data.internal.verdict.value
+        })
     }
 
     outcome "approved" { next = step.publish_workstream }

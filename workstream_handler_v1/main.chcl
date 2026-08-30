@@ -50,7 +50,7 @@ data "internal" "_coordinator_user" {
 }
 
 subworkflow "branch_manager" {
-    source = "./branch_manager"
+    source = "./workflows/branch_manager"
     input = {
         workstream_file = var.workstream_file
         base_branch     = var.base_branch
@@ -61,7 +61,7 @@ subworkflow "branch_manager" {
 }
 
 subworkflow "pr_reviewer_loop" {
-    source = "./pr_reviewer_loop"
+    source = "./workflows/pr_reviewer_loop"
     input = {
         pr_url          = data.internal.pr_url.value
         workstream_file = var.workstream_file
@@ -73,7 +73,7 @@ subworkflow "pr_reviewer_loop" {
 }
 
 subworkflow "pair_programming_loop" {
-    source = "./pair_programming_loop"
+    source = "./workflows/pair_programming_loop"
     input = {
         workstream_file = var.workstream_file
         ci_gate_cmd     = var.ci_gate_cmd
@@ -87,7 +87,7 @@ subworkflow "pair_programming_loop" {
 
 // Re-uses the same loop with coordinator feedback injected as the initial prompt.
 subworkflow "pair_programming_loop_feedback" {
-    source = "./pair_programming_loop"
+    source = "./workflows/pair_programming_loop"
     input = {
         workstream_file          = var.workstream_file
         ci_gate_cmd              = var.ci_gate_cmd
@@ -378,7 +378,9 @@ step "merge_pr" {
         next = step.triage_pr_feedback
         write {
             target = data.internal.developer_feedback.value
-            value  = "The merge was refused. Diagnose and resolve it before anything else.\n\n${output.stdout}\n\nIf unresolved_threads is non-zero, read each thread: address real findings as code changes, and reply-then-resolve anything already handled or out of scope."
+            value = templatefile("./agents/merge_refused.md.tftpl", {
+                stdout = output.stdout
+            })
         }
     }
 }
@@ -415,29 +417,11 @@ step "triage_pr_feedback" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-EOT
-            The PR at ${data.internal.pr_url.value} for branch '${data.internal.branch.value}' needs attention.
-
-            First, read the workstream file at '${var.workstream_file}' to understand what was being built and what the exit criteria are.
-
-            Then fetch all open (unresolved, not-outdated) review threads and review feedback on the PR using GitHub tools.
-            Also check the PR's CI status in case checks are failing.
-
-            For each piece of feedback decide:
-            - Requires code changes → include in the developer brief with precise instructions (file, function, expected behavior)
-            - Already addressed, out of scope, or dismissable → note your reasoning; you will respond to these in push_and_respond
-
-            If there are code changes the developer must make:
-              Call submit_outcome with outcome "has_work".
-              Write the complete developer brief in the reason field — be specific enough that the developer can execute it without asking clarifying questions.
-              Do NOT include any approval, denial, or sign-off language. Only list the required changes and any relevant technical notes (e.g., additional fixes or decisions taken outside the workstream scope).
-
-            If all comments can be handled by responding in the threads without code changes:
-              Call submit_outcome with outcome "no_work".
-              Describe your response plan in the reason field, again without approval or denial language.
-
-            If something is unrecoverable, call submit_outcome with outcome "failed".
-        EOT
+                prompt = templatefile("./agents/triage_pr_feedback.md.tftpl", {
+                        pr_url          = data.internal.pr_url.value
+                        branch          = data.internal.branch.value
+                        workstream_file = var.workstream_file
+                })
     }
 
     outcome "has_work" {
@@ -472,25 +456,10 @@ step "validate_developer_response" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-EOT
-            The developer has finished a round of work on branch '${data.internal.branch.value}' in response to PR feedback.
-
-            Brief given to the developer:
-            ${data.internal.developer_feedback.value}
-
-            Inspect the latest commits and diffs on the branch. For each requirement in the brief verify:
-            - Was the change implemented?
-            - Is the implementation correct and complete?
-            - Does it actually address the underlying PR comment?
-
-            If every requirement is fully satisfied:
-              Call submit_outcome with outcome "approved".
-              Summarise what was done in the reason field. Do NOT include any approval, denial, or sign-off language — only a concise summary of the actual code changes and any relevant technical notes (e.g., additional fixes or decisions taken outside the workstream scope).
-
-            If any requirements are missing or only partially addressed:
-              Call submit_outcome with outcome "needs_work".
-              In the reason field, write a precise brief covering only what is still missing — the developer will receive this directly. Again, no approval or denial language; only the remaining changes needed.
-        EOT
+                prompt = templatefile("./agents/validate_developer_response.md.tftpl", {
+                        branch             = data.internal.branch.value
+                        developer_feedback = data.internal.developer_feedback.value
+                })
     }
 
     outcome "approved"   { next = step.push_and_respond }
@@ -514,21 +483,10 @@ step "push_and_respond" {
     allow_tools = ["*"]
 
     input {
-        prompt = <<-EOT
-            Push the current branch and close out all open review threads on the PR at ${data.internal.pr_url.value}.
-
-            1. Push the branch: git push origin '${data.internal.branch.value}'
-            2. Fetch every open (unresolved, not-outdated) review thread on the PR via the GitHub GraphQL API.
-            3. For each thread:
-               - If addressed by a developer commit: reply citing the specific commit SHA and file:line, then resolve the thread.
-               - If dismissed by coordinator decision: reply with a clear, professional justification, then resolve the thread.
-            4. Confirm every thread is resolved before finishing.
-
-            Keep all replies factual and technical. Do NOT use approval, denial, or sign-off language (e.g., "approved", "looks good", "passes review"). Only describe what was done, what commit addresses it, or why it was dismissed.
-
-            Call submit_outcome with outcome "success" when all threads are resolved and the push is complete.
-            Call submit_outcome with outcome "failed" if something cannot be completed, with details in the reason.
-        EOT
+        prompt = templatefile("./agents/push_and_respond.md.tftpl", {
+            pr_url = data.internal.pr_url.value
+            branch = data.internal.branch.value
+        })
     }
 
     outcome "success" { next = switch.route_reviewer_creds }
