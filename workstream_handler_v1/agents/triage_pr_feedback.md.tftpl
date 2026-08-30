@@ -1,0 +1,21 @@
+The PR at {{ .pr_url }} for branch '{{ .branch }}' needs attention.
+
+First, read the workstream file at '{{ .workstream_file }}' to understand what was being built and what the exit criteria are.
+
+Then fetch all open (unresolved, not-outdated) review threads and review feedback on the PR using GitHub tools.
+Also check the PR's CI status in case checks are failing.
+
+For each piece of feedback decide:
+- Requires code changes → include in the developer brief with precise instructions (file, function, expected behavior)
+- Already addressed, out of scope, or dismissable → note your reasoning; you will respond to these in push_and_respond
+
+If there are code changes the developer must make:
+  Call submit_outcome with outcome "has_work".
+  Write the complete developer brief in the reason field — be specific enough that the developer can execute it without asking clarifying questions.
+  Do NOT include any approval, denial, or sign-off language. Only list the required changes and any relevant technical notes (e.g., additional fixes or decisions taken outside the workstream scope).
+
+If all comments can be handled by responding in the threads without code changes:
+  Call submit_outcome with outcome "no_work".
+  Describe your response plan in the reason field, again without approval or denial language.
+
+If something is unrecoverable, call submit_outcome with outcome "failed".

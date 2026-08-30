@@ -1,0 +1,14 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail; exec 2>&1
+branch="$criteria_value_1"
+base="$criteria_value_2"
+# Already on $branch inside the isolated worktree — no checkout needed.
+# Stash uncommitted work so the rebase can run; restore_stash pops it back.
+if [ -n "$(git status --porcelain)" ]; then
+    git stash push -u -m criteria-branch-manager-wip
+    echo "stashed uncommitted changes before rebase"
+fi
+fork_point=$(git merge-base HEAD "origin/$base")
+echo "rebase --onto origin/$base from fork_point=$fork_point"
+git rebase --onto "origin/$base" "$fork_point"

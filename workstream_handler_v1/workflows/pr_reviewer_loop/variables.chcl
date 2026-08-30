@@ -1,0 +1,65 @@
+variable "pr_url" {
+    type        = string
+    description = "URL of the GitHub PR to review (e.g. https://github.com/org/repo/pull/42). If omitted, derived from the current branch via gh pr view."
+    default     = ""
+}
+
+variable "workstream_file" {
+    type        = string
+    description = "Path to the workstream markdown file used as the acceptance bar for the reviewer."
+}
+
+variable "worktree_dir" {
+    type        = string
+    description = "Absolute path of the isolated worktree the PR reviewer agent operates in. Empty = process working directory."
+    default     = ""
+}
+
+variable "ci_backoff_seconds" {
+    type        = number
+    description = "Seconds to sleep between CI status polls when checks are still pending."
+    default     = 60
+}
+
+variable "max_poll_visits" {
+    type        = number
+    description = "Maximum PR status checks before failing."
+    default     = 60
+}
+
+variable "max_backoff_visits" {
+    type        = number
+    description = "Maximum CI backoff cycles before failing."
+    default     = 30
+}
+
+variable "max_review_visits" {
+    type        = number
+    description = "Maximum PR reviewer agent attempts."
+    default     = 5
+}
+
+// PR reviewer runs on the copilot adapter, resolving through the local Ollama
+// endpoint. glm-5.2:cloud is the review model.
+variable "pr_reviewer" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.2:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

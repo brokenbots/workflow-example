@@ -1,0 +1,16 @@
+Draft the workstream file to
+{{ .run_dir }}/evidence/workstream-draft.md
+
+Verdict: {{ .verdict }}
+Evidence directory: {{ .run_dir }}/evidence
+
+Supervisor's verdict reasoning and any revision notes:
+{{ .supervisor_feedback }}
+
+Follow the workstream file contract in your instructions exactly.
+Specify required behavior — never delegate a design decision back to
+the implementer. If the fix requires a design decision you cannot
+make from the evidence, call submit_outcome with `needs_design`
+instead of guessing.
+
+Call submit_outcome with `draft_ready` or `needs_design`.

@@ -1,0 +1,13 @@
+GATE 0 — INTAKE.
+
+Request:       {{ .run_dir }}/evidence/report.md
+Run context:   {{ .run_dir }}/evidence/context.md
+Evidence dir:  {{ .run_dir }}/evidence
+
+Decide only whether a devops engineer could begin work from this.
+Do not diagnose. Do not read source code. Do not plan.
+
+The request may be a single sentence. That is expected and is not a
+defect in it — the triage agent discovers the specifics.
+
+Call submit_outcome with `actionable`, `insufficient`, or `needs_human`.

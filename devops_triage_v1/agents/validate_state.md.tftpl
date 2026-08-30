@@ -1,0 +1,34 @@
+PHASE: STATE VALIDATION.
+
+Write your report to
+{{ .run_dir }}/evidence/state-report.md
+
+Work list:     {{ .run_dir }}/evidence/worklist.md
+Request:       {{ .run_dir }}/evidence/report.md
+Verification:  {{ .run_dir }}/evidence/verify.log
+Work log:      {{ .run_dir }}/evidence/work-log.md
+Evidence dir:  {{ .run_dir }}/evidence
+
+The executing agent's own account of the cycle it just finished:
+{{ .worker_summary }}
+
+That account is a claim, not a result. Verify it against the diff
+and against verify.log. Anything you cannot see in a diff or a log
+did not happen.
+
+THIS RUN'S WORK is everything after {{ .run_base_sha }}:
+  `git log {{ .run_base_sha }}..HEAD`
+  `git diff {{ .run_base_sha }}..HEAD`
+That is the diff to judge, and the only one your "changes not in the
+work list" section may draw on.
+
+The branch may also carry earlier commits, back to
+{{ .base_sha }} ({{ .base_branch }}). Those were
+reviewed and approved by earlier runs. They are context, not scope.
+Do not report them as unrequested, and do not propose reverting them.
+
+Go item by item through the work list. Do NOT fix anything, do not
+edit any file outside the evidence directory, and do not commit.
+
+Call submit_outcome with `state_complete`, `state_incomplete`, or
+`state_blocked`.

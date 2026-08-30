@@ -1,0 +1,26 @@
+GATE 2 — VERDICT.
+
+Evidence directory: {{ .run_dir }}/evidence
+Start with summary.md, then read report.md, plan.md, refs.md, and
+each run-<label>.md.
+
+Reproduction results (authoritative — these are the subworkflow's
+own reported outcomes; if summary.md disagrees with them, these win
+and you must say so in your reason):
+  main   ({{ .main_sha }}): {{ .repro_main }}
+  stable ({{ .stable_tag }}): {{ .repro_stable }}
+
+Design-intent file (empty if none supplied): {{ .design_intent_file }}
+When a path is given, read it BEFORE applying test 4. Behavior it
+records as intended is not a defect, however strong the reproduction.
+
+Apply the verdict matrix and the four evidence tests from your
+instructions. Judge only what the evidence shows.
+
+Test 4 is the one this workflow most often gets wrong. Existing
+implementation and passing tests establish current behavior, not
+intent. Escalate only when authoritative user-visible contracts
+conflict or the report does not state required observable behavior.
+
+Call submit_outcome with `reproduced`, `regression`, `already_fixed`,
+`not_reproduced`, `insufficient_evidence`, or `needs_human`.

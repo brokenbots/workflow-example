@@ -1,0 +1,14 @@
+Write the reproduction test plan to
+{{ .run_dir }}/evidence/plan.md
+
+Bug report: {{ .run_dir }}/evidence/report.md
+Refs under test: {{ .run_dir }}/evidence/refs.md
+Provided repro workflow (empty if none): {{ .repro_workflow_dir }}
+Build command: {{ .build_cmd }}
+Test command: {{ .test_cmd }}
+
+Supervisor feedback on your previous attempt (empty on first pass):
+{{ .supervisor_feedback }}
+
+Plan only. Do not execute anything yet. Do not modify the repository.
+Call submit_outcome with `plan_ready` when plan.md is written.

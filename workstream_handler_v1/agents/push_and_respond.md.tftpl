@@ -1,0 +1,13 @@
+Push the current branch and close out all open review threads on the PR at {{ .pr_url }}.
+
+1. Push the branch: git push origin '{{ .branch }}'
+2. Fetch every open (unresolved, not-outdated) review thread on the PR via the GitHub GraphQL API.
+3. For each thread:
+   - If addressed by a developer commit: reply citing the specific commit SHA and file:line, then resolve the thread.
+   - If dismissed by coordinator decision: reply with a clear, professional justification, then resolve the thread.
+4. Confirm every thread is resolved before finishing.
+
+Keep all replies factual and technical. Do NOT use approval, denial, or sign-off language (e.g., "approved", "looks good", "passes review"). Only describe what was done, what commit addresses it, or why it was dismissed.
+
+Call submit_outcome with outcome "success" when all threads are resolved and the push is complete.
+Call submit_outcome with outcome "failed" if something cannot be completed, with details in the reason.

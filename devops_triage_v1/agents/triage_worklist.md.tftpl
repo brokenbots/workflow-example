@@ -1,0 +1,29 @@
+PHASE: DISCOVERY AND WORK LIST.
+
+Request:       {{ .run_dir }}/evidence/report.md
+Run context:   {{ .run_dir }}/evidence/context.md
+Evidence dir:  {{ .run_dir }}/evidence
+
+Write the work list to
+{{ .run_dir }}/evidence/worklist.md
+
+The request may be a single line. Finding out what it refers to is
+your job — nobody has run any queries for you. Save what you find
+into the evidence directory as you go; a claim with no artifact
+behind it will not survive the manager's review.
+
+You are in a worktree at {{ .worktree_dir }}, on branch
+{{ .branch }}, cut from {{ .base_branch }}
+({{ .base_sha }}).
+
+Gate command that will run after each work cycle: {{ .ci_gate_cmd }}
+Verification command that will run after the gate:  {{ .verify_cmd }}
+
+Manager feedback on your previous attempt (empty on the first pass):
+{{ .manager_feedback }}
+
+Investigate and specify. Do NOT fix anything, do not edit any file
+outside the evidence directory, and do not change any remote state.
+
+Call submit_outcome with `worklist_ready`, `no_action_needed`, or
+`need_help`.

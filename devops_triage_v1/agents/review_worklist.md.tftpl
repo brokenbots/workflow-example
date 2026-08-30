@@ -1,0 +1,29 @@
+GATE 1 — WORK LIST.
+
+Work list:     {{ .run_dir }}/evidence/worklist.md
+Request:       {{ .run_dir }}/evidence/report.md
+Run context:   {{ .run_dir }}/evidence/context.md
+Evidence dir:  {{ .run_dir }}/evidence
+  — everything else in this directory was put there by triage during
+    discovery. It is what its claims must rest on.
+
+Judge the work list. Do not execute it and do not rewrite it.
+
+Check every claim about the current state against those artifacts. A
+claim with nothing behind it was inferred from reading code, and a
+plausible inference is not an observation.
+
+On `worklist_approved`, your reason becomes the brief the executing
+agent is launched with, and it is the only instruction that agent
+receives. Write it as a directive, not as a verdict on the work list.
+
+Remote-state changes: if the work list has a REMOTE CHANGES section,
+that is the set of actions the executor may take outside this
+worktree. It may take NONE of them unless your brief names them one
+by one. Anything you do not name, it must report back instead of
+doing. If an item needs an approval, a credential, or a decision that
+is not yours, `needs_human` — do not delegate the judgement to the
+executor by writing "do it if your token permits".
+
+Call submit_outcome with `worklist_approved`, `worklist_revise`,
+`worklist_reject`, or `needs_human`.

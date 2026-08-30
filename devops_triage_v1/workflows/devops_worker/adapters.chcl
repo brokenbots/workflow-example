@@ -1,0 +1,29 @@
+// Everything in this subworkflow happens inside the run's worktree, which the
+// parent created before the first cycle.
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+adapter "shell" "wt" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.2"
+    environment = shell.worktree
+}
+
+adapter "copilot" "devops" {
+    environment = shell.worktree
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.4"
+    secrets {
+        GITHUB_TOKEN = "env:DEVOPS_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.devops.model
+        max_turns         = "${var.devops.max_turns}"
+        reasoning_effort  = var.devops.reasoning_effort
+        system_prompt     = file("./agents/devops.md")
+        provider_base_url = var.devops.provider.base_url
+        provider_wire_api = var.devops.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}

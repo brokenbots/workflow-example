@@ -1,0 +1,50 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail; exec 2>&1
+branch="$criteria_value_1"
+base="$criteria_value_2"
+wt="$criteria_value_3"
+echo "branch=$branch base=$base worktree=$wt"
+
+git fetch origin 2>&1 || true
+git worktree prune 2>&1 || true
+
+# Reuse a worktree already present at this path (resume case). Detect by
+# asking git directly rather than string-matching paths, which differ
+# under symlinks (e.g. /tmp vs /private/tmp on macOS).
+if [ -d "$wt" ]; then
+    if git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "reusing existing worktree at $wt (on '$(git -C "$wt" branch --show-current)')"
+        exit 0
+    fi
+    echo "path $wt exists but is not a git worktree"
+    exit 1
+fi
+
+if git show-ref --verify --quiet "refs/heads/$branch"; then
+    git worktree add --force "$wt" "$branch"
+elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git worktree add --force -b "$branch" "$wt" "origin/$branch"
+elif git show-ref --verify --quiet "refs/remotes/origin/$base"; then
+    git worktree add --force -b "$branch" "$wt" "origin/$base"
+else
+    echo "base_branch_remote_not_found=true using local base as-is"
+    git worktree add --force -b "$branch" "$wt" "$base"
+fi
+
+# If the worktree lives inside the repo, keep it out of the operator's
+# git status via the repo-local exclude (no tracked-file changes).
+# Canonicalize both paths so the prefix test survives symlinks
+# (e.g. /tmp vs /private/tmp on macOS).
+top=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+top_real=$(cd "$top" 2>/dev/null && pwd -P || echo "$top")
+wt_real=$(cd "$wt" 2>/dev/null && pwd -P || echo "$wt")
+case "$wt_real" in
+    "$top_real"/*)
+        rel="${wt_real#$top_real/}"
+        excl=$(git rev-parse --git-path info/exclude)
+        grep -qxF "/$rel" "$excl" 2>/dev/null || printf '/%s\n' "$rel" >> "$excl"
+        ;;
+esac
+echo "worktree_ready=$wt on_branch=$branch"

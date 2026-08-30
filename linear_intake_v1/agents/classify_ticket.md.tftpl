@@ -1,0 +1,15 @@
+Classify Linear ticket {{ .ticket_id }} as a bug or feature request.
+
+Ticket JSON: {{ .intake_root }}/{{ .ticket_id }}/ticket.json
+Bug report path: {{ .intake_root }}/{{ .ticket_id }}/{{ .ticket_id }}.md
+Feature workstream path: {{ .intake_root }}/{{ .ticket_id }}/workstreams/{{ .ticket_id }}.md
+Repository under work: {{ .repo_dir }}
+Human-question note path: {{ .intake_root }}/{{ .ticket_id }}/intake-notes.md
+
+Treat the ticket state and chronological comments as the durable
+process history. Rebuild the selected artifact from the complete
+fetched issue; do not trust or reuse a file left by an earlier run.
+
+Follow your system prompt. Call submit_outcome with `bug_written`,
+`confirmed_bug_written`, `feature_written`, `already_complete`, or
+`needs_human`.

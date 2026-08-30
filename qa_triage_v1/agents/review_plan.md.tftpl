@@ -1,0 +1,9 @@
+GATE 1 — TEST PLAN.
+
+Plan: {{ .run_dir }}/evidence/plan.md
+Bug report: {{ .run_dir }}/evidence/report.md
+Provided repro workflow (empty if none): {{ .repro_workflow_dir }}
+
+Judge the plan only. Do not execute it.
+
+Call submit_outcome with `plan_approved`, `plan_revise`, or `plan_reject`.

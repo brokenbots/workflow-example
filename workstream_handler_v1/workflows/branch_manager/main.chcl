@@ -1,0 +1,329 @@
+workflow {
+    name          = "branch_manager"
+    version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state = "resolve_branch"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 60
+    }
+}
+
+// Internal resolved branch name, prefixed to avoid conflict with var.branch.
+data "internal" "_branch" {
+    type  = string
+    value = ""
+}
+
+// Error output from whichever shell step failed, passed verbatim to the agent.
+data "internal" "triage_context" {
+    type  = string
+    value = ""
+}
+
+// Human-readable note describing any uncommitted work that was stashed to allow
+// a rebase and then restored to the working tree. Reported up to the parent so
+// the developer can be informed. Empty when nothing was stashed.
+data "internal" "stash_report" {
+    type  = string
+    value = ""
+}
+
+// ── Branch name resolution ────────────────────────────────────────────────────
+
+step "resolve_branch" {
+    target = adapter.shell.repo
+    input {
+        command = templatefile("./scripts/resolve_branch.sh.tftpl", {
+            criteria_value_1 = var.branch
+            criteria_value_2 = var.workstream_file
+        })
+    }
+    outcome "success" {
+        next = step.setup_worktree
+        write {
+            target = data.internal._branch.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Isolated worktree setup ───────────────────────────────────────────────────
+//
+// Creates (or reuses) a dedicated git worktree for this run so the workstream
+// never touches the operator's main checkout. Runs in the repo's primary tree
+// (adapter.shell.repo) because the per-run worktree does not exist yet. All
+// subsequent branch-scoped steps run inside the worktree (adapter.shell.sh,
+// working_directory = var.worktree_dir).
+//
+// Branch resolution is folded in here: attach an existing local/remote branch,
+// or create a new one off origin/base. A failure here means the worktree does
+// not exist, so it routes to needs_human rather than the worktree-pinned triage
+// agent.
+
+step "setup_worktree" {
+    target  = adapter.shell.repo
+    timeout = "60s"
+    input {
+        command = templatefile("./scripts/setup_worktree.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+            criteria_value_3 = var.worktree_dir
+        })
+    }
+    outcome "success" { next = step.validate_base_branch }
+    outcome "failure" {
+        next = state.needs_human
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Base branch validation ────────────────────────────────────────────────────
+//
+// Finds the oldest commit on the feature branch not on base_branch, then
+// confirms its parent is an ancestor of base_branch.  An empty unique-commit
+// set (branch is even with base) is also valid.
+//
+//   exit 0 — base branch is correct (or branch has no unique commits)
+//   exit 1 — base branch mismatch
+
+step "validate_base_branch" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/validate_base_branch.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
+    }
+    outcome "success" { next = switch.route_base_validation }
+    outcome "failure" { next = switch.route_base_validation }
+}
+
+switch "route_base_validation" {
+    match {
+        condition = steps.validate_base_branch.exit_code == "0"
+        next      = step.check_rebase_needed
+    }
+    default {
+        next = step.rebase_onto_base
+    }
+}
+
+// ── Rebase-needed check ───────────────────────────────────────────────────────
+//
+//   exit 0 — branch is current, no rebase required
+//   exit 1 — base has advanced, rebase needed
+
+step "check_rebase_needed" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/check_rebase_needed.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
+    }
+    outcome "success" { next = switch.route_rebase_needed }
+    outcome "failure" { next = switch.route_rebase_needed }
+}
+
+switch "route_rebase_needed" {
+    match {
+        condition = steps.check_rebase_needed.exit_code == "0"
+        next      = step.checkout_branch
+    }
+    default {
+        next = step.rebase_branch
+    }
+}
+
+// ── Rebase: bring branch current with base ────────────────────────────────────
+
+step "rebase_branch" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/rebase_branch.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
+    }
+    timeout = "60s"
+    outcome "success" { next = step.restore_stash }
+    outcome "failure" {
+        next = step.skip_merged_rebase_commits
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Skip already-merged commits blocking a rebase ─────────────────────────────
+//
+// When rebase_branch fails, the branch may be stalled on commits that were
+// already squash-merged into origin/base. Such commits are ancestors of
+// origin/base by SHA — git rebase --skip removes them cleanly.
+//
+// Loop: after each skip git may pause on the next commit; keep skipping as long
+// as the failing commit is an ancestor of origin/base. Exit 0 when the rebase
+// completes. Exit 1 (genuine conflict, rebase aborted) routes to the AI agent.
+
+step "skip_merged_rebase_commits" {
+    target  = adapter.shell.sh
+    timeout = "60s"
+    input {
+        command = templatefile("./scripts/skip_merged_rebase_commits.sh.tftpl", {
+            criteria_value_1 = var.base_branch
+        })
+    }
+    outcome "success" { next = step.restore_stash }
+    outcome "failure" {
+        next = step.branch_triage_agent
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Rebase: correct a wrong base branch ──────────────────────────────────────
+
+step "rebase_onto_base" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/rebase_onto_base.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+            criteria_value_2 = var.base_branch
+        })
+    }
+    timeout = "60s"
+    outcome "success" { next = step.restore_stash }
+    outcome "failure" {
+        next = step.branch_triage_agent
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Fast-forward to remote ────────────────────────────────────────────────────
+//
+// No rebase was needed; the worktree is already on $branch. Fast-forward to any
+// new commits on origin/$branch (no-op for a brand-new branch).
+
+step "checkout_branch" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/checkout_branch.sh.tftpl", {
+            criteria_value_1 = data.internal._branch.value
+        })
+    }
+    timeout = "15s"
+    outcome "success" { next = state.done }
+    outcome "failure" {
+        next = step.branch_triage_agent
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Branch triage agent ───────────────────────────────────────────────────────
+//
+// Called when any shell step fails.  The agent diagnoses the situation and
+// performs only mechanical git operations to restore the branch to the happy
+// path.  It does NOT make code changes or do any development work.
+
+step "branch_triage_agent" {
+    target      = adapter.copilot.branch_repair
+    allow_tools = ["*"]
+    max_visits  = var.max_repair_visits
+
+    input {
+                prompt = templatefile("./agents/repair_branch.md.tftpl", {
+                        branch         = data.internal._branch.value
+                        base_branch    = var.base_branch
+                        triage_context = data.internal.triage_context.value
+                })
+    }
+
+    outcome "success"     { next = state.done }
+    outcome "needs_human" { next = state.needs_human }
+    outcome "failed"      { next = state.failed }
+    // "failure" is the copilot adapter's built-in outcome when the provider is
+    // unreachable or the session crashes — treat it as needs_human since the
+    // branch is in an unresolved state that requires manual intervention.
+    outcome "failure"     { next = state.needs_human }
+    outcome "default"     { next = state.needs_human }
+}
+
+// ── Restore stashed work ──────────────────────────────────────────────────────
+//
+// After a successful rebase, pop the WIP stashed by the rebase step back onto
+// the branch so the developer's uncommitted work is preserved in the tree.
+// Captures a report of what was restored for the parent to surface.
+//
+//   exit 0 — stash popped cleanly (or nothing was stashed)
+//   exit 1 — stash pop conflicted; needs resolution
+
+step "restore_stash" {
+    target  = adapter.shell.sh
+    timeout = "30s"
+    input {
+        command = templatefile("./scripts/restore_stash.sh.tftpl", {})
+    }
+    outcome "success" {
+        next = state.done
+        write {
+            target = data.internal.stash_report.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" {
+        next = step.branch_triage_agent
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Mark success ──────────────────────────────────────────────────────────────
+
+// ── Terminal states ───────────────────────────────────────────────────────────
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "needs_human" {
+    terminal = true
+    success  = false
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+output "branch" {
+    type  = string
+    value = data.internal._branch.value
+}
+
+output "base_branch" {
+    type  = string
+    value = var.base_branch
+}
+
+output "stash_report" {
+    type  = string
+    value = data.internal.stash_report.value
+}

@@ -1,0 +1,101 @@
+// Override for the developer's initial prompt. When set, takes priority over
+// var.developer.initial_prompt and the default workstream prompt. Used by the
+// parent workflow to inject coordinator feedback on re-run cycles.
+variable "developer_initial_prompt" {
+    type    = string
+    default = ""
+}
+
+variable "ci_gate_cmd" {
+    type        = string
+    description = "command to run as ci gate, should exit 0 for clean and non-zero for failed. stderr and stdout are sent to the developer on failure. Empty (the default) skips the gate. Mirror what the remote CI runs — an aggregate target often omits gates CI runs separately (e.g. a vulnerability scan), and a gate missing here is one the developer only discovers after the PR is already red (e.g. 'make ci && make vuln-scan')."
+    default     = ""
+}
+
+variable "workstream_file" {
+    type        = string
+    description = "workstream file that agent will use to do work"
+}
+
+variable "worktree_dir" {
+    type        = string
+    description = "Absolute path of the isolated worktree the developer/reviewer agents operate in. Empty = process working directory."
+    default     = ""
+}
+
+variable "log_file" {
+    type        = string
+    description = "path to worklog file, if not set worklog will be kept in /tmp/uuid()/work.log"
+    default     = null
+}
+
+variable "allow_dirty" {
+    type        = bool
+    description = "skip the clean working tree check and proceed even if there are uncommitted changes"
+    default     = false
+}
+
+variable "branch_notes" {
+    type        = string
+    description = "note from the parent (e.g. branch_manager stash report) describing uncommitted work restored to the tree; surfaced to the developer when the tree is dirty"
+    default     = ""
+}
+
+variable "max_agent_visits" {
+    type        = number
+    description = "Maximum attempts for each developer and reviewer gate."
+    default     = 10
+}
+
+variable "developer" {
+    type = object({
+        model            = string
+        max_turns        = number
+        reasoning_effort = optional(string, "")
+        initial_prompt   = optional(string, "")
+        provider = optional(object({
+            base_url     = optional(string, "")
+            api          = optional(string, "")
+            wire_api     = optional(string, "")
+            api_key      = optional(string, "")
+            bearer_token = optional(string, "")
+        }))
+    })
+
+    // kimi-k3:cloud is "extra usage only" on the current Ollama plan;
+    // kimi-k2.7-code:cloud is the latest included kimi and is coding-tuned.
+    default = {
+        model     = "kimi-k2.7-code:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Reviewer runs on the copilot adapter, resolving through the local Ollama
+// endpoint like the developer. glm-5.2:cloud is the review model.
+variable "reviewer" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.2:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

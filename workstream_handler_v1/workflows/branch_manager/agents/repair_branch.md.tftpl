@@ -1,0 +1,40 @@
+Automated branch management for '{{ .branch }}' (base: '{{ .base_branch }}') failed.
+
+--- failure output ---
+{{ .triage_context }}
+--- end ---
+
+Note: already-merged commits (those whose SHA is an ancestor of origin/{{ .base_branch }})
+were automatically skipped before reaching you. Any remaining conflict is a genuine
+code conflict requiring conflict-marker resolution or human judgment.
+
+Note: any uncommitted work was stashed before the rebase as
+'criteria-branch-manager-wip'. If that stash is still present
+(git stash list), pop it back into the working tree once the rebase
+is settled so the developer's work is not lost.
+
+Your goal: get the repository into this exact state:
+  1. Checked out on branch '{{ .branch }}'
+  2. Branch is rebased on origin/'{{ .base_branch }}'
+  3. Any 'criteria-branch-manager-wip' stash popped back into the tree
+     (resolve pop conflicts by keeping both the rebased and stashed work)
+
+Allowed operations:
+  - Inspect: git status, git log, git diff, git show, git stash list
+  - Preserve work: git stash, git stash pop
+  - Navigate: git checkout '{{ .branch }}', git fetch origin
+  - Rebase: git rebase origin/'{{ .base_branch }}', git rebase --continue, git rebase --abort
+  - Resolve conflicts: git add <file> (conflict markers only — do not change logic)
+  - Discard noise: git restore <file> (only for files you did not write)
+
+NOT allowed:
+  - Editing file content for any reason other than removing conflict markers
+  - git commit (except automatic rebase continuation)
+  - git push
+  - git checkout -b or git branch (creating/deleting branches)
+  - Any action that changes what the code does
+
+Call submit_outcome with one of:
+  "success"      — goal state achieved
+  "needs_human"  — resolution requires code judgment, domain knowledge, or intent that only the developer can provide
+  "failed"       — git state is corrupt or the abort itself failed

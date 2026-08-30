@@ -1,0 +1,17 @@
+The developer has finished a round of work on branch '{{ .branch }}' in response to PR feedback.
+
+Brief given to the developer:
+{{ .developer_feedback }}
+
+Inspect the latest commits and diffs on the branch. For each requirement in the brief verify:
+- Was the change implemented?
+- Is the implementation correct and complete?
+- Does it actually address the underlying PR comment?
+
+If every requirement is fully satisfied:
+  Call submit_outcome with outcome "approved".
+  Summarise what was done in the reason field. Do NOT include any approval, denial, or sign-off language — only a concise summary of the actual code changes and any relevant technical notes (e.g., additional fixes or decisions taken outside the workstream scope).
+
+If any requirements are missing or only partially addressed:
+  Call submit_outcome with outcome "needs_work".
+  In the reason field, write a precise brief covering only what is still missing — the developer will receive this directly. Again, no approval or denial language; only the remaining changes needed.

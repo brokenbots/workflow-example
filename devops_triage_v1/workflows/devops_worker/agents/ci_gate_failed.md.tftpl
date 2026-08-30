@@ -1,0 +1,9 @@
+The gate command `{{ .ci_gate_cmd }}` is failing on branch {{ .branch }}. Fix it. Everything you changed so far is already committed — keep going from here, do not start over.
+
+stdout:
+{{ .stdout }}
+
+stderr:
+{{ .stderr }}
+
+Do NOT run git commit, git push, git tag, or gh release. Call submit_outcome with `work_done` or `blocked`.

@@ -1,0 +1,23 @@
+GATE 1 — NO ACTION NEEDED.
+
+Triage reports that this request needs no change. Its finding:
+{{ .run_dir }}/evidence/no-action.md
+
+Request:       {{ .run_dir }}/evidence/report.md
+Run context:   {{ .run_dir }}/evidence/context.md
+Evidence dir:  {{ .run_dir }}/evidence
+
+This is the conclusion to be most sceptical of: it is also the
+cheapest one for the agent that would otherwise have had to do the
+work. Confirm it only if the evidence on disk shows it — that the
+reported symptom does not occur, that it was already fixed and by
+what, or that the behavior is deliberate and documented as such.
+
+"I could not find a problem" is not the same as "there is no
+problem". If triage did not look, send it back.
+
+On `confirmed`, your reason is what the requester is told, and it is
+the whole answer they get. Say what was checked, what was found, and
+why no change follows.
+
+Call submit_outcome with `confirmed`, `disputed`, or `needs_human`.

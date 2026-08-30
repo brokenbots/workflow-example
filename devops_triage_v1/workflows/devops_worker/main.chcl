@@ -1,0 +1,226 @@
+workflow {
+    name          = "devops_worker"
+    version       = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state = "assert_worktree"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 80
+    }
+}
+
+// The executing agent's account of this cycle, returned to the parent for the
+// state validation and the manager's final gate. A claim, not a result — both
+// readers are told to check it against the diff.
+data "internal" "summary" {
+    type  = string
+    value = ""
+}
+
+// The prompt for the current attempt. Starts as the manager's brief and is
+// replaced wholesale by gate output on a retry, so a failing gate is the whole
+// of what the agent is asked to deal with rather than an appendix to a brief it
+// has already acted on.
+data "internal" "agent_prompt" {
+    type  = string
+    value = templatefile("./agents/missing_brief.md.tftpl", {})
+}
+
+// "yes" when the agent reported it cannot proceed. Skips the gate — a gate run
+// against work the agent already said is unfinished tells nobody anything — and
+// hands the cycle back to the manager to decide.
+data "internal" "blocked" {
+    type  = string
+    value = ""
+}
+
+// ── Worktree assertion ───────────────────────────────────────────────────────
+//
+// Assert, never correct. The parent created this worktree on this branch; if it
+// is not there, something upstream is wrong and the right response is to stop.
+// A subworkflow that quietly checks out the branch it expected turns a setup bug
+// into commits on whatever branch it found.
+
+step "assert_worktree" {
+    target  = adapter.shell.wt
+    timeout = "30s"
+    input {
+        command = templatefile("./scripts/assert_worktree.sh.tftpl", {
+            criteria_value_1 = var.branch
+        })
+    }
+    outcome "success" {
+        next = switch.route_brief
+        write {
+            target = data.internal.agent_prompt.value
+            value = templatefile("./agents/execute_cycle.md.tftpl", {
+                branch         = var.branch
+                worktree_dir   = var.worktree_dir
+                brief          = var.brief
+                worklist_file  = var.worklist_file
+                report_file    = var.report_file
+                evidence_dir   = var.evidence_dir
+            })
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// The empty-brief guard is an HCL condition, NOT a shell test.
+//
+// It was `[ -z '${var.brief}' ]` inside the step above, and that killed a real
+// run: the brief is manager-authored prose, an apostrophe in it closed the
+// single quote, and a later `(` parsed as a shell token —
+// `sh: -c: line 13: syntax error near unexpected token '('`.
+//
+// The rule the rest of this workflow already follows for agent text going into
+// a FILE (always a quoted heredoc) applies just as much to agent text going onto
+// a COMMAND LINE. The safest version is not to put it there at all: HCL compares
+// the value without a shell ever seeing it.
+switch "route_brief" {
+    match {
+        condition = var.brief == ""
+        next      = state.failed
+    }
+    default { next = step.execute }
+}
+
+// ── Execute ──────────────────────────────────────────────────────────────────
+//
+// max_visits bounds the execute <-> gate cycle within this one worker run. The
+// parent bounds how many worker runs happen at all, so a stuck job terminates at
+// both levels.
+
+step "execute" {
+    target      = adapter.copilot.devops
+    max_visits  = var.max_visits
+    allow_tools = ["*"]
+
+    input {
+        prompt = data.internal.agent_prompt.value
+    }
+
+    outcome "work_done" {
+        next = step.write_work_log
+        write {
+            target = data.internal.summary.value
+            value  = output.reason
+        }
+    }
+    outcome "blocked" {
+        next = step.write_work_log
+        write {
+            target = data.internal.summary.value
+            value  = "BLOCKED — the executing agent reported it could not complete this cycle:\n\n${output.reason}"
+        }
+        write {
+            target = data.internal.blocked.value
+            value  = "yes"
+        }
+    }
+    // The copilot adapter emits "failure" if the session dies or the agent never
+    // calls submit_outcome after re-prompts. Any uncommitted work is left in the
+    // worktree; the parent keeps that worktree on a failed cycle.
+    outcome "need_help" { next = state.failed }
+    outcome "failure"   { next = state.failed }
+    outcome "default"   { next = state.failed }
+}
+
+step "write_work_log" {
+    target = adapter.shell.wt
+    input {
+        command = templatefile("./scripts/write_work_log.sh.tftpl", {
+            criteria_value_1 = var.evidence_dir
+            criteria_value_2 = data.internal.summary.value
+        })
+    }
+    outcome "success" { next = step.commit_cycle }
+    outcome "failure" { next = step.commit_cycle }
+}
+
+// ── Deterministic commit ─────────────────────────────────────────────────────
+//
+// The agent is told not to commit and does not need to: staging and committing
+// a cycle is identical every time, so it is done here. That removes the whole
+// "you forgot to commit, go back and commit" loop, and it removes the class of
+// cycle where an agent commits a subset of its own work and reports all of it.
+//
+// One commit per cycle. The cycle boundary is a real boundary — it is what the
+// manager reviews — so it is worth having it visible in the history.
+
+step "commit_cycle" {
+    target  = adapter.shell.wt
+    timeout = "60s"
+    input {
+        command = templatefile("./scripts/commit_cycle.sh.tftpl", {
+            criteria_value_1 = var.base_branch
+            criteria_value_2 = var.branch
+        })
+    }
+    outcome "success" { next = switch.route_gate }
+    outcome "failure" { next = switch.route_gate }
+}
+
+switch "route_gate" {
+    match {
+        condition = data.internal.blocked.value == "yes"
+        next      = state.done
+    }
+    match {
+        condition = var.ci_gate_cmd == ""
+        next      = state.done
+    }
+    default { next = step.ci_gate }
+}
+
+// The gate is the only thing in this loop that can send the agent back, and it
+// is deterministic. A reviewer agent here would be a third opinion on work two
+// agents upstream already judge; a command that exits non-zero is not an
+// opinion.
+step "ci_gate" {
+    target  = adapter.shell.wt
+    timeout = "1800s"
+    input {
+        command = var.ci_gate_cmd
+    }
+
+    outcome "success" { next = state.done }
+
+    outcome "failure" {
+        next = step.execute
+        write {
+            target = data.internal.agent_prompt.value
+            value = templatefile("./agents/ci_gate_failed.md.tftpl", {
+                ci_gate_cmd = var.ci_gate_cmd
+                branch      = var.branch
+                stdout      = output.stdout
+                stderr      = output.stderr
+            })
+        }
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// Declared outputs. `data "internal"` alone is NOT visible to the parent as
+// `subworkflow.<name>` — without these blocks the parent's
+// try(subworkflow.summary, "") silently takes the fallback and every cycle
+// reports nothing regardless of what actually happened.
+output "summary" {
+    type  = string
+    value = data.internal.summary.value
+}
+
+output "blocked" {
+    type  = string
+    value = data.internal.blocked.value
+}

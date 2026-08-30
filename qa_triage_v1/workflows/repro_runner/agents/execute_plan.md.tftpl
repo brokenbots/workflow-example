@@ -1,0 +1,17 @@
+Execute the approved plan against this ref and write your findings to
+{{ .evidence_dir }}/run-{{ .ref_label }}.md
+
+Ref under test: {{ .ref }} ({{ .ref_display }})
+Arm: {{ .ref_label }}
+Worktree (you are already in it): {{ .worktree_dir }}
+Plan: {{ .evidence_dir }}/plan.md
+Bug report: {{ .evidence_dir }}/report.md
+Baseline suite health at this ref: {{ .baseline_health }}
+Provided reproduction log (empty if none was supplied):
+{{ .evidence_dir }}/provided-{{ .ref_label }}.log
+
+Record every shape you tried, including the ones that did NOT
+reproduce. Do not fix anything. Do not commit.
+
+Call submit_outcome with `reproduced`, `not_reproduced`, or
+`inconclusive`.

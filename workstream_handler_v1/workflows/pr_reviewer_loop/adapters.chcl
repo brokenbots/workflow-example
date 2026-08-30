@@ -1,0 +1,39 @@
+environment "shell" "worktree" {
+    working_directory = var.worktree_dir
+}
+
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.2"
+    environment = shell.worktree
+}
+
+// PR review runs on the copilot harness, resolving through the local Ollama
+// endpoint. glm-5.2 is the review model.
+adapter "copilot" "pr_reviewer" {
+    environment = shell.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.4"
+    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    //
+    // This adapter must authenticate as the *reviewer*, not the coordinator.
+    // The workflow's two-identity separation is enforced at the shell level by
+    // `gh auth switch`, but an agent adapter carries its own token and ignores
+    // the active gh account — so sharing one GITHUB_TOKEN across all copilot
+    // instances makes the reviewer act as the PR author, and GitHub rejects
+    // self-approval. REVIEWER_GITHUB_TOKEN must be set in the environment and
+    // must hold a token for var.reviewer_gh_user; set it to the same value as
+    // GITHUB_TOKEN for single-identity setups.
+    secrets {
+        GITHUB_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
+    }
+    config {
+        model             = var.pr_reviewer.model
+        max_turns         = "${var.pr_reviewer.max_turns}"
+        reasoning_effort  = var.pr_reviewer.reasoning_effort
+        system_prompt     = file("./agents/pr_reviewer.md")
+        provider_base_url = var.pr_reviewer.provider.base_url
+        provider_wire_api = var.pr_reviewer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
