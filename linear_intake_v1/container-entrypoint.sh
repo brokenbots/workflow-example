@@ -44,6 +44,8 @@ if [ "$workflow_user" = "$reviewer_user" ]; then
 fi
 
 git config --global credential.https://github.com.helper '!gh auth git-credential'
+git config --global user.name "$workflow_user"
+git config --global user.email "$workflow_user@users.noreply.github.com"
 
 if ! git -C "$REPO_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
     : "${REPO_URL:?REPO_URL is required when REPO_DIR is not a Git repository}"

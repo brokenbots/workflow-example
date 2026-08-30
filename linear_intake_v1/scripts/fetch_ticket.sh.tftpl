@@ -14,7 +14,9 @@ case "$ticket_id" in
 esac
 
 run_dir="$intake_root/$ticket_id"
-mkdir -p "$run_dir/workstreams"
+if [ ! -d "$run_dir/workstreams" ]; then
+    mkdir "$run_dir/workstreams"
+fi
 
 # Linear's issue(id:) accepts the human identifier ("CRI-32") in
 # place of the UUID.

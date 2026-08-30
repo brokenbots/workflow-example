@@ -30,12 +30,17 @@ data "internal" "review_result" {
     value = ""
 }
 
+data "internal" "_review_body" {
+    type  = string
+    value = ""
+}
+
 // ── PR number resolution ──────────────────────────────────────────────────────
 // Accept a full PR URL (e.g. https://github.com/org/repo/pull/42, or a
 // multi-line string that contains such a URL) or fall back to the current branch.
 
 step "resolve_pr_number" {
-    target = adapter.shell.sh
+    target = adapter.shell.reviewer
     input {
         command = templatefile("./scripts/resolve_pr_number.sh.tftpl", {
             criteria_value_1 = var.pr_url
@@ -62,7 +67,7 @@ step "resolve_pr_number" {
 //   status:checks_failed      — required CI check failed; escalate
 
 step "check_pr_status" {
-    target     = adapter.shell.sh
+    target     = adapter.shell.reviewer
     timeout    = "120s"
     max_visits = var.max_poll_visits
     input {
@@ -119,7 +124,7 @@ switch "route_pr_status" {
 // ── CI backoff ────────────────────────────────────────────────────────────────
 
 step "backoff" {
-    target     = adapter.shell.sh
+    target     = adapter.shell.reviewer
     timeout    = "300s"
     max_visits = var.max_backoff_visits
     input {
@@ -149,21 +154,55 @@ step "pr_review" {
     }
 
     outcome "approve" {
-        next = state.approved
+        next = step.post_approval
         write {
             target = data.internal.review_result.value
             value  = "approved"
         }
+        write {
+            target = data.internal._review_body.value
+            value  = output.reason
+        }
     }
     outcome "changes_requested" {
-        next = state.changes_requested
+        next = step.post_changes_requested
         write {
             target = data.internal.review_result.value
             value  = "changes_requested"
         }
+        write {
+            target = data.internal._review_body.value
+            value  = output.reason
+        }
     }
     outcome "failure"           { next = state.failed }
     outcome "default"           { next = state.failed }
+}
+
+step "post_approval" {
+    target = adapter.shell.reviewer
+    input {
+        command = templatefile("./scripts/post_review.sh.tftpl", {
+            criteria_value_1 = data.internal._pr_number.value
+            criteria_value_2 = "APPROVE"
+            criteria_value_3 = data.internal._review_body.value
+        })
+    }
+    outcome "success" { next = state.approved }
+    outcome "failure" { next = state.failed }
+}
+
+step "post_changes_requested" {
+    target = adapter.shell.reviewer
+    input {
+        command = templatefile("./scripts/post_review.sh.tftpl", {
+            criteria_value_1 = data.internal._pr_number.value
+            criteria_value_2 = "REQUEST_CHANGES"
+            criteria_value_3 = data.internal._review_body.value
+        })
+    }
+    outcome "success" { next = state.changes_requested }
+    outcome "failure" { next = state.failed }
 }
 
 // ── Terminal states ───────────────────────────────────────────────────────────

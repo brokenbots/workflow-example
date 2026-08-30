@@ -359,14 +359,14 @@ step "run_repro_main" {
         next = switch.route_after_main
         write {
             target = data.internal.repro_main.value
-            value  = try(subworkflow.reproduced, "inconclusive")
+            value  = subworkflow.reproduced != null ? subworkflow.reproduced : "inconclusive"
         }
     }
     outcome "failure" {
         next = switch.route_after_main
         write {
             target = data.internal.repro_main.value
-            value  = try(subworkflow.reproduced, "inconclusive")
+            value  = subworkflow.reproduced != null ? subworkflow.reproduced : "inconclusive"
         }
     }
 }
@@ -407,14 +407,14 @@ step "run_repro_stable" {
         next = step.aggregate_evidence
         write {
             target = data.internal.repro_stable.value
-            value  = try(subworkflow.reproduced, "inconclusive")
+            value  = subworkflow.reproduced != null ? subworkflow.reproduced : "inconclusive"
         }
     }
     outcome "failure" {
         next = step.aggregate_evidence
         write {
             target = data.internal.repro_stable.value
-            value  = try(subworkflow.reproduced, "inconclusive")
+            value  = subworkflow.reproduced != null ? subworkflow.reproduced : "inconclusive"
         }
     }
 }

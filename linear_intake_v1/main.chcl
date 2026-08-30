@@ -214,22 +214,22 @@ step "run_qa_triage" {
         next = switch.route_qa_result
         write {
             target = data.internal.verdict.value
-            value  = subworkflow.verdict
+            value  = subworkflow.verdict != null ? subworkflow.verdict : ""
         }
         write {
             target = data.internal.workstream_file.value
-            value  = subworkflow.workstream_file
+            value  = subworkflow.workstream_file != null ? subworkflow.workstream_file : ""
         }
     }
     outcome "failure" {
         next = switch.route_qa_result
         write {
             target = data.internal.verdict.value
-            value  = subworkflow.verdict
+            value  = subworkflow.verdict != null ? subworkflow.verdict : ""
         }
         write {
             target = data.internal.workstream_file.value
-            value  = subworkflow.workstream_file
+            value  = subworkflow.workstream_file != null ? subworkflow.workstream_file : ""
         }
     }
 }

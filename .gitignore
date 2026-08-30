@@ -1,5 +1,2 @@
-bug_reports/**
-workstreams/**
+.env
 varfiles/*.chcl
-ops_reports
-DESIGN-INTENT.md

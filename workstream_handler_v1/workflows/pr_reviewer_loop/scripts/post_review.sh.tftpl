@@ -1,0 +1,19 @@
+set -euo pipefail
+
+pr_number={{ .criteria_value_1 | shellquote }}
+event={{ .criteria_value_2 | shellquote }}
+body={{ .criteria_value_3 | shellquote }}
+
+reviewer=$(gh api user --jq .login)
+author=$(gh pr view "$pr_number" --json author --jq .author.login)
+if [ "$reviewer" = "$author" ]; then
+    echo "reviewer identity matches PR author: $reviewer" >&2
+    exit 1
+fi
+
+gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" \
+    -X POST \
+    -f event="$event" \
+    -f body="$body" >/dev/null
+
+echo "review posted by $reviewer"

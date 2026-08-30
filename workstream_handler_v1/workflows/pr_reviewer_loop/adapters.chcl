@@ -5,7 +5,7 @@ environment "sandbox" "worktree" {
     }
 }
 
-adapter "shell" "sh" {
+adapter "shell" "reviewer" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.2"
     environment = sandbox.worktree

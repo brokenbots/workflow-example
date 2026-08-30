@@ -4,6 +4,10 @@
 // adapter sets as subworkflows.
 environment "sandbox" "intake" {
     working_directory = var.intake_root
+    filesystem = {
+        read  = ["/"]
+        write = ["/data", "/tmp", "/dev", "/home/criteria"]
+    }
     network = {
         allow = ["*"]
     }

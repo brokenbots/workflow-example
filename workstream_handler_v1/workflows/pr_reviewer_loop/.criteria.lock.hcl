@@ -13,7 +13,7 @@ adapter "copilot" "pr_reviewer" {
     }
   }
 }
-adapter "shell" "sh" {
+adapter "shell" "reviewer" {
   reference            = "ghcr.io/brokenbots/criteria-adapter-shell:0.5.2"
   version              = "0.5.2"
   resolved_digest      = "sha256:38f23c92a11548ce57c54e9312c567558d3ad017fd632adfba305b058988703d"

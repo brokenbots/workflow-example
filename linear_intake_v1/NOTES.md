@@ -54,7 +54,8 @@ docker compose --env-file linear_intake_v1/.env \
 The default Compose run uses no mounts. The entrypoint verifies both identities
 without storing either credential, clones `REPO_URL` to `/repo` with a
 one-command `GH_TOKEN` assignment using the non-review token, writes only
-non-secret workflow settings to a temporary JSON varfile, and runs
+non-secret workflow settings to a temporary JSON varfile, configures Git commit
+identity from the non-review GitHub login, and runs
 `linear_intake_v1`. A custom deployment
 may instead mount an existing checkout at `REPO_DIR`; cloning is skipped when
 that path is already a Git repository. Without a `/data` volume, run artifacts
@@ -62,13 +63,19 @@ are intentionally ephemeral. Extend the Dockerfile when the target repository
 needs build tools beyond the included Go/Make toolchain.
 `PROVIDER_BASE_URL` defaults to the host's Ollama-compatible endpoint through
 `host.docker.internal` and is passed to every agent in the composed workflow.
-The Dockerfile downloads the architecture-specific Criteria v0.5.9 release,
-verifies its published SHA-256 digest, and installs its bundled adapters. It
-source-builds only the Criteria executable from the pinned v0.5.9 commit with a
-small compatibility patch that passes the resolved OCI adapter path to the
-Linux sandbox shim and retains the container network namespace when policy
-allows egress. Without it, v0.5.9 attempts to execute an empty path and creates
-an empty network namespace. Both amd64 and arm64 builds are supported.
+The Dockerfile installs the published, architecture-specific Criteria v0.5.11
+release after verifying the archive against that release's `SHA256SUMS` file.
+Version updates therefore change only `CRITERIA_VERSION`; the matching archive
+digest is selected from the release manifest at build time. It does not compile
+or patch Criteria, adapters, or any other software. Both amd64 and arm64 are
+supported. Criteria state and locked adapters use the current
+`/home/criteria/.local/criteria` root rather than the legacy `~/.criteria` path.
+The image also installs GitHub CLI, the pinned GitHub Copilot and Linear CLIs,
+and common Go repository development tools. It uses a glibc-based image because
+the Copilot CLI native addon does not load reliably on Alpine/musl. `/bin/sh`
+resolves to Bash because the shell adapter invokes `sh -c` and the workflow
+scripts require `pipefail`. Compose selects concise output explicitly so step
+outcomes and terminal failures remain visible in a non-TTY stream.
 The Docker build runs `criteria adapter lock` recursively. Adapter references
 and versions come only from the workflow declarations; Criteria verifies their
 signatures and lockfile digests and populates the image's OCI cache. No adapter

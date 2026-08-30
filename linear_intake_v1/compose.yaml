@@ -3,6 +3,7 @@ services:
     build:
       context: ..
       dockerfile: linear_intake_v1/Dockerfile
+    command: ["--output", "concise"]
     environment:
       LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY}
       WORKFLOW_GITHUB_TOKEN: ${WORKFLOW_GITHUB_TOKEN:?set WORKFLOW_GITHUB_TOKEN}
