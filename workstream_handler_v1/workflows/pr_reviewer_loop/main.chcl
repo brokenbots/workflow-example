@@ -233,3 +233,8 @@ output "review_result" {
     type  = string
     value = data.internal.review_result.value
 }
+
+output "status_output" {
+    type  = string
+    value = data.internal._status_output.value
+}

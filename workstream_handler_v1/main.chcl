@@ -40,6 +40,11 @@ data "internal" "review_result" {
     value = ""
 }
 
+data "internal" "review_status_output" {
+    type  = string
+    value = ""
+}
+
 subworkflow "branch_manager" {
     source = "./workflows/branch_manager"
     input = {
@@ -278,6 +283,10 @@ step "run_pr_reviewer_loop" {
             target = data.internal.review_result.value
             value  = subworkflow.review_result
         }
+        write {
+            target = data.internal.review_status_output.value
+            value  = subworkflow.status_output
+        }
     }
     outcome "failure" {
         next = switch.route_pr_reviewer_loop
@@ -285,6 +294,10 @@ step "run_pr_reviewer_loop" {
             target = data.internal.review_result.value
             // try(): a child that dies early exposes no outputs at all.
             value  = try(subworkflow.review_result, "")
+        }
+        write {
+            target = data.internal.review_status_output.value
+            value  = try(subworkflow.status_output, "")
         }
     }
 }
@@ -379,6 +392,7 @@ step "triage_pr_feedback" {
                         pr_url          = data.internal.pr_url.value
                         branch          = data.internal.branch.value
                         workstream_file = var.workstream_file
+                    status_output   = data.internal.review_status_output.value
                 })
     }
 

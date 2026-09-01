@@ -1,9 +1,19 @@
 The PR at {{ .pr_url }} for branch '{{ .branch }}' needs attention.
 
+Latest CI/review status:
+```
+{{ .status_output }}
+```
+
 First, read the workstream file at '{{ .workstream_file }}' to understand what was being built and what the exit criteria are.
 
 Then fetch all open (unresolved, not-outdated) review threads and review feedback on the PR using GitHub tools.
 Also check the PR's CI status in case checks are failing.
+
+If the status above reports `status:checks_failed`, every listed `failing_check`
+is developer work even when there are no review comments. Inspect the failing
+check output and return `has_work` with a precise remediation and validation
+brief. Do not return `no_work` while a check is failing.
 
 For each piece of feedback decide:
 - Requires code changes → include in the developer brief with precise instructions (file, function, expected behavior)
