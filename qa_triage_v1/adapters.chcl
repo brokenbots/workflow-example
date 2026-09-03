@@ -28,7 +28,7 @@ adapter "shell" "repo" {
     version     = "0.5.2"
     environment = sandbox.primary
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.WORKFLOW_GITHUB_TOKEN
     }
 }
 
@@ -44,8 +44,8 @@ adapter "copilot" "investigator" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.WORKFLOW_GITHUB_TOKEN
+        GH_TOKEN     = var.WORKFLOW_GITHUB_TOKEN
     }
     config {
         model             = var.investigator.model
@@ -66,8 +66,8 @@ adapter "copilot" "supervisor" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.WORKFLOW_GITHUB_TOKEN
+        GH_TOKEN     = var.WORKFLOW_GITHUB_TOKEN
     }
     config {
         model             = var.supervisor.model

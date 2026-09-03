@@ -95,3 +95,10 @@ variable "investigator" {
         }
     }
 }
+
+variable "WORKFLOW_GITHUB_TOKEN" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "GitHub token for the workflow identity. Resolved from the host environment and referenced by adapter secret bindings."
+}

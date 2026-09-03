@@ -24,7 +24,7 @@ adapter "shell" "intake" {
     version     = "0.5.2"
     environment = sandbox.intake
     secrets {
-        LINEAR_API_KEY = "env:LINEAR_API_KEY"
+        LINEAR_API_KEY = var.LINEAR_API_KEY
     }
 }
 
@@ -36,8 +36,8 @@ adapter "copilot" "intake_classifier" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.WORKFLOW_GITHUB_TOKEN
+        GH_TOKEN     = var.WORKFLOW_GITHUB_TOKEN
     }
     config {
         model             = var.intake_classifier.model
@@ -57,8 +57,8 @@ adapter "copilot" "triage_reviewer" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.WORKFLOW_GITHUB_TOKEN
+        GH_TOKEN     = var.WORKFLOW_GITHUB_TOKEN
     }
     config {
         model             = var.triage_reviewer.model

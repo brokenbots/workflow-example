@@ -7,7 +7,7 @@ adapter "shell" "workflow" {
     version     = "0.5.2"
     environment = sandbox.probe
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.WORKFLOW_GITHUB_TOKEN
     }
 }
 
@@ -16,6 +16,6 @@ adapter "shell" "reviewer" {
     version     = "0.5.2"
     environment = sandbox.probe
     secrets {
-        GH_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
+        GH_TOKEN = var.REVIEWER_GITHUB_TOKEN
     }
 }

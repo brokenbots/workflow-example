@@ -18,7 +18,7 @@ adapter "shell" "sh" {
     version = "0.5.2"
     environment = sandbox.worktree
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.WORKFLOW_GITHUB_TOKEN
     }
 }
 
@@ -29,7 +29,7 @@ adapter "shell" "repo" {
     version = "0.5.2"
     environment = sandbox.primary
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.WORKFLOW_GITHUB_TOKEN
     }
 }
 
@@ -39,8 +39,8 @@ adapter "copilot" "branch_repair" {
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.WORKFLOW_GITHUB_TOKEN
+        GH_TOKEN     = var.WORKFLOW_GITHUB_TOKEN
     }
     config {
         model             = var.repair_agent.model

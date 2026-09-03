@@ -1,0 +1,11 @@
+criteria_value_1={{ .intake_root | shellquote }}
+criteria_value_2={{ .ticket_id | shellquote }}
+set -euo pipefail
+intake_root="$criteria_value_1"
+ticket_id="$criteria_value_2"
+
+if [ -f "${intake_root}/${ticket_id}/approved-plan.md" ]; then
+    echo "true"
+else
+    echo "false"
+fi

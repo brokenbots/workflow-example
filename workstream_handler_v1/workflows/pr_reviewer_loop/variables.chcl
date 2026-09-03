@@ -69,3 +69,10 @@ variable "pr_reviewer" {
         }
     }
 }
+
+variable "REVIEWER_GITHUB_TOKEN" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "GitHub token for the reviewer identity. Resolved from the host environment and referenced by adapter secret bindings."
+}

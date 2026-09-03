@@ -35,6 +35,13 @@ data "internal" "pr_url" {
     value = ""
 }
 
+// Set to "true" when a durable approved plan from a previous run is detected
+// for this ticket. Used to skip re-running the intake classifier on retry.
+data "internal" "approved_plan_exists" {
+    type  = string
+    value = "false"
+}
+
 // ── Subworkflows ─────────────────────────────────────────────────────────────
 // Both are siblings of this directory, referenced by relative path and locked
 // recursively by `criteria adapter lock` from this directory.
@@ -59,6 +66,8 @@ subworkflow "qa_triage" {
         investigator       = var.investigator
         supervisor         = var.supervisor
         provider_base_url  = var.provider_base_url
+        intake_root        = var.intake_root
+        approved_plan_file = "${var.intake_root}/${var.ticket_id}/approved-plan.md"
     }
 }
 
@@ -97,8 +106,37 @@ step "fetch_ticket" {
             ticket_id = var.ticket_id
         })
     }
-    outcome "success" { next = step.classify_ticket }
+    outcome "success" { next = step.check_approved_plan }
     outcome "failure" { next = state.ticket_not_found }
+}
+
+// On a same-ticket retry a supervisor-approved plan may already be persisted
+// in durable storage. Detect it before paying for intake classification, and
+// resume QA triage directly if it exists.
+step "check_approved_plan" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/check_approved_plan.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+    }
+    outcome "success" {
+        next = switch.route_after_fetch
+        write {
+            target = data.internal.approved_plan_exists.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+switch "route_after_fetch" {
+    match {
+        condition = data.internal.approved_plan_exists.value == "true"
+        next      = step.set_bug_label
+    }
+    default { next = step.classify_ticket }
 }
 
 // The intake agent reconstructs process state from the freshly fetched Linear

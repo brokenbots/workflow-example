@@ -104,3 +104,17 @@ variable "max_review_visits" {
     type        = number
     default     = 5
 }
+
+variable "WORKFLOW_GITHUB_TOKEN" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "GitHub token for the workflow identity. Resolved from the host environment and referenced by adapter secret bindings."
+}
+
+variable "LINEAR_API_KEY" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "Linear API key used by intake shell adapters. Resolved from the host environment and referenced by adapter secret bindings."
+}

@@ -153,3 +153,25 @@ variable "supervisor" {
         }
     }
 }
+
+// The non-review GitHub identity used by this workflow's git/gh/copilot
+// adapters. Resolved from the host environment so it is never interpolated
+// into commands, and referenced directly by adapter secret bindings.
+variable "WORKFLOW_GITHUB_TOKEN" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "GitHub token for the workflow identity. Resolved from the host environment and referenced by adapter secret bindings."
+}
+
+variable "intake_root" {
+    description = "Absolute path of the intake working root used for durable approved-plan storage. When this path is volume-mounted, plans persisted here survive container recreation. Passed through from linear_intake_v1."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+variable "approved_plan_file" {
+    description = "Optional absolute path to a durable, supervisor-approved reproduction plan from a previous run. When present and readable, triage resumes from this plan instead of re-running intake classification and plan review."
+    type        = string
+    default     = ""
+}

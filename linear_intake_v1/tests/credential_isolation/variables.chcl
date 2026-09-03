@@ -1,0 +1,13 @@
+variable "WORKFLOW_GITHUB_TOKEN" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "GitHub token for the workflow identity, used by the workflow adapter in this test."
+}
+
+variable "REVIEWER_GITHUB_TOKEN" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "GitHub token for the reviewer identity, used by the reviewer adapter in this test."
+}

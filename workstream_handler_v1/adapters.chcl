@@ -21,8 +21,8 @@ adapter "copilot" "coordinator" {
     // The sandbox strips both source-token variables before adapter launch.
     // Only the non-review identity is reintroduced into this session.
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.WORKFLOW_GITHUB_TOKEN
+        GH_TOKEN     = var.WORKFLOW_GITHUB_TOKEN
     }
     config {
         model             = "minimax-m3:cloud"
@@ -39,7 +39,7 @@ adapter "shell" "sh" {
     version = "0.5.2"
     environment = sandbox.worktree
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.WORKFLOW_GITHUB_TOKEN
     }
 }
 
@@ -50,7 +50,7 @@ adapter "shell" "repo" {
     version = "0.5.2"
     environment = sandbox.primary
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.WORKFLOW_GITHUB_TOKEN
     }
 }
 
@@ -60,6 +60,6 @@ adapter "shell" "linear" {
     version     = "0.5.2"
     environment = sandbox.worktree
     secrets {
-        LINEAR_API_KEY = "env:LINEAR_API_KEY"
+        LINEAR_API_KEY = var.LINEAR_API_KEY
     }
 }

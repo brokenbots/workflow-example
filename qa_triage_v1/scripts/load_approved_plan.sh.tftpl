@@ -1,0 +1,21 @@
+criteria_value_1={{ .run_dir | shellquote }}
+criteria_value_2={{ .approved_plan_file | shellquote }}
+criteria_value_3={{ .intake_root | shellquote }}
+set -euo pipefail
+run_dir="$criteria_value_1"
+approved_plan_file="$criteria_value_2"
+intake_root="$criteria_value_3"
+
+# Fall back to a durable path derived from the run slug when no explicit file is passed.
+if [ -z "$approved_plan_file" ]; then
+    slug=$(basename "$run_dir")
+    approved_plan_file="${intake_root}/${slug}/approved-plan.md"
+fi
+
+if [ -f "$approved_plan_file" ]; then
+    mkdir -p "${run_dir}/evidence"
+    cp "$approved_plan_file" "${run_dir}/evidence/plan.md"
+    echo "true"
+else
+    echo "false"
+fi

@@ -19,6 +19,13 @@ data "internal" "run_dir" {
     value = ""
 }
 
+// Set to "true" when an approved plan was restored from durable storage.
+// The workflow skips intake/plan gates and resumes reproduction on a same-ticket retry.
+data "internal" "resume_plan" {
+    type  = string
+    value = "false"
+}
+
 // Concrete SHA of the mainline ref, resolved after an explicit fetch so the
 // tested commit is the remote's rather than a stale local ref.
 data "internal" "main_sha" {
@@ -220,8 +227,38 @@ step "setup_scratch_worktree" {
             criteria_value_3 = data.internal.main_sha.value
         })
     }
-    outcome "success" { next = step.intake_review }
+    outcome "success" { next = step.load_approved_plan }
     outcome "failure" { next = state.failed }
+}
+
+// On a same-ticket retry, an approved plan may already exist in durable storage.
+// Load it into the run evidence directory so reproduction can resume without
+// re-running the intake and plan gates.
+step "load_approved_plan" {
+    target = adapter.shell.repo
+    input {
+        command = templatefile("./scripts/load_approved_plan.sh.tftpl", {
+            run_dir            = data.internal.run_dir.value
+            approved_plan_file = var.approved_plan_file
+            intake_root        = var.intake_root
+        })
+    }
+    outcome "success" {
+        next = switch.route_after_load
+        write {
+            target = data.internal.resume_plan.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+switch "route_after_load" {
+    match {
+        condition = data.internal.resume_plan.value == "true"
+        next      = switch.route_repro_start
+    }
+    default { next = step.intake_review }
 }
 
 // ── Gate 0: is this report actionable at all? ────────────────────────────────
@@ -315,7 +352,7 @@ step "review_plan" {
     }
 
     outcome "plan_approved" {
-        next = switch.route_repro_start
+        next = step.persist_approved_plan
         write {
             target = data.internal.supervisor_feedback.value
             value  = ""
@@ -341,6 +378,22 @@ step "review_plan" {
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
+}
+
+// Persist the supervisor-approved plan to durable storage before any expensive
+// reproduction work begins. On a container-recreating retry, this file is
+// detected by load_approved_plan and the run resumes from it.
+step "persist_approved_plan" {
+    target = adapter.shell.repo
+    input {
+        command = templatefile("./scripts/persist_approved_plan.sh.tftpl", {
+            run_dir            = data.internal.run_dir.value
+            approved_plan_file = var.approved_plan_file
+            intake_root        = var.intake_root
+        })
+    }
+    outcome "success" { next = switch.route_repro_start }
+    outcome "failure" { next = state.failed }
 }
 
 // ── Reproduction across the ref matrix ───────────────────────────────────────
