@@ -141,6 +141,9 @@ step "check_ticket_state" {
         next = switch.route_after_state_check
         write {
             target = data.internal.ticket_terminal.value
+            // The script prints "open" or "terminal" (a string); compare to get
+            // the bool the data node is declared as. Writing output.stdout
+            // directly fails conversion ("cannot convert to type bool").
             value  = output.stdout == "terminal"
         }
     }
