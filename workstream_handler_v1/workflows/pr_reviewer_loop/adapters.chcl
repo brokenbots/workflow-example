@@ -3,6 +3,9 @@ environment "sandbox" "worktree" {
     network = {
         allow = ["*"]
     }
+    process = {
+        exec = ["*"]
+    }
 }
 
 adapter "shell" "reviewer" {
@@ -10,7 +13,7 @@ adapter "shell" "reviewer" {
     version = "0.5.2"
     environment = sandbox.worktree
     secrets {
-        GH_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
+        GH_TOKEN = var.reviewer_github_token
     }
 }
 
@@ -25,8 +28,8 @@ adapter "copilot" "pr_reviewer" {
     // Both adapters in this child receive only the reviewer token. No
     // coordinator adapter can access it or switch to the reviewer identity.
     secrets {
-        GITHUB_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
-        GH_TOKEN     = "env:REVIEWER_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.reviewer_github_token
+        GH_TOKEN     = var.reviewer_github_token
     }
     config {
         model             = var.pr_reviewer.model

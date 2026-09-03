@@ -105,7 +105,18 @@ jq -n \
         max_agent_visits: $max_agent_visits
     }' > "$runtime_vars"
 
+# Secret variables are NOT placed in the var-file (it is a plain JSON artifact
+# on disk and would persist credentials). They are passed as --var overrides,
+# which criteria accepts for secret-typed variables and reports as (sensitive).
+# The sandbox scrubs the host token env vars before launch, so the adapters
+# reintroduce only the declared secret channel — but that channel resolves
+# var.<name>, which is empty unless a value is supplied here. An empty
+# linear_api_key previously reached the shell adapter as "LINEAR_API_KEY is not
+# set" and aborted the run at fetch_ticket.
 exec /usr/local/bin/criteria apply /workflows/linear_intake_v1 \
     --var-file "$runtime_vars" \
+    --var "linear_api_key=$LINEAR_API_KEY" \
+    --var "workflow_github_token=$WORKFLOW_GITHUB_TOKEN" \
+    --var "reviewer_github_token=$REVIEWER_GITHUB_TOKEN" \
     --events-file "${EVENTS_FILE:-$INTAKE_ROOT/$TICKET_ID/events.ndjson}" \
     "$@"

@@ -28,10 +28,19 @@ fi
 checks_rc=0
 checks_json=$(gh pr checks "$number" --json bucket,name,state 2>&1) || checks_rc=$?
 if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
-    # CI hasn't registered check runs yet (common right after PR
-    # creation / push) — pending, not failed.
-    echo "status:pending"
-    exit 0
+    # No check runs. Two cases: CI hasn't registered yet after a push
+    # (pending), or the repo has no Actions workflows at all and never
+    # will (observed: CRI-90 on workflow-example looped pending forever).
+    # Count the repo's workflows to distinguish them.
+    wf_count=$(gh api "repos/$(gh repo view --json nameWithOwner --jq '.nameWithOwner')/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+    if [ "$wf_count" = "0" ]; then
+        # No CI to wait for; fall through to the review-decision logic.
+        checks_json='[]'
+        checks_rc=0
+    else
+        echo "status:pending"
+        exit 0
+    fi
 elif [ "$checks_rc" -ne 0 ] && ! printf '%s' "$checks_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
     # Non-zero with output that isn't the checks array — a real error.
     echo "status:checks_failed"

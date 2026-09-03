@@ -105,3 +105,8 @@ variable "reviewer" {
         }
     }
 }
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

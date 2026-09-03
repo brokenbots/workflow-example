@@ -165,8 +165,24 @@ step "commit_work_log" {
             criteria_value_1 = data.internal._log_file.value
         })
     }
-    outcome "success" { next = step.verify_committed }
+    outcome "success" { next = step.push_wip_checkpoint }
     outcome "failure" { next = state.failed }
+}
+
+// Durability checkpoint: push the branch so committed work survives container
+// loss (see EXPERIMENT-ANALYSIS-2026-09-02.md, recommendation 1 — CRI-54/69/75
+// lost uncommitted developer work when the run container died mid-loop). The
+// push is best-effort and offsets work/review-log commit churn, so it fires
+// only when the branch carries real commits the remote has not seen. A
+// checkpoint miss never fails the run.
+step "push_wip_checkpoint" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {})
+    }
+    timeout = "60s"
+    outcome "success" { next = step.verify_committed }
+    outcome "failure" { next = step.verify_committed }
 }
 
 // Ensure the developer committed all changes before we run CI or review.
@@ -282,8 +298,22 @@ step "commit_review_log" {
             criteria_value_1 = data.internal._log_file.value
         })
     }
-    outcome "success" { next = switch.triage_review }
+    outcome "success" { next = step.push_review_checkpoint }
     outcome "failure" { next = state.failed }
+}
+
+// Second durability checkpoint after the review pass: an approved head (or a
+// changes-requested head) is exactly the state a restart must be able to find
+// on the remote. Same best-effort, churn-offsetting semantics as
+// push_wip_checkpoint.
+step "push_review_checkpoint" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {})
+    }
+    timeout = "60s"
+    outcome "success" { next = switch.triage_review }
+    outcome "failure" { next = switch.triage_review }
 }
 
 switch "triage_review" {

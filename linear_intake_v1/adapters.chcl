@@ -6,10 +6,13 @@ environment "sandbox" "intake" {
     working_directory = var.intake_root
     filesystem = {
         read  = ["/"]
-        write = ["/data", "/tmp", "/dev", "/home/criteria"]
+        write = ["/data", "/tmp", "/dev", "/home/criteria", "/Users/dave/.copilot"]
     }
     network = {
         allow = ["*"]
+    }
+    process = {
+        exec = ["*"]
     }
 }
 
@@ -24,7 +27,7 @@ adapter "shell" "intake" {
     version     = "0.5.2"
     environment = sandbox.intake
     secrets {
-        LINEAR_API_KEY = "env:LINEAR_API_KEY"
+        LINEAR_API_KEY = var.linear_api_key
     }
 }
 
@@ -36,8 +39,8 @@ adapter "copilot" "intake_classifier" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
     }
     config {
         model             = var.intake_classifier.model
@@ -57,8 +60,8 @@ adapter "copilot" "triage_reviewer" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
     }
     config {
         model             = var.triage_reviewer.model
