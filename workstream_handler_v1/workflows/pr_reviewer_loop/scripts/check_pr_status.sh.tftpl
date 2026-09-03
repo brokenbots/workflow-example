@@ -22,11 +22,23 @@ checks_json=$(gh pr checks "$pr" --json bucket,name,state,workflow 2>&1) || chec
 
 # exit 8 / "no checks reported" means CI has not registered check
 # runs yet (common right after a push) — pending, not failed.
+# BUT: on a repo with no Actions workflows at all, checks never
+# register, so this would loop pending forever (observed: CRI-90 on
+# workflow-example). Distinguish the two by counting the repo's
+# workflows; zero workflows means there is no CI to wait for, so fall
+# through to the review-decision logic below instead of reporting pending.
 if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
-    echo "status:pending"
-    echo "pr_number=$pr"
-    echo "checks=not_yet_reported"
-    exit 0
+    wf_count=$(gh api "repos/$(gh repo view --json nameWithOwner --jq '.nameWithOwner')/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+    if [ "$wf_count" = "0" ]; then
+        echo "checks=none (repo has no Actions workflows; skipping CI wait)" >&2
+        checks_json='[]'
+        checks_rc=0
+    else
+        echo "status:pending"
+        echo "pr_number=$pr"
+        echo "checks=not_yet_reported"
+        exit 0
+    fi
 fi
 
 # Classify from buckets rather than the exit code alone: gh exits
