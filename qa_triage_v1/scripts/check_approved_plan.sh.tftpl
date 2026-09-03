@@ -6,9 +6,12 @@ mkdir -p "$ev"
 
 if [ -n "$approved_plan_file" ] && [ -f "$approved_plan_file" ]; then
     cp "$approved_plan_file" "$ev/plan.md"
-    printf '%s' "restored"
+    # Literal true so the workflow can write it into the bool restored node via
+    # a bare output.stdout write (a comparison would be misrouted by the
+    # engine's bare-traversal fast path).
+    printf '%s' "true"
     exit 0
 fi
 
-printf '%s' "fresh"
+printf '%s' "false"
 exit 0

@@ -141,11 +141,10 @@ step "check_ticket_state" {
         next = switch.route_after_state_check
         write {
             target = data.internal.ticket_terminal.value
-            // The script prints "open" or "terminal" (a string); compare to get
-            // the bool the data node is declared as. trimspace() forces the
-            // expression path: a bare output.stdout comparison is misrouted by
-            // the engine's bare-traversal fast path and fails bool conversion.
-            value  = trimspace(output.stdout) == "terminal"
+            // The script prints a literal true/false; a bare output.stdout write
+            // converts the string to the node's bool type. (A comparison here
+            // would be misrouted by the engine's bare-traversal fast path.)
+            value  = output.stdout
         }
     }
     outcome "failure" { next = state.failed }
@@ -176,7 +175,7 @@ step "check_approved_plan" {
         next = switch.route_after_plan_check
         write {
             target = data.internal.resume_approved_plan.value
-            value  = trimspace(output.stdout) == "resume"
+            value  = output.stdout
         }
     }
     outcome "failure" { next = state.failed }

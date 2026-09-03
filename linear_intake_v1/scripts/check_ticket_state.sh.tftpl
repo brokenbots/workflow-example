@@ -9,12 +9,16 @@ if [ ! -f "$ticket_json" ]; then
 fi
 
 state_type=$(jq -r '.data.issue.state.type // "unknown"' "$ticket_json")
+# Emit a literal true/false so the workflow can write it directly into the
+# bool-typed ticket_terminal node via a bare output.stdout write. (A comparison
+# like output.stdout == "terminal" in the write value is misrouted by the
+# engine's bare-traversal fast path and fails bool conversion.)
 case "$state_type" in
     completed|canceled)
-        printf '%s' "terminal"
+        printf '%s' "true"
         ;;
     *)
-        printf '%s' "open"
+        printf '%s' "false"
         ;;
 esac
 exit 0

@@ -13,9 +13,12 @@ workstream="$run_dir/workstreams/$ticket_id.md"
 # 3. a published workstream does not exist (otherwise the ticket has already
 #    progressed past the plan-approval phase).
 if [ -f "$plan" ] && [ -f "$report" ] && [ ! -f "$workstream" ]; then
-    printf '%s' "resume"
+    # Literal true so the workflow can write it into the bool resume node via a
+    # bare output.stdout write (a comparison in the write is misrouted by the
+    # engine's bare-traversal fast path).
+    printf '%s' "true"
     exit 0
 fi
 
-printf '%s' "fetch"
+printf '%s' "false"
 exit 0
