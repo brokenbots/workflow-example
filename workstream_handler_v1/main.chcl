@@ -397,6 +397,11 @@ step "triage_pr_feedback" {
                         branch          = data.internal.branch.value
                         workstream_file = var.workstream_file
                     status_output   = data.internal.review_status_output.value
+                    // Merge-refusal diagnostics (from merge_pr's stdout). Carries
+                    // the failed-CI-workflow signal so the coordinator can route a
+                    // broken workflow file / absent required checks to the developer
+                    // instead of finding no_work and spinning (observed: CRI-93).
+                    merge_feedback  = data.internal.developer_feedback.value
                 })
     }
 

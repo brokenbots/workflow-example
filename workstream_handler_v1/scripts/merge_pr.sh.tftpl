@@ -38,6 +38,22 @@ echo "merge_error=$merge_err"
 gh pr view "$pr" --json mergeStateStatus,mergeable,reviewDecision \
     --jq '"merge_state=\(.mergeStateStatus) mergeable=\(.mergeable) review_decision=\(.reviewDecision)"' 2>&1 || true
 
+# A blocked merge with green review is often a CI failure the status rollup
+# misses (e.g. an invalid workflow file that prevents required checks from ever
+# registering — observed in CRI-93). Detect a failed Actions run for this
+# branch and name it, so the coordinator can route it to the developer as
+# actionable feedback instead of finding no_work and spinning.
+branch_name=$(gh pr view "$pr" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+if [ -n "$branch_name" ]; then
+    failed_wf=$(gh api "repos/$owner/$repo/actions/runs?branch=$branch_name&per_page=10" \
+        --jq '[.workflow_runs[] | select(.conclusion == "failure")] | .[0] | "\(.name) (\(.event))"' 2>/dev/null || echo "")
+    if [ -n "$failed_wf" ] && [ "$failed_wf" != "null" ]; then
+        echo "ci_workflow_failed=true"
+        echo "failed_workflow=$failed_wf"
+        echo "ci_detail=a GitHub Actions workflow run failed for branch $branch_name; if it failed at workflow-file validation, no required checks ran and the merge stays blocked until the workflow file is fixed"
+    fi
+fi
+
 unresolved=$(gh api graphql \
         -f query='query($owner: String!, $repo: String!, $pr: Int!) {
             repository(owner: $owner, name: $repo) {
