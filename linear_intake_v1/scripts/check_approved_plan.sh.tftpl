@@ -1,0 +1,21 @@
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
+set -euo pipefail
+run_dir="$intake_root/$ticket_id"
+plan="$run_dir/approved-plan.md"
+report="$run_dir/$ticket_id.md"
+workstream="$run_dir/workstreams/$ticket_id.md"
+
+# Resume only when three conditions hold:
+# 1. an approved plan was persisted from a previous run,
+# 2. the original classified bug report still exists (the plan is not usable
+#    without the report it was built from), and
+# 3. a published workstream does not exist (otherwise the ticket has already
+#    progressed past the plan-approval phase).
+if [ -f "$plan" ] && [ -f "$report" ] && [ ! -f "$workstream" ]; then
+    printf '%s' "resume"
+    exit 0
+fi
+
+printf '%s' "fetch"
+exit 0

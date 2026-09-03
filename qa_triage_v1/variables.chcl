@@ -35,6 +35,17 @@ variable "workstream_out_dir" {
     type        = string
 }
 
+// Durable path where the supervisor-approved reproduction plan is persisted
+// before execution begins. When a parent workflow (e.g. linear_intake_v1)
+// provides this path, qa_triage_v1 will copy the approved plan there on plan
+// approval and will detect/restore it on a subsequent same-ticket run, skipping
+// plan generation. Empty disables persistence (standalone usage)."
+variable "approved_plan_file" {
+    description = "Optional absolute path to a durable approved reproduction plan file. When set, the approved plan is copied here before execution and restored from here on a same-ticket retry."
+    type        = string
+    default     = ""
+}
+
 // Records design decisions that are NOT discoverable from the code or the
 // documentation — behavior that is deliberate but undocumented, and would
 // otherwise read as a defect to anyone reading the spec literally. The

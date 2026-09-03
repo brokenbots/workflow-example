@@ -1,0 +1,28 @@
+approved_plan_file={{ .approved_plan_file | shellquote }}
+run_dir={{ .run_dir | shellquote }}
+set -euo pipefail
+plan="$run_dir/evidence/plan.md"
+
+# Persistence is optional: standalone runs that do not pass approved_plan_file
+# continue to work without cross-run durability.
+if [ -z "$approved_plan_file" ]; then
+    echo "approved_plan_file not configured; plan will not persist across restarts" >&2
+    exit 0
+fi
+
+if [ ! -f "$plan" ]; then
+    echo "approved plan source missing: $plan" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "$approved_plan_file")"
+cp "$plan" "$approved_plan_file"
+
+metadata_file="${approved_plan_file%.md}.json"
+jq -n \
+    --arg approved_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg run_dir "$run_dir" \
+    --arg source_plan "$plan" \
+    '{approved_at: $approved_at, run_dir: $run_dir, source_plan: $source_plan, persisted_by: "qa_triage_v1"}' > "$metadata_file"
+
+printf '%s' "plan persisted to $approved_plan_file"

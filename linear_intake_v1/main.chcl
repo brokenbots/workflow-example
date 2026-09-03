@@ -29,6 +29,20 @@ data "internal" "workstream_file" {
     value = ""
 }
 
+// Set by check_approved_plan. When true, a durable approved plan from a prior
+// run exists and this run should skip intake classification and resume QA.
+data "internal" "resume_approved_plan" {
+    type  = bool
+    value = false
+}
+
+// Set by check_ticket_state. When true, the Linear ticket is in a terminal
+// state and the workflow should exit without modifying anything.
+data "internal" "ticket_terminal" {
+    type  = bool
+    value = false
+}
+
 // URL of the PR the handler merged, for the closing Linear comment.
 data "internal" "pr_url" {
     type  = string
@@ -49,6 +63,7 @@ subworkflow "qa_triage" {
         repo_dir           = var.repo_dir
         triage_root        = var.triage_root
         workstream_out_dir = "${var.intake_root}/${var.ticket_id}/workstreams"
+        approved_plan_file = "${var.intake_root}/${var.ticket_id}/approved-plan.md"
         build_cmd          = var.build_cmd
         test_cmd           = var.test_cmd
         test_refs          = var.test_refs
@@ -107,8 +122,68 @@ step "fetch_ticket" {
             ticket_id = var.ticket_id
         })
     }
-    outcome "success" { next = step.classify_ticket }
+    outcome "success" { next = step.check_ticket_state }
     outcome "failure" { next = state.ticket_not_found }
+}
+
+// Terminal Linear states (completed/canceled) mean the ticket has already
+// been resolved. Respect that regardless of any locally persisted plan; do
+// not resume or reclassify a completed issue.
+step "check_ticket_state" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/check_ticket_state.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id = var.ticket_id
+        })
+    }
+    outcome "success" {
+        next = switch.route_after_state_check
+        write {
+            target = data.internal.ticket_terminal.value
+            value  = output.stdout == "terminal"
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+switch "route_after_state_check" {
+    match {
+        condition = data.internal.ticket_terminal.value
+        next      = state.already_complete
+    }
+    default { next = step.check_approved_plan }
+}
+
+// Detect a durable supervisor-approved reproduction plan from a previous
+// same-ticket run. When one exists (and the bug report it was built from is
+// still present, and no workstream has been published yet), skip the LLM-based
+// intake classification and resume QA execution directly. Otherwise fall
+// through to the normal classification path.
+step "check_approved_plan" {
+    target = adapter.shell.intake
+    input {
+        command = templatefile("./scripts/check_approved_plan.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id = var.ticket_id
+        })
+    }
+    outcome "success" {
+        next = switch.route_after_plan_check
+        write {
+            target = data.internal.resume_approved_plan.value
+            value  = output.stdout == "resume"
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+switch "route_after_plan_check" {
+    match {
+        condition = data.internal.resume_approved_plan.value
+        next      = step.set_bug_label
+    }
+    default { next = step.classify_ticket }
 }
 
 // The intake agent reconstructs process state from the freshly fetched Linear
