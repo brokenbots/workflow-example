@@ -35,7 +35,7 @@ variable "max_backoff_visits" {
 
 variable "max_review_visits" {
     type        = number
-    description = "Maximum PR reviewer agent attempts."
+    description = "Maximum PR reviewer agent attempts, including the initial attempt and any retries after malformed tool-call or missing-outcome failures."
     default     = 5
 }
 

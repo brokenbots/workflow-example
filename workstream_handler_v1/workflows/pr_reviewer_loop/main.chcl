@@ -35,6 +35,21 @@ data "internal" "_review_body" {
     value = ""
 }
 
+// Counter for reviewer attempts that ended in a malformed or missing outcome.
+// Used to enforce the bounded retry path; reset is implicit because the
+// subworkflow is invoked fresh for each review pass.
+data "internal" "_review_attempts" {
+    type  = number
+    value = 0
+}
+
+// Context fed back into the reviewer prompt after a failed/malformed attempt.
+// Empty on the first attempt and whenever the reviewer returns a valid outcome.
+data "internal" "_review_repair_context" {
+    type  = string
+    value = ""
+}
+
 // ── PR number resolution ──────────────────────────────────────────────────────
 // Accept a full PR URL (e.g. https://github.com/org/repo/pull/42, or a
 // multi-line string that contains such a URL) or fall back to the current branch.
@@ -139,6 +154,11 @@ step "backoff" {
 // reviews from the diff, resolves any addressable threads, then approves or
 // posts a REQUEST_CHANGES review to GitHub and returns a precise changes list
 // for the coordinator to triage.
+//
+// Malformed tool-call or missing-outcome failures are not terminal on the
+// first occurrence. They route through switch.route_review_retry, which counts
+// the attempt and re-enters pr_review with a repair prompt so long as the
+// total number of attempts stays within max_review_visits.
 
 step "pr_review" {
     target      = adapter.copilot.pr_reviewer
@@ -147,9 +167,10 @@ step "pr_review" {
 
     input {
                 prompt = templatefile("./agents/review_pr.md.tftpl", {
-                        pr_number      = data.internal._pr_number.value
+                        pr_number       = data.internal._pr_number.value
                         workstream_file = var.workstream_file
                         status_output   = data.internal._status_output.value
+                        repair_context  = data.internal._review_repair_context.value
                 })
     }
 
@@ -163,6 +184,10 @@ step "pr_review" {
             target = data.internal._review_body.value
             value  = output.reason
         }
+        write {
+            target = data.internal._review_repair_context.value
+            value  = ""
+        }
     }
     outcome "changes_requested" {
         next = step.post_changes_requested
@@ -174,9 +199,48 @@ step "pr_review" {
             target = data.internal._review_body.value
             value  = output.reason
         }
+        write {
+            target = data.internal._review_repair_context.value
+            value  = ""
+        }
     }
-    outcome "failure"           { next = state.failed }
-    outcome "default"           { next = state.failed }
+    outcome "failure" {
+        next = switch.route_review_retry
+        write {
+            target = data.internal._review_attempts.value
+            value  = data.internal._review_attempts.value + 1
+        }
+        write {
+            target = data.internal._review_repair_context.value
+            value  = "The previous reviewer attempt reported failure: ${output.reason}\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
+        }
+    }
+    outcome "default" {
+        next = switch.route_review_retry
+        write {
+            target = data.internal._review_attempts.value
+            value  = data.internal._review_attempts.value + 1
+        }
+        write {
+            target = data.internal._review_repair_context.value
+            value  = "The previous reviewer attempt returned an unrecognised or malformed outcome (e.g. malformed tool-call text, missing submit_outcome, or an invalid outcome name).\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
+        }
+    }
+}
+
+// Bounded retry decision for reviewer failures. The counter is incremented by
+// the pr_review failure/default outcomes before this switch is evaluated, so
+// the condition enforces: attempts < max_review_visits => one more try,
+// otherwise fail the run. This keeps the loop finite and makes the existing
+// max_visits budget the hard ceiling.
+switch "route_review_retry" {
+    match {
+        condition = data.internal._review_attempts.value < var.max_review_visits
+        next      = step.pr_review
+    }
+    default {
+        next = state.failed
+    }
 }
 
 step "post_approval" {
