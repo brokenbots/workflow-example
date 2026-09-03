@@ -6,6 +6,14 @@ variable "developer_initial_prompt" {
     default = ""
 }
 
+// Shell snippet shared with the parent workflow that sets up a Git credential
+// helper reading GH_TOKEN / GITHUB_TOKEN / WORKFLOW_GITHUB_TOKEN at runtime.
+// Injected so push steps do not duplicate the helper or embed a token.
+variable "git_credential_helper" {
+    type    = string
+    default = ""
+}
+
 variable "ci_gate_cmd" {
     type        = string
     description = "command to run as ci gate, should exit 0 for clean and non-zero for failed. stderr and stdout are sent to the developer on failure. Empty (the default) skips the gate. Mirror what the remote CI runs — an aggregate target often omits gates CI runs separately (e.g. a vulnerability scan), and a gate missing here is one the developer only discovers after the PR is already red (e.g. 'make ci && make vuln-scan')."

@@ -1,4 +1,7 @@
 set -euo pipefail
+
+{{ .helper }}
+
 # Durability checkpoint: push the current branch so committed work survives
 # container loss. Never fails the run — a checkpoint miss must not block the
 # develop/review cycle. Offsets churn from the work/review log commits so the
@@ -17,6 +20,9 @@ if [ "$ahead" -le 1 ]; then
     echo "wip-checkpoint: branch=$branch ahead=$ahead (log/noise only or nothing); skipping push"
     exit 0
 fi
+
+setup_gh_token_git_credentials
+
 if ! git push origin "$branch" 2>&1; then
     echo "wip-checkpoint: push failed for $branch (non-fatal); continuing"
 fi

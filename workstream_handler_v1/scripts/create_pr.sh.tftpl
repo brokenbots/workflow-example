@@ -1,6 +1,9 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 set -euo pipefail
+
+{{ .helper }}
+
 branch=$(git branch --show-current)
 # Clean title: strip any trailing annotations, convert hyphens to spaces
 title=$(printf '%s' "$branch" | sed 's/-approved$//i; s/-reviewed$//i; s/-draft$//i' | tr '-' ' ')
@@ -17,6 +20,8 @@ fi
 if [ -n "$existing_url" ] && [ "$existing_state" = "OPEN" ]; then
     printf '%s' "$existing_url" | tr -d '\n'
 else
+    setup_gh_token_git_credentials
+
     # Do not discard stderr here: a rejected push (no write access,
     # protected branch, non-fast-forward) is otherwise reduced to a
     # bare exit 128 with no indication of the cause.

@@ -47,6 +47,41 @@ Every copilot role resolves through the local Ollama endpoint
 `ollama pull kimi-k2.7-code:cloud minimax-m3:cloud glm-5.2:cloud`. No `claude`
 CLI is required — there are no claude-agent roles left.
 
+## Git push credentials for agent shells (CRI-95)
+
+Agent-driven shells in `pair_programming_loop` and the coordinator push step
+need to push to GitHub, but the container-wide `git config` points to
+`gh auth git-credential`, which does **not** resolve a token from the
+environment.  Sandboxed adapter shells only have the injected
+`GH_TOKEN` / `GITHUB_TOKEN` / `WORKFLOW_GITHUB_TOKEN`, so pushes must use a
+credential helper that reads from those variables at runtime.
+
+The shared helper lives in
+`scripts/_github_token_git_credentials.sh.tftpl`.  It defines
+`setup_gh_token_git_credentials()`, which installs a git credential helper
+that:
+
+- Responds only to `get` operations and ignores `store` / `erase`.
+- Reads the token from `GH_TOKEN` → `GITHUB_TOKEN` → `WORKFLOW_GITHUB_TOKEN`.
+- Returns `username=x-access-token` and `password=<token>` over the git
+  credential protocol.
+- Never writes the token to the worktree, global config, or logs — the helper
+  string stored in git config only references the environment variable names.
+
+Usage:
+
+```sh
+setup_gh_token_git_credentials
+git push origin "$branch"
+```
+
+The helper snippet is injected by the parent workflow into the
+`pair_programming_loop` subworkflow via `git_credential_helper`, so push steps
+share one implementation instead of duplicating it.  The coordinator prompt
+`agents/push_and_respond.md.tftpl` and the developer prompt
+`workflows/pair_programming_loop/agents/developer.md` both instruct agents to
+use the environment-token helper and forbid inline-token URLs.
+
 ## Refresh procedure
 
 ```sh

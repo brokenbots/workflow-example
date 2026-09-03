@@ -75,15 +75,16 @@ subworkflow "pr_reviewer_loop" {
 subworkflow "pair_programming_loop" {
     source = "./workflows/pair_programming_loop"
     input = {
-        workstream_file = var.workstream_file
-        ci_gate_cmd     = var.ci_gate_cmd
-        log_file        = var.log_file != "" ? var.log_file : null
-        allow_dirty     = var.allow_dirty
-        branch_notes    = data.internal.branch_notes.value
-        worktree_dir    = var.worktree_dir
-        max_agent_visits = var.max_pair_agent_visits
-        provider_base_url = var.provider_base_url
+        workstream_file       = var.workstream_file
+        ci_gate_cmd           = var.ci_gate_cmd
+        log_file              = var.log_file != "" ? var.log_file : null
+        allow_dirty           = var.allow_dirty
+        branch_notes          = data.internal.branch_notes.value
+        worktree_dir          = var.worktree_dir
+        max_agent_visits      = var.max_pair_agent_visits
+        provider_base_url     = var.provider_base_url
         workflow_github_token = var.workflow_github_token
+        git_credential_helper = file("./scripts/_github_token_git_credentials.sh.tftpl")
     }
 }
 
@@ -101,6 +102,7 @@ subworkflow "pair_programming_loop_feedback" {
         max_agent_visits         = var.max_pair_agent_visits
         provider_base_url        = var.provider_base_url
         workflow_github_token    = var.workflow_github_token
+        git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
     }
 }
 
@@ -237,6 +239,7 @@ step "create_pr" {
         command = templatefile("./scripts/create_pr.sh.tftpl", {
             criteria_value_1 = var.base_branch
             criteria_value_2 = var.workstream_file
+            helper           = file("./scripts/_github_token_git_credentials.sh.tftpl")
         })
     }
     timeout = "60s"

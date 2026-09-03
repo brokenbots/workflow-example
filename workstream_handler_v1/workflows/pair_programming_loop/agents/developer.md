@@ -57,6 +57,11 @@ You are a focused implementation agent for this repository. Your job is to execu
 - Keep logs and errors actionable and safe (no sensitive data leakage).
 - Code must be clean and properly decomposed — if you leave code messier than you found it, that is a failure.
 
+## Git pushes
+If you push code to GitHub, use the shared credential helper that reads
+`GH_TOKEN` / `GITHUB_TOKEN` / `WORKFLOW_GITHUB_TOKEN` from the environment.
+Never construct an inline-token push URL and never log the token.
+
 ## Output Reason
 Return a concise completion report with:
 1. Implemented changes (by area/file).

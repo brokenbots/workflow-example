@@ -178,7 +178,9 @@ step "commit_work_log" {
 step "push_wip_checkpoint" {
     target = adapter.shell.sh
     input {
-        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {})
+        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {
+            helper = var.git_credential_helper
+        })
     }
     timeout = "60s"
     outcome "success" { next = step.verify_committed }
@@ -309,7 +311,9 @@ step "commit_review_log" {
 step "push_review_checkpoint" {
     target = adapter.shell.sh
     input {
-        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {})
+        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {
+            helper = var.git_credential_helper
+        })
     }
     timeout = "60s"
     outcome "success" { next = switch.triage_review }
