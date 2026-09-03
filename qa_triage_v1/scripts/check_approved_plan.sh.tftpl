@@ -1,0 +1,14 @@
+approved_plan_file={{ .approved_plan_file | shellquote }}
+run_dir={{ .run_dir | shellquote }}
+set -euo pipefail
+ev="$run_dir/evidence"
+mkdir -p "$ev"
+
+if [ -n "$approved_plan_file" ] && [ -f "$approved_plan_file" ]; then
+    cp "$approved_plan_file" "$ev/plan.md"
+    printf '%s' "restored"
+    exit 0
+fi
+
+printf '%s' "fresh"
+exit 0
