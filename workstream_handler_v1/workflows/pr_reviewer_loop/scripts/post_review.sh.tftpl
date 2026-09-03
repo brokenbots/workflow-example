@@ -11,9 +11,45 @@ if [ "$reviewer" = "$author" ]; then
     exit 1
 fi
 
-gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" \
+find_pending_review() {
+    gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" --jq \
+        ".[] | select(.state == \"PENDING\" and .user.login == \"$reviewer\") | .id" | head -n1
+}
+
+submit_pending_review() {
+    local review_id="$1"
+    echo "submitting existing pending review $review_id for $reviewer" >&2
+    gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews/$review_id/events" \
+        -X POST \
+        -f event="$event" \
+        -f body="$body" >/dev/null
+    echo "review submitted by $reviewer"
+}
+
+# Detect and submit a pre-existing pending review by the reviewer identity,
+# avoiding repeated HTTP 422 attempts to create a new review.
+pending_review_id=$(find_pending_review)
+if [ -n "$pending_review_id" ]; then
+    submit_pending_review "$pending_review_id"
+    exit 0
+fi
+
+# No pending review found; attempt to create a new one.
+if gh api "repos/{owner}/{repo}/pulls/$pr_number/reviews" \
     -X POST \
     -f event="$event" \
     -f body="$body" >/dev/null
-
-echo "review posted by $reviewer"
+then
+    echo "review posted by $reviewer"
+else
+    create_exit=$?
+    # A concurrent pending review may have been created between our check and
+    # the POST. Inspect again and submit it if found.
+    pending_review_id=$(find_pending_review)
+    if [ -n "$pending_review_id" ]; then
+        submit_pending_review "$pending_review_id"
+        exit 0
+    fi
+    echo "failed to post review (exit $create_exit)" >&2
+    exit $create_exit
+fi
