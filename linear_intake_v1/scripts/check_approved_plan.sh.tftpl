@@ -5,7 +5,7 @@ intake_root="$criteria_value_1"
 ticket_id="$criteria_value_2"
 
 if [ -f "${intake_root}/${ticket_id}/approved-plan.md" ]; then
-    echo "true"
+    printf '%s' "true"
 else
-    echo "false"
+    printf '%s' "false"
 fi

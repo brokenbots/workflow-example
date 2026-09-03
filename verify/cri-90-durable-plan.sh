@@ -54,7 +54,7 @@ def run_script(rendered, cwd=None):
         print("STDERR:", result.stderr)
         print("STDOUT:", result.stdout)
         raise RuntimeError("script exited non-zero")
-    return result.stdout.strip()
+    return result.stdout
 
 
 tmp = tempfile.mkdtemp(prefix="cri90-verify-")

@@ -15,7 +15,7 @@ fi
 if [ -f "$approved_plan_file" ]; then
     mkdir -p "${run_dir}/evidence"
     cp "$approved_plan_file" "${run_dir}/evidence/plan.md"
-    echo "true"
+    printf '%s' "true"
 else
-    echo "false"
+    printf '%s' "false"
 fi
