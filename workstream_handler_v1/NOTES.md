@@ -6,6 +6,22 @@ v0.5 "adapter-v2" model). All pins lock and compile end-to-end on this host
 and `criteria compile <dir>` succeeds for the root workflow and all three
 subworkflows.
 
+## PR reviewer loop retry behavior (CRI-91)
+
+`workflows/pr_reviewer_loop/main.chcl` bounds retries when the reviewer copilot
+adapter returns a malformed tool-call or missing `submit_outcome`.
+
+- A `failure` or `default` outcome from `step.pr_review` increments
+  `data.internal._review_attempts` and routes through
+  `switch.route_review_retry`.
+- The switch re-enters `step.pr_review` only while
+  `_review_attempts < max_review_visits`, so the existing visit budget is the
+  hard ceiling and the loop cannot run forever.
+- The repair prompt (`agents/review_pr.md.tftpl`) includes the previous error
+  context on retry passes, telling the reviewer to emit a valid outcome.
+- Once a valid `approve` or `changes_requested` outcome is returned, the repair
+  context is cleared.
+
 ## Pins (as of 2026-07-28)
 
 | adapter | source | version | notes |

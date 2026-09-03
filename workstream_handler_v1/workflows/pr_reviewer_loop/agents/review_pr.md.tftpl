@@ -1,5 +1,13 @@
 Review PR #{{ .pr_number }} for workstream '{{ .workstream_file }}'.
 
+{{ if .repair_context }}
+## Retry notice
+
+{{ .repair_context }}
+
+---
+{{ end }}
+
 Status check output (from check_pr_status):
 ---
 {{ .status_output }}
