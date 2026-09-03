@@ -470,6 +470,7 @@ step "push_and_respond" {
         prompt = templatefile("./agents/push_and_respond.md.tftpl", {
             pr_url = data.internal.pr_url.value
             branch = data.internal.branch.value
+            helper = file("./scripts/_github_token_git_credentials.sh.tftpl")
         })
     }
 
