@@ -242,3 +242,13 @@ variable "supervisor" {
         }
     }
 }
+
+variable "linear_api_key" {
+    type   = string
+    secret = true
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

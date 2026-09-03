@@ -5,6 +5,9 @@ environment "sandbox" "primary" {
     network = {
         allow = ["*"]
     }
+    process = {
+        exec = ["*"]
+    }
 }
 
 // Build, baseline tests, and the reproduction itself run inside the checked-out
@@ -14,6 +17,9 @@ environment "sandbox" "worktree" {
     network = {
         allow = ["*"]
     }
+    process = {
+        exec = ["*"]
+    }
 }
 
 adapter "shell" "repo" {
@@ -21,7 +27,7 @@ adapter "shell" "repo" {
     version     = "0.5.2"
     environment = sandbox.primary
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.workflow_github_token
     }
 }
 
@@ -30,7 +36,7 @@ adapter "shell" "wt" {
     version     = "0.5.2"
     environment = sandbox.worktree
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.workflow_github_token
     }
 }
 
@@ -39,8 +45,8 @@ adapter "copilot" "investigator" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.4"
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
     }
     config {
         model             = var.investigator.model

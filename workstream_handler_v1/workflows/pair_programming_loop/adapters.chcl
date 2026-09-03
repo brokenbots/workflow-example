@@ -3,6 +3,9 @@ environment "sandbox" "worktree" {
     network = {
         allow = ["*"]
     }
+    process = {
+        exec = ["*"]
+    }
 }
 
 adapter "shell" "sh" {
@@ -10,7 +13,7 @@ adapter "shell" "sh" {
     version = "0.5.2"
     environment = sandbox.worktree
     secrets {
-        GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
+        GH_TOKEN = var.workflow_github_token
     }
 }
 
@@ -20,8 +23,8 @@ adapter "copilot" "developer" {
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
     }
     config {
         model             = var.developer.model
@@ -41,8 +44,8 @@ adapter "copilot" "reviewer" {
     version = "0.5.4"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
-        GITHUB_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
-        GH_TOKEN     = "env:WORKFLOW_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
     }
     config {
         model             = var.reviewer.model

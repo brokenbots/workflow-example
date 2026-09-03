@@ -104,3 +104,18 @@ variable "max_review_visits" {
     type        = number
     default     = 5
 }
+
+variable "linear_api_key" {
+    type   = string
+    secret = true
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}
+
+variable "reviewer_github_token" {
+    type   = string
+    secret = true
+}

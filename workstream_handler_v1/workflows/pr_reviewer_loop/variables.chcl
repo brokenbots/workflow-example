@@ -69,3 +69,8 @@ variable "pr_reviewer" {
         }
     }
 }
+
+variable "reviewer_github_token" {
+    type   = string
+    secret = true
+}

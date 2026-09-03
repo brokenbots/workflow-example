@@ -63,3 +63,8 @@ variable "repair_agent" {
         }
     }
 }
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

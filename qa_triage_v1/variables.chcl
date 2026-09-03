@@ -153,3 +153,8 @@ variable "supervisor" {
         }
     }
 }
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

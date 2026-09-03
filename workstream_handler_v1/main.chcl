@@ -54,6 +54,7 @@ subworkflow "branch_manager" {
         worktree_dir    = var.worktree_dir
         max_repair_visits = var.max_branch_repair_visits
         provider_base_url = var.provider_base_url
+        workflow_github_token = var.workflow_github_token
     }
 }
 
@@ -67,6 +68,7 @@ subworkflow "pr_reviewer_loop" {
         max_backoff_visits = var.max_reviewer_backoff_visits
         max_review_visits  = var.max_review_visits
         provider_base_url  = var.provider_base_url
+        reviewer_github_token = var.reviewer_github_token
     }
 }
 
@@ -81,6 +83,7 @@ subworkflow "pair_programming_loop" {
         worktree_dir    = var.worktree_dir
         max_agent_visits = var.max_pair_agent_visits
         provider_base_url = var.provider_base_url
+        workflow_github_token = var.workflow_github_token
     }
 }
 
@@ -97,6 +100,7 @@ subworkflow "pair_programming_loop_feedback" {
         worktree_dir             = var.worktree_dir
         max_agent_visits         = var.max_pair_agent_visits
         provider_base_url        = var.provider_base_url
+        workflow_github_token    = var.workflow_github_token
     }
 }
 

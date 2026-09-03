@@ -91,6 +91,7 @@ subworkflow "repro_main" {
         max_visits         = var.max_repro_visits
         investigator       = var.investigator
         provider_base_url  = var.provider_base_url
+        workflow_github_token = var.workflow_github_token
     }
 }
 
@@ -110,6 +111,7 @@ subworkflow "repro_stable" {
         max_visits         = var.max_repro_visits
         investigator       = var.investigator
         provider_base_url  = var.provider_base_url
+        workflow_github_token = var.workflow_github_token
     }
 }
 
