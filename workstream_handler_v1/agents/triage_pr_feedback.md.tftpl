@@ -4,6 +4,19 @@ Latest CI/review status:
 ```
 {{ .status_output }}
 ```
+{{ if .merge_feedback }}
+Merge-refusal diagnostics (the most recent merge attempt failed):
+```
+{{ .merge_feedback }}
+```
+If the diagnostics report `ci_workflow_failed=true` or otherwise indicate a
+GitHub Actions workflow failed (including a workflow-file validation error that
+prevented required checks from registering), that is developer work even when
+there are no review comments: the merge stays blocked until the workflow file or
+failing job is fixed. Inspect the failed workflow and return `has_work` with a
+precise remediation brief. Do not return `no_work` while a CI workflow is
+failing or required checks have never run.
+{{ end }}
 
 First, read the workstream file at '{{ .workstream_file }}' to understand what was being built and what the exit criteria are.
 
