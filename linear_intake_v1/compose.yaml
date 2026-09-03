@@ -28,6 +28,11 @@ services:
       PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-http://host.docker.internal:11434/v1}
     extra_hosts:
       - host.docker.internal:host-gateway
+    volumes:
+      - criteria-data:/data
     security_opt:
       # Criteria creates per-adapter namespaces and installs its own seccomp filter.
       - seccomp=unconfined
+
+volumes:
+  criteria-data:
