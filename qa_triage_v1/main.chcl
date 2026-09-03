@@ -249,10 +249,10 @@ step "check_approved_plan" {
         next = switch.route_after_plan_check
         write {
             target = data.internal.approved_plan_restored.value
-            // trimspace() forces the expression path so the == comparison is
-            // evaluated to a bool (a bare output.stdout comparison is misrouted
-            // by the engine's bare-traversal fast path and fails conversion).
-            value  = trimspace(output.stdout) == "restored"
+            // Bare output.stdout: the script emits a literal true/false, which
+            // converts to the node's bool type. A comparison here would be
+            // misrouted by the engine's bare-traversal fast path.
+            value  = output.stdout
         }
     }
     outcome "failure" { next = state.failed }
