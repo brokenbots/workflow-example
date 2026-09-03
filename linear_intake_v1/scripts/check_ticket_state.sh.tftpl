@@ -1,0 +1,20 @@
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
+set -euo pipefail
+ticket_json="$intake_root/$ticket_id/ticket.json"
+
+if [ ! -f "$ticket_json" ]; then
+    printf '%s' "unknown"
+    exit 0
+fi
+
+state_type=$(jq -r '.data.issue.state.type // "unknown"' "$ticket_json")
+case "$state_type" in
+    completed|canceled)
+        printf '%s' "terminal"
+        ;;
+    *)
+        printf '%s' "open"
+        ;;
+esac
+exit 0
