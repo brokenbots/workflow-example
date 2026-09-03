@@ -1,6 +1,24 @@
 Push the current branch and close out all open review threads on the PR at {{ .pr_url }}.
 
-1. Push the branch: git push origin '{{ .branch }}'
+1. Configure the token-aware git credential helper and push the branch. The
+   helper reads GH_TOKEN / GITHUB_TOKEN / WORKFLOW_GITHUB_TOKEN from the
+   environment at runtime; never embed the token in a push URL or write it to
+   logs or the worktree.
+
+   ```sh
+   git config --global --replace-all credential.https://github.com.helper '!_gh_token_credential() {
+     local op line token
+     op="$1"
+     while IFS= read -r line && [ -n "$line" ]; do :; done
+     [ "$op" != "get" ] && return 0
+     token="${GH_TOKEN:-${GITHUB_TOKEN:-${WORKFLOW_GITHUB_TOKEN:-}}}"
+     [ -z "$token" ] && { echo "missing GitHub token in environment" >&2; return 1; }
+     echo "username=x-access-token"
+     echo "password=$token"
+   }; _gh_token_credential'
+   git push origin '{{ .branch }}'
+   ```
+
 2. Fetch every open (unresolved, not-outdated) review thread on the PR via the GitHub GraphQL API.
 3. For each thread:
    - If addressed by a developer commit: reply citing the specific commit SHA and file:line, then resolve the thread.
