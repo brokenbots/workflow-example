@@ -252,3 +252,13 @@ variable "workflow_github_token" {
     type   = string
     secret = true
 }
+
+// GitHub token for the reviewer identity. Kept separate from
+// workflow_github_token so the handler's PR review/merge runs under a
+// different identity than the PR author — the external "independent approval"
+// gate is meaningless if both resolve to the same user (the entrypoint already
+// rejects that). Threaded into workstream_handler_v1 as reviewer_github_token.
+variable "reviewer_github_token" {
+    type   = string
+    secret = true
+}

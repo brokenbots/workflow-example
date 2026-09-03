@@ -1,6 +1,9 @@
 FROM golang:1.26.6-bookworm
 ARG TARGETARCH
-ARG CRITERIA_VERSION=v0.5.12
+# Bumped from v0.5.12: the workflow sandbox environments use the `process`
+# attribute, which v0.5.12's compiler rejects ("unknown attribute process").
+# v0.5.17 is the release the native CRI-81 run validated.
+ARG CRITERIA_VERSION=v0.5.17
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
 ARG LINEAR_CLI_VERSION=0.0.5

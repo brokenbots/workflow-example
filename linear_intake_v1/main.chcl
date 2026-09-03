@@ -79,7 +79,13 @@ subworkflow "handler" {
         provider_base_url   = var.provider_base_url
         linear_api_key      = var.linear_api_key
         workflow_github_token = var.workflow_github_token
-        reviewer_github_token = var.workflow_github_token
+        // The handler's reviewer role must authenticate as the reviewer
+        // identity (pr_reviewer_loop approves/merges under it), which differs
+        // from the workflow identity that authors the PR. Thread the real
+        // reviewer token through; previously this was miswired to the workflow
+        // token, which made the external "independent approval" gate approve
+        // its own PRs (see EXPERIMENT-ANALYSIS-2026-09-02.md section 3).
+        reviewer_github_token = var.reviewer_github_token
     }
 }
 
