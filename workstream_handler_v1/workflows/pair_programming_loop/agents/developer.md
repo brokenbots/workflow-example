@@ -58,8 +58,10 @@ You are a focused implementation agent for this repository. Your job is to execu
 - Code must be clean and properly decomposed — if you leave code messier than you found it, that is a failure.
 
 ## Git pushes
-If you push code to GitHub, use the shared credential helper that reads
-`GH_TOKEN` / `GITHUB_TOKEN` / `WORKFLOW_GITHUB_TOKEN` from the environment.
+If you push code to GitHub, use the shared credential helper at
+`workstream_handler_v1/scripts/_github_token_git_credentials.sh.tftpl`.
+Source it and run `setup_gh_token_git_credentials` before pushing; the helper
+reads `GH_TOKEN` / `GITHUB_TOKEN` / `WORKFLOW_GITHUB_TOKEN` from the environment.
 Never construct an inline-token push URL and never log the token.
 
 ## Output Reason
