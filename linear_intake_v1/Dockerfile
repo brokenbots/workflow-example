@@ -7,6 +7,11 @@ ARG CRITERIA_VERSION=v0.5.17
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
 ARG LINEAR_CLI_VERSION=0.0.5
+ARG SHELL_ADAPTER_VERSION=0.5.2
+ARG COPILOT_ADAPTER_VERSION=0.5.4
+
+FROM ghcr.io/brokenbots/criteria-adapter-shell:${SHELL_ADAPTER_VERSION} AS shell-adapter
+FROM ghcr.io/brokenbots/criteria-adapter-copilot:${COPILOT_ADAPTER_VERSION} AS copilot-adapter
 
 ENV CGO_ENABLED=0
 
@@ -57,6 +62,13 @@ RUN apt-get update \
     && install -m 0755 /tmp/criteria/criteria /usr/local/bin/criteria \
     && install -m 0755 /tmp/criteria/criteria-adapter-* /home/criteria/.local/criteria/adapters/ \
     && rm -rf "/tmp/${archive}" /tmp/criteria-checksums.txt /tmp/criteria
+
+# Pull the shell and copilot adapters from their remote-capable container
+# images instead of using the bundled copies from the Criteria release tarball.
+COPY --from=shell-adapter /usr/local/bin/criteria-adapter-shell /home/criteria/.local/criteria/adapters/
+COPY --from=copilot-adapter /usr/local/bin/criteria-adapter-copilot /home/criteria/.local/criteria/adapters/
+
+RUN chown -R criteria:criteria /home/criteria/.local/criteria
 
 ENV HOME=/home/criteria \
     CRITERIA_HOME=/home/criteria/.local/criteria
