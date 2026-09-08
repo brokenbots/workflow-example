@@ -1,3 +1,6 @@
+FROM ghcr.io/brokenbots/criteria-adapter-shell:2.0.1 AS shell-adapter
+FROM ghcr.io/brokenbots/criteria-adapter-copilot:0.1.1 AS copilot-adapter
+
 FROM golang:1.26.6-bookworm
 ARG TARGETARCH
 # Bumped from v0.5.12: the workflow sandbox environments use the `process`
@@ -55,8 +58,11 @@ RUN apt-get update \
     && mkdir -p /tmp/criteria /home/criteria/.local/criteria/adapters \
     && tar -xzf "/tmp/${archive}" -C /tmp/criteria \
     && install -m 0755 /tmp/criteria/criteria /usr/local/bin/criteria \
-    && install -m 0755 /tmp/criteria/criteria-adapter-* /home/criteria/.local/criteria/adapters/ \
     && rm -rf "/tmp/${archive}" /tmp/criteria-checksums.txt /tmp/criteria
+
+# Copy remote-capable adapter binaries from their published container images.
+COPY --from=shell-adapter --chown=criteria:criteria /usr/local/bin/criteria-adapter-shell /home/criteria/.local/criteria/adapters/
+COPY --from=copilot-adapter --chown=criteria:criteria /usr/local/bin/criteria-adapter-copilot /home/criteria/.local/criteria/adapters/
 
 ENV HOME=/home/criteria \
     CRITERIA_HOME=/home/criteria/.local/criteria

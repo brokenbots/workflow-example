@@ -24,7 +24,7 @@ environment "sandbox" "intake" {
 // interpolated into step input.
 adapter "shell" "intake" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.2"
+    version     = "2.0.1"
     environment = sandbox.intake
     secrets {
         LINEAR_API_KEY = var.linear_api_key
@@ -37,7 +37,7 @@ adapter "shell" "intake" {
 adapter "copilot" "intake_classifier" {
     environment = sandbox.intake
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.1.1"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
@@ -58,7 +58,7 @@ adapter "copilot" "intake_classifier" {
 adapter "copilot" "triage_reviewer" {
     environment = sandbox.intake
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.1.1"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
