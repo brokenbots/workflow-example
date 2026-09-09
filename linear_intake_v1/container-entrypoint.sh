@@ -148,30 +148,53 @@ find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
     done
 ' sh "$CRITERIA_REMOTE_TOKEN" {} +
 
-# Locate the locked remote adapter binaries in the local OCI cache.
-adapter_binary() {
+# Locate the locked remote adapter binaries in the local OCI cache. The
+# installed-cache listing may not carry the reference (unattributed when the
+# adapter was pulled without annotation), so resolve the digest straight from
+# the workflow lockfile — the same trust anchor `criteria apply` enforces.
+# The digest doubles as the adapter's identity over the handshake: the shim
+# rejects connections whose presented digest does not match the pinned one,
+# so each adapter is launched with CRITERIA_REMOTE_DIGEST=<pinned digest>.
+adapter_digest() {
     kind="$1"
-    ref="$2"
-    digest=$(criteria adapter list --installed | awk -v r="$ref" '$0 ~ r {print $1; exit}')
+    lockfile="$2"
+    digest=$(awk -v k="criteria-adapter-${kind}" '
+        $0 ~ "reference.*"k { in_entry=1 }
+        in_entry && /resolved_digest/ { gsub(/[\" ]/, ""); sub(/^resolved_digest=sha256:/, ""); print; exit }
+    ' "$lockfile")
     if [ -z "$digest" ]; then
-        echo "criteria adapter $ref not found in local cache" >&2
+        echo "criteria adapter $kind not found in $lockfile" >&2
         exit 1
     fi
-    digest=$(printf '%s' "$digest" | tr ':' '-')
-    printf '%s' "/home/criteria/.local/criteria/adapters/${digest}/criteria-adapter-${kind}"
+    printf '%s' "$digest"
 }
 
-shell_adapter=$(adapter_binary shell ghcr.io/brokenbots/criteria-adapter-shell:0.5.3)
-copilot_adapter=$(adapter_binary copilot ghcr.io/brokenbots/criteria-adapter-copilot:0.5.5)
+adapter_binary() {
+    kind="$1"
+    digest="$2"
+    printf '%s' "/home/criteria/.local/criteria/adapters/sha256-${digest}/criteria-adapter-${kind}"
+}
+
+main_lockfile="$workflow_src/linear_intake_v1/.criteria.lock.hcl"
+shell_digest=$(adapter_digest shell "$main_lockfile")
+copilot_digest=$(adapter_digest copilot "$main_lockfile")
+shell_adapter=$(adapter_binary shell "$shell_digest")
+copilot_adapter=$(adapter_binary copilot "$copilot_digest")
 
 # Launch the adapters in phone-home mode. They retry until the criteria shim
-# starts listening on 127.0.0.1:7778.  CRITERIA_REMOTE_HOST is passed only to the
-# adapters; the engine uses the listen_address from the workflow config and must
-# not see this variable (otherwise adapter verification would run in remote
-# mode and time out).
-env CRITERIA_REMOTE_HOST="127.0.0.1:7778" "$shell_adapter" &
+# starts listening on 127.0.0.1:7778.  CRITERIA_REMOTE_HOST is passed only to
+# the adapters; the engine uses the listen_address from the workflow config
+# and must not see this variable (otherwise adapter verification would run in
+# remote mode and time out).
+env CRITERIA_REMOTE_HOST="127.0.0.1:7778" \
+    CRITERIA_REMOTE_TOKEN="$CRITERIA_REMOTE_TOKEN" \
+    CRITERIA_REMOTE_DIGEST="sha256:$shell_digest" \
+    "$shell_adapter" &
 shell_pid=$!
-env CRITERIA_REMOTE_HOST="127.0.0.1:7778" "$copilot_adapter" &
+env CRITERIA_REMOTE_HOST="127.0.0.1:7778" \
+    CRITERIA_REMOTE_TOKEN="$CRITERIA_REMOTE_TOKEN" \
+    CRITERIA_REMOTE_DIGEST="sha256:$copilot_digest" \
+    "$copilot_adapter" &
 copilot_pid=$!
 
 cleanup() {

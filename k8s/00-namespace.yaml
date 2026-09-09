@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: criteria-jobs
+  labels:
+    # Remote-mode workflows run unprivileged: adapters are plain processes
+    # phoning home to the in-pod shim, so the baseline pod security standard
+    # applies. (The old privileged label existed for sandbox-era runs that
+    # needed seccomp=Unconfined; remote environments do not.)
+    pod-security.kubernetes.io/enforce: baseline

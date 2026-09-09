@@ -1,0 +1,33 @@
+# OpenBao Kubernetes auth role for the criteria-runner service account.
+# The role binds the SA in criteria-jobs to the criteria-jobs policy,
+# granting read access to secrets under the criteria/ KV path.
+#
+# Apply after the namespace exists and after OpenBao kubernetes auth is enabled:
+#   kubectl exec -n default openbao-0 -- env VAULT_TOKEN=$ROOT_TOKEN \
+#     vault write auth/kubernetes/role/criteria-jobs \
+#       bound_service_account_names=criteria-runner \
+#       bound_service_account_namespaces=criteria-jobs \
+#       policies=criteria-jobs ttl=1h
+#
+# This manifest is for documentation/reference only - the role is configured
+# directly in OpenBao via the CLI commands above.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-role-reference
+  namespace: criteria-jobs
+data:
+  role-config.txt: |
+    auth/kubernetes/role/criteria-jobs:
+      bound_service_account_names: criteria-runner
+      bound_service_account_namespaces: criteria-jobs
+      policies: criteria-jobs
+      ttl: 1h
+
+  policy.hcl: |
+    path "criteria/data/*" {
+      capabilities = ["read", "list"]
+    }
+    path "criteria/metadata/*" {
+      capabilities = ["read", "list"]
+    }

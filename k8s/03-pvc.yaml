@@ -1,0 +1,15 @@
+# Persistent volume for criteria run artifacts.
+# Uses the default local-path provisioner (hostPath on the control-plane node).
+# This keeps intake/triage/repo artifacts across pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: criteria-data
+  namespace: criteria-jobs
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path

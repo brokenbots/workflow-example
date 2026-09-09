@@ -2,8 +2,9 @@ FROM golang:1.26.6-bookworm
 ARG TARGETARCH
 # Bumped from v0.5.12: the workflow sandbox environments use the `process`
 # attribute, which v0.5.12's compiler rejects ("unknown attribute process").
-# v0.5.17 is the release the native CRI-81 run validated.
-ARG CRITERIA_VERSION=v0.5.17
+# v0.5.18 is the first release whose remote-environment shim verifies adapter
+# digests from the compiled graph pin set (CRI-111); remote runs need it.
+ARG CRITERIA_VERSION=v0.5.18
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
 ARG LINEAR_CLI_VERSION=0.0.5
@@ -63,7 +64,20 @@ ENV HOME=/home/criteria \
 
 COPY . /workflows
 COPY linear_intake_v1/container-entrypoint.sh /usr/local/bin/linear-intake
+# Lock and pre-pull every OCI adapter the workflow tree references. The remote
+# environments resolve adapter binaries from the local OCI cache at startup
+# (container-entrypoint.sh adapter_binary), so the 0.5.3/0.5.5 remote-capable
+# adapters must be present in the image. Auto-pull during `criteria apply`
+# happens too late for the entrypoint's direct resolution.
 RUN criteria adapter lock /workflows/linear_intake_v1 \
+    && for wf in linear_intake_v1 qa_triage_v1 qa_triage_v1/workflows/repro_runner \
+                 workstream_handler_v1 workstream_handler_v1/workflows/branch_manager \
+                 workstream_handler_v1/workflows/pair_programming_loop \
+                 workstream_handler_v1/workflows/pr_reviewer_loop; do \
+        criteria adapter lock "/workflows/$wf" || exit 1; \
+       done \
+    && criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.3 \
+    && criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.5 \
     && chmod 0755 /usr/local/bin/linear-intake \
     && mkdir -p /repo /data/intake /data/triage /home/criteria/.config/gh \
     && chown -R criteria:criteria /repo /data /home/criteria/.config /home/criteria/.local/criteria

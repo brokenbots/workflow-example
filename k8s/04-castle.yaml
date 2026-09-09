@@ -1,0 +1,100 @@
+# Castle server: the control-plane that orchestrates criteria agents.
+# Runs as a single replica with persistent SQLite storage.
+#
+# The image is built from ~/Projects/castle and pushed to the local registry:
+#   docker build -f Dockerfile.castle -t localhost:5000/castle:dev ~/Projects/castle
+#   docker push localhost:5000/castle:dev
+#
+# k3s on this node pulls from localhost:5000 automatically (insecure registry
+# configured via the containerd template below).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: castle
+  namespace: criteria-jobs
+  labels:
+    app: castle
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: castle
+  template:
+    metadata:
+      labels:
+        app: castle
+    spec:
+      serviceAccountName: criteria-runner
+      # Keep Castle off GPU nodes - it only needs CPU
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: castle
+        image: localhost:5000/castle:dev
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: h2c
+        env:
+        - name: CASTLE_ADDR
+          value: ":8080"
+        - name: CASTLE_DB_PATH
+          value: /data/castle.db
+        - name: CASTLE_EVENT_BUFFER_CAPACITY
+          value: "10000"
+        - name: CASTLE_ALLOW_ANON_READS
+          value: "true"
+        # Dev mode: allow agents to register without a bootstrap token.
+        # For production, set OVERLORD_CASTLE_BOOTSTRAP_TOKEN and remove this.
+        command:
+        - castle
+        - --dev-allow-anon-register
+        - --allow-anon-reads=true
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        readinessProbe:
+          exec:
+            command:
+            - wget
+            - -q
+            - -O-
+            - --post-data={}
+            - --header=Content-Type:application/json
+            - http://localhost:8080/grpc.health.v1.Health/Check
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - wget
+            - -q
+            - -O-
+            - --post-data={}
+            - --header=Content-Type:application/json
+            - http://localhost:8080/grpc.health.v1.Health/Check
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: criteria-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: castle
+  namespace: criteria-jobs
+spec:
+  selector:
+    app: castle
+  ports:
+  - name: h2c
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP

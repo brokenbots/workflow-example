@@ -1,0 +1,19 @@
+# k3s containerd registry mirror for the local Docker registry.
+# This tells k3s's containerd to treat localhost:5000 as an insecure registry,
+# so pods can pull images pushed there without TLS.
+#
+# Install: sudo cp k8s/registries.yaml /etc/rancher/k3s/registries.yaml && sudo systemctl restart k3s
+mirrors:
+  localhost:5000:
+    endpoint:
+    - http://localhost:5000
+  "192.168.17.116:5000":
+    endpoint:
+    - http://192.168.17.116:5000
+configs:
+  localhost:5000:
+    tls:
+      insecure_skip_verify: true
+  "192.168.17.116:5000":
+    tls:
+      insecure_skip_verify: true
