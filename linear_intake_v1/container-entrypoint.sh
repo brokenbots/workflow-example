@@ -19,6 +19,14 @@ read_secret_file LINEAR_API_KEY /secrets/linear_api_key
 read_secret_file WORKFLOW_GITHUB_TOKEN /secrets/workflow_github_token
 read_secret_file REVIEWER_GITHUB_TOKEN /secrets/reviewer_github_token
 
+# The PV may contain files from a previous run owned by a different UID.
+# Git refuses to operate on repositories whose owner differs from the current
+# user. Add the repo to git's safe.directory list so clone/worktree commands
+# work regardless of file ownership on the persistent volume.
+if [ -n "${REPO_DIR:-}" ]; then
+    git config --global --add safe.directory "$REPO_DIR"
+fi
+
 : "${LINEAR_API_KEY:?LINEAR_API_KEY is required (set env var or mount /secrets/linear_api_key)}"
 : "${WORKFLOW_GITHUB_TOKEN:?WORKFLOW_GITHUB_TOKEN is required (set env var or mount /secrets/workflow_github_token)}"
 : "${REVIEWER_GITHUB_TOKEN:?REVIEWER_GITHUB_TOKEN is required (set env var or mount /secrets/reviewer_github_token)}"

@@ -32,6 +32,11 @@ esac
 
 mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"
 
+# Git refuses repositories whose on-disk owner differs from the current user
+# (the emptyDir/PV clone runs under a different effective ownership view).
+git config --global --add safe.directory "$REPO_DIR"
+git config --global --add safe.directory "$REPO_DIR/**"
+
 # Generate a per-run bearer token for the remote adapters and publish it to the
 # shared PVC so all three containers agree on the token. Write-once: on a
 # workflow-runner restart (Job restartPolicy), keep the existing token so the
