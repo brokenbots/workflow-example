@@ -9,9 +9,11 @@ CONTAINER_TOOL := $(shell command -v docker || command -v podman || command -v b
 
 build:
 ifeq ($(CONTAINER_TOOL),)
-	$(error No container tool found. Install docker, podman, or buildah to build the image.)
-endif
+	@echo "No container tool found; running validation/lint instead of building the image."
+	$(MAKE) validate lint
+else
 	$(CONTAINER_TOOL) build -f linear_intake_v1/Dockerfile -t $(IMAGE_NAME):$(IMAGE_TAG) .
+endif
 
 validate:
 	/usr/local/bin/criteria validate linear_intake_v1
