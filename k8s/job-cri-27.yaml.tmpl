@@ -98,7 +98,7 @@ spec:
               set -eu
               WORKFLOW_GITHUB_TOKEN=""
               if [ -r /secrets/workflow_github_token ]; then
-                  IFS= read -r WORKFLOW_GITHUB_TOKEN < /secrets/workflow_github_token
+                  WORKFLOW_GITHUB_TOKEN=$(cat /secrets/workflow_github_token)
               fi
               if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
                   echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
@@ -118,8 +118,7 @@ spec:
             - name: repo
               mountPath: /repo
             - name: shell-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
+              mountPath: /secrets
           resources:
             requests:
               memory: "512Mi"
@@ -184,8 +183,7 @@ spec:
             - name: repo
               mountPath: /repo
             - name: linear-secrets
-              mountPath: /secrets/linear_api_key
-              subPath: linear_api_key
+              mountPath: /secrets
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
@@ -209,11 +207,7 @@ spec:
             - name: repo
               mountPath: /repo
             - name: copilot-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
-            - name: copilot-secrets
-              mountPath: /secrets/reviewer_github_token
-              subPath: reviewer_github_token
+              mountPath: /secrets
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
@@ -237,8 +231,7 @@ spec:
             - name: repo
               mountPath: /repo
             - name: shell-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
+              mountPath: /secrets
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:

@@ -5,7 +5,7 @@ set -eu
 # both tokens; the shell sidecar mounts only the workflow token.
 WORKFLOW_GITHUB_TOKEN=""
 if [ -r /secrets/workflow_github_token ]; then
-    IFS= read -r WORKFLOW_GITHUB_TOKEN < /secrets/workflow_github_token
+    WORKFLOW_GITHUB_TOKEN=$(cat /secrets/workflow_github_token)
 fi
 if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
     echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
@@ -14,7 +14,7 @@ fi
 
 REVIEWER_GITHUB_TOKEN=""
 if [ -r /secrets/reviewer_github_token ]; then
-    IFS= read -r REVIEWER_GITHUB_TOKEN < /secrets/reviewer_github_token
+    REVIEWER_GITHUB_TOKEN=$(cat /secrets/reviewer_github_token)
 fi
 if [ -z "$REVIEWER_GITHUB_TOKEN" ] && [ "$ADAPTER_KIND" = "copilot" ]; then
     echo "REVIEWER_GITHUB_TOKEN is required via /secrets/reviewer_github_token" >&2

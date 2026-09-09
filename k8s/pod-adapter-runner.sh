@@ -5,7 +5,7 @@ set -eu
 # intentionally not given any GitHub token mounts.
 LINEAR_API_KEY=""
 if [ -r /secrets/linear_api_key ]; then
-    IFS= read -r LINEAR_API_KEY < /secrets/linear_api_key
+    LINEAR_API_KEY=$(cat /secrets/linear_api_key)
 fi
 if [ -z "$LINEAR_API_KEY" ]; then
     echo "LINEAR_API_KEY is required via /secrets/linear_api_key" >&2

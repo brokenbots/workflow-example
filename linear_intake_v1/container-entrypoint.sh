@@ -10,7 +10,7 @@ read_secret_file() {
     if [ -z "$current" ] && [ -r "$path" ]; then
         # Read the first line of the secret file verbatim. Tokens are single-line
         # values, and IFS= prevents trimming leading/trailing whitespace.
-        IFS= read -r value < "$path"
+        value=$(cat "$path")
         export "$target=$value"
     fi
 }
