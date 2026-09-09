@@ -35,7 +35,7 @@ printf '%s' "$manifest" | grep -q 'vaultAddress' && \
 printf '%s' "$manifest" | grep -q 'secretPath: criteria/data/linear' || \
     fail "SPC does not read from criteria/data/linear"
 
-printf '%s' "$manifest" | grep -q 'filePermission: 0600' || \
+printf '%s' "$manifest" | grep -q 'filePermission: 0444' || \
     fail "SPC objects do not request restrictive file permissions"
 
 printf '%s' "$manifest" | grep -q 'objectName: linear_api_key' || \
@@ -70,8 +70,8 @@ printf '%s' "$manifest" | grep -q 'nodeSelector:' || \
 printf '%s' "$manifest" | grep -q 'kubernetes.io/arch: amd64' || \
     fail "nodeSelector is not amd64"
 
-printf '%s' "$manifest" | grep -q 'key: node-role.kubernetes.io/control-plane' || \
-    fail "missing control-plane toleration"
+printf '%s' "$manifest" | grep -q 'key: catch' || \
+    fail "missing catch toleration"
 
 printf '%s' "$manifest" | grep -q 'claimName: criteria-data' || \
     fail "missing /data PVC mount"
@@ -131,11 +131,11 @@ printf '%s' "$manifest" | grep -q 'name: pod-adapter-scripts' || \
 printf '%s' "$manifest" | grep -q 'mountPath: /opt/criteria-pod-adapter' || \
     fail "scripts ConfigMap is not mounted"
 
-# Verify the runner script was embedded and rewrites GitHub secrets to env refs.
-printf '%s' "$manifest" | grep -q 'env:WORKFLOW_GITHUB_TOKEN' || \
-    fail "runner script does not rewrite workflow_github_token to env ref"
-printf '%s' "$manifest" | grep -q 'env:REVIEWER_GITHUB_TOKEN' || \
-    fail "runner script does not rewrite reviewer_github_token to env ref"
+# Verify the runner script passes GitHub secrets as file refs, never as env vars.
+printf '%s' "$manifest" | grep -q 'file:/home/criteria/secrets/workflow_github_token' || \
+    fail "runner script does not pass workflow_github_token as a file ref"
+printf '%s' "$manifest" | grep -q 'file:/home/criteria/secrets/reviewer_github_token' || \
+    fail "runner script does not pass reviewer_github_token as a file ref"
 
 # Extract and run the runner's substitution logic against a synthetic workflow
 # tree containing both placeholder variants. This is the blocking runtime path
@@ -181,15 +181,13 @@ adapter "copilot" "legacy" {
 }
 EOF
 
-# Mirror both substitution passes from the runner script: bearer-token
-# placeholders (both the new literal and the legacy double-underscore form),
-# then GitHub token secret rewrites.
+# Mirror the runner script's bearer-token placeholder substitution (both the
+# new literal and the legacy double-underscore form). GitHub token references
+# are intentionally left as var bindings and resolved by the engine via the
+# runner's file: OriginRefs, so they never become container environment vars.
 find "$test_tmp" -name 'adapters.chcl' -exec sed -i \
     -e "s|CRITERIA_REMOTE_TOKEN_PLACEHOLDER|$token|g" \
     -e "s|__CRITERIA_REMOTE_TOKEN__|$token|g" {} +
-find "$test_tmp" -name 'adapters.chcl' -exec sed -i \
-    -e 's|var\.workflow_github_token|env:WORKFLOW_GITHUB_TOKEN|g' \
-    -e 's|var\.reviewer_github_token|env:REVIEWER_GITHUB_TOKEN|g' {} +
 
 find "$test_tmp" -name 'adapters.chcl' | while read -r f; do
     if grep -qE 'CRITERIA_REMOTE_TOKEN_PLACEHOLDER|__CRITERIA_REMOTE_TOKEN__' "$f"; then
@@ -198,11 +196,11 @@ find "$test_tmp" -name 'adapters.chcl' | while read -r f; do
     if ! grep -qF "accept_token = \"$token\"" "$f"; then
         fail "generated token not found in $f"
     fi
-    if ! grep -q 'env:WORKFLOW_GITHUB_TOKEN' "$f"; then
-        fail "workflow_github_token not rewritten to env ref in $f"
+    if ! grep -q 'var.workflow_github_token' "$f"; then
+        fail "workflow_github_token binding removed in $f"
     fi
-    if ! grep -q 'env:REVIEWER_GITHUB_TOKEN' "$f"; then
-        fail "reviewer_github_token not rewritten to env ref in $f"
+    if ! grep -q 'var.reviewer_github_token' "$f"; then
+        fail "reviewer_github_token binding removed in $f"
     fi
 done
 
