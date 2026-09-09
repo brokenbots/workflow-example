@@ -204,4 +204,4 @@ find "$test_tmp" -name 'adapters.chcl' | while read -r f; do
     fi
 done
 
-echo "PASS: rendered pod-adapter Job manifest meets CRI-103/CRI-106 requirements"
+echo "PASS: rendered pod-adapter Job manifest meets CRI-104 requirements"
