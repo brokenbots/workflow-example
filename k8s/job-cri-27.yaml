@@ -115,14 +115,13 @@ data:
         done
     ' sh "$token" "$old_token_placeholder" {} +
     
-    # Rewrite GitHub token secrets so each adapter reads its own token from its CSI
-    # mount instead of receiving it from the workflow-runner over the secret
-    # channel. This lets the runner mount only the Linear API key. Secret values
-    # are OriginRef strings ("kind:ref") parsed by the host's secret provider
-    # stack - they must stay quoted HCL strings.
-    find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
-        -e 's|var\.workflow_github_token|"env:WORKFLOW_GITHUB_TOKEN"|g' \
-        -e 's|var\.reviewer_github_token|"env:REVIEWER_GITHUB_TOKEN"|g' {} +
+    # The workflow HCL keeps its var.workflow_github_token / var.reviewer_github_token
+    # secret references untouched: the compiler requires direct var.<name> bindings.
+    # Instead the runner passes file: OriginRefs for those variables (--var below);
+    # the engine's resolveSecretVarOrigins reads them through the secrets provider
+    # stack (FileProvider) at run start and delivers the values to adapters over
+    # OpenSession - the SDK contract (D69: adapters never read their own process
+    # environment for workflow secrets). Tokens never appear as env vars or argv.
     
     runtime_dir=$(mktemp -d)
     runtime_vars="$runtime_dir/vars.json"
@@ -179,13 +178,14 @@ data:
         events_file="$INTAKE_ROOT/$TICKET_ID/events.ndjson"
     fi
     
-    # Dummy values for GitHub token variables: the real values live in each adapter
-    # container's CSI mount and are resolved via env: references at runtime.
+    # Secret variables are passed as file: OriginRefs: the engine resolves them
+    # through the FileProvider at run start (resolveSecretVarOrigins). Raw token
+    # values never appear in argv - only the mount paths.
     /usr/local/bin/criteria apply "$workflow_tmp/linear_intake_v1" \
         --var-file "$runtime_vars" \
         --var "linear_api_key=$LINEAR_API_KEY" \
-        --var "workflow_github_token=csi-supplied" \
-        --var "reviewer_github_token=csi-supplied" \
+        --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
+        --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
         --events-file "$events_file" \
         --output concise
   sidecar.sh: |
@@ -386,6 +386,8 @@ spec:
               mountPath: /repo
             - name: linear-secrets
               mountPath: /secrets
+            - name: copilot-secrets
+              mountPath: /home/criteria/secrets
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:

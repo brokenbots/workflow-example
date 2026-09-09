@@ -184,6 +184,8 @@ spec:
               mountPath: /repo
             - name: linear-secrets
               mountPath: /secrets
+            - name: copilot-secrets
+              mountPath: /home/criteria/secrets
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
