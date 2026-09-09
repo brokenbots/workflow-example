@@ -1,0 +1,14 @@
+apiVersion: criteria.brokenbots.dev/v1
+kind: CriteriaRun
+metadata:
+  name: cri-42
+  namespace: criteria-jobs
+spec:
+  ticketId: "CRI-42"
+  repoUrl: "https://github.com/brokenbots/workflow-example.git"
+  image: "localhost:5000/linear-intake-remote:dev"
+  buildCmd: "make build"
+  testCmd: "make test"
+  ciGateCmd: "make ci-gate"
+  maxAgentVisits: 2
+  providerBaseUrl: "http://192.168.17.116:11434/v1"
