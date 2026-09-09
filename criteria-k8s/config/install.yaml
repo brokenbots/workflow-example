@@ -1,0 +1,316 @@
+# Install manifest for the criteria-k8s operator.
+# Applies namespace, CRD, RBAC, and the operator/Linear watcher deployments.
+# The SecretProviderClasses (linear-spc, copilot-spc, shell-spc) and the
+# criteria-data PVC must already exist in the target namespace.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: criteria-jobs
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: criteriaruns.criteria.brokenbots.dev
+spec:
+  group: criteria.brokenbots.dev
+  names:
+    kind: CriteriaRun
+    listKind: CriteriaRunList
+    plural: criteriaruns
+    singular: criteriarun
+    shortNames:
+      - cri
+      - crun
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Ticket
+          type: string
+          jsonPath: .spec.ticketId
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Job
+          type: string
+          jsonPath: .status.jobName
+        - name: PR
+          type: string
+          jsonPath: .status.prNumber
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - ticketId
+                - repoUrl
+              properties:
+                ticketId:
+                  type: string
+                  description: Linear ticket identifier to process.
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  maxLength: 64
+                repoUrl:
+                  type: string
+                  description: GitHub repository to clone and work on.
+                image:
+                  type: string
+                  description: Criteria workflow image to run.
+                buildCmd:
+                  type: string
+                  description: Optional build command for the repository under test.
+                testCmd:
+                  type: string
+                  description: Optional test command for the repository under test.
+                ciGateCmd:
+                  type: string
+                  description: CI gate command for the implementation loop.
+                maxAgentVisits:
+                  type: integer
+                  default: 2
+                  description: Maximum visits for each agent gate.
+                providerBaseUrl:
+                  type: string
+                  description: Ollama-compatible provider endpoint for adapters.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                    - Unknown
+                  description: Lifecycle phase of the child Job.
+                jobName:
+                  type: string
+                  description: Name of the reconciled child Job.
+                prNumber:
+                  type: string
+                  description: Pull request number produced by the run, when known.
+                ticketState:
+                  type: string
+                  description: Final Linear ticket state read from run events.
+                eventsPath:
+                  type: string
+                  description: Absolute path to the run's events file on /data.
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Last reconciled metadata generation.
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: criteria-k8s-operator
+rules:
+  - apiGroups: ["criteria.brokenbots.dev"]
+    resources: ["criteriaruns"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["criteria.brokenbots.dev"]
+    resources: ["criteriaruns/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["criteria.brokenbots.dev"]
+    resources: ["criteriaruns/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "events"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: criteria-k8s-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: criteria-k8s-operator
+subjects:
+  - kind: ServiceAccount
+    name: criteria-k8s-operator
+    namespace: criteria-jobs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+  labels:
+    app.kubernetes.io/name: criteria-k8s-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-k8s-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-k8s-operator
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: localhost:5000/criteria-k8s:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/manager"]
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: criteria-linear-watcher
+  namespace: criteria-jobs
+  labels:
+    app.kubernetes.io/name: criteria-linear-watcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-linear-watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-linear-watcher
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: watcher
+          image: localhost:5000/criteria-k8s:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/linear-watcher"]
+          env:
+            - name: NAMESPACE
+              value: "criteria-jobs"
+            - name: LINEAR_PROJECT_NAME
+              value: "Criteria K8s Workflow Runner"
+            - name: LINEAR_TRIAGE_STATE
+              value: "Triage"
+            - name: POLL_INTERVAL
+              value: "60s"
+            - name: CRITERIA_IMAGE
+              value: "localhost:5000/linear-intake-remote:dev"
+            - name: PROVIDER_BASE_URL
+              value: "http://192.168.17.116:11434/v1"
+            - name: MAX_AGENT_VISITS
+              value: "2"
+          volumeMounts:
+            - name: linear-secrets
+              mountPath: /secrets/linear_api_key
+              subPath: linear_api_key
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+      volumes:
+        - name: linear-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: linear-spc

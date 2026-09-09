@@ -78,7 +78,7 @@ spec:
       nodeSelector:
         kubernetes.io/arch: amd64
       tolerations:
-        - key: node-role.kubernetes.io/control-plane
+        - key: catch
           operator: Exists
           effect: NoSchedule
       restartPolicy: OnFailure
@@ -87,6 +87,8 @@ spec:
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: repo-clone
           image: __IMAGE__
@@ -118,7 +120,8 @@ spec:
             - name: repo
               mountPath: /repo
             - name: shell-secrets
-              mountPath: /secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
           resources:
             requests:
               memory: "512Mi"
@@ -183,7 +186,8 @@ spec:
             - name: repo
               mountPath: /repo
             - name: linear-secrets
-              mountPath: /secrets
+              mountPath: /secrets/linear_api_key
+              subPath: linear_api_key
             - name: copilot-secrets
               mountPath: /home/criteria/secrets
             - name: scripts
@@ -209,7 +213,11 @@ spec:
             - name: repo
               mountPath: /repo
             - name: copilot-secrets
-              mountPath: /secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+            - name: copilot-secrets
+              mountPath: /secrets/reviewer_github_token
+              subPath: reviewer_github_token
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
@@ -233,7 +241,8 @@ spec:
             - name: repo
               mountPath: /repo
             - name: shell-secrets
-              mountPath: /secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
