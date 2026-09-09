@@ -117,10 +117,12 @@ data:
     
     # Rewrite GitHub token secrets so each adapter reads its own token from its CSI
     # mount instead of receiving it from the workflow-runner over the secret
-    # channel. This lets the runner mount only the Linear API key.
+    # channel. This lets the runner mount only the Linear API key. Secret values
+    # are OriginRef strings ("kind:ref") parsed by the host's secret provider
+    # stack - they must stay quoted HCL strings.
     find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
-        -e 's|var\.workflow_github_token|env:WORKFLOW_GITHUB_TOKEN|g' \
-        -e 's|var\.reviewer_github_token|env:REVIEWER_GITHUB_TOKEN|g' {} +
+        -e 's|var\.workflow_github_token|"env:WORKFLOW_GITHUB_TOKEN"|g' \
+        -e 's|var\.reviewer_github_token|"env:REVIEWER_GITHUB_TOKEN"|g' {} +
     
     runtime_dir=$(mktemp -d)
     runtime_vars="$runtime_dir/vars.json"
