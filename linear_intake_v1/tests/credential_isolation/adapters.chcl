@@ -1,11 +1,14 @@
-environment "sandbox" "probe" {
+environment "remote" "probe" {
     working_directory = "/tmp"
+    listen_address = "127.0.0.1:7778"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
 }
 
 adapter "shell" "workflow" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.2"
-    environment = sandbox.probe
+    version     = "0.5.3"
+    environment = remote.probe
     secrets {
         GH_TOKEN = "env:WORKFLOW_GITHUB_TOKEN"
     }
@@ -13,8 +16,8 @@ adapter "shell" "workflow" {
 
 adapter "shell" "reviewer" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.2"
-    environment = sandbox.probe
+    version     = "0.5.3"
+    environment = remote.probe
     secrets {
         GH_TOKEN = "env:REVIEWER_GITHUB_TOKEN"
     }

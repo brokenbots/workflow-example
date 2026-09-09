@@ -1,13 +1,13 @@
 // Ref resolution and worktree lifecycle need the repo's primary tree.
 // Deterministic shell steps bind here; agents deliberately do NOT.
-environment "sandbox" "primary" {
+environment "remote" "primary" {
     working_directory = var.repo_dir
-    network = {
-        allow = ["*"]
-    }
     process = {
         exec = ["*"]
     }
+    listen_address = "127.0.0.1:7778"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
 }
 
 // Agents run in a throwaway scratch worktree checked out at the mainline ref —
@@ -19,20 +19,20 @@ environment "sandbox" "primary" {
 // to test a hypothesis is exactly what an investigator should do. The fix is to
 // give them a real checkout they are free to destroy. Whatever they do here is
 // discarded at teardown.
-environment "sandbox" "scratch" {
+environment "remote" "scratch" {
     working_directory = "${var.triage_root}/scratch"
-    network = {
-        allow = ["*"]
-    }
     process = {
         exec = ["*"]
     }
+    listen_address = "127.0.0.1:7778"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
 }
 
 adapter "shell" "repo" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.2"
-    environment = sandbox.primary
+    version     = "0.5.3"
+    environment = remote.primary
     secrets {
         GH_TOKEN = var.workflow_github_token
     }
@@ -42,13 +42,13 @@ adapter "shell" "repo" {
 // repro_runner. Bound to the primary tree here because the root-level phases
 // only read the report and the evidence directory.
 //
-// The sandbox scrubs host token variables before launch. The secret channel
-// reintroduces only this workflow's non-review identity under the names used by
-// the Copilot SDK and gh CLI.
+// The remote environment does not inherit host token variables. The secret
+// channel reintroduces only this workflow's non-review identity under the names
+// used by the Copilot SDK and gh CLI.
 adapter "copilot" "investigator" {
-    environment = sandbox.scratch
+    environment = remote.scratch
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.5.5"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
@@ -68,9 +68,9 @@ adapter "copilot" "investigator" {
 // the investigator's transcript, so a poisoned investigator context cannot
 // propagate into the gate that authorizes a workstream file.
 adapter "copilot" "supervisor" {
-    environment = sandbox.scratch
+    environment = remote.scratch
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.5.5"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token

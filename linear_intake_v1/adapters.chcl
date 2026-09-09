@@ -2,18 +2,14 @@
 // under intake_root. Nothing here touches the repository directly;
 // qa_triage_v1 and workstream_handler_v1 manage their own environments and
 // adapter sets as subworkflows.
-environment "sandbox" "intake" {
+environment "remote" "intake" {
     working_directory = var.intake_root
-    filesystem = {
-        read  = ["/"]
-        write = ["/data", "/tmp", "/dev", "/home/criteria", "/Users/dave/.copilot"]
-    }
-    network = {
-        allow = ["*"]
-    }
     process = {
         exec = ["*"]
     }
+    listen_address = "127.0.0.1:7778"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
 }
 
 // Deterministic steps. Also carries the Linear credential: every Linear step
@@ -24,20 +20,20 @@ environment "sandbox" "intake" {
 // interpolated into step input.
 adapter "shell" "intake" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.2"
-    environment = sandbox.intake
+    version     = "0.5.3"
+    environment = remote.intake
     secrets {
         LINEAR_API_KEY = var.linear_api_key
     }
 }
 
-// The sandbox scrubs host token variables before launch. The secret channel
-// reintroduces only the non-review identity under the names used by the Copilot
-// SDK and gh CLI.
+// The remote environment does not inherit host token variables. The secret
+// channel reintroduces only the non-review identity under the names used by the
+// Copilot SDK and gh CLI.
 adapter "copilot" "intake_classifier" {
-    environment = sandbox.intake
+    environment = remote.intake
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.5.5"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
@@ -56,9 +52,9 @@ adapter "copilot" "intake_classifier" {
 // The routing gate at the end of triage. Reads artifacts from disk — the
 // triage report and the workstream file — never another agent's transcript.
 adapter "copilot" "triage_reviewer" {
-    environment = sandbox.intake
+    environment = remote.intake
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.5.5"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
