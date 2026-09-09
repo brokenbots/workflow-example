@@ -53,7 +53,7 @@ tmpl_var DESIGN_INTENT_FILE   "${DESIGN_INTENT_FILE:-}"
 tmpl_var REPRO_WORKFLOW_DIR   "${REPRO_WORKFLOW_DIR:-}"
 tmpl_var ALLOW_DIRTY          "${ALLOW_DIRTY:-false}"
 tmpl_var MAX_AGENT_VISITS     "${MAX_AGENT_VISITS:-2}"
-tmpl_var PROVIDER_BASE_URL    "${PROVIDER_BASE_URL:-http://host.docker.internal:11434/v1}"
+tmpl_var PROVIDER_BASE_URL    "${PROVIDER_BASE_URL:-http://192.168.17.116:11434/v1}"
 tmpl_var EVENTS_FILE          "${EVENTS_FILE:-}"
 
 tmpl_var REPO_DIR        "${REPO_DIR:-/repo}"

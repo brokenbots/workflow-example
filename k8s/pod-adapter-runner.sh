@@ -33,9 +33,16 @@ esac
 mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"
 
 # Generate a per-run bearer token for the remote adapters and publish it to the
-# shared PVC so all three containers agree on the token.
-token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
-printf '%s' "$token" > /data/.criteria-remote-token
+# shared PVC so all three containers agree on the token. Write-once: on a
+# workflow-runner restart (Job restartPolicy), keep the existing token so the
+# long-lived adapter sidecars (which latched it at first boot) stay in sync.
+token_file=/data/.criteria-remote-token
+if [ -s "$token_file" ]; then
+    token=$(cat "$token_file")
+else
+    token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
+    printf '%s' "$token" > "$token_file"
+fi
 
 workflow_src=/workflows
 workflow_tmp=/tmp/workflows
