@@ -107,4 +107,57 @@ printf '%s' "$manifest" | grep -q 'env:WORKFLOW_GITHUB_TOKEN' || \
 printf '%s' "$manifest" | grep -q 'env:REVIEWER_GITHUB_TOKEN' || \
     fail "runner script does not rewrite reviewer_github_token to env ref"
 
+# Extract and run the runner's substitution logic against a synthetic workflow
+# tree containing both placeholder variants. This is the blocking runtime path
+# because the generated manifest embeds the runner script verbatim.
+runner_script=$(printf '%s' "$manifest" | awk '/^  runner.sh: \|/{flag=1;next} flag{print} /^  sidecar.sh: \|/{flag=0}')
+[ -n "$runner_script" ] || fail "could not extract runner script from ConfigMap"
+
+test_tmp=$(mktemp -d)
+trap 'rm -rf "$test_tmp"' EXIT
+
+# Recreate enough of the runner substitution for both token placeholders.
+token="test-token-$(date +%s)"
+mkdir -p "$test_tmp/linear_intake_v1" "$test_tmp/qa_triage_v1" "$test_tmp/workstream_handler_v1/workflows/nested"
+
+for p in "$test_tmp/linear_intake_v1/adapters.chcl" "$test_tmp/qa_triage_v1/adapters.chcl" "$test_tmp/workstream_handler_v1/adapters.chcl" "$test_tmp/workstream_handler_v1/workflows/nested/adapters.chcl"; do
+    cat > "$p" <<EOF
+environment "remote" "test" {
+    accept_token = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
+}
+adapter "copilot" "x" {
+    environment = remote.test
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.reviewer_github_token
+    }
+}
+EOF
+done
+
+# Mirror both substitution passes from the runner script: bearer-token
+# placeholders (both the new literal and the legacy double-underscore form),
+# then GitHub token secret rewrites.
+find "$test_tmp" -name 'adapters.chcl' -exec sed -i \
+    -e "s|CRITERIA_REMOTE_TOKEN_PLACEHOLDER|$token|g" \
+    -e "s|__CRITERIA_REMOTE_TOKEN__|$token|g" {} +
+find "$test_tmp" -name 'adapters.chcl' -exec sed -i \
+    -e 's|var\.workflow_github_token|env:WORKFLOW_GITHUB_TOKEN|g' \
+    -e 's|var\.reviewer_github_token|env:REVIEWER_GITHUB_TOKEN|g' {} +
+
+find "$test_tmp" -name 'adapters.chcl' | while read -r f; do
+    if grep -qE 'CRITERIA_REMOTE_TOKEN_PLACEHOLDER|__CRITERIA_REMOTE_TOKEN__' "$f"; then
+        fail "unsubstituted token placeholder remains in $f"
+    fi
+    if ! grep -qF "accept_token = \"$token\"" "$f"; then
+        fail "generated token not found in $f"
+    fi
+    if ! grep -q 'env:WORKFLOW_GITHUB_TOKEN' "$f"; then
+        fail "workflow_github_token not rewritten to env ref in $f"
+    fi
+    if ! grep -q 'env:REVIEWER_GITHUB_TOKEN' "$f"; then
+        fail "reviewer_github_token not rewritten to env ref in $f"
+    fi
+done
+
 echo "PASS: rendered pod-adapter Job manifest meets CRI-103 requirements"

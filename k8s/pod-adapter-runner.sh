@@ -42,15 +42,22 @@ workflow_tmp=/tmp/workflows
 rm -rf "$workflow_tmp"
 cp -a "$workflow_src" "$workflow_tmp"
 
-# Substitute the placeholder in the remote environment block so the shim and
-# the adapter sidecars share the generated bearer token.
+# Substitute the placeholders in every subworkflow's remote environment block
+# so each shim and the adapter sidecars share the generated bearer token. The
+# legacy placeholder literal is assembled at runtime so the launcher template
+# renderer does not try to replace it while rendering the manifest.
+old_token_placeholder="_""_CRITERIA_REMOTE_TOKEN_""_"
 find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
     tok="$1"
-    shift
+    old="$2"
+    shift 2
     for f; do
-        sed -i "s|CRITERIA_REMOTE_TOKEN_PLACEHOLDER|$tok|g" "$f"
+        sed -i \
+            -e "s|CRITERIA_REMOTE_TOKEN_PLACEHOLDER|$tok|g" \
+            -e "s|$old|$tok|g" \
+            "$f"
     done
-' sh "$token" {} +
+' sh "$token" "$old_token_placeholder" {} +
 
 # Rewrite GitHub token secrets so each adapter reads its own token from its CSI
 # mount instead of receiving it from the workflow-runner over the secret
