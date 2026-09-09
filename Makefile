@@ -19,7 +19,10 @@ validate:
 	/usr/local/bin/criteria validate linear_intake_v1
 
 test: validate
-	@echo "No additional test suite defined; running validation."
+	@echo "Running k8s template regression test..."
+	./k8s/tests/test_launch_template.sh
 
 lint:
-	shellcheck linear_intake_v1/container-entrypoint.sh
+	shellcheck linear_intake_v1/container-entrypoint.sh \
+		k8s/launch-ticket-job.sh \
+		k8s/tests/test_launch_template.sh
