@@ -144,7 +144,10 @@ find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
     for f; do
         # The generated token contains only alphanumerics, so a fixed string
         # delimiter is safe.  Printf defends against leading "-" in sed args.
-        sed -i "s|__CRITERIA_REMOTE_TOKEN__|$token|g" "$f"
+        sed -i \
+            -e "s|__CRITERIA_REMOTE_TOKEN__|$token|g" \
+            -e "s|CRITERIA_REMOTE_TOKEN_PLACEHOLDER|$token|g" \
+            "$f"
     done
 ' sh "$CRITERIA_REMOTE_TOKEN" {} +
 

@@ -25,6 +25,8 @@ test: validate
 	./k8s/tests/test_job_cri_27.sh
 	@echo "Running k8s template regression test..."
 	./k8s/tests/test_launch_template.sh
+	@echo "Running container-entrypoint token substitution regression test..."
+	./k8s/tests/test_container_entrypoint_substitution.sh
 
 lint:
 	shellcheck linear_intake_v1/container-entrypoint.sh \
@@ -34,4 +36,5 @@ lint:
 		k8s/pod-adapter-runner.sh \
 		k8s/pod-adapter-sidecar.sh \
 		k8s/tests/test_launch_template.sh \
-		k8s/tests/test_job_cri_27.sh
+		k8s/tests/test_job_cri_27.sh \
+		k8s/tests/test_container_entrypoint_substitution.sh
