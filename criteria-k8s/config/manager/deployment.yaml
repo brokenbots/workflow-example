@@ -27,6 +27,8 @@ spec:
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: operator
           image: localhost:5000/criteria-k8s:dev
@@ -80,6 +82,8 @@ spec:
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: watcher
           image: localhost:5000/criteria-k8s:dev
@@ -102,7 +106,8 @@ spec:
               value: "2"
           volumeMounts:
             - name: linear-secrets
-              mountPath: /secrets
+              mountPath: /secrets/linear_api_key
+              subPath: linear_api_key
               readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
