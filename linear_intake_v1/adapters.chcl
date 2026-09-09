@@ -8,7 +8,7 @@ environment "remote" "intake" {
         exec = ["*"]
     }
     listen_address = "127.0.0.1:7778"
-    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_token = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
     accept_digest_from = "lockfile"
 }
 

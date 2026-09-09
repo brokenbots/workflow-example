@@ -19,10 +19,19 @@ validate:
 	/usr/local/bin/criteria validate linear_intake_v1
 
 test: validate
+	@echo "Rendering pod-adapter manifest..."
+	./k8s/generate-pod-adapter-manifest.sh
+	@echo "Running k8s pod-adapter regression test..."
+	./k8s/tests/test_job_cri_27.sh
 	@echo "Running k8s template regression test..."
 	./k8s/tests/test_launch_template.sh
 
 lint:
 	shellcheck linear_intake_v1/container-entrypoint.sh \
 		k8s/launch-ticket-job.sh \
-		k8s/tests/test_launch_template.sh
+		k8s/generate-pod-adapter-manifest.sh \
+		k8s/launch-pod-adapter-job.sh \
+		k8s/pod-adapter-runner.sh \
+		k8s/pod-adapter-sidecar.sh \
+		k8s/tests/test_launch_template.sh \
+		k8s/tests/test_job_cri_27.sh
