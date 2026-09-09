@@ -1,0 +1,452 @@
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: linear-spc
+  namespace: __NAMESPACE__
+spec:
+  provider: vault
+  parameters:
+    roleName: criteria-jobs
+    vaultAddress: __VAULT_ADDR__
+    objects: |
+      - objectName: linear_api_key
+        secretPath: criteria/data/linear
+        secretKey: linear_api_key
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: github-spc
+  namespace: __NAMESPACE__
+spec:
+  provider: vault
+  parameters:
+    roleName: criteria-jobs
+    vaultAddress: __VAULT_ADDR__
+    objects: |
+      - objectName: workflow_github_token
+        secretPath: criteria/data/linear
+        secretKey: workflow_github_token
+      - objectName: reviewer_github_token
+        secretPath: criteria/data/linear
+        secretKey: reviewer_github_token
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-adapter-scripts
+  namespace: __NAMESPACE__
+data:
+  runner.sh: |
+    #!/bin/sh
+    set -eu
+    
+    # Read the Linear API key from the CSI mount. The workflow-runner container is
+    # intentionally not given any GitHub token mounts.
+    LINEAR_API_KEY=""
+    if [ -r /secrets/linear_api_key ]; then
+        IFS= read -r LINEAR_API_KEY < /secrets/linear_api_key
+    fi
+    if [ -z "$LINEAR_API_KEY" ]; then
+        echo "LINEAR_API_KEY is required via /secrets/linear_api_key" >&2
+        exit 1
+    fi
+    
+    if [ -z "${TICKET_ID:-}" ]; then
+        echo "TICKET_ID is required" >&2
+        exit 1
+    fi
+    if [ -z "${REPO_URL:-}" ]; then
+        echo "REPO_URL is required" >&2
+        exit 1
+    fi
+    
+    case "$ALLOW_DIRTY" in
+        true|false) ;;
+        *) echo "ALLOW_DIRTY must be true or false" >&2; exit 2 ;;
+    esac
+    case "$MAX_AGENT_VISITS" in
+        ''|*[!0-9]*) echo "MAX_AGENT_VISITS must be a positive integer" >&2; exit 2 ;;
+        0) echo "MAX_AGENT_VISITS must be a positive integer" >&2; exit 2 ;;
+    esac
+    
+    mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"
+    
+    # Generate a per-run bearer token for the remote adapters and publish it to the
+    # shared PVC so all three containers agree on the token.
+    token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
+    printf '%s' "$token" > /data/.criteria-remote-token
+    
+    workflow_src=/workflows
+    workflow_tmp=/tmp/workflows
+    rm -rf "$workflow_tmp"
+    cp -a "$workflow_src" "$workflow_tmp"
+    
+    # Substitute the placeholders in every subworkflow's remote environment block
+    # so each shim and the adapter sidecars share the generated bearer token. The
+    # legacy placeholder literal is assembled at runtime so the launcher template
+    # renderer does not try to replace it while rendering the manifest.
+    old_token_placeholder="_""_CRITERIA_REMOTE_TOKEN_""_"
+    find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
+        tok="$1"
+        old="$2"
+        shift 2
+        for f; do
+            sed -i \
+                -e "s|CRITERIA_REMOTE_TOKEN_PLACEHOLDER|$tok|g" \
+                -e "s|$old|$tok|g" \
+                "$f"
+        done
+    ' sh "$token" "$old_token_placeholder" {} +
+    
+    # Rewrite GitHub token secrets so each adapter reads its own token from its CSI
+    # mount instead of receiving it from the workflow-runner over the secret
+    # channel. This lets the runner mount only the Linear API key.
+    find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
+        -e 's|var\.workflow_github_token|env:WORKFLOW_GITHUB_TOKEN|g' \
+        -e 's|var\.reviewer_github_token|env:REVIEWER_GITHUB_TOKEN|g' {} +
+    
+    runtime_dir=$(mktemp -d)
+    runtime_vars="$runtime_dir/vars.json"
+    trap 'rm -rf "$runtime_dir"' EXIT
+    
+    jq -n \
+        --arg ticket_id "$TICKET_ID" \
+        --arg repo_dir "$REPO_DIR" \
+        --arg intake_root "$INTAKE_ROOT" \
+        --arg triage_root "$TRIAGE_ROOT" \
+        --arg linear_review_state "$LINEAR_REVIEW_STATE" \
+        --arg linear_triage_state "$LINEAR_TRIAGE_STATE" \
+        --arg linear_work_state "$LINEAR_WORK_STATE" \
+        --arg linear_done_state "$LINEAR_DONE_STATE" \
+        --arg base_branch "$BASE_BRANCH" \
+        --arg build_cmd "$BUILD_CMD" \
+        --arg test_cmd "$TEST_CMD" \
+        --arg ci_gate_cmd "$CI_GATE_CMD" \
+        --arg test_refs "$TEST_REFS" \
+        --arg main_ref "$MAIN_REF" \
+        --arg stable_ref "$STABLE_REF" \
+        --arg design_intent_file "$DESIGN_INTENT_FILE" \
+        --arg repro_workflow_dir "$REPRO_WORKFLOW_DIR" \
+        --arg provider_base_url "$PROVIDER_BASE_URL" \
+        --argjson allow_dirty "$ALLOW_DIRTY" \
+        --argjson max_agent_visits "$MAX_AGENT_VISITS" \
+        '{
+            ticket_id: $ticket_id,
+            repo_dir: $repo_dir,
+            intake_root: $intake_root,
+            triage_root: $triage_root,
+            linear_review_state: $linear_review_state,
+            linear_triage_state: $linear_triage_state,
+            linear_work_state: $linear_work_state,
+            linear_done_state: $linear_done_state,
+            base_branch: $base_branch,
+            build_cmd: $build_cmd,
+            test_cmd: $test_cmd,
+            ci_gate_cmd: $ci_gate_cmd,
+            test_refs: $test_refs,
+            main_ref: $main_ref,
+            stable_ref: $stable_ref,
+            design_intent_file: $design_intent_file,
+            repro_workflow_dir: $repro_workflow_dir,
+            provider_base_url: $provider_base_url,
+            allow_dirty: $allow_dirty,
+            max_agent_visits: $max_agent_visits
+        }' > "$runtime_vars"
+    
+    # shellcheck disable=SC2153
+    : "${EVENTS_FILE:=}"
+    events_file="$EVENTS_FILE"
+    if [ -z "$events_file" ]; then
+        events_file="$INTAKE_ROOT/$TICKET_ID/events.ndjson"
+    fi
+    
+    # Dummy values for GitHub token variables: the real values live in each adapter
+    # container's CSI mount and are resolved via env: references at runtime.
+    /usr/local/bin/criteria apply "$workflow_tmp/linear_intake_v1" \
+        --var-file "$runtime_vars" \
+        --var "linear_api_key=$LINEAR_API_KEY" \
+        --var "workflow_github_token=csi-supplied" \
+        --var "reviewer_github_token=csi-supplied" \
+        --events-file "$events_file" \
+        --output concise
+  sidecar.sh: |
+    #!/bin/sh
+    set -eu
+    
+    # Read this container's own CSI-mounted secrets. The copilot sidecar mounts
+    # both tokens; the shell sidecar mounts only the workflow token.
+    WORKFLOW_GITHUB_TOKEN=""
+    if [ -r /secrets/workflow_github_token ]; then
+        IFS= read -r WORKFLOW_GITHUB_TOKEN < /secrets/workflow_github_token
+    fi
+    if [ -z "$WORKFLOW_GITHUB_TOKEN" ] && [ "$ADAPTER_KIND" = "shell" ]; then
+        echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
+        exit 1
+    fi
+    
+    REVIEWER_GITHUB_TOKEN=""
+    if [ -r /secrets/reviewer_github_token ]; then
+        IFS= read -r REVIEWER_GITHUB_TOKEN < /secrets/reviewer_github_token
+    fi
+    
+    # Wait for the workflow-runner to publish the shared remote token.
+    until [ -r /data/.criteria-remote-token ]; do
+        sleep 1
+    done
+    CRITERIA_REMOTE_TOKEN=$(cat /data/.criteria-remote-token)
+    export CRITERIA_REMOTE_TOKEN
+    
+    if [ -z "${ADAPTER_KIND:-}" ]; then
+        echo "ADAPTER_KIND must be set to shell or copilot" >&2
+        exit 1
+    fi
+    
+    export WORKFLOW_GITHUB_TOKEN
+    if [ -n "$REVIEWER_GITHUB_TOKEN" ]; then
+        export REVIEWER_GITHUB_TOKEN
+    fi
+    
+    # Resolve the pinned adapter digest from the workflow lockfile. The same digest
+    # is used as the adapter's identity over the remote handshake.
+    lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
+    digest=$(awk -v k="criteria-adapter-$ADAPTER_KIND" '
+        $0 ~ "reference.*"k { in_entry=1 }
+        in_entry && /resolved_digest/ { gsub(/[\" ]/, ""); sub(/^resolved_digest=sha256:/, ""); print; exit }
+    ' "$lockfile")
+    if [ -z "$digest" ]; then
+        echo "criteria adapter $ADAPTER_KIND not found in $lockfile" >&2
+        exit 1
+    fi
+    
+    binary="/home/criteria/.local/criteria/adapters/sha256-${digest}/criteria-adapter-${ADAPTER_KIND}"
+    if [ ! -x "$binary" ]; then
+        echo "adapter binary not found: $binary" >&2
+        exit 1
+    fi
+    
+    # Shell steps run git/gh commands; set a generic bot identity and the gh
+    # credential helper so the adapter's own token is used for HTTPS clones.
+    if [ "$ADAPTER_KIND" = "shell" ]; then
+        git config --global credential.https://github.com.helper '!gh auth git-credential'
+        git config --global user.name "criteria-runner"
+        git config --global user.email "criteria-runner@brokenbots.invalid"
+    fi
+    
+    export CRITERIA_REMOTE_HOST=127.0.0.1:7778
+    export CRITERIA_REMOTE_DIGEST="sha256:$digest"
+    
+    exec "$binary"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: pod-adapter-run
+    ticket: __TICKET_ID__
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pod-adapter-run
+        ticket: __TICKET_ID__
+    spec:
+      serviceAccountName: criteria-runner
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      initContainers:
+        - name: repo-clone
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              WORKFLOW_GITHUB_TOKEN=""
+              if [ -r /secrets/workflow_github_token ]; then
+                  IFS= read -r WORKFLOW_GITHUB_TOKEN < /secrets/workflow_github_token
+              fi
+              if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
+                  echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
+                  exit 1
+              fi
+              if [ -z "$REPO_URL" ]; then
+                  echo "REPO_URL is required" >&2
+                  exit 1
+              fi
+              find /repo -mindepth 1 -delete 2>/dev/null || true
+              git config --global credential.https://github.com.helper '!gh auth git-credential'
+              GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" /repo
+          env:
+            - name: REPO_URL
+              value: "__REPO_URL__"
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+            - name: github-secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      containers:
+        - name: workflow-runner
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/criteria-pod-adapter/runner.sh
+          env:
+            - name: TICKET_ID
+              value: "__TICKET_ID__"
+            - name: REPO_URL
+              value: "__REPO_URL__"
+            - name: REPO_DIR
+              value: "__REPO_DIR__"
+            - name: INTAKE_ROOT
+              value: "__INTAKE_ROOT__"
+            - name: TRIAGE_ROOT
+              value: "__TRIAGE_ROOT__"
+            - name: LINEAR_REVIEW_STATE
+              value: "__LINEAR_REVIEW_STATE__"
+            - name: LINEAR_TRIAGE_STATE
+              value: "__LINEAR_TRIAGE_STATE__"
+            - name: LINEAR_WORK_STATE
+              value: "__LINEAR_WORK_STATE__"
+            - name: LINEAR_DONE_STATE
+              value: "__LINEAR_DONE_STATE__"
+            - name: BASE_BRANCH
+              value: "__BASE_BRANCH__"
+            - name: BUILD_CMD
+              value: "__BUILD_CMD__"
+            - name: TEST_CMD
+              value: "__TEST_CMD__"
+            - name: CI_GATE_CMD
+              value: "__CI_GATE_CMD__"
+            - name: TEST_REFS
+              value: "__TEST_REFS__"
+            - name: MAIN_REF
+              value: "__MAIN_REF__"
+            - name: STABLE_REF
+              value: "__STABLE_REF__"
+            - name: DESIGN_INTENT_FILE
+              value: "__DESIGN_INTENT_FILE__"
+            - name: REPRO_WORKFLOW_DIR
+              value: "__REPRO_WORKFLOW_DIR__"
+            - name: ALLOW_DIRTY
+              value: "__ALLOW_DIRTY__"
+            - name: MAX_AGENT_VISITS
+              value: "__MAX_AGENT_VISITS__"
+            - name: PROVIDER_BASE_URL
+              value: "__PROVIDER_BASE_URL__"
+            - name: EVENTS_FILE
+              value: "__EVENTS_FILE__"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: linear-secrets
+              mountPath: /secrets/linear_api_key
+              subPath: linear_api_key
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+        - name: adapter-copilot
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/criteria-pod-adapter/sidecar.sh
+          env:
+            - name: ADAPTER_KIND
+              value: copilot
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: github-secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+            - name: github-secrets
+              mountPath: /secrets/reviewer_github_token
+              subPath: reviewer_github_token
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+        - name: adapter-shell
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/criteria-pod-adapter/sidecar.sh
+          env:
+            - name: ADAPTER_KIND
+              value: shell
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: github-secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: __DATA_PVC__
+        - name: repo
+          emptyDir: {}
+        - name: linear-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: linear-spc
+        - name: github-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: github-spc
+        - name: scripts
+          configMap:
+            name: pod-adapter-scripts
+            defaultMode: 0755

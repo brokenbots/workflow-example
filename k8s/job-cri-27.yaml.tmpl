@@ -1,0 +1,256 @@
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: linear-spc
+  namespace: __NAMESPACE__
+spec:
+  provider: vault
+  parameters:
+    roleName: criteria-jobs
+    vaultAddress: __VAULT_ADDR__
+    objects: |
+      - objectName: linear_api_key
+        secretPath: criteria/data/linear
+        secretKey: linear_api_key
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: github-spc
+  namespace: __NAMESPACE__
+spec:
+  provider: vault
+  parameters:
+    roleName: criteria-jobs
+    vaultAddress: __VAULT_ADDR__
+    objects: |
+      - objectName: workflow_github_token
+        secretPath: criteria/data/linear
+        secretKey: workflow_github_token
+      - objectName: reviewer_github_token
+        secretPath: criteria/data/linear
+        secretKey: reviewer_github_token
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-adapter-scripts
+  namespace: __NAMESPACE__
+data:
+  runner.sh: |
+__RUNNER_SCRIPT__
+  sidecar.sh: |
+__SIDECAR_SCRIPT__
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: pod-adapter-run
+    ticket: __TICKET_ID__
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pod-adapter-run
+        ticket: __TICKET_ID__
+    spec:
+      serviceAccountName: criteria-runner
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      initContainers:
+        - name: repo-clone
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              WORKFLOW_GITHUB_TOKEN=""
+              if [ -r /secrets/workflow_github_token ]; then
+                  IFS= read -r WORKFLOW_GITHUB_TOKEN < /secrets/workflow_github_token
+              fi
+              if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
+                  echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
+                  exit 1
+              fi
+              if [ -z "$REPO_URL" ]; then
+                  echo "REPO_URL is required" >&2
+                  exit 1
+              fi
+              find /repo -mindepth 1 -delete 2>/dev/null || true
+              git config --global credential.https://github.com.helper '!gh auth git-credential'
+              GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" /repo
+          env:
+            - name: REPO_URL
+              value: "__REPO_URL__"
+          volumeMounts:
+            - name: repo
+              mountPath: /repo
+            - name: github-secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      containers:
+        - name: workflow-runner
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/criteria-pod-adapter/runner.sh
+          env:
+            - name: TICKET_ID
+              value: "__TICKET_ID__"
+            - name: REPO_URL
+              value: "__REPO_URL__"
+            - name: REPO_DIR
+              value: "__REPO_DIR__"
+            - name: INTAKE_ROOT
+              value: "__INTAKE_ROOT__"
+            - name: TRIAGE_ROOT
+              value: "__TRIAGE_ROOT__"
+            - name: LINEAR_REVIEW_STATE
+              value: "__LINEAR_REVIEW_STATE__"
+            - name: LINEAR_TRIAGE_STATE
+              value: "__LINEAR_TRIAGE_STATE__"
+            - name: LINEAR_WORK_STATE
+              value: "__LINEAR_WORK_STATE__"
+            - name: LINEAR_DONE_STATE
+              value: "__LINEAR_DONE_STATE__"
+            - name: BASE_BRANCH
+              value: "__BASE_BRANCH__"
+            - name: BUILD_CMD
+              value: "__BUILD_CMD__"
+            - name: TEST_CMD
+              value: "__TEST_CMD__"
+            - name: CI_GATE_CMD
+              value: "__CI_GATE_CMD__"
+            - name: TEST_REFS
+              value: "__TEST_REFS__"
+            - name: MAIN_REF
+              value: "__MAIN_REF__"
+            - name: STABLE_REF
+              value: "__STABLE_REF__"
+            - name: DESIGN_INTENT_FILE
+              value: "__DESIGN_INTENT_FILE__"
+            - name: REPRO_WORKFLOW_DIR
+              value: "__REPRO_WORKFLOW_DIR__"
+            - name: ALLOW_DIRTY
+              value: "__ALLOW_DIRTY__"
+            - name: MAX_AGENT_VISITS
+              value: "__MAX_AGENT_VISITS__"
+            - name: PROVIDER_BASE_URL
+              value: "__PROVIDER_BASE_URL__"
+            - name: EVENTS_FILE
+              value: "__EVENTS_FILE__"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: linear-secrets
+              mountPath: /secrets/linear_api_key
+              subPath: linear_api_key
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+        - name: adapter-copilot
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/criteria-pod-adapter/sidecar.sh
+          env:
+            - name: ADAPTER_KIND
+              value: copilot
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: github-secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+            - name: github-secrets
+              mountPath: /secrets/reviewer_github_token
+              subPath: reviewer_github_token
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+        - name: adapter-shell
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/criteria-pod-adapter/sidecar.sh
+          env:
+            - name: ADAPTER_KIND
+              value: shell
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: github-secrets
+              mountPath: /secrets/workflow_github_token
+              subPath: workflow_github_token
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: __DATA_PVC__
+        - name: repo
+          emptyDir: {}
+        - name: linear-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: linear-spc
+        - name: github-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: github-spc
+        - name: scripts
+          configMap:
+            name: pod-adapter-scripts
+            defaultMode: 0755
