@@ -1,9 +1,27 @@
 #!/bin/sh
 set -eu
 
-: "${LINEAR_API_KEY:?LINEAR_API_KEY is required}"
-: "${WORKFLOW_GITHUB_TOKEN:?WORKFLOW_GITHUB_TOKEN is required}"
-: "${REVIEWER_GITHUB_TOKEN:?REVIEWER_GITHUB_TOKEN is required}"
+# Read k8s CSI secret mounts when the corresponding env var is not already set.
+# Falls back to the existing environment variable for local Docker bootstrap.
+read_secret_file() {
+    target="$1"
+    path="$2"
+    eval "current=\${$target:-}"
+    if [ -z "$current" ] && [ -r "$path" ]; then
+        # Read the first line of the secret file verbatim. Tokens are single-line
+        # values, and IFS= prevents trimming leading/trailing whitespace.
+        IFS= read -r value < "$path"
+        export "$target=$value"
+    fi
+}
+
+read_secret_file LINEAR_API_KEY /secrets/linear_api_key
+read_secret_file WORKFLOW_GITHUB_TOKEN /secrets/workflow_github_token
+read_secret_file REVIEWER_GITHUB_TOKEN /secrets/reviewer_github_token
+
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is required (set env var or mount /secrets/linear_api_key)}"
+: "${WORKFLOW_GITHUB_TOKEN:?WORKFLOW_GITHUB_TOKEN is required (set env var or mount /secrets/workflow_github_token)}"
+: "${REVIEWER_GITHUB_TOKEN:?REVIEWER_GITHUB_TOKEN is required (set env var or mount /secrets/reviewer_github_token)}"
 : "${TICKET_ID:?TICKET_ID is required}"
 
 REPO_DIR=${REPO_DIR:-/repo}
@@ -108,12 +126,61 @@ jq -n \
 # Secret variables are NOT placed in the var-file (it is a plain JSON artifact
 # on disk and would persist credentials). They are passed as --var overrides,
 # which criteria accepts for secret-typed variables and reports as (sensitive).
-# The sandbox scrubs the host token env vars before launch, so the adapters
-# reintroduce only the declared secret channel — but that channel resolves
-# var.<name>, which is empty unless a value is supplied here. An empty
-# linear_api_key previously reached the shell adapter as "LINEAR_API_KEY is not
-# set" and aborted the run at fetch_ticket.
-exec /usr/local/bin/criteria apply /workflows/linear_intake_v1 \
+# Remote adapters reconnect to the shim over a bearer token; generate one unless
+# the operator supplied it.
+CRITERIA_REMOTE_TOKEN=${CRITERIA_REMOTE_TOKEN:-$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)}
+export CRITERIA_REMOTE_TOKEN
+# The Criteria parser evaluates environment-block attributes as static literals,
+# so `env("CRITERIA_REMOTE_TOKEN")` cannot be used inside `environment "remote"`
+# blocks.  Copy the workflow tree into the runtime directory and substitute the
+# placeholder with the generated token so the shim and adapters agree on the
+# bearer token at run time.  The original /workflows tree is left untouched.
+workflow_src=${CRITERIA_WORKFLOW_SOURCE:-/workflows}
+workflow_tmp="$runtime_dir/workflows"
+cp -a "$workflow_src" "$workflow_tmp"
+find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
+    token="$1"
+    shift
+    for f; do
+        # The generated token contains only alphanumerics, so a fixed string
+        # delimiter is safe.  Printf defends against leading "-" in sed args.
+        sed -i "s|__CRITERIA_REMOTE_TOKEN__|$token|g" "$f"
+    done
+' sh "$CRITERIA_REMOTE_TOKEN" {} +
+
+# Locate the locked remote adapter binaries in the local OCI cache.
+adapter_binary() {
+    kind="$1"
+    ref="$2"
+    digest=$(criteria adapter list --installed | awk -v r="$ref" '$0 ~ r {print $1; exit}')
+    if [ -z "$digest" ]; then
+        echo "criteria adapter $ref not found in local cache" >&2
+        exit 1
+    fi
+    digest=$(printf '%s' "$digest" | tr ':' '-')
+    printf '%s' "/home/criteria/.local/criteria/adapters/${digest}/criteria-adapter-${kind}"
+}
+
+shell_adapter=$(adapter_binary shell ghcr.io/brokenbots/criteria-adapter-shell:0.5.3)
+copilot_adapter=$(adapter_binary copilot ghcr.io/brokenbots/criteria-adapter-copilot:0.5.5)
+
+# Launch the adapters in phone-home mode. They retry until the criteria shim
+# starts listening on 127.0.0.1:7778.  CRITERIA_REMOTE_HOST is passed only to the
+# adapters; the engine uses the listen_address from the workflow config and must
+# not see this variable (otherwise adapter verification would run in remote
+# mode and time out).
+env CRITERIA_REMOTE_HOST="127.0.0.1:7778" "$shell_adapter" &
+shell_pid=$!
+env CRITERIA_REMOTE_HOST="127.0.0.1:7778" "$copilot_adapter" &
+copilot_pid=$!
+
+cleanup() {
+    kill "$shell_pid" "$copilot_pid" 2>/dev/null || true
+    rm -rf "$runtime_dir"
+}
+trap cleanup EXIT INT TERM
+
+/usr/local/bin/criteria apply "$workflow_tmp/linear_intake_v1" \
     --var-file "$runtime_vars" \
     --var "linear_api_key=$LINEAR_API_KEY" \
     --var "workflow_github_token=$WORKFLOW_GITHUB_TOKEN" \
