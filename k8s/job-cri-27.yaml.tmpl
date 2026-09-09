@@ -4,32 +4,48 @@ metadata:
   name: linear-spc
   namespace: __NAMESPACE__
 spec:
-  provider: vault
+  provider: openbao
   parameters:
     roleName: criteria-jobs
-    vaultAddress: __VAULT_ADDR__
     objects: |
       - objectName: linear_api_key
         secretPath: criteria/data/linear
         secretKey: linear_api_key
+        filePermission: 0600
 ---
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: github-spc
+  name: copilot-spc
   namespace: __NAMESPACE__
 spec:
-  provider: vault
+  provider: openbao
   parameters:
     roleName: criteria-jobs
-    vaultAddress: __VAULT_ADDR__
     objects: |
       - objectName: workflow_github_token
         secretPath: criteria/data/linear
         secretKey: workflow_github_token
+        filePermission: 0600
       - objectName: reviewer_github_token
         secretPath: criteria/data/linear
         secretKey: reviewer_github_token
+        filePermission: 0600
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: shell-spc
+  namespace: __NAMESPACE__
+spec:
+  provider: openbao
+  parameters:
+    roleName: criteria-jobs
+    objects: |
+      - objectName: workflow_github_token
+        secretPath: criteria/data/linear
+        secretKey: workflow_github_token
+        filePermission: 0600
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -101,7 +117,7 @@ spec:
           volumeMounts:
             - name: repo
               mountPath: /repo
-            - name: github-secrets
+            - name: shell-secrets
               mountPath: /secrets/workflow_github_token
               subPath: workflow_github_token
           resources:
@@ -192,10 +208,10 @@ spec:
               mountPath: /data
             - name: repo
               mountPath: /repo
-            - name: github-secrets
+            - name: copilot-secrets
               mountPath: /secrets/workflow_github_token
               subPath: workflow_github_token
-            - name: github-secrets
+            - name: copilot-secrets
               mountPath: /secrets/reviewer_github_token
               subPath: reviewer_github_token
             - name: scripts
@@ -220,7 +236,7 @@ spec:
               mountPath: /data
             - name: repo
               mountPath: /repo
-            - name: github-secrets
+            - name: shell-secrets
               mountPath: /secrets/workflow_github_token
               subPath: workflow_github_token
             - name: scripts
@@ -244,12 +260,18 @@ spec:
             readOnly: true
             volumeAttributes:
               secretProviderClass: linear-spc
-        - name: github-secrets
+        - name: copilot-secrets
           csi:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
-              secretProviderClass: github-spc
+              secretProviderClass: copilot-spc
+        - name: shell-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: shell-spc
         - name: scripts
           configMap:
             name: pod-adapter-scripts

@@ -27,6 +27,8 @@ test: validate
 	./k8s/tests/test_launch_template.sh
 	@echo "Running container-entrypoint token substitution regression test..."
 	./k8s/tests/test_container_entrypoint_substitution.sh
+	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
+	./k8s/tests/test_secrets_store_csi.sh
 
 lint:
 	shellcheck linear_intake_v1/container-entrypoint.sh \
@@ -35,6 +37,9 @@ lint:
 		k8s/launch-pod-adapter-job.sh \
 		k8s/pod-adapter-runner.sh \
 		k8s/pod-adapter-sidecar.sh \
+		k8s/install-secrets-store-csi.sh \
+		k8s/verify-secrets-store-csi.sh \
 		k8s/tests/test_launch_template.sh \
 		k8s/tests/test_job_cri_27.sh \
-		k8s/tests/test_container_entrypoint_substitution.sh
+		k8s/tests/test_container_entrypoint_substitution.sh \
+		k8s/tests/test_secrets_store_csi.sh
