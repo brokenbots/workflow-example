@@ -120,7 +120,7 @@ trap 'rm -rf "$test_tmp"' EXIT
 token="test-token-$(date +%s)"
 mkdir -p "$test_tmp/linear_intake_v1" "$test_tmp/qa_triage_v1" "$test_tmp/workstream_handler_v1/workflows/nested"
 
-for p in "$test_tmp/linear_intake_v1/adapters.chcl" "$test_tmp/qa_triage_v1/adapters.chcl" "$test_tmp/workstream_handler_v1/adapters.chcl" "$test_tmp/workstream_handler_v1/workflows/nested/adapters.chcl"; do
+for p in "$test_tmp/linear_intake_v1/adapters.chcl" "$test_tmp/workstream_handler_v1/adapters.chcl" "$test_tmp/workstream_handler_v1/workflows/nested/adapters.chcl"; do
     cat > "$p" <<EOF
 environment "remote" "test" {
     accept_token = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
@@ -134,6 +134,22 @@ adapter "copilot" "x" {
 }
 EOF
 done
+
+# Use the legacy double-underscore placeholder for one subworkflow so the test
+# exercises the runtime-assembled legacy sed expression that the runner needs
+# to support older adapters.chcl files.
+cat > "$test_tmp/qa_triage_v1/adapters.chcl" <<EOF
+environment "remote" "legacy" {
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+}
+adapter "copilot" "legacy" {
+    environment = remote.legacy
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.reviewer_github_token
+    }
+}
+EOF
 
 # Mirror both substitution passes from the runner script: bearer-token
 # placeholders (both the new literal and the legacy double-underscore form),
