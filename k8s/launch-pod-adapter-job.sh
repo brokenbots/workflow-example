@@ -10,7 +10,6 @@ set -euo pipefail
 #   NAMESPACE                 Target namespace (default: criteria-jobs)
 #   JOB_NAME                  Explicit Job name; defaults to pod-adapter-<lowercase ticket>
 #   DATA_PVC                  PVC for /data (default: criteria-data)
-#   VAULT_ADDR                OpenBao/Vault address for the CSI driver (default: http://openbao-0.default.svc.cluster.local:8200)
 #
 #   TICKET_ID                 Required Linear ticket identifier
 #   REPO_URL                  Required GitHub repository (e.g. brokenbots/criteria)
@@ -30,7 +29,6 @@ tmpl_var IMAGE           "${IMAGE:-localhost:5000/linear-intake-remote:dev}"
 tmpl_var DIGEST          "${DIGEST:-latest}"
 tmpl_var NAMESPACE       "${NAMESPACE:-criteria-jobs}"
 tmpl_var DATA_PVC        "${DATA_PVC:-criteria-data}"
-tmpl_var VAULT_ADDR      "${VAULT_ADDR:-http://openbao-0.default.svc.cluster.local:8200}"
 
 : "${TICKET_ID:?TICKET_ID is required}"
 : "${REPO_URL:?REPO_URL is required}"

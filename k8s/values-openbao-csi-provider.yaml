@@ -1,0 +1,27 @@
+# Values for the openbao/openbao chart when installing only the CSI provider.
+# The OpenBao server and agent injector are disabled; the provider connects to
+# the existing in-cluster OpenBao instance at openbao-0.default.svc.
+global:
+  enabled: false
+  externalBaoAddr: "http://openbao-0.default.svc.cluster.local:8200"
+
+server:
+  enabled: false
+
+injector:
+  enabled: false
+
+csi:
+  enabled: true
+  agent:
+    enabled: false
+  pod:
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    tolerations:
+      - key: catch
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
