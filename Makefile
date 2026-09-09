@@ -29,6 +29,8 @@ test: validate
 	./k8s/tests/test_container_entrypoint_substitution.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
 	./k8s/tests/test_secrets_store_csi.sh
+	@echo "Running example manifest regression test..."
+	./k8s/tests/test_example_manifest.sh
 
 lint:
 	shellcheck linear_intake_v1/container-entrypoint.sh \
@@ -42,4 +44,5 @@ lint:
 		k8s/tests/test_launch_template.sh \
 		k8s/tests/test_job_cri_27.sh \
 		k8s/tests/test_container_entrypoint_substitution.sh \
-		k8s/tests/test_secrets_store_csi.sh
+		k8s/tests/test_secrets_store_csi.sh \
+		k8s/tests/test_example_manifest.sh
