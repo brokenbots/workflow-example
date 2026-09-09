@@ -67,6 +67,8 @@ spec:
                 ticketId:
                   type: string
                   description: Linear ticket identifier to process.
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  maxLength: 64
                 repoUrl:
                   type: string
                   description: GitHub repository to clone and work on.

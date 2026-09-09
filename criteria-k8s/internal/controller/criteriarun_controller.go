@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -85,7 +86,7 @@ func (r *PodExecReader) Read(ctx context.Context, run *criteriav1.CriteriaRun) (
 		Param("container", "workflow-runner").
 		Param("command", "sh").
 		Param("command", "-c").
-		Param("command", fmt.Sprintf("cat %s 2>/dev/null || true", eventsPath)).
+		Param("command", fmt.Sprintf("cat %s 2>/dev/null || true", shellQuote(eventsPath))).
 		Param("stdout", "true").
 		Param("stderr", "false").
 		Param("tty", "false")
@@ -226,6 +227,12 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 
 func eventsPath(run *criteriav1.CriteriaRun) string {
 	return fmt.Sprintf("/data/intake/%s/events.ndjson", run.Spec.TicketID)
+}
+
+// shellQuote returns a single-quoted shell literal for s.
+// It assumes the remote shell is POSIX /bin/sh.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func (r *CriteriaRunReconciler) readOutcome(ctx context.Context, run *criteriav1.CriteriaRun) (*events.Outcome, error) {

@@ -3,6 +3,7 @@ package jobbuilder
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -13,6 +14,38 @@ import (
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 )
+
+var nonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
+var nonLabel = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
+
+// safeObjectName returns a DNS-1123 subdomain-safe name derived from s.
+func safeObjectName(s string) string {
+	s = strings.ToLower(s)
+	s = nonDNS.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > 63 {
+		s = s[:63]
+	}
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "unknown"
+	}
+	return s
+}
+
+// safeLabelValue returns a Kubernetes label value derived from s.
+func safeLabelValue(s string) string {
+	s = nonLabel.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-_.")
+	if len(s) > 63 {
+		s = s[:63]
+	}
+	s = strings.Trim(s, "-_.")
+	if s == "" {
+		s = "unknown"
+	}
+	return s
+}
 
 // Defaults carries operator-wide defaults used when the CriteriaRun spec omits a value.
 type Defaults struct {
@@ -48,7 +81,7 @@ func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 				"app.kubernetes.io/name":       "criteria-run",
 				"app.kubernetes.io/managed-by":   "criteria-k8s",
 				"criteria.brokenbots.dev/run":  run.Name,
-				"ticket":                       strings.ToLower(ticket),
+				"ticket":                       safeLabelValue(ticket),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -67,9 +100,9 @@ func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"app.kubernetes.io/name":      "criteria-run",
-						"app.kubernetes.io/managed-by":  "criteria-k8s",
+						"app.kubernetes.io/managed-by": "criteria-k8s",
 						"criteria.brokenbots.dev/run": run.Name,
-						"ticket":                      strings.ToLower(ticket),
+						"ticket":                      safeLabelValue(ticket),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -132,7 +165,10 @@ func JobName(run *criteriav1.CriteriaRun) string {
 			return name
 		}
 	}
-	return fmt.Sprintf("criteria-run-%s", strings.ToLower(run.Spec.TicketID))
+	if run.Name != "" {
+		return run.Name
+	}
+	return fmt.Sprintf("criteria-run-%s", safeObjectName(run.Spec.TicketID))
 }
 
 func repoCloneContainer(image, repoURL, repoDir string) corev1.Container {

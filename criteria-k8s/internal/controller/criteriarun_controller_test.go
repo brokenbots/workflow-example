@@ -64,14 +64,14 @@ func TestReconcileCreatesJob(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, res)
 
 	var child batchv1.Job
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: "criteria-run-cri-42", Namespace: "default"}, &child))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: "cri-42", Namespace: "default"}, &child))
 	require.Len(t, child.OwnerReferences, 1)
 	assert.Equal(t, "CriteriaRun", child.OwnerReferences[0].Kind)
 
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.True(t, updated.Finalizers != nil && len(updated.Finalizers) > 0)
-	assert.Equal(t, "criteria-run-cri-42", updated.Status.JobName)
+	assert.Equal(t, "cri-42", updated.Status.JobName)
 }
 
 func TestReconcileMirrorsJobCompletion(t *testing.T) {
@@ -87,7 +87,7 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "criteria-run-cri-42",
+			Name:      "cri-42",
 			Namespace: "default",
 		},
 		Status: batchv1.JobStatus{
@@ -134,7 +134,7 @@ func TestFinalizeDeletesJob(t *testing.T) {
 	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "criteria-run-cri-42",
+			Name:      "cri-42",
 			Namespace: "default",
 		},
 	}
@@ -150,7 +150,7 @@ func TestFinalizeDeletesJob(t *testing.T) {
 	require.NoError(t, err)
 
 	var deleted batchv1.Job
-	err = cl.Get(context.Background(), types.NamespacedName{Name: "criteria-run-cri-42", Namespace: "default"}, &deleted)
+	err = cl.Get(context.Background(), types.NamespacedName{Name: "cri-42", Namespace: "default"}, &deleted)
 	assert.True(t, err != nil, "expected job to be deleted")
 
 	var updated criteriav1.CriteriaRun
