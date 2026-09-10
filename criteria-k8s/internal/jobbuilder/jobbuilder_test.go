@@ -10,6 +10,33 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestBuildJobPodSecurity(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-113",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			Image:    "localhost:5000/linear-intake-remote:dev",
+		},
+	}
+
+	job := jobbuilder.Build(run, jobbuilder.Defaults{})
+	require.NotNil(t, job)
+
+	containers := append(job.Spec.Template.Spec.InitContainers, job.Spec.Template.Spec.Containers...)
+	require.Len(t, containers, 4)
+
+	wantNames := []string{"repo-clone", "workflow-runner", "adapter-copilot", "adapter-shell"}
+	for i, name := range wantNames {
+		assert.Equal(t, name, containers[i].Name)
+		sc := containers[i].SecurityContext
+		require.NotNil(t, sc, "container %q must have a non-nil SecurityContext", name)
+		require.NotNil(t, sc.AllowPrivilegeEscalation)
+		assert.False(t, *sc.AllowPrivilegeEscalation, "container %q must not allow privilege escalation", name)
+		require.NotNil(t, sc.Capabilities, "container %q must drop capabilities", name)
+		assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop, "container %q must drop ALL capabilities", name)
+	}
+}
+
 func TestBuildJob(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		Spec: criteriav1.CriteriaRunSpec{

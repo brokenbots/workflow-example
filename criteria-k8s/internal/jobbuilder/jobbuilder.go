@@ -171,11 +171,21 @@ func JobName(run *criteriav1.CriteriaRun) string {
 	return fmt.Sprintf("criteria-run-%s", safeObjectName(run.Spec.TicketID))
 }
 
+func restrictedContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: boolPtr(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
 func repoCloneContainer(image, repoURL, repoDir string) corev1.Container {
 	return corev1.Container{
 		Name:            "repo-clone",
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: restrictedContainerSecurityContext(),
 		Command: []string{
 			"/bin/sh",
 			"-c",
@@ -246,6 +256,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		Name:            "workflow-runner",
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/runner.sh"},
 		Env:             env,
 		VolumeMounts: []corev1.VolumeMount{
@@ -273,6 +284,7 @@ func adapterContainer(name, kind, image string) corev1.Container {
 		Name:            name,
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/sidecar.sh"},
 		Env:             []corev1.EnvVar{{Name: "ADAPTER_KIND", Value: kind}},
 		VolumeMounts: []corev1.VolumeMount{

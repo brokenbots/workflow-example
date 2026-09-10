@@ -29,6 +29,8 @@ type Issue struct {
 	ProjectID   string `json:"projectId"`
 	ProjectName string `json:"projectName"`
 	StateName   string `json:"stateName"`
+	// RepoLabel is an optional repository reference (owner/repo) configured on the issue.
+	RepoLabel string `json:"repoLabel,omitempty"`
 }
 
 // NewClient returns a Linear client using the provided API key.
@@ -193,21 +195,101 @@ func (c *Client) FindTriageTickets(ctx context.Context, projectName, stateName s
 	return c.IssuesInProjectState(ctx, projectID, stateName)
 }
 
+// RepoValidator checks whether a short-form owner/repo reference names an existing
+// GitHub repository. It is used by ExtractRepoURL to avoid returning file paths or
+// arbitrary slash-separated tokens.
+type RepoValidator func(repo string) bool
+
+// DefaultRepoValidator returns a RepoValidator that confirms repository existence
+// via the GitHub REST API. A nil httpClient uses a client with a 10-second timeout.
+// An empty token performs unauthenticated requests; callers should supply a token
+// when available to avoid rate limits. An empty apiURL defaults to
+// https://api.github.com.
+func DefaultRepoValidator(httpClient *http.Client, token, apiURL string) RepoValidator {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if apiURL == "" {
+		apiURL = "https://api.github.com"
+	}
+	return func(repo string) bool {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/repos/%s", strings.TrimSuffix(apiURL, "/"), repo), nil)
+		if err != nil {
+			return false
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+}
+
+var (
+	fileExtensionSuffixes = []string{".go", ".yaml", ".yml", ".json", ".md"}
+	configStyleDirs       = []string{"k8s", "config", "manifests", "deploy"}
+)
+
+func hasFileExtension(s string) bool {
+	lower := strings.ToLower(s)
+	for _, ext := range fileExtensionSuffixes {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func isConfigStyleDir(s string) bool {
+	for _, dir := range configStyleDirs {
+		if strings.EqualFold(s, dir) {
+			return true
+		}
+	}
+	return false
+}
+
 // ExtractRepoURL tries to find a GitHub repository reference in the issue.
 // It looks for owner/repo or https://github.com/owner/repo in the title and
-// description, then falls back to the provided defaultRepoURL.
-func ExtractRepoURL(issue Issue, defaultRepoURL string) string {
+// description, validates short-form candidates via validate, then falls back to
+// the issue's RepoLabel and finally the provided defaultRepoURL.
+func ExtractRepoURL(issue Issue, defaultRepoURL string, validate RepoValidator) string {
 	candidate := issue.Title + "\n" + issue.Description
+
+	// Prefer an explicit github.com URL.
 	repoPattern := regexp.MustCompile(`(?:https?://)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)`)
 	if m := repoPattern.FindStringSubmatch(candidate); m != nil {
 		return m[1]
 	}
+
+	// Validate any remaining short-form candidates.
 	shortPattern := regexp.MustCompile(`\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b`)
 	for _, m := range shortPattern.FindAllStringSubmatch(candidate, -1) {
 		parts := strings.Split(m[1], "/")
-		if len(parts) == 2 && len(parts[0]) > 0 && len(parts[1]) > 0 {
+		if len(parts) != 2 || len(parts[0]) == 0 || len(parts[1]) == 0 {
+			continue
+		}
+		if hasFileExtension(parts[1]) {
+			continue
+		}
+		if isConfigStyleDir(parts[0]) {
+			continue
+		}
+		if validate != nil && validate(m[1]) {
 			return m[1]
 		}
 	}
+
+	// Fall back to a repository label configured on the issue.
+	if issue.RepoLabel != "" {
+		return issue.RepoLabel
+	}
+
 	return defaultRepoURL
 }
