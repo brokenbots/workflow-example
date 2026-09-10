@@ -32,21 +32,6 @@ spec:
         secretKey: reviewer_github_token
         filePermission: 0444
 ---
-apiVersion: secrets-store.csi.x-k8s.io/v1
-kind: SecretProviderClass
-metadata:
-  name: shell-spc
-  namespace: __NAMESPACE__
-spec:
-  provider: openbao
-  parameters:
-    roleName: criteria-jobs
-    objects: |
-      - objectName: workflow_github_token
-        secretPath: criteria/data/linear
-        secretKey: workflow_github_token
-        filePermission: 0444
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -55,8 +40,8 @@ metadata:
 data:
   runner.sh: |
 __RUNNER_SCRIPT__
-  sidecar.sh: |
-__SIDECAR_SCRIPT__
+  adapter.sh: |
+__ADAPTER_SCRIPT__
 ---
 apiVersion: batch/v1
 kind: Job
@@ -64,17 +49,24 @@ metadata:
   name: __JOB_NAME__
   namespace: __NAMESPACE__
   labels:
-    app.kubernetes.io/name: pod-adapter-run
+    app.kubernetes.io/name: criteria-run
+    app.kubernetes.io/managed-by: criteria-k8s
+    criteria.brokenbots.dev/run: __JOB_NAME__
+    criteria.brokenbots.dev/role: runner
     ticket: __TICKET_ID__
 spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: pod-adapter-run
+        app.kubernetes.io/name: criteria-run
+        app.kubernetes.io/managed-by: criteria-k8s
+        criteria.brokenbots.dev/run: __JOB_NAME__
+        criteria.brokenbots.dev/role: runner
         ticket: __TICKET_ID__
     spec:
       serviceAccountName: criteria-runner
+      automountServiceAccountToken: true
       nodeSelector:
         kubernetes.io/arch: amd64
       tolerations:
@@ -93,17 +85,22 @@ spec:
         - name: repo-clone
           image: __IMAGE__
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - /bin/sh
             - -c
             - |
               set -eu
               WORKFLOW_GITHUB_TOKEN=""
-              if [ -r /secrets/workflow_github_token ]; then
-                  WORKFLOW_GITHUB_TOKEN=$(cat /secrets/workflow_github_token)
+              if [ -r /home/criteria/secrets/workflow_github_token ]; then
+                  WORKFLOW_GITHUB_TOKEN=$(cat /home/criteria/secrets/workflow_github_token)
               fi
               if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
-                  echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
+                  echo "WORKFLOW_GITHUB_TOKEN is required via /home/criteria/secrets/workflow_github_token" >&2
                   exit 1
               fi
               if [ -z "$REPO_URL" ]; then
@@ -119,9 +116,8 @@ spec:
           volumeMounts:
             - name: repo
               mountPath: /repo
-            - name: shell-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
+            - name: copilot-secrets
+              mountPath: /home/criteria/secrets
           resources:
             requests:
               memory: "512Mi"
@@ -133,6 +129,11 @@ spec:
         - name: workflow-runner
           image: __IMAGE__
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - /opt/criteria-pod-adapter/runner.sh
           env:
@@ -180,6 +181,12 @@ spec:
               value: "__PROVIDER_BASE_URL__"
             - name: EVENTS_FILE
               value: "__EVENTS_FILE__"
+            - name: JOB_NAME
+              value: "__JOB_NAME__"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           volumeMounts:
             - name: data
               mountPath: /data
@@ -199,50 +206,90 @@ spec:
             limits:
               memory: "8Gi"
               cpu: "4000m"
-        - name: adapter-copilot
-          image: __IMAGE__
-          imagePullPolicy: IfNotPresent
-          command:
-            - /opt/criteria-pod-adapter/sidecar.sh
-          env:
-            - name: ADAPTER_KIND
-              value: copilot
-          volumeMounts:
-            - name: data
-              mountPath: /data
-            - name: repo
-              mountPath: /repo
-            - name: copilot-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
-            - name: copilot-secrets
-              mountPath: /secrets/reviewer_github_token
-              subPath: reviewer_github_token
-            - name: scripts
-              mountPath: /opt/criteria-pod-adapter
-          resources:
-            requests:
-              memory: "1Gi"
-              cpu: "500m"
-            limits:
-              memory: "4Gi"
-              cpu: "2000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: __DATA_PVC__
+        - name: repo
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
+        - name: linear-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: linear-spc
+        - name: copilot-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: copilot-spc
+        - name: scripts
+          configMap:
+            name: pod-adapter-scripts
+            defaultMode: 0755
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__-adapter-shell
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: criteria-run
+    app.kubernetes.io/managed-by: criteria-k8s
+    criteria.brokenbots.dev/run: __JOB_NAME__
+    criteria.brokenbots.dev/role: adapter
+    criteria.brokenbots.dev/adapter-kind: shell
+    ticket: __TICKET_ID__
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-run
+        app.kubernetes.io/managed-by: criteria-k8s
+        criteria.brokenbots.dev/run: __JOB_NAME__
+        criteria.brokenbots.dev/role: adapter
+        criteria.brokenbots.dev/adapter-kind: shell
+        ticket: __TICKET_ID__
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
         - name: adapter-shell
-          image: __IMAGE__
+          image: __ADAPTER_SHELL_IMAGE__
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
-            - /opt/criteria-pod-adapter/sidecar.sh
+            - /opt/criteria-pod-adapter/adapter.sh
           env:
             - name: ADAPTER_KIND
               value: shell
+            - name: CRITERIA_RUN_JOB_NAME
+              value: "__JOB_NAME__"
           volumeMounts:
             - name: data
               mountPath: /data
             - name: repo
               mountPath: /repo
-            - name: shell-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
@@ -257,25 +304,89 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
-        - name: linear-secrets
-          csi:
-            driver: secrets-store.csi.k8s.io
-            readOnly: true
-            volumeAttributes:
-              secretProviderClass: linear-spc
-        - name: copilot-secrets
-          csi:
-            driver: secrets-store.csi.k8s.io
-            readOnly: true
-            volumeAttributes:
-              secretProviderClass: copilot-spc
-        - name: shell-secrets
-          csi:
-            driver: secrets-store.csi.k8s.io
-            readOnly: true
-            volumeAttributes:
-              secretProviderClass: shell-spc
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
+        - name: scripts
+          configMap:
+            name: pod-adapter-scripts
+            defaultMode: 0755
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__-adapter-copilot
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: criteria-run
+    app.kubernetes.io/managed-by: criteria-k8s
+    criteria.brokenbots.dev/run: __JOB_NAME__
+    criteria.brokenbots.dev/role: adapter
+    criteria.brokenbots.dev/adapter-kind: copilot
+    ticket: __TICKET_ID__
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-run
+        app.kubernetes.io/managed-by: criteria-k8s
+        criteria.brokenbots.dev/run: __JOB_NAME__
+        criteria.brokenbots.dev/role: adapter
+        criteria.brokenbots.dev/adapter-kind: copilot
+        ticket: __TICKET_ID__
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: adapter-copilot
+          image: __ADAPTER_COPILOT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /opt/criteria-pod-adapter/adapter.sh
+          env:
+            - name: ADAPTER_KIND
+              value: copilot
+            - name: CRITERIA_RUN_JOB_NAME
+              value: "__JOB_NAME__"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: __DATA_PVC__
+        - name: repo
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts

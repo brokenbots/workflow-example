@@ -133,7 +133,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Finalizer-driven cleanup: delete child Job when the CriteriaRun is deleted.
+	// Finalizer-driven cleanup: delete child Jobs when the CriteriaRun is deleted.
 	if !run.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, &run, logger)
 	}
@@ -149,25 +149,35 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	desired := jobbuilder.Build(&run, r.Defaults)
+	desiredJobs := jobbuilder.BuildAll(&run, r.Defaults)
 
-	var found batchv1.Job
-	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &found)
-	if err != nil && apierrors.IsNotFound(err) {
-		logger.Info("creating child job", "job", desired.Name)
-		if err := ctrl.SetControllerReference(&run, desired, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("setting controller reference: %w", err)
+	var runnerJob *batchv1.Job
+	for _, desired := range desiredJobs {
+		var found batchv1.Job
+		err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &found)
+		if err != nil && apierrors.IsNotFound(err) {
+			logger.Info("creating child job", "job", desired.Name)
+			if err := ctrl.SetControllerReference(&run, desired, r.Scheme); err != nil {
+				return ctrl.Result{}, fmt.Errorf("setting controller reference: %w", err)
+			}
+			if err := r.Create(ctx, desired); err != nil {
+				return ctrl.Result{}, fmt.Errorf("creating job %s: %w", desired.Name, err)
+			}
+			found = *desired
+		} else if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting job %s: %w", desired.Name, err)
 		}
-		if err := r.Create(ctx, desired); err != nil {
-			return ctrl.Result{}, fmt.Errorf("creating job: %w", err)
+		if desired.Labels["criteria.brokenbots.dev/role"] == "runner" {
+			runnerJob = &found
 		}
-		found = *desired
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting job: %w", err)
 	}
 
-	// Sync status from the child Job.
-	if err := r.updateStatus(ctx, &run, &found, logger); err != nil {
+	if runnerJob == nil {
+		return ctrl.Result{}, fmt.Errorf("no runner job found in desired set")
+	}
+
+	// Sync status from the runner Job.
+	if err := r.updateStatus(ctx, &run, runnerJob, logger); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -252,15 +262,17 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 	}
 	logger.Info("finalizing CriteriaRun")
 
-	jobName := jobbuilder.JobName(run)
-	var job batchv1.Job
-	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: run.Namespace}, &job)
-	if err == nil {
-		if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("deleting child job: %w", err)
+	desiredJobs := jobbuilder.BuildAll(run, r.Defaults)
+	for _, desired := range desiredJobs {
+		var job batchv1.Job
+		err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &job)
+		if err == nil {
+			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("deleting child job %s: %w", desired.Name, err)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("getting child job %s for deletion: %w", desired.Name, err)
 		}
-	} else if !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("getting child job for deletion: %w", err)
 	}
 
 	controllerutil.RemoveFinalizer(run, criteriaRunFinalizer)

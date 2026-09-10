@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Launch a Kubernetes Job that runs linear_intake_v1 with separate in-pod
-# adapter sidecars. Secrets are mounted via CSI SecretProviderClass only; no
-# container uses secret environment variables.
+# Launch a Kubernetes Job group that runs linear_intake_v1 with one runner pod
+# plus dedicated adapter pods (one per adapter type). The runner pod keeps its
+# CSI mounts; adapter pods mount only the shared /repo and /data volumes and
+# discover connection details from per-run files published by the runner. No
+# adapter pod uses secret environment variables or Kubernetes RBAC.
 #
 # Environment variables:
-#   IMAGE                     Container image to run (default: localhost:5000/linear-intake-remote:dev)
+#   IMAGE                     Runner container image (default: localhost:5000/linear-intake-remote:dev)
+#   ADAPTER_SHELL_IMAGE       Shell adapter image (default: localhost:5000/criteria-adapter-shell:0.5.3)
+#   ADAPTER_COPILOT_IMAGE     Copilot adapter image (default: localhost:5000/criteria-adapter-copilot:0.5.5)
 #   NAMESPACE                 Target namespace (default: criteria-jobs)
 #   JOB_NAME                  Explicit Job name; defaults to pod-adapter-<lowercase ticket>
 #   DATA_PVC                  PVC for /data (default: criteria-data)
+#   REPO_PVC                  PVC for /repo (default: criteria-repo)
 #
 #   TICKET_ID                 Required Linear ticket identifier
 #   REPO_URL                  Required GitHub repository (e.g. brokenbots/criteria)
@@ -25,10 +30,12 @@ tmpl_var() {
     export "__${name}__=$value"
 }
 
-tmpl_var IMAGE           "${IMAGE:-localhost:5000/linear-intake-remote:dev}"
-tmpl_var DIGEST          "${DIGEST:-latest}"
-tmpl_var NAMESPACE       "${NAMESPACE:-criteria-jobs}"
-tmpl_var DATA_PVC        "${DATA_PVC:-criteria-data}"
+tmpl_var IMAGE                 "${IMAGE:-localhost:5000/linear-intake-remote:dev}"
+tmpl_var ADAPTER_SHELL_IMAGE    "${ADAPTER_SHELL_IMAGE:-localhost:5000/criteria-adapter-shell:0.5.3}"
+tmpl_var ADAPTER_COPILOT_IMAGE  "${ADAPTER_COPILOT_IMAGE:-localhost:5000/criteria-adapter-copilot:0.5.5}"
+tmpl_var NAMESPACE             "${NAMESPACE:-criteria-jobs}"
+tmpl_var DATA_PVC              "${DATA_PVC:-criteria-data}"
+tmpl_var REPO_PVC              "${REPO_PVC:-criteria-repo}"
 
 : "${TICKET_ID:?TICKET_ID is required}"
 : "${REPO_URL:?REPO_URL is required}"

@@ -29,7 +29,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func TestReconcileCreatesJob(t *testing.T) {
+func TestReconcileCreatesJobs(t *testing.T) {
 	scheme := newScheme(t)
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -63,14 +63,27 @@ func TestReconcileCreatesJob(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, res)
 
-	var child batchv1.Job
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: "cri-42", Namespace: "default"}, &child))
-	require.Len(t, child.OwnerReferences, 1)
-	assert.Equal(t, "CriteriaRun", child.OwnerReferences[0].Kind)
+	var runner batchv1.Job
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: "cri-42", Namespace: "default"}, &runner))
+	require.Len(t, runner.OwnerReferences, 1)
+	assert.Equal(t, "CriteriaRun", runner.OwnerReferences[0].Kind)
+
+	for _, kind := range []string{"shell", "copilot"} {
+		var adapter batchv1.Job
+		require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: "cri-42-adapter-" + kind, Namespace: "default"}, &adapter))
+		require.Len(t, adapter.OwnerReferences, 1)
+		assert.Equal(t, "CriteriaRun", adapter.OwnerReferences[0].Kind)
+		assert.Empty(t, adapter.Spec.Template.Spec.ServiceAccountName)
+		require.NotNil(t, adapter.Spec.Template.Spec.AutomountServiceAccountToken)
+		assert.False(t, *adapter.Spec.Template.Spec.AutomountServiceAccountToken)
+		for _, v := range adapter.Spec.Template.Spec.Volumes {
+			assert.Nil(t, v.CSI, "adapter volume %q must not be CSI", v.Name)
+		}
+	}
 
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
-	assert.True(t, updated.Finalizers != nil && len(updated.Finalizers) > 0)
+	assert.NotEmpty(t, updated.Finalizers)
 	assert.Equal(t, "cri-42", updated.Status.JobName)
 }
 
@@ -119,7 +132,7 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 	assert.Equal(t, "Done", updated.Status.TicketState)
 }
 
-func TestFinalizeDeletesJob(t *testing.T) {
+func TestFinalizeDeletesJobs(t *testing.T) {
 	scheme := newScheme(t)
 	now := metav1.NewTime(time.Now())
 	run := &criteriav1.CriteriaRun{
@@ -132,26 +145,31 @@ func TestFinalizeDeletesJob(t *testing.T) {
 		},
 		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-42"},
 	}
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cri-42",
-			Namespace: "default",
-		},
+	jobs := []*batchv1.Job{
+		{ObjectMeta: metav1.ObjectMeta{Name: "cri-42", Namespace: "default"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "cri-42-adapter-shell", Namespace: "default"}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "cri-42-adapter-copilot", Namespace: "default"}},
+	}
+	objects := []client.Object{run}
+	for _, j := range jobs {
+		objects = append(objects, j)
 	}
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(run).
-		WithObjects(run, job).
+		WithObjects(objects...).
 		Build()
 
 	r := &controller.CriteriaRunReconciler{Client: cl, Scheme: scheme}
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
 
-	var deleted batchv1.Job
-	err = cl.Get(context.Background(), types.NamespacedName{Name: "cri-42", Namespace: "default"}, &deleted)
-	assert.True(t, err != nil, "expected job to be deleted")
+	for _, name := range []string{"cri-42", "cri-42-adapter-shell", "cri-42-adapter-copilot"} {
+		var deleted batchv1.Job
+		err = cl.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, &deleted)
+		assert.True(t, err != nil, "expected job %s to be deleted", name)
+	}
 
 	var updated criteriav1.CriteriaRun
 	err = cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated)

@@ -20,6 +20,14 @@ if [ -z "${REPO_URL:-}" ]; then
     echo "REPO_URL is required" >&2
     exit 1
 fi
+if [ -z "${JOB_NAME:-}" ]; then
+    echo "JOB_NAME is required" >&2
+    exit 1
+fi
+if [ -z "${POD_IP:-}" ]; then
+    echo "POD_IP is required" >&2
+    exit 1
+fi
 
 case "$ALLOW_DIRTY" in
     true|false) ;;
@@ -37,17 +45,39 @@ mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"
 git config --global --add safe.directory "$REPO_DIR"
 git config --global --add safe.directory "$REPO_DIR/**"
 
-# Generate a per-run bearer token for the remote adapters and publish it to the
-# shared PVC so all three containers agree on the token. Write-once: on a
-# workflow-runner restart (Job restartPolicy), keep the existing token so the
-# long-lived adapter sidecars (which latched it at first boot) stay in sync.
-token_file=/data/.criteria-remote-token
-if [ -s "$token_file" ]; then
-    token=$(cat "$token_file")
-else
-    token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
-    printf '%s' "$token" > "$token_file"
-fi
+# Per-run discovery directory. Adapters poll this path by convention to learn
+# the runner's dial address, the per-run bearer token, and the pinned adapter
+# digests. The directory is removed on exit so a subsequent run cannot reuse
+# the token.
+run_dir="/data/.criteria/runs/$JOB_NAME"
+mkdir -p "$run_dir"
+
+# Generate a per-run bearer token and publish it for the adapters.
+token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
+printf '%s' "$token" > "$run_dir/token"
+
+# Resolve the pinned adapter digests from the workflow lockfile using the same
+# awk the local container entrypoint uses.
+lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
+adapter_digest() {
+    kind="$1"
+    digest=$(awk -v k="criteria-adapter-${kind}" '
+        $0 ~ "reference.*"k { in_entry=1 }
+        in_entry && /resolved_digest/ { gsub(/[" ]/, ""); sub(/^resolved_digest=sha256:/, ""); print; exit }
+    ' "$lockfile")
+    if [ -z "$digest" ]; then
+        echo "criteria adapter $kind not found in $lockfile" >&2
+        exit 1
+    fi
+    printf '%s' "$digest"
+}
+printf 'sha256:%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
+printf 'sha256:%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
+
+# Publish the runner dial address. The Kubernetes runtime widens the shim to
+# 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
+# 127.0.0.1:7778 unchanged.
+printf '%s' "${POD_IP}:7778" > "$run_dir/host"
 
 workflow_src=/workflows
 workflow_tmp=/tmp/workflows
@@ -55,7 +85,7 @@ rm -rf "$workflow_tmp"
 cp -a "$workflow_src" "$workflow_tmp"
 
 # Substitute the placeholders in every subworkflow's remote environment block
-# so each shim and the adapter sidecars share the generated bearer token. The
+# so each shim and the adapter pods share the generated bearer token. The
 # legacy placeholder literal is assembled at runtime so the launcher template
 # renderer does not try to replace it while rendering the manifest.
 old_token_placeholder="_""_CRITERIA_REMOTE_TOKEN_""_"
@@ -71,6 +101,13 @@ find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
     done
 ' sh "$token" "$old_token_placeholder" {} +
 
+# The declarative workflow keeps 127.0.0.1:7778 as its portable default. Only
+# the Kubernetes runtime widens the listen address so separate adapter pods can
+# phone home. accept_token stays enabled because the engine requires it for
+# non-loopback listen addresses.
+find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
+    -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' {} +
+
 # The workflow HCL keeps its var.workflow_github_token / var.reviewer_github_token
 # secret references untouched: the compiler requires direct var.<name> bindings.
 # Instead the runner passes file: OriginRefs for those variables (--var below);
@@ -81,7 +118,10 @@ find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
 
 runtime_dir=$(mktemp -d)
 runtime_vars="$runtime_dir/vars.json"
-trap 'rm -rf "$runtime_dir"' EXIT
+cleanup() {
+    rm -rf "$run_dir" "$runtime_dir"
+}
+trap cleanup EXIT
 
 jq -n \
     --arg ticket_id "$TICKET_ID" \
