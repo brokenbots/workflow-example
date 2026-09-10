@@ -26,6 +26,16 @@ spec:
         app: castle
     spec:
       serviceAccountName: criteria-runner
+      # Restricted PodSecurity compliance (the criteria-jobs namespace enforces
+      # restricted since CRI-113): non-root, no privilege escalation, drop all
+      # capabilities, RuntimeDefault seccomp.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       # Keep Castle off GPU nodes - it only needs CPU
       nodeSelector:
         kubernetes.io/arch: amd64
@@ -37,6 +47,10 @@ spec:
       - name: castle
         image: localhost:5000/castle:dev
         imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
         ports:
         - containerPort: 8080
           name: h2c
