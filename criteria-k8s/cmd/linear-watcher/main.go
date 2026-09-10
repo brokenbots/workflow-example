@@ -72,21 +72,28 @@ func main() {
 	}
 
 	linearClient := linear.NewClient(apiKey)
+	githubToken := getenv("WORKFLOW_GITHUB_TOKEN", "")
+	if githubToken == "" {
+		if b, err := os.ReadFile("/secrets/workflow_github_token"); err == nil {
+			githubToken = strings.TrimSpace(string(b))
+		}
+	}
 	w := watcher{
-		client:         k8s,
-		linear:         linearClient,
-		namespace:      *namespace,
-		projectName:    *projectName,
-		triageState:    *triageState,
-		pollInterval:   *pollInterval,
-		image:          *image,
+		client:          k8s,
+		linear:          linearClient,
+		namespace:       *namespace,
+		projectName:     *projectName,
+		triageState:     *triageState,
+		pollInterval:    *pollInterval,
+		image:           *image,
 		providerBaseURL: *providerBaseURL,
-		maxAgentVisits: *maxAgentVisits,
-		buildCmd:       *buildCmd,
-		testCmd:        *testCmd,
-		ciGateCmd:      *ciGateCmd,
-		defaultRepoURL: *defaultRepoURL,
-		log:            logger,
+		maxAgentVisits:  *maxAgentVisits,
+		buildCmd:        *buildCmd,
+		testCmd:         *testCmd,
+		ciGateCmd:       *ciGateCmd,
+		defaultRepoURL:  *defaultRepoURL,
+		repoValidator:   linear.DefaultRepoValidator(nil, githubToken, ""),
+		log:             logger,
 	}
 
 	ctx := ctrl.SetupSignalHandler()
@@ -110,6 +117,7 @@ type watcher struct {
 	testCmd         string
 	ciGateCmd       string
 	defaultRepoURL  string
+	repoValidator   linear.RepoValidator
 	log             logr.Logger
 }
 
@@ -141,7 +149,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		return err
 	}
 	for _, issue := range issues {
-		repoURL := linear.ExtractRepoURL(issue, w.defaultRepoURL)
+		repoURL := linear.ExtractRepoURL(issue, w.defaultRepoURL, w.repoValidator)
 		if repoURL == "" {
 			w.log.Info("skipping Linear issue without repo URL", "ticket", issue.Identifier, "title", issue.Title)
 			continue

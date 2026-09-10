@@ -71,5 +71,87 @@ func TestExtractRepoURL(t *testing.T) {
 		Title:       "Fix bug in brokenbots/workflow-example",
 		Description: "Details at https://github.com/brokenbots/workflow-example/pull/12",
 	}
-	assert.Equal(t, "brokenbots/workflow-example", linear.ExtractRepoURL(issue, ""))
+	assert.Equal(t, "brokenbots/workflow-example", linear.ExtractRepoURL(issue, "", nil))
+}
+
+func TestDefaultRepoValidator(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/repos/brokenbots/workflow-example", r.URL.Path)
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := ts.Client()
+	validator := linear.DefaultRepoValidator(client, "test-token", ts.URL)
+	assert.True(t, validator("brokenbots/workflow-example"))
+
+	notFoundTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer notFoundTS.Close()
+
+	missing := linear.DefaultRepoValidator(notFoundTS.Client(), "test-token", notFoundTS.URL)
+	assert.False(t, missing("owner/does-not-exist"))
+}
+
+func TestExtractRepoURLRepro(t *testing.T) {
+	// mockValidator confirms only brokenbots/workflow-example is a real repo.
+	mockValidator := func(repo string) bool {
+		return repo == "brokenbots/workflow-example"
+	}
+	defaultRepoURL := "brokenbots/default-fallback"
+
+	cases := []struct {
+		name         string
+		issue        linear.Issue
+		wantRepoURL  string
+	}{
+		{
+			name:        "config path false positive",
+			issue:       linear.Issue{Title: "Update k8s/service.yaml"},
+			wantRepoURL: defaultRepoURL,
+		},
+		{
+			name:        "file path false positive",
+			issue:       linear.Issue{Title: "Refactor cmd/main.go"},
+			wantRepoURL: defaultRepoURL,
+		},
+		{
+			name:        "nested path false positive",
+			issue:       linear.Issue{Title: "Issue in foo/bar/baz"},
+			wantRepoURL: defaultRepoURL,
+		},
+		{
+			name:        "unvalidated short-form false positive",
+			issue:       linear.Issue{Title: "Fix fake/not-a-repo"},
+			wantRepoURL: defaultRepoURL,
+		},
+		{
+			name:        "explicit GitHub URL wins",
+			issue:       linear.Issue{Title: "Update k8s/service.yaml", Description: "See https://github.com/brokenbots/workflow-example"},
+			wantRepoURL: "brokenbots/workflow-example",
+		},
+		{
+			name:        "validated short-form wins",
+			issue:       linear.Issue{Title: "Fix brokenbots/workflow-example"},
+			wantRepoURL: "brokenbots/workflow-example",
+		},
+		{
+			name:        "plain text falls back to defaultRepoURL",
+			issue:       linear.Issue{Title: "Just a regular issue"},
+			wantRepoURL: defaultRepoURL,
+		},
+		{
+			name:        "repo label falls back before defaultRepoURL",
+			issue:       linear.Issue{Title: "Update k8s/service.yaml", RepoLabel: "brokenbots/labelled-repo"},
+			wantRepoURL: "brokenbots/labelled-repo",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.wantRepoURL, linear.ExtractRepoURL(tc.issue, defaultRepoURL, mockValidator))
+		})
+	}
 }
