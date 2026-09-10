@@ -33,7 +33,7 @@ adapter "shell" "intake" {
 adapter "copilot" "intake_classifier" {
     environment = remote.intake
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.5"
+    version     = "0.5.6"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
@@ -54,7 +54,7 @@ adapter "copilot" "intake_classifier" {
 adapter "copilot" "triage_reviewer" {
     environment = remote.intake
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.5"
+    version     = "0.5.6"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token

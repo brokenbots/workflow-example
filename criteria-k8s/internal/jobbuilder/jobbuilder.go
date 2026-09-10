@@ -65,7 +65,7 @@ func adapterImage(kind string) string {
 	case "shell":
 		return "localhost:5000/criteria-adapter-shell:0.5.3"
 	case "copilot":
-		return "localhost:5000/criteria-adapter-copilot:0.5.5"
+		return "localhost:5000/criteria-adapter-copilot:0.5.6"
 	default:
 		return fmt.Sprintf("localhost:5000/criteria-adapter-%s:latest", kind)
 	}

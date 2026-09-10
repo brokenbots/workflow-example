@@ -10,7 +10,7 @@ set -euo pipefail
 # Environment variables:
 #   IMAGE                     Runner container image (default: localhost:5000/linear-intake-remote:dev)
 #   ADAPTER_SHELL_IMAGE       Shell adapter image (default: localhost:5000/criteria-adapter-shell:0.5.3)
-#   ADAPTER_COPILOT_IMAGE     Copilot adapter image (default: localhost:5000/criteria-adapter-copilot:0.5.5)
+#   ADAPTER_COPILOT_IMAGE     Copilot adapter image (default: localhost:5000/criteria-adapter-copilot:0.5.6)
 #   NAMESPACE                 Target namespace (default: criteria-jobs)
 #   JOB_NAME                  Explicit Job name; defaults to pod-adapter-<lowercase ticket>
 #   DATA_PVC                  PVC for /data (default: criteria-data)
@@ -32,7 +32,7 @@ tmpl_var() {
 
 tmpl_var IMAGE                 "${IMAGE:-localhost:5000/linear-intake-remote:dev}"
 tmpl_var ADAPTER_SHELL_IMAGE    "${ADAPTER_SHELL_IMAGE:-localhost:5000/criteria-adapter-shell:0.5.3}"
-tmpl_var ADAPTER_COPILOT_IMAGE  "${ADAPTER_COPILOT_IMAGE:-localhost:5000/criteria-adapter-copilot:0.5.5}"
+tmpl_var ADAPTER_COPILOT_IMAGE  "${ADAPTER_COPILOT_IMAGE:-localhost:5000/criteria-adapter-copilot:0.5.6}"
 tmpl_var NAMESPACE             "${NAMESPACE:-criteria-jobs}"
 tmpl_var DATA_PVC              "${DATA_PVC:-criteria-data}"
 tmpl_var REPO_PVC              "${REPO_PVC:-criteria-repo}"

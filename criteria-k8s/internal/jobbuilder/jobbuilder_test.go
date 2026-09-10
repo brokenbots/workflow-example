@@ -196,7 +196,7 @@ func TestBuildAll(t *testing.T) {
 	require.NotNil(t, copilot.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.False(t, *copilot.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.Len(t, copilot.Spec.Template.Spec.Volumes, 3)
-	assert.Equal(t, "localhost:5000/criteria-adapter-copilot:0.5.5", copilot.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, "localhost:5000/criteria-adapter-copilot:0.5.6", copilot.Spec.Template.Spec.Containers[0].Image)
 
 	for _, job := range jobs[1:] {
 		// Adapter pods must have no CSI volumes.

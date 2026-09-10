@@ -1,6 +1,6 @@
 schema_version = 1
 adapter "copilot" "branch_repair" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.5"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.6"
   version              = "0.5.5"
   resolved_digest      = "sha256:aa02ce1e187d783195930f2fbeb011114b9e33cc5556e094b5075203ff6e9699"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"

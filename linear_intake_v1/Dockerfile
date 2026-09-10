@@ -77,7 +77,7 @@ RUN criteria adapter lock /workflows/linear_intake_v1 \
         criteria adapter lock "/workflows/$wf" || exit 1; \
        done \
     && criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.3 \
-    && criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.5 \
+    && criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.6 \
     && chmod 0755 /usr/local/bin/linear-intake \
     && mkdir -p /repo /data/intake /data/triage /home/criteria/.config/gh \
     && chown -R criteria:criteria /repo /data /home/criteria/.config /home/criteria/.local/criteria
