@@ -104,7 +104,6 @@ data:
     # the token.
     run_dir="/data/.criteria/runs/$JOB_NAME"
     mkdir -p "$run_dir"
-    trap 'rm -rf "$run_dir"' EXIT
     
     # Generate a per-run bearer token and publish it for the adapters.
     token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
@@ -173,7 +172,10 @@ data:
     
     runtime_dir=$(mktemp -d)
     runtime_vars="$runtime_dir/vars.json"
-    trap 'rm -rf "$runtime_dir"' EXIT
+    cleanup() {
+        rm -rf "$run_dir" "$runtime_dir"
+    }
+    trap cleanup EXIT
     
     jq -n \
         --arg ticket_id "$TICKET_ID" \
