@@ -187,7 +187,7 @@ func TestBuildAll(t *testing.T) {
 	require.NotNil(t, shell.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.False(t, *shell.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.Len(t, shell.Spec.Template.Spec.Volumes, 3)
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:0.5.3", shell.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", shell.Spec.Template.Spec.Containers[0].Image)
 
 	copilot := findJob(t, jobs, "cri-42-adapter-copilot")
 	assert.Equal(t, "adapter", copilot.Spec.Template.Labels["criteria.brokenbots.dev/role"])
@@ -196,7 +196,7 @@ func TestBuildAll(t *testing.T) {
 	require.NotNil(t, copilot.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.False(t, *copilot.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.Len(t, copilot.Spec.Template.Spec.Volumes, 3)
-	assert.Equal(t, "localhost:5000/criteria-adapter-copilot:0.5.6", copilot.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, "localhost:5000/criteria-adapter-copilot:k8s-0.5.6", copilot.Spec.Template.Spec.Containers[0].Image)
 
 	for _, job := range jobs[1:] {
 		// Adapter pods must have no CSI volumes.
