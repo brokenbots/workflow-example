@@ -147,6 +147,11 @@ func TestExtractRepoURLRepro(t *testing.T) {
 			issue:       linear.Issue{Title: "Update k8s/service.yaml", RepoLabel: "brokenbots/labelled-repo"},
 			wantRepoURL: "brokenbots/labelled-repo",
 		},
+		{
+			name:        "validated short-form wins over repo label",
+			issue:       linear.Issue{Title: "Fix brokenbots/workflow-example", RepoLabel: "brokenbots/labelled-repo"},
+			wantRepoURL: "brokenbots/workflow-example",
+		},
 	}
 
 	for _, tc := range cases {
@@ -154,4 +159,15 @@ func TestExtractRepoURLRepro(t *testing.T) {
 			assert.Equal(t, tc.wantRepoURL, linear.ExtractRepoURL(tc.issue, defaultRepoURL, mockValidator))
 		})
 	}
+
+	// Nil validator should never return an unvalidated short-form candidate; it must fall back.
+	t.Run("nil validator short-form falls back before defaultRepoURL", func(t *testing.T) {
+		issue := linear.Issue{Title: "Fix brokenbots/workflow-example"}
+		assert.Equal(t, defaultRepoURL, linear.ExtractRepoURL(issue, defaultRepoURL, nil))
+	})
+
+	t.Run("nil validator short-form falls back before repo label", func(t *testing.T) {
+		issue := linear.Issue{Title: "Fix brokenbots/workflow-example", RepoLabel: "brokenbots/labelled-repo"}
+		assert.Equal(t, "brokenbots/labelled-repo", linear.ExtractRepoURL(issue, defaultRepoURL, nil))
+	})
 }
