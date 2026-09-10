@@ -2,109 +2,104 @@
 
 This directory contains the Kubernetes manifests and launchers for running a
 Criteria workflow (currently `linear_intake_v1`) against a Linear ticket inside
-a cluster. The deployment is split into two paths:
+a cluster. The recommended deployment is operator-based and autonomous:
 
-* **Pod-adapter Job (recommended)** — `job-cri-27.yaml` / `launch-pod-adapter-job.sh`.
-  The workflow engine and each adapter run as separate containers in one pod.
-  Secrets are mounted with the Secrets Store CSI driver and OpenBao; no
-  credential is passed as a pod environment variable.
-* **Legacy single-container Job** — `05-job-template.yaml` /
-  `launch-ticket-job.sh`. All adapters run in one container and credentials are
-  supplied through a Kubernetes Secret via `envFrom`.
-
-The pod-adapter path is the default for new work. This README focuses on it,
-but the legacy launcher is still documented below for existing environments.
+* The `criteria-k8s-operator` reconciles a `CriteriaRun` custom resource into
+  a runner `Job` plus one adapter `Job` per adapter type.
+* The `criteria-linear-watcher` polls Linear and creates a `CriteriaRun` for each
+  ticket that reaches the configured Triage state.
+* A manual path lets you create `CriteriaRun` objects by hand for testing.
+* The host-based launcher scripts remain available for local testing only.
 
 ---
 
 ## Table of contents
 
 1. [Architecture](#architecture)
-2. [Secret flow](#secret-flow)
+2. [Autonomous flow](#autonomous-flow)
 3. [Setup](#setup)
 4. [Running a workflow](#running-a-workflow)
-5. [Debugging](#debugging)
-6. [Security](#security)
-7. [Files in this directory](#files-in-this-directory)
+5. [Reading run status](#reading-run-status)
+6. [Debugging](#debugging)
+7. [Security](#security)
+8. [Files in this directory](#files-in-this-directory)
 
 ---
 
 ## Architecture
 
-A pod-adapter run is a Kubernetes `Job` with three long-lived containers plus an
-init container:
-
-| Container | Role |
-|-----------|------|
-| `repo-clone` (init) | Clones the ticket's GitHub repository into an `emptyDir` volume shared with the other containers. It reads only the workflow GitHub token from its own CSI mount. |
-| `workflow-runner` | Runs `/usr/local/bin/criteria apply`. It owns the Criteria shim that listens on `127.0.0.1:7778` and drives the workflow. It mounts only the Linear API key. |
-| `adapter-copilot` | Sidecar that runs the pinned `criteria-adapter-copilot` binary. It connects back to the shim on the pod loopback interface. It mounts both GitHub tokens. |
-| `adapter-shell` | Sidecar that runs the pinned `criteria-adapter-shell` binary. It mounts only the workflow GitHub token. |
+An operator-based run is driven by the `criteria-k8s-operator` and scheduled as
+a group of batch/v1 Jobs in the `criteria-jobs` namespace.
 
 ```text
-┌─────────────────────────────────────────────────────────────────────┐
-│ Pod: pod-adapter-<ticket>                                            │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐           │
-│  │ repo-clone   │    │ workflow-    │    │ adapter-     │           │
-│  │ (init)       │    │ runner       │    │ copilot      │           │
-│  │              │    │ 127.0.0.1:7778│◄───│              │           │
-│  │ /repo emptyDir│──►│ /data PVC    │◄───│ /data PVC    │           │
-│  │ shell-spc    │    │ linear-spc   │    │ copilot-spc  │           │
-│  └──────────────┘    └──────────────┘    └──────────────┘           │
-│                                         ┌──────────────┐            │
-│                                         │ adapter-shell│            │
-│                                         │ 127.0.0.1:7778◄───────────│
-│                                         │ shell-spc    │            │
-│                                         └──────────────┘            │
-└─────────────────────────────────────────────────────────────────────┘
+Linear ticket in Triage
+        |
+        v
++---------------------------+
+| criteria-linear-watcher |  (polls Linear, creates CriteriaRun)
++---------------------------+
+        |
+        v
++---------------------------+
+|  criteria-k8s-operator    |  (reconciles CriteriaRun)
++---------------------------+
+        |            |            |
+        v            v            v
+   +---------+ +-------------+ +-------------+
+   | runner  | | adapter Job | | adapter Job |
+   | Job     | |   shell     | |   copilot   |
+   +---------+ +-------------+ +-------------+
 ```
 
-The `workflow-runner` starts the Criteria engine against a copied workflow tree
-(`/tmp/workflows`). The engine opens a remote listener on the pod loopback
-address. The two adapter sidecars start after the init container finishes,
-resolve their pinned digests from the workflow lockfile, and run the adapter
-binaries in "phone-home" mode: each adapter opens a TCP connection to
-`127.0.0.1:7778` and calls `OpenSession` over TCP. The session handshake uses a
-per-run bearer token (`accept_token`) and the pinned adapter digest as identity.
+| Resource | Role |
+|----------|------|
+| `CriteriaRun` | Custom resource that describes the ticket to process, repository, image, and runtime settings. |
+| `criteria-linear-watcher` | Polls Linear for tickets in the Triage state and creates a `CriteriaRun` for each one. |
+| `criteria-k8s-operator` | Watches `CriteriaRun` resources and reconciles them into child Jobs. |
+| Runner Job | `repo-clone` init container clones the repository; `workflow-runner` runs `criteria apply` and hosts the remote shim. |
+| Adapter Job | One Job per adapter type (`shell`, `copilot`). Adapters phone home to the runner shim over the pod network. |
 
-This repository does not use a CustomResourceDefinition; workflows are scheduled
-as Kubernetes Jobs. A separate optional `castle` Deployment provides a control
-plane for agent registration and event buffering, but the intake run itself does
-not require it.
+The runner Job mounts the `linear-spc` CSI volume for the Linear API key and the
+`copilot-spc` CSI volume for the two GitHub tokens. Adapter Jobs mount only the
+shared `/data` and `/repo` PVCs and have no CSI volumes, no Kubernetes
+Secrets, and no service account token auto-mount.
+
+The runner starts the Criteria shim on `0.0.0.0:7778` using the pod IP and
+writes per-run connection metadata to `/data/.criteria/runs/<job-name>/`:
+
+| Discovery file | Contents |
+|----------------|----------|
+| `host` | Runner pod IP and port (`<pod-ip>:7778`). |
+| `token` | Per-run `accept_token` bearer token. |
+| `digest-shell` | Pinned SHA256 digest of the `shell` adapter. |
+| `digest-copilot` | Pinned SHA256 digest of the `copilot` adapter. |
+
+Adapters poll those files and then connect to the shim. The adapter's identity
+is verified against the pinned digest and the `accept_token` bearer token.
 
 ---
 
-## Secret flow
+## Autonomous flow
 
-1. OpenBao stores the three credentials under `criteria/data/linear`:
-   * `linear_api_key`
-   * `workflow_github_token`
-   * `reviewer_github_token`
-2. The Secrets Store CSI driver and OpenBao CSI provider are installed as
-   DaemonSets in namespace `csi`.
-3. Three `SecretProviderClass` objects (`linear-spc`, `copilot-spc`, `shell-spc`)
-   declare which OpenBao paths and keys each pod volume exposes. Each file is
-   mounted with permission `0600`.
-4. The Job mounts one CSI volume per container:
-   * `workflow-runner` mounts only `linear-spc` → `/secrets/linear_api_key`
-   * `adapter-copilot` mounts `copilot-spc` → `/secrets/workflow_github_token`
-     and `/secrets/reviewer_github_token`
-   * `adapter-shell` (and the `repo-clone` init container) mounts only
-     `shell-spc` → `/secrets/workflow_github_token`
-5. At startup each container reads its own credential files with `IFS= read -r`.
-6. The runner generates a per-run bearer token, writes it to
-   `/data/.criteria-remote-token` on the shared PVC, and rewrites the workflow's
-   `adapters.chcl` so GitHub token references become `env:WORKFLOW_GITHUB_TOKEN`
-   / `env:REVIEWER_GITHUB_TOKEN`. The adapters therefore read the token files
-   directly instead of receiving the value from the runner over the secret
-   channel.
-7. Each adapter sidecar exports `CRITERIA_REMOTE_HOST=127.0.0.1:7778` and
-   `CRITERIA_REMOTE_DIGEST=sha256:<pin>` and execs its binary. The adapter
-   connects over TCP and calls `OpenSession`, authenticating with the bearer
-   token configured in the remote environment's `accept_token` attribute.
+When a Linear ticket in the watched project is moved to the `Triage` state:
 
-No container sees all three credentials, and none of them are exposed as pod
-environment variables.
+1. The `criteria-linear-watcher` reads the ticket, extracts a repository URL
+   from the description, and checks whether a `CriteriaRun` for that ticket is
+   already active.
+2. If no active run exists, the watcher creates a `CriteriaRun` in the
+   `criteria-jobs` namespace. The `CriteriaRun` carries the ticket ID,
+   repository URL, image, provider URL, and default gate settings.
+3. The `criteria-k8s-operator` sees the new `CriteriaRun` and creates the child
+   Jobs: one runner Job and one adapter Job for each adapter type
+   (`shell`, `copilot`).
+4. The runner Job clones the repository and runs `criteria apply`. The engine
+   resolves workflow secrets from the runner's CSI mounts and delivers them to
+   adapters over the OpenSession SDK channel.
+5. Adapter Jobs start, read the runner's dial address, bearer token, and pinned
+   digest from the shared `/data` PVC, and phone home to the runner shim.
+6. When the runner Job finishes, the operator reads the run's `events.ndjson`
+   file and updates `CriteriaRun` status with the final phase, PR number, and
+   ticket state.
 
 ---
 
@@ -115,9 +110,10 @@ environment variables.
 * A Kubernetes cluster with amd64 worker nodes. The manifests use
   `nodeSelector: kubernetes.io/arch: amd64` and tolerate the `catch` and
   `node-role.kubernetes.io/control-plane` taints.
-* Container images built and available to the cluster. The default image is
-  `localhost:5000/linear-intake-remote:dev`. Build it locally (see the root
-  `README.md` and `Makefile`) and push to a registry the cluster can reach.
+* Container images built and available to the cluster. The workflow image is
+  `localhost:5000/linear-intake-remote:dev` and the operator image is
+  `localhost:5000/criteria-k8s:dev`. Build them locally and push to a registry
+  the cluster can reach.
 * A local insecure registry mirror if you use `localhost:5000`. Copy
   `k8s/registries.yaml` to `/etc/rancher/k3s/registries.yaml` and restart k3s:
 
@@ -187,93 +183,160 @@ kubectl exec -n default openbao-0 -- \
     reviewer_github_token="$REVIEWER_GITHUB_TOKEN"
 ```
 
-### 4. Create the PVCs (if they do not already exist)
+### 4. Create the PVCs
 
 ```sh
 kubectl apply -f k8s/03-pvc.yaml
 ```
 
-### 5. Apply the SecretProviderClasses
+### 5. Apply the operator prerequisites
+
+The operator and its adapter Jobs need the `linear-spc` and `copilot-spc`
+`SecretProviderClass` objects and the `pod-adapter-scripts` ConfigMap. Apply
+all three with the dedicated prerequisite manifest:
 
 ```sh
-kubectl apply -f k8s/job-cri-27.yaml
+kubectl apply -f k8s/operator-prereqs.yaml
 ```
 
-This creates `linear-spc`, `copilot-spc`, and `shell-spc` in the
-`criteria-jobs` namespace. It also creates the `pod-adapter-scripts`
-ConfigMap that embeds the runner and sidecar shell scripts.
-
-### Optional: deploy the Castle control plane
-
-If you want the `castle` control plane for agent registration and event
-buffering, apply its Deployment and Service:
+### 6. Build and push the operator image
 
 ```sh
-kubectl apply -f k8s/04-castle.yaml
+make build-criteria-k8s
+docker push localhost:5000/criteria-k8s:dev
 ```
 
-Castle is not required for a standalone intake run.
+Use `podman push` instead of `docker push` if your build tool is podman.
+
+### 7. Install the operator
+
+```sh
+kubectl apply -f criteria-k8s/config/install.yaml
+```
+
+This creates the `criteria-jobs` namespace, the `CriteriaRun` CRD, the
+operator's RBAC, and the `criteria-k8s-operator` and `criteria-linear-watcher`
+Deployments.
+
+### 8. Verify the watcher picks up Linear tickets
+
+Wait for the operator and watcher to be ready:
+
+```sh
+kubectl wait -n criteria-jobs deployment/criteria-k8s-operator \
+  --for=condition=Available --timeout=120s
+kubectl wait -n criteria-jobs deployment/criteria-linear-watcher \
+  --for=condition=Available --timeout=120s
+```
+
+Tail the watcher logs:
+
+```sh
+kubectl logs -n criteria-jobs deployment/criteria-linear-watcher -f
+```
+
+Move a Linear ticket in the watched project to the `Triage` state and include a
+repository URL in the ticket. The watcher should log that it created a
+`CriteriaRun` for the ticket.
 
 ---
 
 ## Running a workflow
 
-### With the launcher (recommended)
+### Autonomous path
 
-The launcher renders the template and applies the Job:
+Once the watcher is running, move any Linear ticket in the watched project to
+`Triage`. The watcher creates a `CriteriaRun`; the operator reconciles it into
+Jobs automatically.
 
-```sh
-export TICKET_ID=CRI-105
-export REPO_URL=brokenbots/workflow-example
-export IMAGE=localhost:5000/linear-intake-remote:dev
+### Manual path
 
-# Optional overrides
-export NAMESPACE=criteria-jobs
-export DATA_PVC=criteria-data
-export PROVIDER_BASE_URL=http://host.docker.internal:11434/v1
-
-./k8s/launch-pod-adapter-job.sh
-```
-
-To preview the rendered manifest without applying it:
+Create a `CriteriaRun` by hand for testing. Edit the example manifest to set the
+right ticket, repository, image, and provider URL:
 
 ```sh
-DRY_RUN=1 ./k8s/launch-pod-adapter-job.sh
+kubectl apply -f criteria-k8s/config/examples/criteriarun.yaml
 ```
 
-### Without the launcher
+You can also write a run from scratch:
 
-A fully rendered example Job is available at `k8s/examples/ticket-job.yaml`.
-Edit the image, ticket, repository, provider URL, and PVC names to match your
-cluster, then apply it directly:
-
-```sh
-kubectl apply -f k8s/examples/ticket-job.yaml
+```yaml
+apiVersion: criteria.brokenbots.dev/v1
+kind: CriteriaRun
+metadata:
+  name: cri-42
+  namespace: criteria-jobs
+spec:
+  ticketId: "CRI-42"
+  repoUrl: "https://github.com/brokenbots/workflow-example.git"
+  image: "localhost:5000/linear-intake-remote:dev"
+  buildCmd: "make build"
+  testCmd: "make test"
+  ciGateCmd: "make ci-gate"
+  maxAgentVisits: 2
+  providerBaseUrl: "http://192.168.17.116:11434/v1"
 ```
 
-### With the legacy single-container launcher
+After creating it, the operator creates the runner and adapter Jobs.
 
-For environments that have not migrated to the pod-adapter path:
+### Host-based launchers (local testing only)
 
-```sh
-export TICKET_ID=CRI-105
-export REPO_URL=brokenbots/workflow-example
-export LINEAR_API_KEY=...
-export WORKFLOW_GITHUB_TOKEN=...
-export REVIEWER_GITHUB_TOKEN=...
+The launcher scripts are still available for local testing but they bypass
+the operator and the `CriteriaRun` CRD:
 
-./k8s/launch-ticket-job.sh
-```
+* `./k8s/launch-pod-adapter-job.sh` renders and applies a runner Job plus one
+  adapter Job per adapter type directly.
+* `./k8s/launch-ticket-job.sh` renders and applies the legacy single-container
+  Job template (`05-job-template.yaml`).
 
-This path creates a Kubernetes Secret named `linear-intake-credentials` from
-the local environment and applies `05-job-template.yaml`.
+These launchers are intended for local debugging only; production runs should
+use the operator and watcher.
 
 ### Watch the run
 
+List the child Jobs for a run:
+
 ```sh
-kubectl logs -n criteria-jobs job/pod-adapter-cri-105 -f --all-containers
-kubectl wait -n criteria-jobs job/pod-adapter-cri-105 --for=condition=complete --timeout=60m
+kubectl get jobs -n criteria-jobs -l criteria.brokenbots.dev/run=cri-42
 ```
+
+Follow the runner logs:
+
+```sh
+kubectl logs -n criteria-jobs job/cri-42 -c workflow-runner -f
+```
+
+Wait for completion:
+
+```sh
+kubectl wait -n criteria-jobs job/cri-42 --for=condition=complete --timeout=60m
+```
+
+---
+
+## Reading run status
+
+`kubectl get criteriarun` shows the run summary:
+
+```sh
+kubectl get criteriarun -n criteria-jobs
+```
+
+Output columns include `Ticket`, `Phase`, `Job`, `PR`, and `Age`. The `Phase`
+reflects the lifecycle of the child runner Job (`Pending`, `Running`,
+`Succeeded`, or `Failed`). The `PR` column shows the pull request number produced
+by the run when one was created.
+
+For the full status, including the events file path:
+
+```sh
+kubectl describe criteriarun <run-name> -n criteria-jobs
+```
+
+The run's events file lives at `/data/intake/<ticket-id>/events.ndjson` on the
+`criteria-data` PVC. The same path is recorded in the `CriteriaRun` status as
+`eventsPath`. After the runner Job finishes, the operator reads this file to
+populate `prNumber` and `ticketState`.
 
 ---
 
@@ -281,13 +344,15 @@ kubectl wait -n criteria-jobs job/pod-adapter-cri-105 --for=condition=complete -
 
 ### Read container logs
 
-The Job has three main containers. Read each one separately:
+The runner Job has a `repo-clone` init container and a `workflow-runner`
+container. Each adapter Job has a single `adapter-shell` or `adapter-copilot`
+container. Read each one separately:
 
 ```sh
-kubectl logs -n criteria-jobs job/pod-adapter-cri-105 -c workflow-runner
-kubectl logs -n criteria-jobs job/pod-adapter-cri-105 -c adapter-copilot
-kubectl logs -n criteria-jobs job/pod-adapter-cri-105 -c adapter-shell
-kubectl logs -n criteria-jobs job/pod-adapter-cri-105 -c repo-clone
+kubectl logs -n criteria-jobs job/<run-name> -c workflow-runner
+kubectl logs -n criteria-jobs job/<run-name>-adapter-shell -c adapter-shell
+kubectl logs -n criteria-jobs job/<run-name>-adapter-copilot -c adapter-copilot
+kubectl logs -n criteria-jobs job/<run-name> -c repo-clone
 ```
 
 Typical failures:
@@ -295,20 +360,20 @@ Typical failures:
 * `repo-clone` exits non-zero when the workflow GitHub token cannot read the
   repository, or when `REPO_URL` is missing.
 * `workflow-runner` exits if the Linear API key is missing, `ALLOW_DIRTY` is
-  invalid, or the workflow validation fails.
-* `adapter-copilot` / `adapter-shell` loop or crash when they cannot reach
-  `127.0.0.1:7778`, when the bearer token file is missing, or when the pinned
-  adapter digest does not match the binary in the image.
+  invalid, or workflow validation fails.
+* Adapter containers loop or crash when they cannot reach the runner shim,
+  when the per-run discovery files are missing, or when the pinned adapter
+  digest does not match the binary in the image.
 
 ### Check the Linear issue state
 
 Look at the ticket in Linear. The workflow moves the issue through the
 configured states:
 
-1. `linear_triage_state` when a bug is classified
-2. `linear_work_state` before the handler starts
-3. `linear_done_state` after the PR merges
-4. `linear_review_state` when the run cannot proceed autonomously
+1. `Triage` when a bug is classified
+2. `In Progress` before the handler starts
+3. `Done` after the PR merges
+4. `In Review` when the run cannot proceed autonomously
 
 A failure comment is posted to the issue when a step exits non-zero or when a
 gate rejects its input.
@@ -335,28 +400,28 @@ Key files:
 | `/data/intake/<ticket_id>/worktree/` | Handler's isolated worktree. |
 | `/data/intake/<ticket_id>/review-notes.md` | Triage reviewer's reasoning. |
 | `/data/intake/<ticket_id>/intake-notes.md` | Questions posted to Linear. |
-| `/data/.criteria-remote-token` | Per-run bearer token shared between the runner and adapters. |
 
 ### Verify CSI secret mounts
 
-If a container fails with "required via /secrets/...", check that the CSI
+If the runner fails with "required via /secrets/...", check that the CSI
 volume mounted correctly:
 
 ```sh
-kubectl exec -n criteria-jobs job/pod-adapter-cri-105 -c workflow-runner -- \
+kubectl exec -n criteria-jobs job/<run-name> -c workflow-runner -- \
   ls -la /secrets/
 
-kubectl exec -n criteria-jobs job/pod-adapter-cri-105 -c workflow-runner -- \
+kubectl exec -n criteria-jobs job/<run-name> -c workflow-runner -- \
   cat /secrets/linear_api_key | head -c 8
 ```
 
 You should see a single file with mode `0600` owned by the `fsGroup` user
 (`10001`).
 
-### Regenerate the pod-adapter manifest
+### Regenerate the prerequisite manifest
 
-`k8s/job-cri-27.yaml` is generated from `job-cri-27.yaml.tmpl` by embedding the
-runner and sidecar scripts. After editing either script, regenerate it:
+`k8s/operator-prereqs.yaml` and `k8s/job-cri-27.yaml` are generated from
+`k8s/job-cri-27.yaml.tmpl` by embedding the runner and adapter wrapper scripts.
+After editing either wrapper script, regenerate both files:
 
 ```sh
 ./k8s/generate-pod-adapter-manifest.sh
@@ -368,46 +433,54 @@ runner and sidecar scripts. After editing either script, regenerate it:
 
 ### Secret isolation
 
-The pod-adapter design isolates credentials by container:
+The runner Job is the only pod that mounts credential volumes:
 
-* The `workflow-runner` only needs the Linear API key. It never mounts either
-  GitHub token.
-* The `adapter-copilot` mounts both GitHub tokens because it performs GitHub
-  work and PR review under separate identities.
-* The `adapter-shell` and `repo-clone` init container mount only the workflow
-  GitHub token.
+* `workflow-runner` mounts only the Linear API key at `/secrets/linear_api_key`
+  and the two GitHub tokens at `/home/criteria/secrets`.
+* `repo-clone` mounts only the workflow GitHub token at `/home/criteria/secrets`.
+* Adapter Jobs do not mount any CSI volume, Kubernetes Secret, or ConfigMap
+  containing credentials.
 
-This limits the blast radius of a container compromise: a vulnerability in the
-runner cannot leak the reviewer's GitHub token because that file is never
-present in the runner's filesystem namespace.
+This limits the blast radius of a container compromise: a vulnerability in an
+adapter Job cannot leak a credential that was never present in its filesystem or
+environment.
 
 ### Secrets Store CSI driver
 
 Credentials are stored in OpenBao and injected by the CSI driver as files
-inside the container. They are never written to the pod spec, never exposed as
-environment variables, and never persisted in the container image. The driver
-mounts each volume read-only with `0600` permissions. The OpenBao role is
-bound to the `criteria-runner` service account and namespace and has a short
-TTL (one hour by default).
+inside the runner's containers. They are never written to the pod spec, never
+exposed as environment variables, and never persisted in the container image.
+The driver mounts each volume read-only with `0600` permissions. The OpenBao
+role is bound to the `criteria-runner` service account and namespace and has a
+short TTL (one hour by default).
+
+### OpenSession secret delivery
+
+The runner passes the GitHub tokens to the engine as `file:` variable origin
+references (`file:/home/criteria/secrets/workflow_github_token`). The engine's
+secret provider stack resolves those files at startup and delivers the values
+to adapters over the OpenSession SDK contract. Adapters never read workflow
+credentials from their own process environment or filesystem.
 
 ### Remote bridge authentication
 
-Adapters authenticate to the in-pod Criteria shim with two mechanisms:
+Adapters authenticate to the runner shim with two mechanisms:
 
-1. **Bearer token (`accept_token`)**: the runner generates a 32-byte
-   alphanumeric token per run and writes it to the shared PVC. The runner and
-   sidecars agree on the token; nothing outside the pod can read it.
-2. **Pinned digest**: each sidecar resolves the adapter's SHA256 digest from the
-   workflow lockfile and exports it as `CRITERIA_REMOTE_DIGEST`. The shim rejects
-   connections whose presented identity does not match the lockfile pin.
+1. **Per-run `accept_token`**: the runner generates a 32-byte alphanumeric token
+   per run and writes it to the shared `/data` PVC. The runner and adapter Jobs
+   agree on the token; nothing outside the runner's Job can read it.
+2. **Pinned digest**: each adapter resolves its SHA256 digest from the workflow
+   lockfile and presents it during the OpenSession handshake. The shim rejects
+   connections whose identity does not match the lockfile pin.
 
-The default deployment uses the pod loopback interface (`127.0.0.1:7778`), so
-the remote bridge does not cross a network boundary and mTLS is not required.
+The default deployment uses the pod network (`<runner-pod-ip>:7778`) because the
+runner and adapters run in separate pods. `accept_token` is required for
+non-loopback listen addresses.
 
 ### mTLS between pods (if cross-pod)
 
-If you split the runner and adapters across separate pods, the Criteria remote
-bridge leaves the loopback interface. In that configuration you must:
+If you split the runner and adapters across separate network zones, the Criteria
+remote bridge crosses pod boundaries. In that configuration you must:
 
 * Issue a client certificate for each adapter and a server certificate for the
   shim.
@@ -415,29 +488,22 @@ bridge leaves the loopback interface. In that configuration you must:
   Secret env vars.
 * Configure the adapter environment to use TLS (`https://` or the equivalent
   Criteria transport option) and set `accept_token` to a cryptographically
-  random value generated per run and stored only in memory or a CSI mount.
+  random value generated per run and stored only in the shared PVC.
 * Restrict network policy so only adapter pods can reach the runner pod on the
   remote port.
 
-The manifests in this directory use the single-pod loopback model and do not
+The manifests in this directory use the in-cluster pod network and do not
 configure cross-pod mTLS.
 
 ### Pod security
 
 * `runAsNonRoot: true`, `runAsUser: 10001`, `fsGroup: 10001`.
-* No `privileged: true`, no `seccompProfile`, no `--security-opt`.
-* The namespace enforces the `baseline` Pod Security Standard.
-* Only the `csi` driver DaemonSets require host-level access; the workflow Job
-  does not.
-
-### accept_token authentication
-
-The `accept_token` value in each `environment "remote"` block is the shared
-secret that allows an adapter to join the shim. It is generated at runtime,
-not committed to the repository. The runner replaces the committed placeholder
-(`CRITERIA_REMOTE_TOKEN_PLACEHOLDER`) in a temporary copy of the workflow tree
-before `criteria apply` starts, so the token never appears in the image or on
-the persistent workflow source volume.
+* `seccompProfile: RuntimeDefault` for the operator and watcher.
+* No `privileged: true`, no `--security-opt`.
+* Adapter Jobs disable service account token auto-mount.
+* The namespace enforces the `restricted` Pod Security Standard.
+* Only the `csi` driver DaemonSets require host-level access; the workflow Jobs
+  do not.
 
 ---
 
@@ -445,18 +511,19 @@ the persistent workflow source volume.
 
 | File | Purpose |
 |------|---------|
-| `00-namespace.yaml` | `criteria-jobs` namespace with baseline pod security. |
+| `00-namespace.yaml` | `criteria-jobs` namespace with restricted pod security. |
 | `01-openbao-config.yaml` | Reference ConfigMap for the OpenBao Kubernetes auth role and policy. |
 | `02-serviceaccount.yaml` | `criteria-runner` ServiceAccount and RBAC. |
 | `03-pvc.yaml` | `criteria-data` and `criteria-repo` PVCs. |
 | `04-castle.yaml` | Optional Castle control-plane Deployment and Service. |
 | `05-job-template.yaml` | Legacy single-container Job template. |
-| `job-cri-27.yaml.tmpl` | Pod-adapter Job template with embedded script placeholders. |
-| `job-cri-27.yaml` | Generated pod-adapter manifest (created by `generate-pod-adapter-manifest.sh`). |
-| `pod-adapter-runner.sh` | Script for the `workflow-runner` container. |
-| `pod-adapter-sidecar.sh` | Script for the `adapter-copilot` and `adapter-shell` containers. |
-| `generate-pod-adapter-manifest.sh` | Embeds the scripts into `job-cri-27.yaml`. |
-| `launch-pod-adapter-job.sh` | Renders and applies `job-cri-27.yaml`. |
+| `operator-prereqs.yaml` | `SecretProviderClass` and `ConfigMap` objects required by the operator. |
+| `job-cri-27.yaml.tmpl` | Pod-adapter Job group template with embedded script placeholders. |
+| `job-cri-27.yaml` | Generated pod-adapter manifest used by the local launcher. |
+| `pod-adapter-runner.sh` | Runner wrapper script; becomes the `runner.sh` entry in the `pod-adapter-scripts` ConfigMap. |
+| `pod-adapter-adapter.sh` | Adapter wrapper script; becomes the `adapter.sh` entry in the `pod-adapter-scripts` ConfigMap. |
+| `generate-pod-adapter-manifest.sh` | Embeds the wrapper scripts into `job-cri-27.yaml` and `operator-prereqs.yaml`. |
+| `launch-pod-adapter-job.sh` | Renders and applies the pod-adapter Job group directly. |
 | `launch-ticket-job.sh` | Renders and applies the legacy `05-job-template.yaml`. |
 | `install-secrets-store-csi.sh` | Helm installer for the CSI driver and OpenBao provider. |
 | `verify-secrets-store-csi.sh` | Waits for the CSI driver/provider DaemonSets and SPCs. |
@@ -465,5 +532,7 @@ the persistent workflow source volume.
 | `registries.yaml` | k3s containerd mirror for insecure local registries. |
 | `values-secrets-store-csi-driver.yaml` | Helm values for the upstream CSI driver chart. |
 | `values-openbao-csi-provider.yaml` | Helm values for the OpenBao CSI provider chart. |
-| `examples/ticket-job.yaml` | Apply-ready example Job for the pod-adapter path. |
+| `examples/ticket-job.yaml` | Apply-ready example Job for the local launcher path. |
 | `tests/` | Regression tests for the manifests and launchers. |
+| `criteria-k8s/config/install.yaml` | Operator install manifest (CRD, RBAC, operator and watcher deployments). |
+| `criteria-k8s/config/examples/criteriarun.yaml` | Example `CriteriaRun` for the manual path. |
