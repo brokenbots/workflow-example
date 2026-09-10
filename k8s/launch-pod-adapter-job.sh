@@ -14,6 +14,7 @@ set -euo pipefail
 #   NAMESPACE                 Target namespace (default: criteria-jobs)
 #   JOB_NAME                  Explicit Job name; defaults to pod-adapter-<lowercase ticket>
 #   DATA_PVC                  PVC for /data (default: criteria-data)
+#   REPO_PVC                  PVC for /repo (default: criteria-repo)
 #
 #   TICKET_ID                 Required Linear ticket identifier
 #   REPO_URL                  Required GitHub repository (e.g. brokenbots/criteria)
@@ -34,6 +35,7 @@ tmpl_var ADAPTER_SHELL_IMAGE    "${ADAPTER_SHELL_IMAGE:-localhost:5000/criteria-
 tmpl_var ADAPTER_COPILOT_IMAGE  "${ADAPTER_COPILOT_IMAGE:-localhost:5000/criteria-adapter-copilot:0.5.5}"
 tmpl_var NAMESPACE             "${NAMESPACE:-criteria-jobs}"
 tmpl_var DATA_PVC              "${DATA_PVC:-criteria-data}"
+tmpl_var REPO_PVC              "${REPO_PVC:-criteria-repo}"
 
 : "${TICKET_ID:?TICKET_ID is required}"
 : "${REPO_URL:?REPO_URL is required}"

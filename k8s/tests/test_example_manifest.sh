@@ -66,6 +66,10 @@ printf '%s' "$adapter_block" | grep -q 'automountServiceAccountToken: false' || 
     fail "adapter Job does not disable service account token mounting"
 printf '%s' "$adapter_block" | grep -q 'serviceAccountName:' && \
     fail "adapter Job specifies a service account"
+printf '%s' "$adapter_block" | grep -q 'claimName: criteria-repo' || \
+    fail "adapter Job does not mount the shared criteria-repo PVC"
+printf '%s' "$adapter_block" | grep -q 'emptyDir: {}' && \
+    fail "adapter Job uses emptyDir instead of the shared /repo PVC"
 
 # Per-run discovery directory and listen-address widening must be present.
 printf '%s' "$manifest" | grep -q 'run_dir="/data/.criteria/runs' || \

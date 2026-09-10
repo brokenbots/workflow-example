@@ -51,6 +51,7 @@ func safeLabelValue(s string) string {
 type Defaults struct {
 	Image           string
 	DataPVC         string
+	RepoPVC         string
 	Namespace       string
 	ProviderBaseURL string
 }
@@ -184,6 +185,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	repoURL := run.Spec.RepoURL
 	image := firstNonEmpty(run.Spec.Image, defaults.Image, "localhost:5000/linear-intake-remote:dev")
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
+	repoPVC := firstNonEmpty(defaults.RepoPVC, "criteria-repo")
 	providerBaseURL := firstNonEmpty(run.Spec.ProviderBaseURL, defaults.ProviderBaseURL, "http://192.168.17.116:11434/v1")
 	maxVisits := run.Spec.MaxAgentVisits
 	if maxVisits == 0 {
@@ -208,7 +210,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
-		repoVolume(),
+		repoVolume(repoPVC),
 		csiVolume("linear-secrets", "linear-spc"),
 		csiVolume("copilot-secrets", "copilot-spc"),
 		scriptsVolume(),
@@ -221,6 +223,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	jobName := AdapterJobName(run, kind)
 	image := adapterImage(kind)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
+	repoPVC := firstNonEmpty(defaults.RepoPVC, "criteria-repo")
 
 	labels := baseLabels(run)
 	labels["criteria.brokenbots.dev/role"] = "adapter"
@@ -233,7 +236,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
-		repoVolume(),
+		repoVolume(repoPVC),
 		scriptsVolume(),
 	}
 	return job
@@ -408,11 +411,11 @@ func dataVolume(pvc string) corev1.Volume {
 	}
 }
 
-func repoVolume() corev1.Volume {
+func repoVolume(pvc string) corev1.Volume {
 	return corev1.Volume{
 		Name: "repo",
 		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc},
 		},
 	}
 }

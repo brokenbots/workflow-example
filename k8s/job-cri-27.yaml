@@ -147,7 +147,6 @@ data:
     # phone home. accept_token stays enabled because the engine requires it for
     # non-loopback listen addresses.
     find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
-        -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' \
         -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' {} +
     
     # The workflow HCL keeps its var.workflow_github_token / var.reviewer_github_token
@@ -242,8 +241,8 @@ data:
     run_dir="/data/.criteria/runs/$CRITERIA_RUN_JOB_NAME"
     
     # Poll the per-run discovery directory written by the runner. Adapters mount
-    # /data read-only to the same shared volume, so the runner can publish the
-    # dial address, bearer token, and pinned digest without any CSI volumes or
+    # /data RW to the same shared PVC, so the runner can publish the dial
+    # address, bearer token, and pinned digest without any CSI volumes or
     # credential env vars in the adapter pod spec.
     poll_file() {
         path="$1"
@@ -442,7 +441,8 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: linear-secrets
           csi:
             driver: secrets-store.csi.k8s.io
@@ -534,7 +534,8 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts
@@ -614,7 +615,8 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts

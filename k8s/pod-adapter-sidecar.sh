@@ -13,8 +13,8 @@ fi
 run_dir="/data/.criteria/runs/$CRITERIA_RUN_JOB_NAME"
 
 # Poll the per-run discovery directory written by the runner. Adapters mount
-# /data read-only to the same shared volume, so the runner can publish the
-# dial address, bearer token, and pinned digest without any CSI volumes or
+# /data RW to the same shared PVC, so the runner can publish the dial
+# address, bearer token, and pinned digest without any CSI volumes or
 # credential env vars in the adapter pod spec.
 poll_file() {
     path="$1"

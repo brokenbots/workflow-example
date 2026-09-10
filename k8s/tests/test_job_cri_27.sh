@@ -75,8 +75,8 @@ printf '%s' "$manifest" | grep -q 'key: catch' || \
 
 printf '%s' "$manifest" | grep -q 'claimName: criteria-data' || \
     fail "missing /data PVC mount"
-printf '%s' "$manifest" | grep -q 'emptyDir: {}' || \
-    fail "missing /repo emptyDir volume"
+printf '%s' "$manifest" | grep -q 'claimName: criteria-repo' || \
+    fail "missing /repo PVC mount (criteria-repo)"
 
 # Runner pod keeps linear-spc and copilot-spc; shell-spc is gone.
 printf '%s' "$manifest" | grep -q 'secretProviderClass: linear-spc' || \
@@ -97,6 +97,12 @@ printf '%s' "$adapter_block" | grep -q 'automountServiceAccountToken: false' || 
     fail "adapter Job does not disable service account token mounting"
 printf '%s' "$adapter_block" | grep -q 'serviceAccountName:' && \
     fail "adapter Job specifies a service account"
+
+# Adapter pods must share the same /repo PVC, not use a per-pod emptyDir.
+printf '%s' "$adapter_block" | grep -q 'claimName: criteria-repo' || \
+    fail "adapter Job does not mount the shared criteria-repo PVC"
+printf '%s' "$adapter_block" | grep -q 'emptyDir: {}' && \
+    fail "adapter Job uses emptyDir instead of the shared /repo PVC"
 
 # The workflow-runner must mount only the Linear key at /secrets/linear_api_key
 # and the GitHub tokens at /home/criteria/secrets; it must not see either GitHub

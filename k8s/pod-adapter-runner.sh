@@ -106,7 +106,6 @@ find "$workflow_tmp" -name 'adapters.chcl' -exec sh -c '
 # phone home. accept_token stays enabled because the engine requires it for
 # non-loopback listen addresses.
 find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
-    -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' \
     -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' {} +
 
 # The workflow HCL keeps its var.workflow_github_token / var.reviewer_github_token

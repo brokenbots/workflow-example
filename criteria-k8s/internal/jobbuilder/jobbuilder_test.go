@@ -71,6 +71,7 @@ func TestBuildRunnerJob(t *testing.T) {
 	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
 		Image:           "default-image:dev",
 		DataPVC:         "criteria-data",
+		RepoPVC:         "criteria-repo",
 		ProviderBaseURL: "http://default-provider/v1",
 	})
 
@@ -101,7 +102,8 @@ func TestBuildRunnerJob(t *testing.T) {
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		volNames[v.Name] = true
 		if v.Name == "repo" {
-			assert.NotNil(t, v.EmptyDir)
+			require.NotNil(t, v.PersistentVolumeClaim)
+			assert.Equal(t, "criteria-repo", v.PersistentVolumeClaim.ClaimName)
 		}
 		if v.Name == "data" {
 			require.NotNil(t, v.PersistentVolumeClaim)
@@ -117,6 +119,9 @@ func TestBuildRunnerJob(t *testing.T) {
 	assert.True(t, volNames["linear-secrets"])
 	assert.True(t, volNames["copilot-secrets"])
 	assert.False(t, volNames["shell-secrets"], "runner pod must not mount shell-secrets")
+
+	// /repo must be a shared PVC, not a per-pod emptyDir.
+	assert.Nil(t, job.Spec.Template.Spec.Volumes[1].EmptyDir, "repo volume must not be emptyDir")
 
 	// Runner pod must have exactly one init and one container.
 	require.Len(t, job.Spec.Template.Spec.InitContainers, 1)
@@ -214,6 +219,39 @@ func TestBuildAll(t *testing.T) {
 			assert.ElementsMatch(t, []string{"data", "repo", "scripts"}, mountNames)
 		}
 	}
+}
+
+func TestRepoPVCSharedAcrossJobs(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-99"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-99",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+
+	jobs := jobbuilder.BuildAll(run, jobbuilder.Defaults{DataPVC: "criteria-data", RepoPVC: "criteria-repo"})
+	require.Len(t, jobs, 3)
+
+	var claimName string
+	for _, job := range jobs {
+		var repo *corev1.Volume
+		for i := range job.Spec.Template.Spec.Volumes {
+			if job.Spec.Template.Spec.Volumes[i].Name == "repo" {
+				repo = &job.Spec.Template.Spec.Volumes[i]
+				break
+			}
+		}
+		require.NotNil(t, repo, "job %q must have a repo volume", job.Name)
+		require.NotNil(t, repo.PersistentVolumeClaim, "job %q repo volume must be a PersistentVolumeClaim", job.Name)
+		assert.Nil(t, repo.EmptyDir, "job %q repo volume must not be emptyDir", job.Name)
+		if claimName == "" {
+			claimName = repo.PersistentVolumeClaim.ClaimName
+		} else {
+			assert.Equal(t, claimName, repo.PersistentVolumeClaim.ClaimName, "all Jobs must share the same repo PVC")
+		}
+	}
+	assert.Equal(t, "criteria-repo", claimName)
 }
 
 func findJob(t *testing.T, jobs []*batchv1.Job, name string) *batchv1.Job {

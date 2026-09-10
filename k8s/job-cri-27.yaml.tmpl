@@ -211,7 +211,8 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: linear-secrets
           csi:
             driver: secrets-store.csi.k8s.io
@@ -303,7 +304,8 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts
@@ -383,7 +385,8 @@ spec:
           persistentVolumeClaim:
             claimName: __DATA_PVC__
         - name: repo
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts
