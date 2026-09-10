@@ -147,6 +147,12 @@ printf '%s' "$manifest" | grep -q 'mountPath: /opt/criteria-pod-adapter' || \
 # listen address for separate adapter pods.
 printf '%s' "$manifest" | grep -q 'run_dir="/data/.criteria/runs' || \
     fail "runner script does not create per-run discovery directory"
+# Regression: the on-disk digest files must carry the sha256: prefix expected by
+# the adapter sidecar and the remote shim identity check.
+printf '%s' "$manifest" | grep -q "printf 'sha256:%s'.*digest-shell" || \
+    fail "runner script does not write sha256-prefixed shell digest"
+printf '%s' "$manifest" | grep -q "printf 'sha256:%s'.*digest-copilot" || \
+    fail "runner script does not write sha256-prefixed copilot digest"
 # shellcheck disable=SC2016
 printf '%s' "$manifest" | grep -q 'rm -rf "$run_dir"' || \
     fail "runner script does not delete the per-run directory on exit"

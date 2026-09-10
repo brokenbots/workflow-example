@@ -71,8 +71,8 @@ adapter_digest() {
     fi
     printf '%s' "$digest"
 }
-printf '%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
-printf '%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
+printf 'sha256:%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
+printf 'sha256:%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
 
 # Publish the runner dial address. The Kubernetes runtime widens the shim to
 # 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
