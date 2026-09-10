@@ -32,21 +32,6 @@ spec:
         secretKey: reviewer_github_token
         filePermission: 0444
 ---
-apiVersion: secrets-store.csi.x-k8s.io/v1
-kind: SecretProviderClass
-metadata:
-  name: shell-spc
-  namespace: __NAMESPACE__
-spec:
-  provider: openbao
-  parameters:
-    roleName: criteria-jobs
-    objects: |
-      - objectName: workflow_github_token
-        secretPath: criteria/data/linear
-        secretKey: workflow_github_token
-        filePermission: 0444
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -76,6 +61,14 @@ data:
         echo "REPO_URL is required" >&2
         exit 1
     fi
+    if [ -z "${JOB_NAME:-}" ]; then
+        echo "JOB_NAME is required" >&2
+        exit 1
+    fi
+    if [ -z "${POD_IP:-}" ]; then
+        echo "POD_IP is required" >&2
+        exit 1
+    fi
     
     case "$ALLOW_DIRTY" in
         true|false) ;;
@@ -93,17 +86,40 @@ data:
     git config --global --add safe.directory "$REPO_DIR"
     git config --global --add safe.directory "$REPO_DIR/**"
     
-    # Generate a per-run bearer token for the remote adapters and publish it to the
-    # shared PVC so all three containers agree on the token. Write-once: on a
-    # workflow-runner restart (Job restartPolicy), keep the existing token so the
-    # long-lived adapter sidecars (which latched it at first boot) stay in sync.
-    token_file=/data/.criteria-remote-token
-    if [ -s "$token_file" ]; then
-        token=$(cat "$token_file")
-    else
-        token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
-        printf '%s' "$token" > "$token_file"
-    fi
+    # Per-run discovery directory. Adapters poll this path by convention to learn
+    # the runner's dial address, the per-run bearer token, and the pinned adapter
+    # digests. The directory is removed on exit so a subsequent run cannot reuse
+    # the token.
+    run_dir="/data/.criteria/runs/$JOB_NAME"
+    mkdir -p "$run_dir"
+    trap 'rm -rf "$run_dir"' EXIT
+    
+    # Generate a per-run bearer token and publish it for the adapters.
+    token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
+    printf '%s' "$token" > "$run_dir/token"
+    
+    # Resolve the pinned adapter digests from the workflow lockfile using the same
+    # awk the local container entrypoint uses.
+    lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
+    adapter_digest() {
+        kind="$1"
+        digest=$(awk -v k="criteria-adapter-${kind}" '
+            $0 ~ "reference.*"k { in_entry=1 }
+            in_entry && /resolved_digest/ { gsub(/[" ]/, ""); sub(/^resolved_digest=sha256:/, ""); print; exit }
+        ' "$lockfile")
+        if [ -z "$digest" ]; then
+            echo "criteria adapter $kind not found in $lockfile" >&2
+            exit 1
+        fi
+        printf '%s' "$digest"
+    }
+    printf '%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
+    printf '%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
+    
+    # Publish the runner dial address. The Kubernetes runtime widens the shim to
+    # 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
+    # 127.0.0.1:7778 unchanged.
+    printf '%s' "${POD_IP}:7778" > "$run_dir/host"
     
     workflow_src=/workflows
     workflow_tmp=/tmp/workflows
@@ -111,7 +127,7 @@ data:
     cp -a "$workflow_src" "$workflow_tmp"
     
     # Substitute the placeholders in every subworkflow's remote environment block
-    # so each shim and the adapter sidecars share the generated bearer token. The
+    # so each shim and the adapter pods share the generated bearer token. The
     # legacy placeholder literal is assembled at runtime so the launcher template
     # renderer does not try to replace it while rendering the manifest.
     old_token_placeholder="_""_CRITERIA_REMOTE_TOKEN_""_"
@@ -126,6 +142,14 @@ data:
                 "$f"
         done
     ' sh "$token" "$old_token_placeholder" {} +
+    
+    # The declarative workflow keeps 127.0.0.1:7778 as its portable default. Only
+    # the Kubernetes runtime widens the listen address so separate adapter pods can
+    # phone home. accept_token stays enabled because the engine requires it for
+    # non-loopback listen addresses.
+    find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
+        -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' \
+        -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' {} +
     
     # The workflow HCL keeps its var.workflow_github_token / var.reviewer_github_token
     # secret references untouched: the compiler requires direct var.<name> bindings.
@@ -200,64 +224,40 @@ data:
         --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
         --events-file "$events_file" \
         --output concise
-  sidecar.sh: |
+  adapter.sh: |
     #!/bin/sh
     set -eu
-    
-    # Read this container's own CSI-mounted secrets. The copilot sidecar mounts
-    # both tokens; the shell sidecar mounts only the workflow token.
-    WORKFLOW_GITHUB_TOKEN=""
-    if [ -r /secrets/workflow_github_token ]; then
-        WORKFLOW_GITHUB_TOKEN=$(cat /secrets/workflow_github_token)
-    fi
-    if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
-        echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
-        exit 1
-    fi
-    
-    REVIEWER_GITHUB_TOKEN=""
-    if [ -r /secrets/reviewer_github_token ]; then
-        REVIEWER_GITHUB_TOKEN=$(cat /secrets/reviewer_github_token)
-    fi
-    if [ -z "$REVIEWER_GITHUB_TOKEN" ] && [ "$ADAPTER_KIND" = "copilot" ]; then
-        echo "REVIEWER_GITHUB_TOKEN is required via /secrets/reviewer_github_token" >&2
-        exit 1
-    fi
-    
-    # Wait for the workflow-runner to publish the shared remote token.
-    until [ -r /data/.criteria-remote-token ]; do
-        sleep 1
-    done
-    CRITERIA_REMOTE_TOKEN=$(cat /data/.criteria-remote-token)
-    export CRITERIA_REMOTE_TOKEN
     
     if [ -z "${ADAPTER_KIND:-}" ]; then
         echo "ADAPTER_KIND must be set to shell or copilot" >&2
         exit 1
     fi
-    
-    export WORKFLOW_GITHUB_TOKEN
-    if [ -n "$REVIEWER_GITHUB_TOKEN" ]; then
-        export REVIEWER_GITHUB_TOKEN
-    fi
-    
-    # Resolve the pinned adapter digest from the workflow lockfile. The same digest
-    # is used as the adapter's identity over the remote handshake.
-    lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
-    digest=$(awk -v k="criteria-adapter-$ADAPTER_KIND" '
-        $0 ~ "reference.*"k { in_entry=1 }
-        in_entry && /resolved_digest/ { gsub(/[\" ]/, ""); sub(/^resolved_digest=sha256:/, ""); print; exit }
-    ' "$lockfile")
-    if [ -z "$digest" ]; then
-        echo "criteria adapter $ADAPTER_KIND not found in $lockfile" >&2
+    if [ -z "${CRITERIA_RUN_JOB_NAME:-}" ]; then
+        echo "CRITERIA_RUN_JOB_NAME must be set" >&2
         exit 1
     fi
     
-    binary="/home/criteria/.local/criteria/adapters/sha256-${digest}/criteria-adapter-${ADAPTER_KIND}"
-    if [ ! -x "$binary" ]; then
-        echo "adapter binary not found: $binary" >&2
-        exit 1
-    fi
+    run_dir="/data/.criteria/runs/$CRITERIA_RUN_JOB_NAME"
+    
+    # Poll the per-run discovery directory written by the runner. Adapters mount
+    # /data read-only to the same shared volume, so the runner can publish the
+    # dial address, bearer token, and pinned digest without any CSI volumes or
+    # credential env vars in the adapter pod spec.
+    poll_file() {
+        path="$1"
+        until [ -r "$path" ] && [ -s "$path" ]; do
+            sleep 1
+        done
+        cat "$path"
+    }
+    
+    CRITERIA_REMOTE_HOST=$(poll_file "$run_dir/host")
+    CRITERIA_REMOTE_TOKEN=$(poll_file "$run_dir/token")
+    CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$ADAPTER_KIND")
+    
+    export CRITERIA_REMOTE_HOST
+    export CRITERIA_REMOTE_TOKEN
+    export CRITERIA_REMOTE_DIGEST
     
     # Shell steps run git/gh commands; set a generic bot identity and the gh
     # credential helper so the adapter's own token is used for HTTPS clones.
@@ -267,10 +267,10 @@ data:
         git config --global user.email "criteria-runner@brokenbots.invalid"
     fi
     
-    export CRITERIA_REMOTE_HOST=127.0.0.1:7778
-    export CRITERIA_REMOTE_DIGEST="sha256:$digest"
-    
-    exec "$binary"
+    # The adapter image entrypoint is the remote runner phone-home binary. All
+    # credentials reach the adapter over the OpenSession SDK contract; this
+    # wrapper exports only the connection/digest metadata from discovery files.
+    exec /usr/local/bin/criteria-adapter-remote-runner
 ---
 apiVersion: batch/v1
 kind: Job
@@ -278,17 +278,24 @@ metadata:
   name: __JOB_NAME__
   namespace: __NAMESPACE__
   labels:
-    app.kubernetes.io/name: pod-adapter-run
+    app.kubernetes.io/name: criteria-run
+    app.kubernetes.io/managed-by: criteria-k8s
+    criteria.brokenbots.dev/run: __JOB_NAME__
+    criteria.brokenbots.dev/role: runner
     ticket: __TICKET_ID__
 spec:
   ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: pod-adapter-run
+        app.kubernetes.io/name: criteria-run
+        app.kubernetes.io/managed-by: criteria-k8s
+        criteria.brokenbots.dev/run: __JOB_NAME__
+        criteria.brokenbots.dev/role: runner
         ticket: __TICKET_ID__
     spec:
       serviceAccountName: criteria-runner
+      automountServiceAccountToken: true
       nodeSelector:
         kubernetes.io/arch: amd64
       tolerations:
@@ -307,17 +314,22 @@ spec:
         - name: repo-clone
           image: __IMAGE__
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - /bin/sh
             - -c
             - |
               set -eu
               WORKFLOW_GITHUB_TOKEN=""
-              if [ -r /secrets/workflow_github_token ]; then
-                  WORKFLOW_GITHUB_TOKEN=$(cat /secrets/workflow_github_token)
+              if [ -r /home/criteria/secrets/workflow_github_token ]; then
+                  WORKFLOW_GITHUB_TOKEN=$(cat /home/criteria/secrets/workflow_github_token)
               fi
               if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
-                  echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
+                  echo "WORKFLOW_GITHUB_TOKEN is required via /home/criteria/secrets/workflow_github_token" >&2
                   exit 1
               fi
               if [ -z "$REPO_URL" ]; then
@@ -333,9 +345,8 @@ spec:
           volumeMounts:
             - name: repo
               mountPath: /repo
-            - name: shell-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
+            - name: copilot-secrets
+              mountPath: /home/criteria/secrets
           resources:
             requests:
               memory: "512Mi"
@@ -347,6 +358,11 @@ spec:
         - name: workflow-runner
           image: __IMAGE__
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - /opt/criteria-pod-adapter/runner.sh
           env:
@@ -394,6 +410,12 @@ spec:
               value: "__PROVIDER_BASE_URL__"
             - name: EVENTS_FILE
               value: "__EVENTS_FILE__"
+            - name: JOB_NAME
+              value: "__JOB_NAME__"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           volumeMounts:
             - name: data
               mountPath: /data
@@ -413,59 +435,6 @@ spec:
             limits:
               memory: "8Gi"
               cpu: "4000m"
-        - name: adapter-copilot
-          image: __IMAGE__
-          imagePullPolicy: IfNotPresent
-          command:
-            - /opt/criteria-pod-adapter/sidecar.sh
-          env:
-            - name: ADAPTER_KIND
-              value: copilot
-          volumeMounts:
-            - name: data
-              mountPath: /data
-            - name: repo
-              mountPath: /repo
-            - name: copilot-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
-            - name: copilot-secrets
-              mountPath: /secrets/reviewer_github_token
-              subPath: reviewer_github_token
-            - name: scripts
-              mountPath: /opt/criteria-pod-adapter
-          resources:
-            requests:
-              memory: "1Gi"
-              cpu: "500m"
-            limits:
-              memory: "4Gi"
-              cpu: "2000m"
-        - name: adapter-shell
-          image: __IMAGE__
-          imagePullPolicy: IfNotPresent
-          command:
-            - /opt/criteria-pod-adapter/sidecar.sh
-          env:
-            - name: ADAPTER_KIND
-              value: shell
-          volumeMounts:
-            - name: data
-              mountPath: /data
-            - name: repo
-              mountPath: /repo
-            - name: shell-secrets
-              mountPath: /secrets/workflow_github_token
-              subPath: workflow_github_token
-            - name: scripts
-              mountPath: /opt/criteria-pod-adapter
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "250m"
-            limits:
-              memory: "2Gi"
-              cpu: "1000m"
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -484,12 +453,166 @@ spec:
             readOnly: true
             volumeAttributes:
               secretProviderClass: copilot-spc
-        - name: shell-secrets
-          csi:
-            driver: secrets-store.csi.k8s.io
-            readOnly: true
-            volumeAttributes:
-              secretProviderClass: shell-spc
+        - name: scripts
+          configMap:
+            name: pod-adapter-scripts
+            defaultMode: 0755
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__-adapter-shell
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: criteria-run
+    app.kubernetes.io/managed-by: criteria-k8s
+    criteria.brokenbots.dev/run: __JOB_NAME__
+    criteria.brokenbots.dev/role: adapter
+    criteria.brokenbots.dev/adapter-kind: shell
+    ticket: __TICKET_ID__
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-run
+        app.kubernetes.io/managed-by: criteria-k8s
+        criteria.brokenbots.dev/run: __JOB_NAME__
+        criteria.brokenbots.dev/role: adapter
+        criteria.brokenbots.dev/adapter-kind: shell
+        ticket: __TICKET_ID__
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: adapter-shell
+          image: __ADAPTER_SHELL_IMAGE__
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /opt/criteria-pod-adapter/adapter.sh
+          env:
+            - name: ADAPTER_KIND
+              value: shell
+            - name: CRITERIA_RUN_JOB_NAME
+              value: "__JOB_NAME__"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: __DATA_PVC__
+        - name: repo
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: pod-adapter-scripts
+            defaultMode: 0755
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__-adapter-copilot
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: criteria-run
+    app.kubernetes.io/managed-by: criteria-k8s
+    criteria.brokenbots.dev/run: __JOB_NAME__
+    criteria.brokenbots.dev/role: adapter
+    criteria.brokenbots.dev/adapter-kind: copilot
+    ticket: __TICKET_ID__
+spec:
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-run
+        app.kubernetes.io/managed-by: criteria-k8s
+        criteria.brokenbots.dev/run: __JOB_NAME__
+        criteria.brokenbots.dev/role: adapter
+        criteria.brokenbots.dev/adapter-kind: copilot
+        ticket: __TICKET_ID__
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: adapter-copilot
+          image: __ADAPTER_COPILOT_IMAGE__
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /opt/criteria-pod-adapter/adapter.sh
+          env:
+            - name: ADAPTER_KIND
+              value: copilot
+            - name: CRITERIA_RUN_JOB_NAME
+              value: "__JOB_NAME__"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: repo
+              mountPath: /repo
+            - name: scripts
+              mountPath: /opt/criteria-pod-adapter
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: __DATA_PVC__
+        - name: repo
+          emptyDir: {}
         - name: scripts
           configMap:
             name: pod-adapter-scripts

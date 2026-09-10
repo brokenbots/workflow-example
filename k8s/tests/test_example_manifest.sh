@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Regression test for the apply-ready example manifest at
 # k8s/examples/ticket-job.yaml. Verifies the manifest is present, uses the
-# pod-adapter layout, and does not expose secrets as environment variables.
+# CRI-114 multi-Job layout, and does not expose secrets as environment variables
+# or CSI volumes on adapter pods.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EXAMPLE="$REPO_ROOT/k8s/examples/ticket-job.yaml"
@@ -22,8 +23,8 @@ printf '%s' "$manifest" | grep -q 'name: linear-spc' || \
     fail "missing linear-spc SecretProviderClass"
 printf '%s' "$manifest" | grep -q 'name: copilot-spc' || \
     fail "missing copilot-spc SecretProviderClass"
-printf '%s' "$manifest" | grep -q 'name: shell-spc' || \
-    fail "missing shell-spc SecretProviderClass"
+printf '%s' "$manifest" | grep -q 'name: shell-spc' && \
+    fail "shell-spc SecretProviderClass must not be present"
 
 printf '%s' "$manifest" | grep -q 'name: workflow-runner' || \
     fail "missing workflow-runner container"
@@ -41,26 +42,47 @@ printf '%s' "$manifest" | grep -q 'secretRef' && \
 printf '%s' "$manifest" | grep -q 'envFrom:' && \
     fail "example manifest uses envFrom for secrets"
 
+# Runner pod still uses CSI; adapter pods must not.
 printf '%s' "$manifest" | grep -q 'driver: secrets-store.csi.k8s.io' || \
     fail "example manifest does not use the Secrets Store CSI driver"
-
 printf '%s' "$manifest" | grep -q 'secretProviderClass: linear-spc' || \
     fail "missing linear-spc CSI volume"
 printf '%s' "$manifest" | grep -q 'secretProviderClass: copilot-spc' || \
     fail "missing copilot-spc CSI volume"
-printf '%s' "$manifest" | grep -q 'secretProviderClass: shell-spc' || \
-    fail "missing shell-spc CSI volume"
+printf '%s' "$manifest" | grep -q 'secretProviderClass: shell-spc' && \
+    fail "shell-spc CSI volume must not be present"
 
-printf '%s' "$manifest" | grep -q 'app.kubernetes.io/name: pod-adapter-run' || \
-    fail "example manifest missing pod-adapter-run label"
+# Confirm three Jobs (runner + two adapters) instead of one three-container pod.
+job_count=$(printf '%s' "$manifest" | grep -c '^kind: Job$')
+[ "$job_count" -eq 3 ] || \
+    fail "expected 3 Jobs, found $job_count"
+
+# Adapter pods must not mount any CSI volume or specify a service account.
+adapter_block=$(printf '%s' "$manifest" | awk '/name: pod-adapter-cri-105-adapter-shell/{flag=1} flag{print} /^---$/{if(flag){sep++; if(sep==2){flag=0}}}')
+[ -n "$adapter_block" ] || fail "could not extract adapter Job block"
+printf '%s' "$adapter_block" | grep -q 'driver: secrets-store.csi.k8s.io' && \
+    fail "adapter Job contains a CSI volume"
+printf '%s' "$adapter_block" | grep -q 'automountServiceAccountToken: false' || \
+    fail "adapter Job does not disable service account token mounting"
+printf '%s' "$adapter_block" | grep -q 'serviceAccountName:' && \
+    fail "adapter Job specifies a service account"
+
+# Per-run discovery directory and listen-address widening must be present.
+printf '%s' "$manifest" | grep -q 'run_dir="/data/.criteria/runs' || \
+    fail "runner script does not create per-run discovery directory"
+printf '%s' "$manifest" | grep -q 'listen_address = "0.0.0.0:7778"' || \
+    fail "runner script does not widen listen_address"
+
+printf '%s' "$manifest" | grep -q 'app.kubernetes.io/name: criteria-run' || \
+    fail "example manifest missing criteria-run label"
 
 # The header comment must still point readers at the main README.
 printf '%s' "$manifest" | grep -q 'See k8s/README.md' || \
     fail "example manifest header does not reference k8s/README.md"
 
-# Confirm it is a Job, not a Deployment or CronJob.
+# Confirm all resources are Jobs, not Deployments or CronJobs.
 printf '%s' "$manifest" | grep -q '^kind: Job$' || \
-    fail "example manifest is not a Job"
+    fail "example manifest contains no Job resources"
 
 if command -v kubectl >/dev/null 2>&1; then
     echo "kubectl found; validating example manifest client-side..."
@@ -73,4 +95,4 @@ else
     echo "kubectl not found; skipping client-side dry-run"
 fi
 
-echo "PASS: k8s/examples/ticket-job.yaml is a valid pod-adapter example"
+echo "PASS: k8s/examples/ticket-job.yaml is a valid CRI-114 example"

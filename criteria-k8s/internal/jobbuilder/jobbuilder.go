@@ -1,4 +1,4 @@
-// Package jobbuilder constructs the batch/v1 Job that reconciles a CriteriaRun.
+// Package jobbuilder constructs the batch/v1 Jobs that reconcile a CriteriaRun.
 package jobbuilder
 
 import (
@@ -55,58 +55,102 @@ type Defaults struct {
 	ProviderBaseURL string
 }
 
-// Build returns the desired Job for a CriteriaRun.
-func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
-	ticket := run.Spec.TicketID
-	jobName := JobName(run)
-	repoURL := run.Spec.RepoURL
-	image := firstNonEmpty(run.Spec.Image, defaults.Image, "localhost:5000/linear-intake-remote:dev")
-	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
-	providerBaseURL := firstNonEmpty(run.Spec.ProviderBaseURL, defaults.ProviderBaseURL, "http://192.168.17.116:11434/v1")
-	maxVisits := run.Spec.MaxAgentVisits
-	if maxVisits == 0 {
-		maxVisits = 2
+// adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
+var adapterKinds = []string{"shell", "copilot"}
+
+// adapterImage returns the remote adapter image for a given adapter kind.
+func adapterImage(kind string) string {
+	switch kind {
+	case "shell":
+		return "localhost:5000/criteria-adapter-shell:0.5.3"
+	case "copilot":
+		return "localhost:5000/criteria-adapter-copilot:0.5.5"
+	default:
+		return fmt.Sprintf("localhost:5000/criteria-adapter-%s:latest", kind)
 	}
+}
 
-	repoDir := "/repo"
-	intakeRoot := "/data/intake"
-	triageRoot := "/data/triage"
-	eventsFile := fmt.Sprintf("%s/%s/events.ndjson", intakeRoot, ticket)
+// Build returns the runner Job for a CriteriaRun. It is retained for callers
+// that only need the runner; new reconciler code should prefer BuildAll.
+func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
+	return BuildRunnerJob(run, defaults)
+}
 
-	job := &batchv1.Job{
+// BuildAll returns the runner Job plus one adapter Job per adapter kind. All
+// Jobs are owner-referenced to the CriteriaRun for orphan cleanup.
+func BuildAll(run *criteriav1.CriteriaRun, defaults Defaults) []*batchv1.Job {
+	jobs := []*batchv1.Job{BuildRunnerJob(run, defaults)}
+	for _, kind := range adapterKinds {
+		jobs = append(jobs, BuildAdapterJob(run, defaults, kind))
+	}
+	return jobs
+}
+
+// JobName derives the child runner Job name from the CriteriaRun.
+func JobName(run *criteriav1.CriteriaRun) string {
+	if run.Labels != nil {
+		if name := run.Labels["criteria.brokenbots.dev/job-name"]; name != "" {
+			return name
+		}
+	}
+	if run.Name != "" {
+		return run.Name
+	}
+	return fmt.Sprintf("criteria-run-%s", safeObjectName(run.Spec.TicketID))
+}
+
+// RunnerJobName returns the runner Job name for a CriteriaRun.
+func RunnerJobName(run *criteriav1.CriteriaRun) string {
+	return JobName(run)
+}
+
+// AdapterJobName returns the dedicated adapter Job name for a CriteriaRun.
+func AdapterJobName(run *criteriav1.CriteriaRun, kind string) string {
+	return fmt.Sprintf("%s-adapter-%s", JobName(run), kind)
+}
+
+func baseLabels(run *criteriav1.CriteriaRun) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       "criteria-run",
+		"app.kubernetes.io/managed-by":   "criteria-k8s",
+		"criteria.brokenbots.dev/run":  run.Name,
+		"ticket":                       safeLabelValue(run.Spec.TicketID),
+	}
+}
+
+func ownerReference(run *criteriav1.CriteriaRun) metav1.OwnerReference {
+	ref := metav1.OwnerReference{
+		APIVersion:         run.APIVersion,
+		Kind:               run.Kind,
+		Name:               run.Name,
+		UID:                run.UID,
+		Controller:         boolPtr(true),
+		BlockOwnerDeletion: boolPtr(true),
+	}
+	if ref.APIVersion == "" {
+		ref.APIVersion = schema.GroupVersion{Group: "criteria.brokenbots.dev", Version: "v1"}.String()
+	}
+	if ref.Kind == "" {
+		ref.Kind = "CriteriaRun"
+	}
+	return ref
+}
+
+func buildJobBase(run *criteriav1.CriteriaRun, name string, labels map[string]string) *batchv1.Job {
+	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: run.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":       "criteria-run",
-				"app.kubernetes.io/managed-by":   "criteria-k8s",
-				"criteria.brokenbots.dev/run":  run.Name,
-				"ticket":                       safeLabelValue(ticket),
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         run.APIVersion,
-					Kind:               run.Kind,
-					Name:               run.Name,
-					UID:                run.UID,
-					Controller:         boolPtr(true),
-					BlockOwnerDeletion: boolPtr(true),
-				},
-			},
+			Name:            name,
+			Namespace:       run.Namespace,
+			Labels:          labels,
+			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: intPtr(86400),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app.kubernetes.io/name":      "criteria-run",
-						"app.kubernetes.io/managed-by": "criteria-k8s",
-						"criteria.brokenbots.dev/run": run.Name,
-						"ticket":                      safeLabelValue(ticket),
-					},
+					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "criteria-runner",
 					NodeSelector: map[string]string{
 						"kubernetes.io/arch": "amd64",
 					},
@@ -127,48 +171,72 @@ func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
-					InitContainers: []corev1.Container{
-						repoCloneContainer(image, repoURL, repoDir),
-					},
-					Containers: []corev1.Container{
-						workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits),
-						adapterContainer("adapter-copilot", "copilot", image),
-						adapterContainer("adapter-shell", "shell", image),
-					},
-					Volumes: []corev1.Volume{
-						dataVolume(dataPVC),
-						repoVolume(),
-						csiVolume("linear-secrets", "linear-spc"),
-						csiVolume("copilot-secrets", "copilot-spc"),
-						csiVolume("shell-secrets", "shell-spc"),
-						scriptsVolume(),
-					},
 				},
 			},
 		},
 	}
+}
 
-	// Set GVK for the owner reference when it is missing (common in tests).
-	if job.OwnerReferences[0].APIVersion == "" {
-		job.OwnerReferences[0].APIVersion = schema.GroupVersion{Group: "criteria.brokenbots.dev", Version: "v1"}.String()
+// BuildRunnerJob constructs the runner Job: repo-clone init container + workflow-runner.
+func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
+	ticket := run.Spec.TicketID
+	jobName := JobName(run)
+	repoURL := run.Spec.RepoURL
+	image := firstNonEmpty(run.Spec.Image, defaults.Image, "localhost:5000/linear-intake-remote:dev")
+	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
+	providerBaseURL := firstNonEmpty(run.Spec.ProviderBaseURL, defaults.ProviderBaseURL, "http://192.168.17.116:11434/v1")
+	maxVisits := run.Spec.MaxAgentVisits
+	if maxVisits == 0 {
+		maxVisits = 2
 	}
-	if job.OwnerReferences[0].Kind == "" {
-		job.OwnerReferences[0].Kind = "CriteriaRun"
+
+	repoDir := "/repo"
+	intakeRoot := "/data/intake"
+	triageRoot := "/data/triage"
+	eventsFile := fmt.Sprintf("%s/%s/events.ndjson", intakeRoot, ticket)
+
+	labels := baseLabels(run)
+	labels["criteria.brokenbots.dev/role"] = "runner"
+
+	job := buildJobBase(run, jobName, labels)
+	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
+	job.Spec.Template.Spec.InitContainers = []corev1.Container{
+		repoCloneContainer(image, repoURL, repoDir),
+	}
+	job.Spec.Template.Spec.Containers = []corev1.Container{
+		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits),
+	}
+	job.Spec.Template.Spec.Volumes = []corev1.Volume{
+		dataVolume(dataPVC),
+		repoVolume(),
+		csiVolume("linear-secrets", "linear-spc"),
+		csiVolume("copilot-secrets", "copilot-spc"),
+		scriptsVolume(),
 	}
 	return job
 }
 
-// JobName derives the child Job name from the CriteriaRun.
-func JobName(run *criteriav1.CriteriaRun) string {
-	if run.Labels != nil {
-		if name := run.Labels["criteria.brokenbots.dev/job-name"]; name != "" {
-			return name
-		}
+// BuildAdapterJob constructs a dedicated adapter Job for the given kind.
+func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string) *batchv1.Job {
+	jobName := AdapterJobName(run, kind)
+	image := adapterImage(kind)
+	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
+
+	labels := baseLabels(run)
+	labels["criteria.brokenbots.dev/role"] = "adapter"
+	labels["criteria.brokenbots.dev/adapter-kind"] = kind
+
+	job := buildJobBase(run, jobName, labels)
+	job.Spec.Template.Spec.AutomountServiceAccountToken = boolPtr(false)
+	job.Spec.Template.Spec.Containers = []corev1.Container{
+		adapterContainer(kind, image, JobName(run)),
 	}
-	if run.Name != "" {
-		return run.Name
+	job.Spec.Template.Spec.Volumes = []corev1.Volume{
+		dataVolume(dataPVC),
+		repoVolume(),
+		scriptsVolume(),
 	}
-	return fmt.Sprintf("criteria-run-%s", safeObjectName(run.Spec.TicketID))
+	return job
 }
 
 func restrictedContainerSecurityContext() *corev1.SecurityContext {
@@ -191,11 +259,11 @@ func repoCloneContainer(image, repoURL, repoDir string) corev1.Container {
 			"-c",
 			`set -eu
 WORKFLOW_GITHUB_TOKEN=""
-if [ -r /secrets/workflow_github_token ]; then
-    WORKFLOW_GITHUB_TOKEN=$(cat /secrets/workflow_github_token)
+if [ -r /home/criteria/secrets/workflow_github_token ]; then
+    WORKFLOW_GITHUB_TOKEN=$(cat /home/criteria/secrets/workflow_github_token)
 fi
 if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
-    echo "WORKFLOW_GITHUB_TOKEN is required via /secrets/workflow_github_token" >&2
+    echo "WORKFLOW_GITHUB_TOKEN is required via /home/criteria/secrets/workflow_github_token" >&2
     exit 1
 fi
 if [ -z "$REPO_URL" ]; then
@@ -203,7 +271,7 @@ if [ -z "$REPO_URL" ]; then
     exit 1
 fi
 find /repo -mindepth 1 -delete 2>/dev/null || true
-git config --global credential.https://github.com.helper '!gh auth git-credential'
+git config --global credential.https://github.helper '!gh auth git-credential'
 GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" /repo`,
 		},
 		Env: []corev1.EnvVar{
@@ -211,7 +279,7 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" /repo`,
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "repo", MountPath: repoDir},
-			{Name: "shell-secrets", MountPath: "/secrets"},
+			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 		},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -250,6 +318,15 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		{Name: "MAX_AGENT_VISITS", Value: fmt.Sprintf("%d", maxVisits)},
 		{Name: "PROVIDER_BASE_URL", Value: providerBaseURL},
 		{Name: "EVENTS_FILE", Value: eventsFile},
+		{Name: "JOB_NAME", Value: JobName(run)},
+		{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		},
 	}
 
 	return corev1.Container{
@@ -262,7 +339,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: "/data"},
 			{Name: "repo", MountPath: repoDir},
-			{Name: "linear-secrets", MountPath: "/secrets"},
+			{Name: "linear-secrets", MountPath: "/secrets/linear_api_key", SubPath: "linear_api_key"},
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
 		},
@@ -279,21 +356,19 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	}
 }
 
-func adapterContainer(name, kind, image string) corev1.Container {
-	return corev1.Container{
-		Name:            name,
-		Image:           image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		SecurityContext: restrictedContainerSecurityContext(),
-		Command:         []string{"/opt/criteria-pod-adapter/sidecar.sh"},
-		Env:             []corev1.EnvVar{{Name: "ADAPTER_KIND", Value: kind}},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "data", MountPath: "/data"},
-			{Name: "repo", MountPath: "/repo"},
-			{Name: fmt.Sprintf("%s-secrets", kind), MountPath: "/secrets"},
-			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
+func adapterContainer(kind, image, runnerJobName string) corev1.Container {
+	resources := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceMemory: resourceQuantity("512Mi"),
+			corev1.ResourceCPU:    resourceQuantity("250m"),
 		},
-		Resources: corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceMemory: resourceQuantity("2Gi"),
+			corev1.ResourceCPU:    resourceQuantity("1000m"),
+		},
+	}
+	if kind == "copilot" {
+		resources = corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("1Gi"),
 				corev1.ResourceCPU:    resourceQuantity("500m"),
@@ -302,7 +377,25 @@ func adapterContainer(name, kind, image string) corev1.Container {
 				corev1.ResourceMemory: resourceQuantity("4Gi"),
 				corev1.ResourceCPU:    resourceQuantity("2000m"),
 			},
+		}
+	}
+
+	return corev1.Container{
+		Name:            fmt.Sprintf("adapter-%s", kind),
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: restrictedContainerSecurityContext(),
+		Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
+		Env: []corev1.EnvVar{
+			{Name: "ADAPTER_KIND", Value: kind},
+			{Name: "CRITERIA_RUN_JOB_NAME", Value: runnerJobName},
 		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "data", MountPath: "/data"},
+			{Name: "repo", MountPath: "/repo"},
+			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
+		},
+		Resources: resources,
 	}
 }
 
@@ -329,8 +422,8 @@ func csiVolume(name, spc string) corev1.Volume {
 		Name: name,
 		VolumeSource: corev1.VolumeSource{
 			CSI: &corev1.CSIVolumeSource{
-				Driver:    "secrets-store.csi.k8s.io",
-				ReadOnly:  boolPtr(true),
+				Driver:   "secrets-store.csi.k8s.io",
+				ReadOnly: boolPtr(true),
 				VolumeAttributes: map[string]string{
 					"secretProviderClass": spc,
 				},

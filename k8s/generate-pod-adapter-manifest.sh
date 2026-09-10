@@ -14,10 +14,10 @@ indent() {
 }
 
 RUNNER_SCRIPT=$(indent < "$REPO_ROOT/k8s/pod-adapter-runner.sh")
-SIDECAR_SCRIPT=$(indent < "$REPO_ROOT/k8s/pod-adapter-sidecar.sh")
-export RUNNER_SCRIPT SIDECAR_SCRIPT
+ADAPTER_SCRIPT=$(indent < "$REPO_ROOT/k8s/pod-adapter-sidecar.sh")
+export RUNNER_SCRIPT ADAPTER_SCRIPT
 
-perl -pe 's/__(RUNNER_SCRIPT|SIDECAR_SCRIPT)__/exists $ENV{$1} ? $ENV{$1} : die "template placeholder $1 is missing\n"/ge' \
+perl -pe 's/__(RUNNER_SCRIPT|ADAPTER_SCRIPT)__/exists $ENV{$1} ? $ENV{$1} : die "template placeholder $1 is missing\n"/ge' \
     "$TEMPLATE" > "$OUTPUT"
 
 echo "Generated $OUTPUT"
