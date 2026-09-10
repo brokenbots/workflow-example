@@ -43,7 +43,7 @@ lint: lint-criteria-k8s
 		k8s/generate-pod-adapter-manifest.sh \
 		k8s/launch-pod-adapter-job.sh \
 		k8s/pod-adapter-runner.sh \
-		k8s/pod-adapter-sidecar.sh \
+		k8s/pod-adapter-adapter.sh \
 		k8s/install-secrets-store-csi.sh \
 		k8s/verify-secrets-store-csi.sh \
 		k8s/tests/test_launch_template.sh \
