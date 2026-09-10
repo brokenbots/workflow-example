@@ -5,15 +5,24 @@ if [ -n "$criteria_value_1" ]; then
     printf '%s' "$criteria_value_1"
     exit 0
 fi
-git -C "$criteria_value_2" tag --list \
+# A repository with no stable release is a valid state: emit nothing and exit 0
+# (the verdict gate accounts for an empty stable tag). grep returns 1 on zero
+# matches, which pipefail would turn into a step failure - collect the matches
+# in a variable with '|| true' so the empty case falls through cleanly while
+# genuine git errors stay fatal.
+semver_tags=$(git -C "$criteria_value_2" tag --list \
     | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
-    | sed 's/^v//' \
-    | sort -t. -k1,1n -k2,2n -k3,3n \
-    | tail -1 \
-    | while read -r v; do
-        if git -C "$criteria_value_2" rev-parse "v$v" >/dev/null 2>&1; then
-            printf 'v%s' "$v"
-        else
-            printf '%s' "$v"
-        fi
-    done
+    || true)
+if [ -n "$semver_tags" ]; then
+    printf '%s\n' "$semver_tags" \
+        | sed 's/^v//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | tail -1 \
+        | while read -r v; do
+            if git -C "$criteria_value_2" rev-parse "v$v" >/dev/null 2>&1; then
+                printf 'v%s' "$v"
+            else
+                printf '%s' "$v"
+            fi
+        done
+fi
