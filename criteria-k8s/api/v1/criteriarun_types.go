@@ -49,6 +49,25 @@ type CriteriaRunSpec struct {
 	PerScopeSessions bool `json:"perScopeSessions,omitempty"`
 }
 
+// CriteriaRunQueueStatus exposes the repo-keyed admission queue state for this run.
+type CriteriaRunQueueStatus struct {
+	// RepoURL is the repository this queue is keyed on.
+	RepoURL string `json:"repoUrl,omitempty"`
+
+	// Position is this run's position in the pending queue. Zero means admitted
+	// and currently running for the repo.
+	Position int `json:"position,omitempty"`
+
+	// Length is the total number of runs currently queued for this repoURL.
+	Length int `json:"length,omitempty"`
+
+	// Running is the name of the CriteriaRun currently admitted for this repoURL.
+	Running string `json:"running,omitempty"`
+
+	// Pending lists the names of queued CriteriaRuns for this repoURL, in FIFO order.
+	Pending []string `json:"pending,omitempty"`
+}
+
 // CriteriaRunStatus defines the observed state of a CriteriaRun.
 type CriteriaRunStatus struct {
 	// Phase mirrors the lifecycle of the child Job.
@@ -68,6 +87,9 @@ type CriteriaRunStatus struct {
 
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Queue exposes this run's position and repo-keyed queue state.
+	Queue *CriteriaRunQueueStatus `json:"queue,omitempty"`
 
 	// Conditions are optional status conditions for the run.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -128,6 +150,11 @@ func (in *CriteriaRunSpec) DeepCopy() *CriteriaRunSpec {
 // DeepCopyInto for CriteriaRunStatus.
 func (in *CriteriaRunStatus) DeepCopyInto(out *CriteriaRunStatus) {
 	*out = *in
+	if in.Queue != nil {
+		in, out := &in.Queue, &out.Queue
+		*out = new(CriteriaRunQueueStatus)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))
@@ -135,6 +162,26 @@ func (in *CriteriaRunStatus) DeepCopyInto(out *CriteriaRunStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+}
+
+// DeepCopyInto for CriteriaRunQueueStatus.
+func (in *CriteriaRunQueueStatus) DeepCopyInto(out *CriteriaRunQueueStatus) {
+	*out = *in
+	if in.Pending != nil {
+		in, out := &in.Pending, &out.Pending
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+}
+
+// DeepCopy creates a copy of CriteriaRunQueueStatus.
+func (in *CriteriaRunQueueStatus) DeepCopy() *CriteriaRunQueueStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(CriteriaRunQueueStatus)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopy creates a copy of CriteriaRunStatus.

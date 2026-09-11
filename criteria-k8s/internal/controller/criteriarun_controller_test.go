@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +59,7 @@ func TestReconcileCreatesJobs(t *testing.T) {
 		Scheme:   scheme,
 		Reader:   &fakeReader{outcome: &events.Outcome{PRNumber: "42", TicketState: "Done"}},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
 	}
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
@@ -121,6 +123,7 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 		Client: cl,
 		Scheme: scheme,
 		Reader: &fakeReader{outcome: &events.Outcome{PRNumber: "42", TicketState: "Done"}},
+		Queue:  controller.NewRunQueue(),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
@@ -162,7 +165,7 @@ func TestFinalizeDeletesJobs(t *testing.T) {
 		WithObjects(objects...).
 		Build()
 
-	r := &controller.CriteriaRunReconciler{Client: cl, Scheme: scheme}
+	r := &controller.CriteriaRunReconciler{Client: cl, Scheme: scheme, Queue: controller.NewRunQueue()}
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
 
@@ -208,6 +211,7 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 		Scheme:   scheme,
 		Reader:   &fakeReader{data: eventsData},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
 	}
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
@@ -301,6 +305,7 @@ func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
 		Scheme:   scheme,
 		Reader:   &fakeReader{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
@@ -337,6 +342,7 @@ func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
 		Scheme:   scheme,
 		Reader:   &fakeReader{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
@@ -346,6 +352,181 @@ func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
 	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
 	require.Len(t, jobs.Items, 1)
 	assert.Equal(t, "cri-116", jobs.Items[0].Name)
+}
+
+func TestQueueSerializesSameRepoRuns(t *testing.T) {
+	scheme := newScheme(t)
+	repo := "https://github.com/brokenbots/workflow-example.git"
+
+	runA := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-117-a", Namespace: "default", UID: types.UID("uid-a")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-117-A", RepoURL: repo, Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+	runB := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-117-b", Namespace: "default", UID: types.UID("uid-b")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-117-B", RepoURL: repo, Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(runA, runB).
+		WithObjects(runA, runB).
+		Build()
+
+	reader := &fakeReader{outcome: &events.Outcome{PRNumber: "117", TicketState: "Done"}}
+	queue := controller.NewRunQueue()
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Reader:   reader,
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    queue,
+	}
+
+	// Admit A and create its jobs.
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runA)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var jobsA batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobsA, client.InNamespace("default")))
+	require.Len(t, jobsA.Items, 3, "admitted run should create runner and adapter jobs")
+
+	// B targets the same repo, so it must be queued and not create jobs.
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runB)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 5 * time.Second}, res)
+
+	var jobsB batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobsB, client.InNamespace("default")))
+	assert.Len(t, jobsB.Items, 3, "queued run should not create jobs")
+
+	var updatedB criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &updatedB))
+	require.NotNil(t, updatedB.Status.Queue)
+	assert.Equal(t, 1, updatedB.Status.Queue.Position)
+	assert.Equal(t, 2, updatedB.Status.Queue.Length)
+	assert.Equal(t, "cri-117-a", updatedB.Status.Queue.Running)
+	assert.Equal(t, []string{"cri-117-b"}, updatedB.Status.Queue.Pending)
+
+	// Mark A's runner job as complete. Reconciling A releases the slot and
+	// triggers B's reconcile automatically.
+	runnerA := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-117-a", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	}
+	require.NoError(t, cl.Status().Update(context.Background(), runnerA))
+
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runA)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var updatedA criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runA), &updatedA))
+	assert.Equal(t, criteriav1.PhaseSucceeded, updatedA.Status.Phase)
+
+	var allJobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &allJobs, client.InNamespace("default")))
+	assert.Len(t, allJobs.Items, 6, "B should now be admitted and have created its jobs")
+
+	var admittedB criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &admittedB))
+	require.NotNil(t, admittedB.Status.Queue)
+	assert.Equal(t, 0, admittedB.Status.Queue.Position)
+	assert.Equal(t, "cri-117-b", admittedB.Status.Queue.Running)
+	assert.Empty(t, admittedB.Status.Queue.Pending)
+}
+
+func TestQueueDoesNotBlockDifferentRepoRuns(t *testing.T) {
+	scheme := newScheme(t)
+
+	runA := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-117-a", Namespace: "default", UID: types.UID("uid-a")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-117-A", RepoURL: "https://github.com/org/repo-a.git", Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+	runB := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-117-b", Namespace: "default", UID: types.UID("uid-b")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-117-B", RepoURL: "https://github.com/org/repo-b.git", Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(runA, runB).
+		WithObjects(runA, runB).
+		Build()
+
+	queue := controller.NewRunQueue()
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Reader:   &fakeReader{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    queue,
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runA)})
+	require.NoError(t, err)
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runB)})
+	require.NoError(t, err)
+
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	assert.Len(t, jobs.Items, 6, "both runs should be admitted and create jobs")
+
+	for _, run := range []*criteriav1.CriteriaRun{runA, runB} {
+		var updated criteriav1.CriteriaRun
+		require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+		require.NotNil(t, updated.Status.Queue)
+		assert.Equal(t, 0, updated.Status.Queue.Position, "%s should be admitted", run.Name)
+		assert.Equal(t, run.Name, updated.Status.Queue.Running)
+	}
+}
+
+func TestQueueFairnessFIFO(t *testing.T) {
+	scheme := newScheme(t)
+	repo := "https://github.com/brokenbots/workflow-example.git"
+
+	runs := make([]*criteriav1.CriteriaRun, 3)
+	for i := range runs {
+		runs[i] = &criteriav1.CriteriaRun{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("cri-117-%d", i), Namespace: "default", UID: types.UID(fmt.Sprintf("uid-%d", i))},
+			Spec:       criteriav1.CriteriaRunSpec{TicketID: fmt.Sprintf("CRI-117-%d", i), RepoURL: repo, Image: "localhost:5000/linear-intake-remote:dev"},
+		}
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(runs[0], runs[1], runs[2]).
+		WithObjects(runs[0], runs[1], runs[2]).
+		Build()
+
+	queue := controller.NewRunQueue()
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Reader:   &fakeReader{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    queue,
+	}
+
+	for _, run := range runs {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+		require.NoError(t, err)
+	}
+
+	var first criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runs[0]), &first))
+	require.NotNil(t, first.Status.Queue)
+	assert.Equal(t, 0, first.Status.Queue.Position)
+	assert.Equal(t, "cri-117-0", first.Status.Queue.Running)
+	assert.Equal(t, []string{"cri-117-1", "cri-117-2"}, first.Status.Queue.Pending)
+
+	var second criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runs[1]), &second))
+	require.NotNil(t, second.Status.Queue)
+	assert.Equal(t, 1, second.Status.Queue.Position)
 }
 
 type fakeReader struct {
