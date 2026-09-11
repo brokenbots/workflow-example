@@ -1,0 +1,70 @@
+# criteria-k8s operator: reconciles CriteriaRun resources into runner and
+# adapter Jobs and sweeps expired per-ticket artifacts off the data PVC.
+{{- if .Values.operator.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: criteria-k8s-operator
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/name: criteria-k8s-operator
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.operator.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-k8s-operator
+  template:
+    metadata:
+      labels:
+        {{- include "criteria-k8s.labels" . | nindent 8 }}
+        app.kubernetes.io/name: criteria-k8s-operator
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      {{- include "criteria-k8s.scheduling" . | nindent 6 }}
+      {{- include "criteria-k8s.podSecurityContext" . | nindent 6 }}
+      containers:
+        - name: operator
+          image: "{{ .Values.images.operator.repository }}:{{ .Values.images.operator.tag }}"
+          imagePullPolicy: {{ .Values.images.operator.pullPolicy }}
+          command: ["/manager"]
+          # The namespace flag scopes the manager's caches and queue recovery
+          # to the managed namespace; the operator's Role grants no
+          # cluster-scope access.
+          args:
+            - --namespace
+            - {{ include "criteria-k8s.namespace" . | quote }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          env:
+            # Retention sweep: keep per-ticket intake/triage artifacts this
+            # long after the last write (0s disables sweeping).
+            - name: RETENTION_PERIOD
+              value: {{ .Values.operator.retentionPeriod | quote }}
+            - name: RETENTION_INTERVAL
+              value: {{ .Values.operator.retentionInterval | quote }}
+            # Default Criteria workflow image recorded in CriteriaRuns.
+            - name: DEFAULT_CRITERIA_IMAGE
+              value: "{{ .Values.images.workflow.repository }}:{{ .Values.images.workflow.tag }}"
+            - name: CRITERIA_DATA_PVC
+              value: {{ .Values.pvc.data.name | quote }}
+            - name: PROVIDER_BASE_URL
+              value: {{ .Values.operator.providerBaseUrl | quote }}
+          {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
+          volumeMounts:
+            - name: criteria-data
+              mountPath: /data
+              readOnly: true
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+      volumes:
+        - name: criteria-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.data.name }}
+{{- end }}

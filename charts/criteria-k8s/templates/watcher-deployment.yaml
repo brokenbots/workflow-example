@@ -1,0 +1,69 @@
+# criteria-linear-watcher: polls Linear for tickets in the configured project
+# and triage state, creating a CriteriaRun for each one.
+{{- if .Values.watcher.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: criteria-linear-watcher
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/name: criteria-linear-watcher
+    app.kubernetes.io/component: watcher
+spec:
+  replicas: {{ .Values.watcher.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-linear-watcher
+  template:
+    metadata:
+      labels:
+        {{- include "criteria-k8s.labels" . | nindent 8 }}
+        app.kubernetes.io/name: criteria-linear-watcher
+        app.kubernetes.io/component: watcher
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      {{- include "criteria-k8s.scheduling" . | nindent 6 }}
+      {{- include "criteria-k8s.podSecurityContext" . | nindent 6 }}
+      containers:
+        - name: watcher
+          image: "{{ .Values.images.operator.repository }}:{{ .Values.images.operator.tag }}"
+          imagePullPolicy: {{ .Values.images.operator.pullPolicy }}
+          command: ["/linear-watcher"]
+          env:
+            - name: NAMESPACE
+              value: {{ include "criteria-k8s.namespace" . | quote }}
+            - name: LINEAR_PROJECT_NAME
+              value: {{ .Values.watcher.linearProjectName | quote }}
+            - name: LINEAR_TRIAGE_STATE
+              value: {{ .Values.watcher.linearTriageState | quote }}
+            - name: POLL_INTERVAL
+              value: {{ .Values.watcher.pollInterval | quote }}
+            # The operator's DEFAULT_CRITERIA_IMAGE is the single source of
+            # truth for the workflow image (created CriteriaRuns leave
+            # spec.image unset), so CRITERIA_IMAGE stays aligned with it.
+            - name: CRITERIA_IMAGE
+              value: "{{ .Values.images.workflow.repository }}:{{ .Values.images.workflow.tag }}"
+            - name: PROVIDER_BASE_URL
+              value: {{ .Values.watcher.providerBaseUrl | quote }}
+            - name: MAX_AGENT_VISITS
+              value: {{ .Values.watcher.maxAgentVisits | quote }}
+          {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
+          # The Linear API key arrives through the OpenBao CSI provider; the
+          # watcher never receives credentials as environment variables.
+          volumeMounts:
+            - name: linear-secrets
+              mountPath: /secrets/linear_api_key
+              subPath: linear_api_key
+              readOnly: true
+          resources:
+            {{- toYaml .Values.watcher.resources | nindent 12 }}
+      volumes:
+        - name: linear-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: linear-spc
+{{- end }}

@@ -1,0 +1,37 @@
+# Persistent volumes for criteria runs.
+# Uses the default local-path provisioner (hostPath on the control-plane node).
+# criteria-data keeps intake/triage artifacts across runs; criteria-repo holds
+# the cloned working repository (fresh clone per job when REPO_URL is set and
+# the PVC is empty, reused otherwise).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.pvc.data.name }}
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.data.size }}
+  storageClassName: {{ .Values.pvc.data.storageClass }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.pvc.repo.name }}
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.repo.size }}
+  storageClassName: {{ .Values.pvc.repo.storageClass }}

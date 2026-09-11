@@ -1,0 +1,97 @@
+# Service accounts and namespaced RBAC for the operator and the criteria-runner
+# service account the child Jobs use.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: criteria-k8s-operator
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+---
+# Namespaced Role/RoleBinding (replaces the previous cluster-wide binding):
+# the operator's manager cache and queue recovery are scoped to the managed
+# namespace, so no cluster-scope access is granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: criteria-k8s-operator
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["criteria.brokenbots.dev"]
+    resources: ["criteriaruns"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["criteria.brokenbots.dev"]
+    resources: ["criteriaruns/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["criteria.brokenbots.dev"]
+    resources: ["criteriaruns/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log", "events"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: criteria-k8s-operator
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: criteria-k8s-operator
+    namespace: {{ include "criteria-k8s.namespace" . }}
+roleRef:
+  kind: Role
+  name: criteria-k8s-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+# Service account used by all criteria job pods to authenticate with OpenBao
+# via the kubernetes auth method.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: criteria-runner
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+---
+# RBAC: the pod only needs to read its own SA token. The OpenBao agent
+# injector handles the sidecar; the main container never talks to the API.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: criteria-runner
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["criteria-secrets"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: criteria-runner
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: criteria-runner
+    namespace: {{ include "criteria-k8s.namespace" . }}
+roleRef:
+  kind: Role
+  name: criteria-runner
+  apiGroup: rbac.authorization.k8s.io

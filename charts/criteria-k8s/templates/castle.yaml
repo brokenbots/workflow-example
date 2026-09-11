@@ -1,0 +1,105 @@
+# Castle server: the control-plane that orchestrates criteria agents.
+# Runs as a single replica with persistent SQLite storage. The image is built
+# from ~/Projects/castle and pushed to the local registry (see the main
+# k8s/README.md build notes).
+{{- if .Values.castle.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: castle
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/name: castle
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: castle
+  template:
+    metadata:
+      labels:
+        {{- include "criteria-k8s.labels" . | nindent 8 }}
+        app.kubernetes.io/name: castle
+        app.kubernetes.io/component: control-plane
+    spec:
+      serviceAccountName: criteria-runner
+      {{- include "criteria-k8s.podSecurityContext" . | nindent 6 }}
+      # Keep Castle off GPU nodes - it only needs CPU
+      nodeSelector:
+        {{ toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.castle.tolerations | nindent 8 }}
+      containers:
+        - name: castle
+          image: "{{ .Values.castle.image.repository }}:{{ .Values.castle.image.tag }}"
+          imagePullPolicy: {{ .Values.castle.image.pullPolicy }}
+          {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
+          ports:
+            - containerPort: {{ .Values.castle.port }}
+              name: h2c
+          env:
+            - name: CASTLE_ADDR
+              value: ":{{ .Values.castle.port }}"
+            - name: CASTLE_DB_PATH
+              value: /data/castle.db
+            - name: CASTLE_EVENT_BUFFER_CAPACITY
+              value: "10000"
+            - name: CASTLE_ALLOW_ANON_READS
+              value: "true"
+          # Dev mode: allow agents to register without a bootstrap token.
+          # For production, set OVERLORD_CASTLE_BOOTSTRAP_TOKEN and remove this.
+          command:
+            - castle
+            - --dev-allow-anon-register
+            - --allow-anon-reads=true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -O-
+                - --post-data={}
+                - --header=Content-Type:application/json
+                - http://localhost:{{ .Values.castle.port }}/grpc.health.v1.Health/Check
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -O-
+                - --post-data={}
+                - --header=Content-Type:application/json
+                - http://localhost:{{ .Values.castle.port }}/grpc.health.v1.Health/Check
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvc.data.name }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: castle
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/name: castle
+    app.kubernetes.io/component: control-plane
+spec:
+  selector:
+    app.kubernetes.io/name: castle
+  ports:
+    - name: h2c
+      port: {{ .Values.castle.port }}
+      targetPort: {{ .Values.castle.port }}
+  type: ClusterIP
+{{- end }}

@@ -1,0 +1,16 @@
+# Namespace object is optional: helm's --create-namespace creates a bare
+# namespace, while this template (namespaceCreate=true) also applies the
+# pod-security labels the workflow pods rely on.
+{{- if .Values.namespaceCreate }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    # Remote-mode workflows run unprivileged: adapters are plain processes
+    # phoning home to the in-pod shim, so the baseline pod security standard
+    # applies. (The old privileged label existed for sandbox-era runs that
+    # needed seccomp=Unconfined; remote environments do not.)
+    pod-security.kubernetes.io/enforce: {{ .Values.podSecurity.enforce }}
+{{- end }}

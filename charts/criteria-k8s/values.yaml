@@ -1,0 +1,128 @@
+# Default values for the criteria-k8s chart.
+# These defaults mirror the hand-applied manifests in k8s/ and the operator
+# install manifest, so `helm template` output stays diff-reviewable against
+# the previous kubectl-apply flow.
+
+# Target namespace for every namespaced resource in the chart. Helm does not
+# create it: install with --create-namespace (or set namespaceCreate=true to
+# render a Namespace object with the pod-security labels applied).
+namespace: criteria-jobs
+
+# Render a Namespace object (with pod-security labels) from the chart instead
+# of relying on helm's --create-namespace, which creates a bare namespace.
+namespaceCreate: false
+
+# Pod Security Standard label applied to the rendered Namespace when
+# namespaceCreate=true. The criteria-jobs namespace runs remote-mode workflow
+# pods unprivileged, so the baseline profile applies.
+podSecurity:
+  enforce: baseline
+
+images:
+  # criteria-k8s binary image: operator and linear watcher deployments both
+  # run this image with different entrypoints.
+  operator:
+    repository: localhost:5000/criteria-k8s
+    tag: dev
+    pullPolicy: IfNotPresent
+  # Criteria workflow image the operator passes to runner Jobs (via
+  # DEFAULT_CRITERIA_IMAGE / CRITERIA_IMAGE) and the watcher records in
+  # CriteriaRuns.
+  workflow:
+    repository: localhost:5000/linear-intake-remote
+    tag: dev
+
+# Operator: reconciles CriteriaRun resources into runner/adapter Jobs and
+# sweeps expired per-ticket artifacts off the data PVC.
+operator:
+  enabled: true
+  replicaCount: 1
+  # Retention sweep for per-ticket intake/triage artifacts on the data PVC.
+  # "0s" disables sweeping. Durations use Go time.ParseDuration units.
+  retentionPeriod: 168h # 7d
+  retentionInterval: 1h
+  # Ollama-compatible provider endpoint handed to adapter workflows.
+  providerBaseUrl: http://192.168.17.116:11434/v1
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+# Linear watcher: polls Linear and creates a CriteriaRun for each ticket in
+# the watched project that reaches the triage state.
+watcher:
+  enabled: true
+  replicaCount: 1
+  linearProjectName: Criteria K8s Workflow Runner
+  linearTriageState: Triage
+  pollInterval: 60s
+  maxAgentVisits: 2
+  providerBaseUrl: http://192.168.17.116:11434/v1
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 200m
+
+# Castle control plane: single replica with persistent SQLite storage.
+# Castle tolerates the k3s control-plane taint so it can run on a
+# single-node cluster; it only needs CPU.
+castle:
+  enabled: true
+  image:
+    repository: localhost:5000/castle
+    tag: dev
+    pullPolicy: Always
+  port: 8080
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+
+# PVCs shared by the stack. Names must stay aligned with the operator: the
+# data PVC name is passed to the operator (CRITERIA_DATA_PVC) and the runner
+# Jobs it creates mount it.
+pvc:
+  # Intake/triage artifacts and per-run discovery files.
+  data:
+    name: criteria-data
+    size: 10Gi
+    storageClass: local-path
+  # Shared clone workspace for adapter Jobs.
+  repo:
+    name: criteria-repo
+    size: 10Gi
+    storageClass: local-path
+
+# OpenBao CSI provider settings for the SecretProviderClasses. The OpenBao
+# server, kubernetes auth role and policy are external prerequisites and are
+# intentionally not templated here.
+openbao:
+  provider: openbao
+  roleName: criteria-jobs
+  secretPath: criteria/data/linear
+
+# Pod security context shared by the operator, watcher and castle pods
+# (restricted compliance: non-root, no escalation, RuntimeDefault seccomp).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+# Scheduling: keep control-plane components on amd64 nodes and tolerate the
+# k3s catch taint, matching the operator install manifest.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+tolerations:
+  - key: catch
+    operator: Exists
+    effect: NoSchedule

@@ -1,0 +1,153 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: criteriaruns.criteria.brokenbots.dev
+spec:
+  group: criteria.brokenbots.dev
+  names:
+    kind: CriteriaRun
+    listKind: CriteriaRunList
+    plural: criteriaruns
+    singular: criteriarun
+    shortNames:
+      - cri
+      - crun
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Ticket
+          type: string
+          jsonPath: .spec.ticketId
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Job
+          type: string
+          jsonPath: .status.jobName
+        - name: PR
+          type: string
+          jsonPath: .status.prNumber
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - ticketId
+                - repoUrl
+              properties:
+                ticketId:
+                  type: string
+                  description: Linear ticket identifier to process.
+                  pattern: '^[A-Za-z0-9_-]+$'
+                  maxLength: 64
+                repoUrl:
+                  type: string
+                  description: GitHub repository to clone and work on.
+                image:
+                  type: string
+                  description: Criteria workflow image to run.
+                buildCmd:
+                  type: string
+                  description: Optional build command for the repository under test.
+                testCmd:
+                  type: string
+                  description: Optional test command for the repository under test.
+                ciGateCmd:
+                  type: string
+                  description: CI gate command for the implementation loop.
+                maxAgentVisits:
+                  type: integer
+                  default: 2
+                  description: Maximum visits for each agent gate.
+                providerBaseUrl:
+                  type: string
+                  description: Ollama-compatible provider endpoint for adapters.
+                perScopeSessions:
+                  type: boolean
+                  default: false
+                  description: Opt into per-subworkflow adapter pods instead of run-duration adapter pods.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                    - Unknown
+                  description: Lifecycle phase of the child Job.
+                jobName:
+                  type: string
+                  description: Name of the reconciled child Job.
+                prNumber:
+                  type: string
+                  description: Pull request number produced by the run, when known.
+                ticketState:
+                  type: string
+                  description: Final Linear ticket state read from run events.
+                eventsPath:
+                  type: string
+                  description: Absolute path to the run's events file on /data.
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Last reconciled metadata generation.
+                queue:
+                  type: object
+                  description: Repo-keyed admission queue state for this run.
+                  properties:
+                    repoUrl:
+                      type: string
+                      description: Repository the queue is keyed on.
+                    position:
+                      type: integer
+                      description: Pending queue position. Zero means the run is admitted and running.
+                    length:
+                      type: integer
+                      description: Total number of runs queued for this repository.
+                    running:
+                      type: string
+                      description: Name of the CriteriaRun currently admitted for this repository.
+                    pending:
+                      type: array
+                      description: Names of queued CriteriaRuns for this repository, in FIFO order.
+                      items:
+                        type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time

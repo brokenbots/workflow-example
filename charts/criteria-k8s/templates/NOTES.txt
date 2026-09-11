@@ -1,0 +1,36 @@
+The criteria-k8s stack has been {{ if .Release.IsUpgrade -}}upgraded{{- else -}}installed{{- end }} into namespace {{ include "criteria-k8s.namespace" . }}.
+
+Resources deployed:
+  - criteria-k8s-operator (reconciles CriteriaRun -> runner/adapter Jobs)
+  - criteria-linear-watcher (polls Linear, creates CriteriaRuns)
+{{- if .Values.castle.enabled }}
+  - castle (control plane)
+{{- end }}
+  - PVCs {{ .Values.pvc.data.name }} and {{ .Values.pvc.repo.name }}
+  - SecretProviderClasses linear-spc and copilot-spc (OpenBao CSI provider)
+  - pod-adapter-scripts ConfigMap (runner/adapter wrapper scripts)
+
+External prerequisites (not managed by this chart):
+
+1. Secrets Store CSI driver + OpenBao provider:
+     ./k8s/install-secrets-store-csi.sh
+     ./k8s/verify-secrets-store-csi.sh
+
+2. OpenBao kubernetes auth role and policy (never templated here):
+     kubectl exec -n default openbao-0 -- vault policy write criteria-jobs - < k8s/criteria-jobs-policy.hcl
+     kubectl exec -n default openbao-0 -- vault write auth/kubernetes/role/criteria-jobs \
+       bound_service_account_names=criteria-runner \
+       bound_service_account_namespaces={{ include "criteria-k8s.namespace" . }} \
+       policies=criteria-jobs ttl=1h
+     kubectl exec -n default openbao-0 -- env VAULT_TOKEN=$VAULT_TOKEN vault kv put criteria/linear \
+       linear_api_key="$LINEAR_API_KEY" \
+       workflow_github_token="$WORKFLOW_GITHUB_TOKEN" \
+       reviewer_github_token="$REVIEWER_GITHUB_TOKEN"
+
+3. Container images in the local registry:
+     make images-push
+
+Check the rollout:
+
+  kubectl wait -n {{ include "criteria-k8s.namespace" . }} deployment/criteria-k8s-operator --for=condition=Available --timeout=120s
+  kubectl wait -n {{ include "criteria-k8s.namespace" . }} deployment/criteria-linear-watcher --for=condition=Available --timeout=120s
