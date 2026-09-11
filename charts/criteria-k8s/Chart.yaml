@@ -1,0 +1,17 @@
+apiVersion: v2
+name: criteria-k8s
+description: >
+  Criteria workflow stack for the criteria-jobs namespace: the criteria-k8s
+  operator and its Linear watcher, the Castle control plane, persistent volume
+  claims, and the OpenBao CSI SecretProviderClasses the runner Jobs consume.
+type: application
+version: 0.1.0
+appVersion: "dev"
+home: https://linear.app/brokenbots/issue/CRI-129
+maintainers:
+  - name: brokenbots
+keywords:
+  - criteria
+  - operator
+  - linear
+  - openbao

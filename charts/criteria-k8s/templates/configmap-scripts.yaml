@@ -1,0 +1,17 @@
+# Wrapper scripts the operator injects into runner and adapter Jobs.
+# The contents are read from the chart's scripts/ directory, which
+# k8s/generate-pod-adapter-manifest.sh keeps in sync with k8s/pod-adapter-*.sh
+# (the canonical sources). test_criteria_k8s_chart.sh fails on drift.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-adapter-scripts
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+data:
+  runner.sh: |
+{{ .Files.Get "scripts/runner.sh" | trimSuffix "\n" | indent 4 }}
+  adapter.sh: |
+{{ .Files.Get "scripts/adapter.sh" | trimSuffix "\n" | indent 4 }}
