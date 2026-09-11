@@ -62,6 +62,7 @@ jobs:
           for f in k8s/*.yaml; do
             kubectl apply --dry-run=client -f "$f" > /dev/null 2>&1 || true
             # Structural validation only (no cluster): python yaml parse catches syntax errors.
-            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" || exit 1
+            # Use safe_load_all so files with multiple YAML documents validate.
+            python3 -c "import yaml, sys; list(yaml.safe_load_all(open('$f')))" || exit 1
             echo "OK: $f"
           done
