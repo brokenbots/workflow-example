@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +177,177 @@ func TestFinalizeDeletesJobs(t *testing.T) {
 	assert.True(t, err != nil, "expected CriteriaRun to be deleted after finalizer removal")
 }
 
+func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116",
+			Namespace: "default",
+			UID:       types.UID("run-uid"),
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID:         "CRI-116",
+			RepoURL:          "https://github.com/brokenbots/workflow-example.git",
+			PerScopeSessions: true,
+		},
+	}
+
+	eventsData := []byte(strings.Join([]string{
+		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"shell","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-shell","digest":"abc"}`,
+		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"copilot","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-copilot","digest":"def"}`,
+	}, "\n"))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run).
+		Build()
+
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Reader:   &fakeReader{data: eventsData},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
+
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	require.Len(t, pods.Items, 2)
+
+	hasPrefix := func(prefix string) bool {
+		for _, p := range pods.Items {
+			if strings.HasPrefix(p.Name, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	assert.True(t, hasPrefix("cri-116-adp-shell-"))
+	assert.True(t, hasPrefix("cri-116-adp-copilot-"))
+	for _, p := range pods.Items {
+		assert.Equal(t, "CriteriaRun", p.OwnerReferences[0].Kind)
+		assert.Empty(t, p.Spec.ServiceAccountName)
+		assert.False(t, *p.Spec.AutomountServiceAccountToken)
+		for _, v := range p.Spec.Volumes {
+			assert.Nil(t, v.CSI, "pod volume %q must not be CSI", v.Name)
+		}
+	}
+
+	// Mark the runner Job as finished so the release reconciliation stops polling.
+	runner := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-116", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	require.NoError(t, cl.Status().Update(context.Background(), runner))
+
+	// Now emit release events for both scopes and reconcile again.
+	releaseData := []byte(strings.Join([]string{
+		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"shell","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-shell","digest":"abc"}`,
+		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"copilot","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-copilot","digest":"def"}`,
+		`{"event":"release","run_id":"CRI-116","scope_id":"root","adapter_name":"shell"}`,
+		`{"event":"release","run_id":"CRI-116","scope_id":"root","adapter_name":"copilot"}`,
+	}, "\n"))
+	r.Reader = &fakeReader{data: releaseData}
+
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	assert.Empty(t, pods.Items)
+}
+
+func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116",
+			Namespace: "default",
+			UID:       types.UID("run-uid"),
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID:         "CRI-116",
+			PerScopeSessions: true,
+		},
+	}
+
+	orphan := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116-adp-shell-deadbeef",
+			Namespace: "default",
+			Labels: map[string]string{
+				"criteria.brokenbots.dev/run":  "cri-116",
+				"criteria.brokenbots.dev/role": "adapter",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, orphan).
+		Build()
+
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Reader:   &fakeReader{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	assert.Empty(t, pods.Items)
+}
+
+func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116",
+			Namespace: "default",
+			UID:       types.UID("run-uid"),
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID:         "CRI-116",
+			RepoURL:          "https://github.com/brokenbots/workflow-example.git",
+			PerScopeSessions: true,
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run).
+		Build()
+
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Reader:   &fakeReader{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 1)
+	assert.Equal(t, "cri-116", jobs.Items[0].Name)
+}
+
 type fakeReader struct {
 	outcome *events.Outcome
 	data    []byte
@@ -185,5 +357,8 @@ func (f *fakeReader) Read(ctx context.Context, run *criteriav1.CriteriaRun) ([]b
 	if len(f.data) > 0 {
 		return f.data, nil
 	}
-	return []byte(`{"pr_number":"` + f.outcome.PRNumber + `","state":"` + f.outcome.TicketState + `"}`), nil
+	if f.outcome != nil {
+		return []byte(`{"pr_number":"` + f.outcome.PRNumber + `","state":"` + f.outcome.TicketState + `"}`), nil
+	}
+	return nil, nil
 }

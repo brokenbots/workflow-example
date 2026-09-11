@@ -12,3 +12,5 @@ spec:
   ciGateCmd: "make ci-gate"
   maxAgentVisits: 2
   providerBaseUrl: "http://192.168.17.116:11434/v1"
+  # Opt into per-subworkflow adapter pods (CRI-116). Requires engine support.
+  perScopeSessions: false

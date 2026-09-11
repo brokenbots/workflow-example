@@ -67,7 +67,7 @@ func main() {
 		Client: mgr.GetClient(),
 		Scheme: scheme,
 		Config: cfg,
-		Reader: &controller.PodExecReader{Config: cfg},
+		Reader: &controller.FileEventsReader{DataRoot: "/data"},
 		Defaults: jobbuilder.Defaults{
 			Image:           *defaultImage,
 			DataPVC:         *dataPVC,

@@ -78,9 +78,14 @@ func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 }
 
 // BuildAll returns the runner Job plus one adapter Job per adapter kind. All
-// Jobs are owner-referenced to the CriteriaRun for orphan cleanup.
+// Jobs are owner-referenced to the CriteriaRun for orphan cleanup. When the
+// run opts into per-scope sessions, only the runner Job is returned; adapter
+// pods are reconciled independently from the engine's lifecycle events.
 func BuildAll(run *criteriav1.CriteriaRun, defaults Defaults) []*batchv1.Job {
 	jobs := []*batchv1.Job{BuildRunnerJob(run, defaults)}
+	if run.Spec.PerScopeSessions {
+		return jobs
+	}
 	for _, kind := range adapterKinds {
 		jobs = append(jobs, BuildAdapterJob(run, defaults, kind))
 	}
