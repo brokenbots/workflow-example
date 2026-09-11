@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 const (
 	criteriaRunFinalizer      = "criteriarun.criteria.brokenbots.dev/finalizer"
 	perScopeRequeueInterval   = 10 * time.Second
+	queueRequeueInterval      = 5 * time.Second
 )
 
 // EventsReader reads the events ndjson file produced by a completed run.
@@ -115,6 +117,7 @@ type CriteriaRunReconciler struct {
 	Config   *rest.Config
 	Reader   EventsReader
 	Defaults jobbuilder.Defaults
+	Queue    *RunQueue
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -151,6 +154,45 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	// If the run is already terminal, do not re-enter the queue on a resync.
+	// Release any stale admission slot and prompt the next queued run.
+	if isTerminalPhase(run.Status.Phase) {
+		if next := r.Queue.Release(req.NamespacedName, run.Spec.RepoURL); next != nil {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
+				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Enqueue the run for repo-keyed admission control. Only admitted runs
+	// are allowed to create child Jobs.
+	admitted, qstatus, prevRunning := r.Queue.Enqueue(&run)
+
+	update := run.DeepCopy()
+	update.Status.ObservedGeneration = run.Generation
+	update.Status.EventsPath = eventsPath(&run)
+	update.Status.Queue = qstatus
+
+	if !admitted {
+		update.Status.Phase = criteriav1.PhasePending
+		update.Status.JobName = ""
+		if !statusEqual(&run.Status, &update.Status) {
+			logger.Info("queuing CriteriaRun", "repo", run.Spec.RepoURL, "position", qstatus.Position)
+			if err := r.Status().Update(ctx, update); err != nil {
+				return ctrl.Result{}, fmt.Errorf("updating queue status: %w", err)
+			}
+		}
+		// Refresh the currently running run's queue status so it shows the
+		// newly queued run in its pending list.
+		if prevRunning != nil {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *prevRunning}); err != nil {
+				logger.Error(err, "reconciling running CriteriaRun after enqueue", "running", *prevRunning)
+			}
+		}
+		return ctrl.Result{RequeueAfter: queueRequeueInterval}, nil
+	}
+
 	desiredJobs := jobbuilder.BuildAll(&run, r.Defaults)
 
 	var runnerJob *batchv1.Job
@@ -179,9 +221,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Sync status from the runner Job.
-	if err := r.updateStatus(ctx, &run, runnerJob, logger); err != nil {
+	if err := r.applyJobStatus(ctx, &run, runnerJob, update, logger); err != nil {
 		return ctrl.Result{}, err
 	}
+
+	phase := derivePhase(runnerJob)
 
 	// Reconcile per-scope adapter pods from the run event stream.
 	activeAdapters, err := r.reconcilePerScopeAdapters(ctx, &run, logger)
@@ -189,8 +233,18 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Release the queue slot when the run has finished. If another run is
+	// queued for the same repo, reconcile it so it can start promptly.
+	if isTerminalPhase(phase) {
+		if next := r.Queue.Release(client.ObjectKeyFromObject(&run), run.Spec.RepoURL); next != nil {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
+				logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)
+			}
+		}
+	}
+
 	// Keep polling the event stream while the run is using per-scope adapters.
-	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(derivePhase(runnerJob))) {
+	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(phase)) {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
@@ -201,13 +255,11 @@ func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
 }
 
-func (r *CriteriaRunReconciler) updateStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, logger logr.Logger) error {
+func (r *CriteriaRunReconciler) applyJobStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, update *criteriav1.CriteriaRun, logger logr.Logger) error {
 	phase := derivePhase(job)
 
-	update := run.DeepCopy()
 	update.Status.Phase = phase
 	update.Status.JobName = job.Name
-	update.Status.EventsPath = eventsPath(run)
 	update.Status.ObservedGeneration = run.Generation
 
 	if phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed {
@@ -279,6 +331,16 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 	}
 	logger.Info("finalizing CriteriaRun")
 
+	// Release the queue slot before deleting the run so the next queued run
+	// can be admitted.
+	if next := r.Queue.Release(client.ObjectKeyFromObject(run), run.Spec.RepoURL); next != nil {
+		defer func() {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
+				logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)
+			}
+		}()
+	}
+
 	desiredJobs := jobbuilder.BuildAll(run, r.Defaults)
 	for _, desired := range desiredJobs {
 		var job batchv1.Job
@@ -317,11 +379,6 @@ func statusEqual(a, b *criteriav1.CriteriaRunStatus) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.Phase == b.Phase &&
-		a.JobName == b.JobName &&
-		a.PRNumber == b.PRNumber &&
-		a.TicketState == b.TicketState &&
-		a.EventsPath == b.EventsPath &&
-		a.ObservedGeneration == b.ObservedGeneration
+	return reflect.DeepEqual(a, b)
 }
 

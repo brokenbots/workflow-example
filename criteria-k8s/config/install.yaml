@@ -123,6 +123,27 @@ spec:
                   type: integer
                   format: int64
                   description: Last reconciled metadata generation.
+                queue:
+                  type: object
+                  description: Repo-keyed admission queue state for this run.
+                  properties:
+                    repoUrl:
+                      type: string
+                      description: Repository the queue is keyed on.
+                    position:
+                      type: integer
+                      description: Pending queue position. Zero means the run is admitted and running.
+                    length:
+                      type: integer
+                      description: Total number of runs queued for this repository.
+                    running:
+                      type: string
+                      description: Name of the CriteriaRun currently admitted for this repository.
+                    pending:
+                      type: array
+                      description: Names of queued CriteriaRuns for this repository, in FIFO order.
+                      items:
+                        type: string
                 conditions:
                   type: array
                   items:

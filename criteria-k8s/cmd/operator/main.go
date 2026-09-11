@@ -7,10 +7,11 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
-	"k8s.io/apimachinery/pkg/runtime"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -31,6 +32,8 @@ func main() {
 	flag.Parse()
 	logger := zap.New(zap.UseDevMode(*development))
 	log.SetLogger(logger)
+
+	ctx := ctrl.SetupSignalHandler()
 
 	cfg, err := config.GetConfig()
 	if err != nil {
@@ -63,6 +66,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	queue := controller.NewRunQueue()
+
 	reconciler := &controller.CriteriaRunReconciler{
 		Client: mgr.GetClient(),
 		Scheme: scheme,
@@ -73,14 +78,27 @@ func main() {
 			DataPVC:         *dataPVC,
 			ProviderBaseURL: *providerBaseURL,
 		},
+		Queue: queue,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "setting up CriteriaRun reconciler")
 		os.Exit(1)
 	}
 
+	// Recover queue state from existing active runs before starting the manager
+	// so in-flight runs are not lost across operator restarts.
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		logger.Error(err, "creating direct client for queue recovery")
+		os.Exit(1)
+	}
+	if err := queue.Recover(ctx, directClient); err != nil {
+		logger.Error(err, "recovering queue state")
+		os.Exit(1)
+	}
+
 	logger.Info("starting criteria-k8s operator")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		logger.Error(err, "operator exited")
 		os.Exit(1)
 	}
