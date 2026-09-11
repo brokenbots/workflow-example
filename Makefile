@@ -74,6 +74,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_secrets_store_csi.sh
 	@echo "Running example manifest regression test..."
 	./k8s/tests/test_example_manifest.sh
+	@echo "Running criteria-k8s Helm chart regression test..."
+	./k8s/tests/test_criteria_k8s_chart.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -91,7 +93,8 @@ lint: lint-criteria-k8s
 		k8s/tests/test_job_cri_27.sh \
 		k8s/tests/test_container_entrypoint_substitution.sh \
 		k8s/tests/test_secrets_store_csi.sh \
-		k8s/tests/test_example_manifest.sh
+		k8s/tests/test_example_manifest.sh \
+		k8s/tests/test_criteria_k8s_chart.sh
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...

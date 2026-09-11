@@ -210,4 +210,97 @@ helm template criteria-k8s "$CHART" --include-crds > "$CRD_RENDERED" || fail "he
 grep -q '^kind: CustomResourceDefinition$' "$CRD_RENDERED" || fail "CRD not packaged under crds/"
 grep -q 'name: criteriaruns.criteria.brokenbots.dev' "$CRD_RENDERED" || fail "CRD has wrong name"
 
+# ------------------------------------------ shape equivalence vs k8s sources
+# The chart replaces live manifests. Deployment.spec.selector is immutable and
+# Service selectors must keep matching pods, so rendered selectors, pod
+# labels, and security contexts must be field-equal to the manifests being
+# replaced (new chart labels may only be additive).
+
+# Print the document for kind/name from a multi-document YAML file.
+doc_of() { # file kind name
+    awk -v kind="$2" -v name="$3" '
+        $0 == "---" {
+            if (isdoc) { printf "%s", buf; exit }
+            buf = ""
+            seenname = 0
+            isdoc = 0
+            next
+        }
+        {
+            if (!seenname && $0 ~ /^  name: /) {
+                nm = $0
+                sub(/^  name: */, "", nm)
+                if (nm == name && buf ~ ("\nkind: " kind "\n")) {
+                    isdoc = 1
+                }
+                seenname = 1
+            }
+            buf = buf $0 "\n"
+        }
+        END {
+            if (isdoc) printf "%s", buf
+        }
+    ' "$1"
+}
+
+# Normalize a document for comparison: strip comments, blanks and indentation
+# (quote stripping makes YAML quoting style irrelevant).
+norm_doc() { # file kind name
+    doc_of "$1" "$2" "$3" \
+        | grep -v '^[[:space:]]*#' \
+        | tr -d '"' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        | grep -v '^$'
+}
+
+# Sorted slice of a normalized document between exact keys (end exclusive).
+sorted_block() { # start end (stdin: normalized doc)
+    awk -v s="$1" -v e="$2" '$0 == s { f = 1; print; next } f && $0 == e { exit } f { print }' | sort
+}
+
+assert_blocks_equal() { # description rendered-block source-block
+    [ "$2" = "$3" ] || fail "$1 differs from the k8s source shape"
+}
+
+castle_dep_r="$(norm_doc "$RENDERED" Deployment castle)"
+castle_dep_s="$(norm_doc "$REPO_ROOT/k8s/04-castle.yaml" Deployment castle)"
+castle_svc_r="$(norm_doc "$RENDERED" Service castle)"
+castle_svc_s="$(norm_doc "$REPO_ROOT/k8s/04-castle.yaml" Service castle)"
+
+# Castle Deployment selector and Service selector must equal the live
+# manifest (immutable fields; a renamed selector would select no pods).
+assert_blocks_equal "castle Deployment selector" \
+    "$(printf '%s\n' "$castle_dep_r" | sorted_block 'selector:' 'template:')" \
+    "$(printf '%s\n' "$castle_dep_s" | sorted_block 'selector:' 'template:')"
+assert_blocks_equal "castle Service selector" \
+    "$(printf '%s\n' "$castle_svc_r" | sorted_block 'selector:' 'ports:')" \
+    "$(printf '%s\n' "$castle_svc_s" | sorted_block 'selector:' 'ports:')"
+
+# Pod template labels must keep the live-manifest compat key; chart labels
+# are additive on top of it.
+printf '%s\n' "$castle_dep_r" \
+    | awk '$0 == "template:" { f = 1; next } f && $0 == "spec:" { exit } f { print }' \
+    | grep -qx 'app: castle' || fail "castle pod template dropped the live app: castle label"
+
+# Castle container block (image, securityContext, env, command, probes,
+# mounts) must equal the live manifest; the chart must not add runtime
+# constraints the castle image was not tested with.
+assert_blocks_equal "castle container securityContext/env/ports" \
+    "$(printf '%s\n' "$castle_dep_r" | sed -n '/^- name: castle$/,/^volumes:/{/^volumes:/!p}' | sort)" \
+    "$(printf '%s\n' "$castle_dep_s" | sed -n '/^- name: castle$/,/^volumes:/{/^volumes:/!p}' | sort)"
+printf '%s\n' "$castle_dep_r" | grep -q 'readOnlyRootFilesystem' && \
+    fail "castle container must not gain readOnlyRootFilesystem (deviates from k8s/04-castle.yaml)"
+
+# Pod securityContext (restricted compliance) must match the live manifest.
+assert_blocks_equal "castle pod securityContext" \
+    "$(printf '%s\n' "$castle_dep_r" | sorted_block 'securityContext:' 'nodeSelector:')" \
+    "$(printf '%s\n' "$castle_dep_s" | sorted_block 'securityContext:' 'nodeSelector:')"
+
+# Operator/watcher selectors must equal criteria-k8s/config/install.yaml.
+for comp in criteria-k8s-operator criteria-linear-watcher; do
+    assert_blocks_equal "$comp Deployment selector" \
+        "$(norm_doc "$RENDERED" Deployment "$comp" | sorted_block 'selector:' 'template:')" \
+        "$(norm_doc "$REPO_ROOT/criteria-k8s/config/install.yaml" Deployment "$comp" | sorted_block 'selector:' 'template:')"
+done
+
 echo "PASS: criteria-k8s chart lint, inventory, values wiring and script sync are valid"

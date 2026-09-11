@@ -10,6 +10,9 @@ metadata:
   name: castle
   namespace: {{ include "criteria-k8s.namespace" . }}
   labels:
+    # "app: castle" matches the live manifest selector; Deployment.spec.selector
+    # is immutable, so the chart must not rename it on adopt/upgrade.
+    app: castle
     {{- include "criteria-k8s.labels" . | nindent 4 }}
     app.kubernetes.io/name: castle
     app.kubernetes.io/component: control-plane
@@ -17,10 +20,13 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: castle
+      app: castle
   template:
     metadata:
+      # "app: castle" keeps pod-template labels compatible with the live
+      # manifest (selectors unchanged); the chart labels are additive.
       labels:
+        app: castle
         {{- include "criteria-k8s.labels" . | nindent 8 }}
         app.kubernetes.io/name: castle
         app.kubernetes.io/component: control-plane
@@ -36,7 +42,14 @@ spec:
         - name: castle
           image: "{{ .Values.castle.image.repository }}:{{ .Values.castle.image.tag }}"
           imagePullPolicy: {{ .Values.castle.image.pullPolicy }}
-          {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
+          # Matches k8s/04-castle.yaml exactly (restricted PodSecurity does not
+          # require a read-only root filesystem; the castle image is not built
+          # in this repo, so do not add runtime constraints it was not tested
+          # with).
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: {{ .Values.castle.port }}
               name: h2c
@@ -91,12 +104,16 @@ metadata:
   name: castle
   namespace: {{ include "criteria-k8s.namespace" . }}
   labels:
+    # "app: castle" matches the live Service; chart labels are additive.
+    app: castle
     {{- include "criteria-k8s.labels" . | nindent 4 }}
     app.kubernetes.io/name: castle
     app.kubernetes.io/component: control-plane
 spec:
+  # Selector must stay "app: castle" (k8s/04-castle.yaml): a renamed selector
+  # would select no pods until the Deployment is recreated.
   selector:
-    app.kubernetes.io/name: castle
+    app: castle
   ports:
     - name: h2c
       port: {{ .Values.castle.port }}

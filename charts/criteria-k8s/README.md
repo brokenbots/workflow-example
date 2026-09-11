@@ -28,6 +28,17 @@ namespace (no pod-security labels). To get the `pod-security.kubernetes.io`
 labels from the chart instead of `--create-namespace`, set
 `namespaceCreate=true` (or label the namespace manually).
 
+> **Caution:** `values.namespace` defaults to `criteria-jobs` and takes
+> precedence over the `-n` flag — `helm install -n other` would still deploy
+> into `criteria-jobs`. Keep `-n` aligned with `values.namespace`, or set
+> `namespace: ""` to make the chart follow the release namespace.
+
+> **Note:** the chart mirrors `k8s/00-namespace.yaml`, which labels the
+> namespace `pod-security.kubernetes.io/enforce: baseline`. (Cluster notes in
+> `k8s/PHASE2-HANDOFF.md` describe the namespace as enforcing `restricted`;
+> if your environment enforces restricted, set
+> `--set podSecurity.enforce=restricted` or adjust the label manually.)
+
 Upgrade:
 
 ```sh
@@ -44,7 +55,7 @@ helm template criteria-k8s charts/criteria-k8s
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `namespace` | `criteria-jobs` | Target namespace for every namespaced resource. Empty string falls back to the release namespace (`-n`). |
+| `namespace` | `criteria-jobs` | Target namespace for every namespaced resource. Empty string falls back to the release namespace (`-n`). Caution: a non-empty value overrides `-n`; keep them aligned. |
 | `namespaceCreate` | `false` | Render a `Namespace` object (with pod-security labels) from the chart. Leave `false` and use helm's `--create-namespace`. |
 | `podSecurity.enforce` | `baseline` | Pod Security Standard label applied to the rendered namespace. |
 | `images.operator.repository` | `localhost:5000/criteria-k8s` | Operator/watcher image repository. |
@@ -75,7 +86,7 @@ helm template criteria-k8s charts/criteria-k8s
 | `pvc.data.name` | `criteria-data` | Intake/triage artifacts PVC. Passed to the operator (`CRITERIA_DATA_PVC`) and mounted by runner Jobs. |
 | `pvc.data.size` | `10Gi` | Data PVC size. |
 | `pvc.data.storageClass` | `local-path` | Data PVC storage class (k3s local-path provisioner). |
-| `pvc.repo.name` | `criteria-repo` | Shared clone workspace PVC for adapter Jobs. |
+| `pvc.repo.name` | `criteria-repo` | Shared clone workspace PVC for adapter Jobs. Informational only: the operator does not consume this value (adapter clones live under the data PVC at `/data`), so overriding the name changes the rendered PVC but has no effect on child Jobs. |
 | `pvc.repo.size` | `10Gi` | Repo PVC size. |
 | `pvc.repo.storageClass` | `local-path` | Repo PVC storage class. |
 | `openbao.provider` | `openbao` | CSI provider name for the SecretProviderClasses. |

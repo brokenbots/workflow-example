@@ -6,6 +6,8 @@
 # Target namespace for every namespaced resource in the chart. Helm does not
 # create it: install with --create-namespace (or set namespaceCreate=true to
 # render a Namespace object with the pod-security labels applied).
+# Caution: a non-empty value overrides the helm -n flag; keep -n aligned with
+# this value, or set it to "" to follow the release namespace.
 namespace: criteria-jobs
 
 # Render a Namespace object (with pod-security labels) from the chart instead
@@ -14,7 +16,10 @@ namespaceCreate: false
 
 # Pod Security Standard label applied to the rendered Namespace when
 # namespaceCreate=true. The criteria-jobs namespace runs remote-mode workflow
-# pods unprivileged, so the baseline profile applies.
+# pods unprivileged, so the baseline profile applies (mirrors
+# k8s/00-namespace.yaml). Cluster notes (k8s/PHASE2-HANDOFF.md) describe the
+# namespace as enforcing restricted; if your environment enforces restricted,
+# override with --set podSecurity.enforce=restricted.
 podSecurity:
   enforce: baseline
 
@@ -93,7 +98,10 @@ pvc:
     name: criteria-data
     size: 10Gi
     storageClass: local-path
-  # Shared clone workspace for adapter Jobs.
+  # Shared clone workspace for adapter Jobs. Informational only: the operator
+  # does not consume this value (clones live under /data on the data PVC), so
+  # overriding the name changes the rendered PVC but has no effect on child
+  # Jobs.
   repo:
     name: criteria-repo
     size: 10Gi
