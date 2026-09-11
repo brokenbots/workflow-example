@@ -25,7 +25,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "events"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Read the shared pod-adapter scripts ConfigMap.
   - apiGroups: [""]
     resources: ["configmaps"]

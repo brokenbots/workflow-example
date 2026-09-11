@@ -41,6 +41,12 @@ type CriteriaRunSpec struct {
 
 	// ProviderBaseURL is the Ollama-compatible provider endpoint for adapters.
 	ProviderBaseURL string `json:"providerBaseUrl,omitempty"`
+
+	// PerScopeSessions opts into per-subworkflow adapter pods instead of
+	// run-duration adapter pods. When true, the operator creates adapter pods
+	// at subworkflow scope entry and deletes them at scope exit based on the
+	// engine's provision-wanted / release lifecycle events.
+	PerScopeSessions bool `json:"perScopeSessions,omitempty"`
 }
 
 // CriteriaRunStatus defines the observed state of a CriteriaRun.

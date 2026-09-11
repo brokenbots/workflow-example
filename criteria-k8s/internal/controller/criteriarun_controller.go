@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -30,7 +31,8 @@ import (
 )
 
 const (
-	criteriaRunFinalizer = "criteriarun.criteria.brokenbots.dev/finalizer"
+	criteriaRunFinalizer      = "criteriarun.criteria.brokenbots.dev/finalizer"
+	perScopeRequeueInterval   = 10 * time.Second
 )
 
 // EventsReader reads the events ndjson file produced by a completed run.
@@ -181,7 +183,22 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// Reconcile per-scope adapter pods from the run event stream.
+	activeAdapters, err := r.reconcilePerScopeAdapters(ctx, &run, logger)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Keep polling the event stream while the run is using per-scope adapters.
+	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(derivePhase(runnerJob))) {
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
+}
+
+func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
+	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
 }
 
 func (r *CriteriaRunReconciler) updateStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, logger logr.Logger) error {

@@ -91,6 +91,10 @@ spec:
                 providerBaseUrl:
                   type: string
                   description: Ollama-compatible provider endpoint for adapters.
+                perScopeSessions:
+                  type: boolean
+                  default: false
+                  description: Opt into per-subworkflow adapter pods instead of run-duration adapter pods.
             status:
               type: object
               properties:
@@ -165,7 +169,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "events"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
@@ -224,6 +228,10 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+          volumeMounts:
+            - name: criteria-data
+              mountPath: /data
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -237,6 +245,10 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+      volumes:
+        - name: criteria-data
+          persistentVolumeClaim:
+            claimName: criteria-data
 ---
 apiVersion: apps/v1
 kind: Deployment
