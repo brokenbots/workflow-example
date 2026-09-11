@@ -1,9 +1,15 @@
-.PHONY: build validate test lint build-criteria-k8s test-criteria-k8s lint-criteria-k8s
+.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint
 
-IMAGE_NAME ?= linear-intake
-IMAGE_TAG ?= latest
+# Workflow (linear_intake_v1) image. Unique tags are mandatory for the k3s
+# local registry: the kubelet never re-resolves a reused tag with
+# IfNotPresent, so every build gets a timestamped tag.
+WORKFLOW_IMAGE ?= localhost:5000/linear-intake-remote
 CRITERIA_K8S_IMAGE ?= localhost:5000/criteria-k8s
-CRITERIA_K8S_TAG ?= dev
+REGISTRY ?= localhost:5000
+
+# Unique tag: date + short git sha (falls back to timestamp outside a repo).
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo nosha)
+BUILD_TAG := $(shell date +%Y%m%d-%H%M%S)-$(GIT_SHA)
 
 # Prefer podman/buildah when available so the same Dockerfile builds in
 # minimal CI runners that do not ship Docker.
@@ -14,7 +20,42 @@ ifeq ($(CONTAINER_TOOL),)
 	@echo "No container tool found; running validation/lint instead of building the image."
 	$(MAKE) validate lint
 else
-	$(CONTAINER_TOOL) build -f linear_intake_v1/Dockerfile -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	$(CONTAINER_TOOL) build --build-arg TARGETARCH=amd64 -f linear_intake_v1/Dockerfile -t $(WORKFLOW_IMAGE):$(BUILD_TAG) .
+	@echo "Built $(WORKFLOW_IMAGE):$(BUILD_TAG)"
+endif
+
+build-push: build
+ifneq ($(CONTAINER_TOOL),)
+	$(CONTAINER_TOOL) push $(WORKFLOW_IMAGE):$(BUILD_TAG)
+endif
+
+build-criteria-k8s:
+ifeq ($(CONTAINER_TOOL),)
+	cd criteria-k8s && go build ./...
+else
+	$(CONTAINER_TOOL) build -f criteria-k8s/Dockerfile -t $(CRITERIA_K8S_IMAGE):$(BUILD_TAG) criteria-k8s/
+endif
+
+build-criteria-k8s-push: build-criteria-k8s
+ifneq ($(CONTAINER_TOOL),)
+	$(CONTAINER_TOOL) push $(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
+endif
+
+# Build both images with one unique tag.
+images: build build-criteria-k8s
+
+images-push: build-push build-criteria-k8s-push
+	@echo "Tag: $(BUILD_TAG)"
+	@echo "Deploy the watcher with:"
+	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
+	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
+
+deploy-images: images-push
+ifneq ($(CONTAINER_TOOL),)
+	kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
+	kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
+	kubectl -n criteria-jobs rollout status deploy/criteria-linear-watcher --timeout=120s
+	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif
 
 validate:
@@ -54,10 +95,3 @@ lint: lint-criteria-k8s
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...
-
-build-criteria-k8s:
-ifeq ($(CONTAINER_TOOL),)
-	cd criteria-k8s && go build ./...
-else
-	$(CONTAINER_TOOL) build -f criteria-k8s/Dockerfile -t $(CRITERIA_K8S_IMAGE):$(CRITERIA_K8S_TAG) .
-endif

@@ -107,15 +107,18 @@ spec:
                   echo "REPO_URL is required" >&2
                   exit 1
               fi
-              find /repo -mindepth 1 -delete 2>/dev/null || true
-              git config --global credential.https://github.com.helper '!gh auth git-credential'
-              GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" /repo
+              mkdir -p "$(dirname "$REPO_DIR")"
+              rm -rf "$REPO_DIR"
+              git config --global credential.https://github.helper '!gh auth git-credential'
+              GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"
           env:
             - name: REPO_URL
               value: "__REPO_URL__"
+            - name: REPO_DIR
+              value: "__REPO_DIR__"
           volumeMounts:
-            - name: repo
-              mountPath: /repo
+            - name: data
+              mountPath: /data
             - name: copilot-secrets
               mountPath: /home/criteria/secrets
           resources:
@@ -190,8 +193,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: repo
-              mountPath: /repo
             - name: linear-secrets
               mountPath: /secrets/linear_api_key
               subPath: linear_api_key
@@ -210,9 +211,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: __DATA_PVC__
-        - name: repo
-          persistentVolumeClaim:
-            claimName: __REPO_PVC__
         - name: linear-secrets
           csi:
             driver: secrets-store.csi.k8s.io
@@ -288,8 +286,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: repo
-              mountPath: /repo
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
@@ -303,9 +299,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: __DATA_PVC__
-        - name: repo
-          persistentVolumeClaim:
-            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts
@@ -369,8 +362,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: repo
-              mountPath: /repo
             - name: scripts
               mountPath: /opt/criteria-pod-adapter
           resources:
@@ -384,9 +375,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: __DATA_PVC__
-        - name: repo
-          persistentVolumeClaim:
-            claimName: __REPO_PVC__
         - name: scripts
           configMap:
             name: pod-adapter-scripts

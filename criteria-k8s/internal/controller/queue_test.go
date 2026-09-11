@@ -73,7 +73,7 @@ func TestRunQueueRecover(t *testing.T) {
 		Build()
 
 	queue := controller.NewRunQueue()
-	require.NoError(t, queue.Recover(context.Background(), cl))
+	require.NoError(t, queue.Recover(context.Background(), cl, "ns"))
 
 	headA := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "repo-a-pending-1", Namespace: "ns"},
@@ -105,7 +105,7 @@ func TestRunQueueRecover(t *testing.T) {
 	assert.Equal(t, 1, status.Length)
 
 	// Recovering again must not duplicate entries.
-	require.NoError(t, queue.Recover(context.Background(), cl))
+	require.NoError(t, queue.Recover(context.Background(), cl, "ns"))
 	_, status, _ = queue.Enqueue(tailA)
 	assert.Equal(t, 2, status.Length, "duplicate recovery entries should not increase the queue length")
 

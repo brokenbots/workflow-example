@@ -99,9 +99,10 @@ func (q *RunQueue) Release(key types.NamespacedName, repo string) *types.Namespa
 
 // Recover populates the queue from existing non-terminal CriteriaRuns. It is
 // intended for operator startup so in-flight runs are not lost across restarts.
-func (q *RunQueue) Recover(ctx context.Context, cl client.Client) error {
-	var list criteriav1.CriteriaRunList
-	if err := cl.List(ctx, &list); err != nil {
+// The list is namespace-scoped to match the operator's namespaced RBAC.
+func (q *RunQueue) Recover(ctx context.Context, cl client.Client, namespace string) error {
+	list := &criteriav1.CriteriaRunList{}
+	if err := cl.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return err
 	}
 

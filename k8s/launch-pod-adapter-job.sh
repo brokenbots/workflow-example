@@ -22,13 +22,22 @@ set -euo pipefail
 #   All workflow settings use the same defaults as container-entrypoint.sh.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEMPLATE="$REPO_ROOT/k8s/job-cri-27.yaml"
+# The .yaml in this directory is a stale rendered artifact (committed by a
+# workflow run); the launcher always renders from the .tmpl source.
+TEMPLATE="$REPO_ROOT/k8s/job-cri-27.yaml.tmpl"
 
 tmpl_var() {
     local name="$1"
     local value="$2"
     export "__${name}__=$value"
 }
+
+# Inline the adapter scripts into the manifest as indented ConfigMap content.
+indent() {
+    sed 's/^/    /'
+}
+tmpl_var RUNNER_SCRIPT    "$(indent < "$REPO_ROOT/k8s/pod-adapter-runner.sh")"
+tmpl_var ADAPTER_SCRIPT   "$(indent < "$REPO_ROOT/k8s/pod-adapter-adapter.sh")"
 
 tmpl_var IMAGE                 "${IMAGE:-localhost:5000/linear-intake-remote:dev}"
 tmpl_var ADAPTER_SHELL_IMAGE    "${ADAPTER_SHELL_IMAGE:-localhost:5000/criteria-adapter-shell:k8s-0.5.3}"
@@ -63,7 +72,8 @@ tmpl_var MAX_AGENT_VISITS     "${MAX_AGENT_VISITS:-2}"
 tmpl_var PROVIDER_BASE_URL    "${PROVIDER_BASE_URL:-http://192.168.17.116:11434/v1}"
 tmpl_var EVENTS_FILE          "${EVENTS_FILE:-}"
 
-tmpl_var REPO_DIR        "${REPO_DIR:-/repo}"
+LOWER_TICKET="$(printf '%s' "$TICKET_ID" | tr '[:upper:]' '[:lower:]')"
+tmpl_var REPO_DIR        "${REPO_DIR:-/data/intake/${LOWER_TICKET}/repo}"
 tmpl_var INTAKE_ROOT     "${INTAKE_ROOT:-/data/intake}"
 tmpl_var TRIAGE_ROOT     "${TRIAGE_ROOT:-/data/triage}"
 

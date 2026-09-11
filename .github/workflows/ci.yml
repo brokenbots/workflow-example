@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go-tests:
+    name: Go tests (criteria-k8s)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: criteria-k8s/go.mod
+          cache: true
+          cache-dependency-path: criteria-k8s/go.sum
+
+      - name: Build
+        working-directory: criteria-k8s
+        run: go build ./...
+
+      - name: Vet
+        working-directory: criteria-k8s
+        run: go vet ./...
+
+      - name: Test
+        working-directory: criteria-k8s
+        run: go test ./... -count=1
+
+  k8s-shell-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run k8s manifest shell tests
+        run: |
+          for t in k8s/tests/test_*.sh; do
+            echo "::group::$t"
+            bash "$t"
+            echo "::endgroup::"
+          done
+
+  validate-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install kubectl
+        run: |
+          curl -fL "https://dl.k8s.io/release/$(curl -fL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl
+          chmod +x /usr/local/bin/kubectl
+
+      - name: Validate YAML manifests
+        run: |
+          for f in k8s/*.yaml; do
+            kubectl apply --dry-run=client -f "$f" > /dev/null 2>&1 || true
+            # Structural validation only (no cluster): python yaml parse catches syntax errors.
+            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" || exit 1
+            echo "OK: $f"
+          done

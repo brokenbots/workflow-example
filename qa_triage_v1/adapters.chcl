@@ -1,6 +1,9 @@
 // Ref resolution and worktree lifecycle need the repo's primary tree.
 // Deterministic shell steps bind here; agents deliberately do NOT.
 environment "remote" "primary" {
+    // Per-scope sessions: each scope gets its own adapter pod, torn down at
+    // scope exit. Requires the run data dir wiring (CRI-128).
+    per_scope_sessions = true
     working_directory = var.repo_dir
     process = {
         exec = ["*"]

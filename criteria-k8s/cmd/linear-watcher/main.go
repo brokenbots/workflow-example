@@ -205,9 +205,17 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string) *criteria
 			},
 		},
 		Spec: criteriav1.CriteriaRunSpec{
-			TicketID:        ticket,
-			RepoURL:         repoURL,
-			Image:           w.image,
+			TicketID: ticket,
+			RepoURL:  repoURL,
+			// Per-scope adapter pods are the default: the operator tears each
+			// scope's adapter pod down on release instead of leaving idle
+			// adapter jobs running after the workflow finishes. Workflows can
+			// opt out by flipping this field on the created CriteriaRun.
+			PerScopeSessions: true,
+			// Image is intentionally unset: the operator's --default-image
+			// (CRITERIA_IMAGE on the operator deployment) is the single
+			// source of truth for the workflow image, so bumping the image
+			// only requires one deployment update.
 			BuildCmd:        w.buildCmd,
 			TestCmd:         w.testCmd,
 			CIGateCmd:       w.ciGateCmd,

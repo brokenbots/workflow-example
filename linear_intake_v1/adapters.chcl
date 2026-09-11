@@ -3,6 +3,9 @@
 // qa_triage_v1 and workstream_handler_v1 manage their own environments and
 // adapter sets as subworkflows.
 environment "remote" "intake" {
+    // Per-scope sessions: each scope gets its own adapter pod, torn down at
+    // scope exit. Requires the run data dir wiring (CRI-128).
+    per_scope_sessions = true
     working_directory = var.intake_root
     process = {
         exec = ["*"]

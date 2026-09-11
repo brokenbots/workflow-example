@@ -1,0 +1,38 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+rules:
+- apiGroups: ["criteria.brokenbots.dev"]
+  resources: ["criteriaruns"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["criteria.brokenbots.dev"]
+  resources: ["criteriaruns/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["criteria.brokenbots.dev"]
+  resources: ["criteriaruns/finalizers"]
+  verbs: ["update"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log", "events"]
+  verbs: ["get", "list", "watch", "create"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+subjects:
+- kind: ServiceAccount
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+roleRef:
+  kind: Role
+  name: criteria-k8s-operator
+  apiGroup: rbac.authorization.k8s.io
