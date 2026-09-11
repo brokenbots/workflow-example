@@ -30,12 +30,12 @@ func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) s
 
 // BuildPerScopeAdapterPod constructs a Pod for one provision-wanted lifecycle
 // event. The pod has zero Kubernetes privileges, zero CSI mounts, and only
-// the shared data/repo volumes plus the pod-adapter scripts ConfigMap.
+// the shared data volume plus the pod-adapter scripts ConfigMap. The repo
+// clone lives on the data PVC at /data/intake/<ticket>/repo.
 func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent) *corev1.Pod {
 	kind := scope.AdapterName
 	name := PerScopeAdapterPodName(run, kind, scope.ScopeID)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
-	repoPVC := firstNonEmpty(defaults.RepoPVC, "criteria-repo")
 
 	labels := baseLabels(run)
 	labels["criteria.brokenbots.dev/role"] = "adapter"
@@ -100,7 +100,6 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 					Env:             env,
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "data", MountPath: "/data"},
-						{Name: "repo", MountPath: "/repo"},
 						{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
 					},
 					Resources: adapterResources(kind),
@@ -108,7 +107,6 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 			},
 			Volumes: []corev1.Volume{
 				dataVolume(dataPVC),
-				repoVolume(repoPVC),
 				scriptsVolume(),
 			},
 		},

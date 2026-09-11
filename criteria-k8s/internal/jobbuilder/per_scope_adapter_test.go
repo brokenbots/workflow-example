@@ -69,7 +69,7 @@ func TestBuildPerScopeAdapterPod(t *testing.T) {
 	assert.Equal(t, "root-scope", envNames["CRITERIA_SCOPE_TAG"])
 	assert.Equal(t, "/data/intake/CRI-116/tokens/root-shell", envNames["CRITERIA_REMOTE_TOKEN_FILE"])
 
-	assert.ElementsMatch(t, []string{"data", "repo", "scripts"}, volumeMountNames(container.VolumeMounts))
+	assert.ElementsMatch(t, []string{"data", "scripts"}, volumeMountNames(container.VolumeMounts))
 
 	assert.Equal(t, "amd64", pod.Spec.NodeSelector["kubernetes.io/arch"])
 	require.Len(t, pod.Spec.Tolerations, 1)

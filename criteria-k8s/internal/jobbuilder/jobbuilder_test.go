@@ -1,6 +1,7 @@
 package jobbuilder_test
 
 import (
+	"strings"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -101,10 +102,6 @@ func TestBuildRunnerJob(t *testing.T) {
 	volNames := make(map[string]bool)
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		volNames[v.Name] = true
-		if v.Name == "repo" {
-			require.NotNil(t, v.PersistentVolumeClaim)
-			assert.Equal(t, "criteria-repo", v.PersistentVolumeClaim.ClaimName)
-		}
 		if v.Name == "data" {
 			require.NotNil(t, v.PersistentVolumeClaim)
 			assert.Equal(t, "criteria-data", v.PersistentVolumeClaim.ClaimName)
@@ -114,14 +111,11 @@ func TestBuildRunnerJob(t *testing.T) {
 			assert.Equal(t, "secrets-store.csi.k8s.io", v.CSI.Driver)
 		}
 	}
-	assert.True(t, volNames["repo"])
+	assert.False(t, volNames["repo"], "runner must not mount the shared repo PVC; it clones into /data/intake/<ticket>/repo")
 	assert.True(t, volNames["data"])
 	assert.True(t, volNames["linear-secrets"])
 	assert.True(t, volNames["copilot-secrets"])
 	assert.False(t, volNames["shell-secrets"], "runner pod must not mount shell-secrets")
-
-	// /repo must be a shared PVC, not a per-pod emptyDir.
-	assert.Nil(t, job.Spec.Template.Spec.Volumes[1].EmptyDir, "repo volume must not be emptyDir")
 
 	// Runner pod must have exactly one init and one container.
 	require.Len(t, job.Spec.Template.Spec.InitContainers, 1)
@@ -161,7 +155,7 @@ func TestBuildRunnerJob(t *testing.T) {
 	// repo-clone must mount the workflow token from the copilot-spc, not shell-spc.
 	clone := job.Spec.Template.Spec.InitContainers[0]
 	require.Len(t, clone.VolumeMounts, 2)
-	assert.Equal(t, "repo", clone.VolumeMounts[0].Name)
+	assert.Equal(t, "data", clone.VolumeMounts[0].Name)
 	assert.Equal(t, "copilot-secrets", clone.VolumeMounts[1].Name)
 }
 
@@ -186,7 +180,7 @@ func TestBuildAll(t *testing.T) {
 	assert.Empty(t, shell.Spec.Template.Spec.ServiceAccountName)
 	require.NotNil(t, shell.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.False(t, *shell.Spec.Template.Spec.AutomountServiceAccountToken)
-	assert.Len(t, shell.Spec.Template.Spec.Volumes, 3)
+	assert.Len(t, shell.Spec.Template.Spec.Volumes, 2)
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", shell.Spec.Template.Spec.Containers[0].Image)
 
 	copilot := findJob(t, jobs, "cri-42-adapter-copilot")
@@ -195,7 +189,7 @@ func TestBuildAll(t *testing.T) {
 	assert.Empty(t, copilot.Spec.Template.Spec.ServiceAccountName)
 	require.NotNil(t, copilot.Spec.Template.Spec.AutomountServiceAccountToken)
 	assert.False(t, *copilot.Spec.Template.Spec.AutomountServiceAccountToken)
-	assert.Len(t, copilot.Spec.Template.Spec.Volumes, 3)
+	assert.Len(t, copilot.Spec.Template.Spec.Volumes, 2)
 	assert.Equal(t, "localhost:5000/criteria-adapter-copilot:k8s-0.5.6", copilot.Spec.Template.Spec.Containers[0].Image)
 
 	for _, job := range jobs[1:] {
@@ -210,18 +204,19 @@ func TestBuildAll(t *testing.T) {
 				assert.NotContains(t, e.Name, "SECRET")
 			}
 		}
-		// Adapter containers must mount only data/repo/scripts.
+		// Adapter containers must mount only data/scripts; the repo clone
+		// lives on the data PVC at /data/intake/<ticket>/repo.
 		for _, c := range job.Spec.Template.Spec.Containers {
 			mountNames := make([]string, 0, len(c.VolumeMounts))
 			for _, m := range c.VolumeMounts {
 				mountNames = append(mountNames, m.Name)
 			}
-			assert.ElementsMatch(t, []string{"data", "repo", "scripts"}, mountNames)
+			assert.ElementsMatch(t, []string{"data", "scripts"}, mountNames)
 		}
 	}
 }
 
-func TestRepoPVCSharedAcrossJobs(t *testing.T) {
+func TestRunnerUsesPerTicketRepoClone(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-99"},
 		Spec: criteriav1.CriteriaRunSpec{
@@ -233,25 +228,41 @@ func TestRepoPVCSharedAcrossJobs(t *testing.T) {
 	jobs := jobbuilder.BuildAll(run, jobbuilder.Defaults{DataPVC: "criteria-data", RepoPVC: "criteria-repo"})
 	require.Len(t, jobs, 3)
 
-	var claimName string
+	// The runner's init container must clone into the per-ticket directory on
+	// the data PVC so concurrent runs never clobber each other's git clone.
+	runner := findJob(t, jobs, "cri-99")
+	require.NotEmpty(t, runner.Spec.Template.Spec.InitContainers, "runner must have a repo-clone init container")
+	init := runner.Spec.Template.Spec.InitContainers[0]
+	assert.Equal(t, "/data/intake/CRI-99/repo", envValue(init.Env, "REPO_DIR"),
+		"repo-clone must clone into the per-ticket repo path")
+	script := strings.Join(init.Command, " ")
+	assert.NotContains(t, script, "find /repo", "repo-clone must not wipe a shared /repo")
+	assert.Contains(t, script, `gh repo clone "$REPO_URL" "$REPO_DIR"`,
+		"repo-clone must clone into $REPO_DIR")
+
+	// No job may mount the shared repo PVC; the runner and adapters reach the
+	// clone through the data PVC.
 	for _, job := range jobs {
-		var repo *corev1.Volume
 		for i := range job.Spec.Template.Spec.Volumes {
 			if job.Spec.Template.Spec.Volumes[i].Name == "repo" {
-				repo = &job.Spec.Template.Spec.Volumes[i]
-				break
+				t.Errorf("job %q still mounts the shared repo PVC; runs must use the per-ticket clone on the data PVC", job.Name)
 			}
 		}
-		require.NotNil(t, repo, "job %q must have a repo volume", job.Name)
-		require.NotNil(t, repo.PersistentVolumeClaim, "job %q repo volume must be a PersistentVolumeClaim", job.Name)
-		assert.Nil(t, repo.EmptyDir, "job %q repo volume must not be emptyDir", job.Name)
-		if claimName == "" {
-			claimName = repo.PersistentVolumeClaim.ClaimName
-		} else {
-			assert.Equal(t, claimName, repo.PersistentVolumeClaim.ClaimName, "all Jobs must share the same repo PVC")
+	}
+
+	// The runner must pass the per-ticket repo path to the workflow.
+	for _, c := range runner.Spec.Template.Spec.Containers {
+		assert.Equal(t, "/data/intake/CRI-99/repo", envValue(c.Env, "REPO_DIR"))
+	}
+}
+
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, e := range env {
+		if e.Name == name {
+			return e.Value
 		}
 	}
-	assert.Equal(t, "criteria-repo", claimName)
+	return ""
 }
 
 func findJob(t *testing.T, jobs []*batchv1.Job, name string) *batchv1.Job {
