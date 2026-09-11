@@ -18,11 +18,11 @@ adapter "shell" "reviewer" {
 }
 
 // PR review runs on the copilot harness, resolving through the local Ollama
-// endpoint. glm-5.2 is the review model.
+// endpoint. deepseek-v4.1-flash is the review model.
 adapter "copilot" "pr_reviewer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.5"
+    version = "0.5.6"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     //
     // Both adapters in this child receive only the reviewer token. No

@@ -190,14 +190,15 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	repoURL := run.Spec.RepoURL
 	image := firstNonEmpty(run.Spec.Image, defaults.Image, "localhost:5000/linear-intake-remote:dev")
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
-	repoPVC := firstNonEmpty(defaults.RepoPVC, "criteria-repo")
 	providerBaseURL := firstNonEmpty(run.Spec.ProviderBaseURL, defaults.ProviderBaseURL, "http://192.168.17.116:11434/v1")
 	maxVisits := run.Spec.MaxAgentVisits
 	if maxVisits == 0 {
 		maxVisits = 2
 	}
 
-	repoDir := "/repo"
+	// Per-ticket repo clone on the data PVC to avoid concurrent runs
+	// clobbering each other's git clone on the shared repo PVC.
+	repoDir := fmt.Sprintf("/data/intake/%s/repo", ticket)
 	intakeRoot := "/data/intake"
 	triageRoot := "/data/triage"
 	eventsFile := fmt.Sprintf("%s/%s/events.ndjson", intakeRoot, ticket)
@@ -215,7 +216,6 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
-		repoVolume(repoPVC),
 		csiVolume("linear-secrets", "linear-spc"),
 		csiVolume("copilot-secrets", "copilot-spc"),
 		scriptsVolume(),
@@ -228,7 +228,6 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	jobName := AdapterJobName(run, kind)
 	image := adapterImage(kind)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
-	repoPVC := firstNonEmpty(defaults.RepoPVC, "criteria-repo")
 
 	labels := baseLabels(run)
 	labels["criteria.brokenbots.dev/role"] = "adapter"
@@ -241,7 +240,6 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
-		repoVolume(repoPVC),
 		scriptsVolume(),
 	}
 	return job
@@ -278,15 +276,17 @@ if [ -z "$REPO_URL" ]; then
     echo "REPO_URL is required" >&2
     exit 1
 fi
-find /repo -mindepth 1 -delete 2>/dev/null || true
+mkdir -p "$(dirname "$REPO_DIR")"
+rm -rf "$REPO_DIR"
 git config --global credential.https://github.helper '!gh auth git-credential'
-GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" /repo`,
+GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 		},
 		Env: []corev1.EnvVar{
 			{Name: "REPO_URL", Value: repoURL},
+			{Name: "REPO_DIR", Value: repoDir},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "repo", MountPath: repoDir},
+			{Name: "data", MountPath: "/data"},
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 		},
 		Resources: corev1.ResourceRequirements{
@@ -346,7 +346,6 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		Env:             env,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: "/data"},
-			{Name: "repo", MountPath: repoDir},
 			{Name: "linear-secrets", MountPath: "/secrets/linear_api_key", SubPath: "linear_api_key"},
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
@@ -400,7 +399,6 @@ func adapterContainer(kind, image, runnerJobName string) corev1.Container {
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "data", MountPath: "/data"},
-			{Name: "repo", MountPath: "/repo"},
 			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
 		},
 		Resources: resources,

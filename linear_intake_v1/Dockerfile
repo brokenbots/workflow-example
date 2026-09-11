@@ -7,7 +7,8 @@ ARG TARGETARCH
 # v0.5.18 also ships the CRI-94 fix (criteria PR #360), so output.stdout
 # comparisons in gate writes are evaluated correctly and the literal-bool
 # workaround in the durable-plan gates can be retired.
-ARG CRITERIA_VERSION=v0.5.18
+# v0.5.19 adds CRI-115 remote adapter lifecycle events and per-scope tokens.
+ARG CRITERIA_VERSION=v0.5.19
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
 ARG LINEAR_CLI_VERSION=0.0.5

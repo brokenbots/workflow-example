@@ -146,7 +146,7 @@ variable "manager" {
     })
 
     default = {
-        model     = "glm-5.2:cloud"
+        model     = "deepseek-v4.1-flash:cloud"
         max_turns = 30
         provider = {
             base_url = "http://localhost:11434/v1"
@@ -176,7 +176,7 @@ variable "triage" {
     // walking history, querying GitHub, running scanners — so its turn budget is
     // higher than the manager's, which only ever reads and decides.
     default = {
-        model     = "kimi-k2.7-code:cloud"
+        model     = "glm-5.3-flash:cloud"
         max_turns = 60
         provider = {
             base_url = "http://localhost:11434/v1"
@@ -202,7 +202,7 @@ variable "devops" {
     })
 
     default = {
-        model     = "kimi-k2.7-code:cloud"
+        model     = "glm-5.3-flash:cloud"
         max_turns = 40
         provider = {
             base_url = "http://localhost:11434/v1"

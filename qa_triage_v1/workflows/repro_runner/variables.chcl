@@ -86,7 +86,7 @@ variable "investigator" {
     })
 
     default = {
-        model     = "kimi-k2.7-code:cloud"
+        model     = "glm-5.3-flash:cloud"
         max_turns = 40
         provider = {
             base_url = "http://localhost:11434/v1"

@@ -20,7 +20,7 @@ adapter "shell" "sh" {
 adapter "copilot" "developer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.5"
+    version = "0.5.6"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
@@ -37,11 +37,11 @@ adapter "copilot" "developer" {
 }
 
 // Review runs on the copilot harness alongside the developer, resolving
-// through the local Ollama endpoint. glm-5.2 is the review model.
+// through the local Ollama endpoint. deepseek-v4.1-flash is the review model.
 adapter "copilot" "reviewer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.5"
+    version = "0.5.6"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
         GITHUB_TOKEN = var.workflow_github_token

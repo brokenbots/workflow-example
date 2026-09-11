@@ -46,7 +46,7 @@ variable "provider_base_url" {
 }
 
 // PR reviewer runs on the copilot adapter, resolving through the local Ollama
-// endpoint. glm-5.2:cloud is the review model.
+// endpoint. deepseek-v4.1-flash:cloud is the review model.
 variable "pr_reviewer" {
     type = object({
         model            = string
@@ -60,7 +60,7 @@ variable "pr_reviewer" {
     })
 
     default = {
-        model     = "glm-5.2:cloud"
+        model     = "deepseek-v4.1-flash:cloud"
         max_turns = 30
         provider = {
             base_url = "http://localhost:11434/v1"

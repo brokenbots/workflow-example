@@ -76,10 +76,10 @@ variable "developer" {
         }))
     })
 
-    // kimi-k3:cloud is "extra usage only" on the current Ollama plan;
-    // kimi-k2.7-code:cloud is the latest included kimi and is coding-tuned.
+    // glm-5.3-flash:cloud is the coding model; the kimi-k3 family is
+    // glm-5.3-flash:cloud is the latest included kimi and is coding-tuned.
     default = {
-        model     = "kimi-k2.7-code:cloud"
+        model     = "glm-5.3-flash:cloud"
         max_turns = 30
         provider = {
             base_url = "http://localhost:11434/v1"
@@ -90,7 +90,7 @@ variable "developer" {
 }
 
 // Reviewer runs on the copilot adapter, resolving through the local Ollama
-// endpoint like the developer. glm-5.2:cloud is the review model.
+// endpoint like the developer. deepseek-v4.1-flash:cloud is the review model.
 variable "reviewer" {
     type = object({
         model            = string
@@ -104,7 +104,7 @@ variable "reviewer" {
     })
 
     default = {
-        model     = "glm-5.2:cloud"
+        model     = "deepseek-v4.1-flash:cloud"
         max_turns = 30
         provider = {
             base_url = "http://localhost:11434/v1"

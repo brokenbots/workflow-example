@@ -21,7 +21,7 @@ environment "remote" "primary" {
 adapter "copilot" "coordinator" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.5"
+    version = "0.5.6"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     //
     // The remote environment does not inherit host token variables.
