@@ -8,7 +8,7 @@ ARG TARGETARCH
 # comparisons in gate writes are evaluated correctly and the literal-bool
 # workaround in the durable-plan gates can be retired.
 # v0.5.19 adds CRI-115 remote adapter lifecycle events and per-scope tokens.
-ARG CRITERIA_VERSION=v0.5.19
+ARG CRITERIA_VERSION=v0.5.20
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
 ARG LINEAR_CLI_VERSION=0.0.5
