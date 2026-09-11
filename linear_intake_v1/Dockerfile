@@ -4,6 +4,9 @@ ARG TARGETARCH
 # attribute, which v0.5.12's compiler rejects ("unknown attribute process").
 # v0.5.18 is the first release whose remote-environment shim verifies adapter
 # digests from the compiled graph pin set (CRI-111); remote runs need it.
+# v0.5.18 also ships the CRI-94 fix (criteria PR #360), so output.stdout
+# comparisons in gate writes are evaluated correctly and the literal-bool
+# workaround in the durable-plan gates can be retired.
 ARG CRITERIA_VERSION=v0.5.18
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
