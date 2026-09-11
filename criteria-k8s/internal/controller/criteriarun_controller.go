@@ -154,6 +154,17 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	// If the run is already terminal, do not re-enter the queue on a resync.
+	// Release any stale admission slot and prompt the next queued run.
+	if isTerminalPhase(run.Status.Phase) {
+		if next := r.Queue.Release(req.NamespacedName, run.Spec.RepoURL); next != nil {
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
+				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Enqueue the run for repo-keyed admission control. Only admitted runs
 	// are allowed to create child Jobs.
 	admitted, qstatus, prevRunning := r.Queue.Enqueue(&run)
