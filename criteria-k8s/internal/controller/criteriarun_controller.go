@@ -9,6 +9,7 @@ import (
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,7 +49,7 @@ type CriteriaRunReconciler struct {
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;delete
 
 func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx).WithValues("criteriarun", req.NamespacedName)
@@ -83,6 +84,19 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if next := r.Queue.Release(req.NamespacedName, run.Spec.RepoURL); next != nil {
 			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
 				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
+			}
+		}
+		// Stale per-scope adapters of a terminal run: the engine releases
+		// every scope when the run ends, so any surviving adapter pod dials a
+		// deregistered shim forever ("scope ... is not registered" every 2s)
+		// — exactly the loop observed across CRI-130..142 for runs whose
+		// runner job crash-looped to deletion. Delete them on every terminal
+		// pass; the castle re-derivation below is independent of this
+		// cleanup.
+		if run.Spec.PerScopeSessions {
+			if err := r.deleteRunAdapterPods(ctx, &run, logger); err != nil {
+				logger.Error(err, "deleting stale per-scope adapter pods of terminal CriteriaRun")
+				return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 			}
 		}
 		if r.Castle == nil || r.Castle.Disabled() {
@@ -168,7 +182,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		} else if err != nil {
 			return ctrl.Result{}, fmt.Errorf("getting job %s: %w", desired.Name, err)
 		}
-		if desired.Labels["criteria.brokenbots.dev/role"] == "runner" {
+		if desired.Labels[jobbuilder.LabelRole] == jobbuilder.RoleRunner {
 			runnerJob = &found
 		}
 	}
@@ -255,6 +269,34 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
+}
+
+// deleteRunAdapterPods deletes every per-scope adapter pod labeled for the
+// run. Called from the finalize path (CR deletion) and on terminal passes
+// (stale pods of a finished run): the per-scope reconcile only converges
+// desired state while the run lives, so its pods would otherwise outlive
+// the runner's shim and dial it forever. Only ever called for per-scope
+// runs — legacy-path adapter pods are owned by their adapter Job and must
+// not be deleted directly.
+func (r *CriteriaRunReconciler) deleteRunAdapterPods(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) error {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(run.Namespace),
+		client.MatchingLabels(map[string]string{
+			jobbuilder.LabelRun:  run.Name,
+			jobbuilder.LabelRole: jobbuilder.RoleAdapter,
+		}),
+	); err != nil {
+		return fmt.Errorf("listing adapter pods: %w", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		logger.Info("deleting stale per-scope adapter pod", "pod", pod.Name)
+		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting adapter pod %s: %w", pod.Name, err)
+		}
+	}
+	return nil
 }
 
 // castleTerminalObserved reports whether a castle observation has already
@@ -367,6 +409,16 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 			}
 		} else if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("getting child job %s for deletion: %w", desired.Name, err)
+		}
+	}
+
+	// Per-scope adapter pods are not among the desired Jobs (BuildAll omits
+	// them for per-scope runs): delete them here so a deletionTimestamp-
+	// propagated CR delete reaps its pods within one reconcile interval.
+	// Force-deletes that orphan the pods are covered by the adapter sweep.
+	if run.Spec.PerScopeSessions {
+		if err := r.deleteRunAdapterPods(ctx, run, logger); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 

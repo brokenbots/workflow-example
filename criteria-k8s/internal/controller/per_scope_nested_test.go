@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -334,4 +335,91 @@ func TestReconcilePerScopeRequeuesOnIntervalWithCastleRunID(t *testing.T) {
 	assert.Equal(t, 2, castleStub.calls)
 	assert.Equal(t, "castle-run-9", castleStub.lastKnownID, "persisted run id must short-circuit discovery")
 	assert.Equal(t, "cri-132", castleStub.lastRunnerJob)
+}
+
+// CRI-144: deleting a CriteriaRun (deletionTimestamp-propagated delete) must
+// remove its per-scope adapter pods within the finalize pass, in the same
+// reconcile interval. Force-deletes that skip the finalizer are covered by
+// the periodic adapter sweep (adaptersweep_test.go).
+func TestFinalizeDeletesPerScopeAdapterPods(t *testing.T) {
+	run := perScopeTestRun(true)
+	run.Finalizers = []string{criteriaRunFinalizer}
+	now := metav1.Now()
+	run.DeletionTimestamp = &now
+	pod := adapterPod("adp-cri-132-0", run.Namespace, run.Name)
+	withCriteriaRunOwnerRef(pod, run.Name, string(run.UID), true)
+	r, cl := newPerScopeTestReconciler(t, run, pod)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: run.Name, Namespace: run.Namespace}})
+	require.NoError(t, err)
+
+	assert.Empty(t, listAdapterPods(t, cl, run.Namespace), "adapter pods of a deleted CriteriaRun must be deleted during finalize")
+	var gone criteriav1.CriteriaRun
+	err = cl.Get(context.Background(), types.NamespacedName{Name: run.Name, Namespace: run.Namespace}, &gone)
+	require.True(t, apierrors.IsNotFound(err), "finalizer must be removed so the CR is reaped")
+}
+
+// CRI-144: a run whose runner job crash-looped to deletion ends terminal
+// with its per-scope adapter pods still Running — those pods dial the dead
+// runner's shim forever ("scope ... is not registered" every 2s). The
+// terminal reconcile pass must delete them, and must not requeue the run
+// when castle observation is off.
+func TestTerminalRunDeletesStalePerScopeAdapterPods(t *testing.T) {
+	run := perScopeTestRun(true)
+	run.Finalizers = []string{criteriaRunFinalizer}
+	run.Status.Phase = criteriav1.PhaseFailed
+	pod := adapterPod("adp-cri-132-stale", run.Namespace, run.Name)
+	r, cl := newPerScopeTestReconciler(t, run, pod)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: run.Name, Namespace: run.Namespace}})
+	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter, "terminal pass with castle observation off must not requeue")
+
+	assert.Empty(t, listAdapterPods(t, cl, run.Namespace), "stale per-scope adapter pods of a terminal run must be deleted")
+}
+
+// Legacy safety: adapter pods from the legacy path are owned by their
+// adapter Job. A terminal non-per-scope run must not have those pods
+// deleted behind the Job's back (the Job would recreate them); their
+// cleanup goes through the finalizer's Job deletion and the sweep.
+func TestTerminalNonPerScopeRunKeepsLegacyAdapterPod(t *testing.T) {
+	run := perScopeTestRun(false)
+	run.Finalizers = []string{criteriaRunFinalizer}
+	run.Status.Phase = criteriav1.PhaseFailed
+	pod := adapterPod("cri-132-adapter-abc", run.Namespace, run.Name)
+	controller := true
+	pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "batch/v1",
+		Kind:       "Job",
+		Name:       "cri-132-adapter",
+		UID:        "job-uid",
+		Controller: &controller,
+	}}
+	r, cl := newPerScopeTestReconciler(t, run, pod)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: run.Name, Namespace: run.Namespace}})
+	require.NoError(t, err)
+
+	pods := listAdapterPods(t, cl, run.Namespace)
+	require.Len(t, pods, 1, "legacy-path adapter pod must survive the terminal pass of a non-per-scope run")
+	assert.Equal(t, "Job", pods[0].OwnerReferences[0].Kind)
+}
+
+// CRI-144 ownerReference verification: per-scope adapter pods must carry a
+// controller ownerReference to the CriteriaRun so the default GC reaps them
+// at deletionTimestamp-propagated CR deletes.
+func TestPerScopeAdapterPodsCarryRunOwnerReference(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	require.NoError(t, err)
+
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1)
+	require.NotEmpty(t, pods[0].OwnerReferences)
+	ref := pods[0].OwnerReferences[0]
+	assert.Equal(t, "CriteriaRun", ref.Kind)
+	assert.Equal(t, "cri-132", ref.Name)
+	assert.Equal(t, run.UID, ref.UID)
 }
