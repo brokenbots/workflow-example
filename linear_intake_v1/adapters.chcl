@@ -5,7 +5,7 @@
 environment "remote" "intake" {
     // Per-scope sessions: each scope gets its own adapter pod, torn down at
     // scope exit. Requires the run data dir wiring (CRI-128).
-    per_scope_sessions = true
+    per_scope_sessions = false  // CRI-132: disabled until the operator parser understands the nested envelope
     working_directory = var.intake_root
     process = {
         exec = ["*"]

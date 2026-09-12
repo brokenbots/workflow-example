@@ -207,11 +207,13 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string) *criteria
 		Spec: criteriav1.CriteriaRunSpec{
 			TicketID: ticket,
 			RepoURL:  repoURL,
-			// Per-scope adapter pods are the default: the operator tears each
-			// scope's adapter pod down on release instead of leaving idle
-			// adapter jobs running after the workflow finishes. Workflows can
-			// opt out by flipping this field on the created CriteriaRun.
-			PerScopeSessions: true,
+			// Per-scope sessions: the engine emits provision/release events and
+			// the operator reconciles per-scope adapter pods. DISABLED as the
+			// watcher default until CRI-132 lands: the operator's lifecycle
+			// parser does not understand the engine's nested event envelope,
+			// so an enabled run gets its adapter pods deleted and hangs at
+			// WaitForHandle. Flip back to true after CRI-132 merges.
+			PerScopeSessions: false,
 			// Image is intentionally unset: the operator's --default-image
 			// (CRITERIA_IMAGE on the operator deployment) is the single
 			// source of truth for the workflow image, so bumping the image

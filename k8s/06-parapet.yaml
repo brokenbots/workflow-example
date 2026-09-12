@@ -33,7 +33,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: parapet
-          image: localhost:5000/parapet:v2
+          image: localhost:5000/parapet:v3
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
