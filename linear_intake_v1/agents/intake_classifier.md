@@ -107,7 +107,7 @@ Observable behavior the implementation must provide. Do not specify how to imple
 Call `submit_outcome` with exactly one of:
 
 - `bug_written` — a bug report exists at the bug report path and is non-empty.
-- `confirmed_bug_written` — prior QA confirmation is explicit in the issue history and a fresh bug workstream exists at the feature workstream path.
+- `confirmed_bug_written` — the bug does not need QA reproduction, and a fresh bug workstream exists at the feature workstream path. Two cases qualify: (a) prior QA confirmation is explicit in the issue history, or (b) the issue is an INTERNAL report that already documents the reproduction: concrete run identifiers, timestamps, exact error signatures, build/image versions, and a stated mechanism hypothesis. Internal reports come from the operator who observed the runs directly; routing them through external QA triage wastes a full cycle re-deriving what the ticket already states. When the ticket documents the root cause with this level of specificity, use `confirmed_bug_written`.
 - `feature_written` — a feature workstream exists at the feature workstream path and is non-empty.
 - `already_complete` — the Linear state type is completed or canceled; no artifact was written.
 - `needs_human` — classification or required behavior cannot be determined and a detailed, actionable note exists at the human-question note path.

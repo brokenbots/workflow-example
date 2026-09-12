@@ -1,0 +1,15 @@
+#!/bin/sh
+# Deterministic triage bypass gate (CRI-132 follow-up / internal-reproduced label).
+# Reads the fetched ticket.json and prints "skip_triage" when the issue carries
+# the internal-reproduced label, "run_triage" otherwise. Exit 0 in both cases -
+# the label is a routing signal, not an error condition.
+set -eu
+
+TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
+
+if jq -e --arg label "internal-reproduced" \
+    '.labels.nodes[]? | select(.name == $label)' "$TICKET_JSON" > /dev/null 2>&1; then
+    echo "skip_triage"
+else
+    echo "run_triage"
+fi

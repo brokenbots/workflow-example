@@ -1,0 +1,44 @@
+#!/bin/sh
+# Assemble the develop workstream for an internal-reproduced bug directly from
+# the ticket. The reproduction is already documented (run IDs, error
+# signatures, builds, mechanism) - regenerating it via the classifier or QA
+# triage duplicates work the ticket already did. Exit criteria: the workstream
+# file exists and is non-empty; the develop handler treats it as the plan.
+set -eu
+
+TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
+WORKSTREAM="{{ .intake_root }}/{{ .ticket_id }}/workstreams/{{ .ticket_id }}.md"
+
+mkdir -p "$(dirname "$WORKSTREAM")"
+
+TITLE=$(jq -r '.title // empty' "$TICKET_JSON")
+DESC=$(jq -r '.description // empty' "$TICKET_JSON")
+URL=$(jq -r '.url // empty' "$TICKET_JSON")
+
+{
+    echo "# Workstream: $TITLE"
+    echo
+    echo "Source: $URL"
+    echo
+    echo "## Problem (documented reproduction)"
+    echo
+    echo "$DESC"
+    echo
+    echo "## Ticket comments (evidence history)"
+    echo
+    jq -r '.comments.nodes[]? | "### " + .createdAt + "\n\n" + .body + "\n"' "$TICKET_JSON"
+    echo "## Required behavior"
+    echo
+    echo "Implement the fix described above. The reproduction in the ticket"
+    echo "is authoritative: preserve the observed error signatures and verify"
+    echo "the fix against the documented mechanism. Add or update tests that"
+    echo "exercise the failing path."
+} > "$WORKSTREAM"
+
+# Guard: non-empty workstream or the bypass failed
+if [ ! -s "$WORKSTREAM" ]; then
+    echo "workstream file is empty" >&2
+    exit 1
+fi
+
+echo "workstream written: $WORKSTREAM"

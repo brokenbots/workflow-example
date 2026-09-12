@@ -196,6 +196,48 @@ switch "route_after_plan_check" {
 // issue on every run. Bugs become reports for QA unless an earlier comment
 // records explicit QA confirmation; features and confirmed bugs become
 // workstreams directly. Terminal Linear states are left untouched.
+
+// Deterministic triage bypass: tickets carrying the `internal-reproduced`
+// Linear label are internal bugs whose reproduction is already documented
+// (run IDs, error signatures, builds). External QA triage would only re-derive
+// what the ticket already states, so the label routes straight to the develop
+// path. The label check is a shell grep over ticket.json - no model judgment.
+step "check_internal_label" {
+    target      = adapter.shell.intake
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/check_internal_label.sh.tftpl", {
+            ticket_id   = var.ticket_id
+            intake_root = var.intake_root
+        })
+    }
+    outcome "success" { next = switch.route_internal_label }
+    outcome "failure" { next = state.failed }
+}
+
+switch "route_internal_label" {
+    match {
+        condition = output.check_internal_label.stdout == "skip_triage"
+        next      = step.write_confirmed_workstream
+    }
+    default { next = step.classify_ticket }
+}
+
+// The label says the ticket already documents the reproduction; the workstream
+// is assembled mechanically from the ticket itself (title, description, comment
+// evidence) - no model call re-derives the analysis.
+step "write_confirmed_workstream" {
+    target      = adapter.shell.intake
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/write_confirmed_workstream.sh.tftpl", {
+            ticket_id   = var.ticket_id
+            intake_root = var.intake_root
+        })
+    }
+    outcome "success" { next = step.set_confirmed_bug_label }
+    outcome "failure" { next = state.failed }
+}
 step "classify_ticket" {
     target      = adapter.copilot.intake_classifier
     max_visits  = var.max_agent_visits
