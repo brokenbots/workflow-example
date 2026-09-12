@@ -15,6 +15,38 @@ const (
 	EventRelease         = "release"
 )
 
+// Nested envelope shapes. The engine wraps adapter lifecycle events in an
+// AdapterEvent payload envelope; the lifecycle kind is carried in
+// payload.kind and the event content in payload.data. Top-level run_id on the
+// envelope is authoritative (payload.data.run_id is empty at the emission
+// site).
+const (
+	payloadTypeAdapterEvent    = "AdapterEvent"
+	payloadKindProvisionWanted = "adapter.lifecycle.provision_wanted"
+)
+
+// payloadEnvelope is the probe for the nested engine envelope shape.
+type payloadEnvelope struct {
+	PayloadType string          `json:"payload_type"`
+	RunID       string          `json:"run_id"`
+	Payload     *payloadMessage `json:"payload"`
+}
+
+// payloadMessage is the AdapterEvent payload: kind plus event content.
+type payloadMessage struct {
+	Kind string           `json:"kind"`
+	Data payloadEventData `json:"data"`
+}
+
+// payloadEventData carries the event content for a nested lifecycle event.
+type payloadEventData struct {
+	Adapter     string `json:"adapter"`
+	Digest      string `json:"digest"`
+	ScopeID     string `json:"scope_instance_id"`
+	ShimAddress string `json:"shim_listen_address"`
+	TokenFile   string `json:"token_ref"`
+}
+
 // LifecycleEvent describes a provision-wanted or release event in the run
 // event stream. The engine emits these at subworkflow scope entry and exit.
 type LifecycleEvent struct {
@@ -66,6 +98,8 @@ func (e LifecycleEvent) ScopeKey() string {
 
 // ParseLifecycleEvents scans an ndjson event stream and returns all lifecycle
 // events in stream order. Non-JSON lines and unrelated events are ignored.
+// Both the flat shape (top-level event/adapter_name keys) and the engine's
+// nested AdapterEvent envelope are recognized.
 func ParseLifecycleEvents(r io.Reader) ([]LifecycleEvent, error) {
 	var events []LifecycleEvent
 	scanner := bufio.NewScanner(r)
@@ -73,6 +107,16 @@ func ParseLifecycleEvents(r io.Reader) ([]LifecycleEvent, error) {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
+			continue
+		}
+		var envelope payloadEnvelope
+		if err := json.Unmarshal(line, &envelope); err == nil &&
+			envelope.PayloadType == payloadTypeAdapterEvent && envelope.Payload != nil {
+			// Nested envelope shape: interpret from payload.data, never
+			// from top-level keys.
+			if ev, ok := lifecycleEventFromPayload(envelope); ok {
+				events = append(events, ev)
+			}
 			continue
 		}
 		var ev LifecycleEvent
@@ -91,6 +135,30 @@ func ParseLifecycleEvents(r io.Reader) ([]LifecycleEvent, error) {
 		return nil, fmt.Errorf("scanning lifecycle events: %w", err)
 	}
 	return events, nil
+}
+
+// lifecycleEventFromPayload maps a nested AdapterEvent envelope to a
+// LifecycleEvent. Only provision_wanted is recognized; every other kind —
+// including released — is skipped silently (release handling is separately
+// scheduled). Events with an empty adapter name are skipped, as with flat
+// events. Unknown fields are ignored.
+func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) {
+	if envelope.Payload.Kind != payloadKindProvisionWanted {
+		return LifecycleEvent{}, false
+	}
+	ev := LifecycleEvent{
+		Event:       EventProvisionWanted,
+		RunID:       envelope.RunID,
+		ScopeID:     envelope.Payload.Data.ScopeID,
+		AdapterName: envelope.Payload.Data.Adapter,
+		Digest:      envelope.Payload.Data.Digest,
+		ShimAddress: envelope.Payload.Data.ShimAddress,
+		TokenFile:   envelope.Payload.Data.TokenFile,
+	}
+	if ev.AdapterName == "" {
+		return LifecycleEvent{}, false
+	}
+	return ev, true
 }
 
 // ParseLifecycleEventsBytes is a convenience wrapper around ParseLifecycleEvents.
