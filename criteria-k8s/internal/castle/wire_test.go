@@ -74,8 +74,9 @@ func TestLifecycleFromEnvelopeMatchesFileParserOnCapturedProvision(t *testing.T)
 // publishes adapter_type (the implementation kind) alongside the workflow's
 // adapter node name (the instance, "intake") in payload.data — the shape the
 // production castle client actually receives, never the CRI-132 capture which
-// predates adapter_type.
-const v0522ProvisionWantedJSON = `{"schema_version":1,"seq":1,"run_id":"CRI-140","payload_type":"AdapterEvent","payload":{"adapter":"intake","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","scope_instance_id":"root","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-140/token"}}}`
+// predates adapter_type. scope_instance_id is UUID-shaped, as the engine
+// emits (uuid.NewString()).
+const v0522ProvisionWantedJSON = `{"schema_version":1,"seq":1,"run_id":"CRI-140","payload_type":"AdapterEvent","payload":{"adapter":"intake","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-140/token"}}}`
 
 // The castle conversion of a v0.5.22-shaped provision_wanted envelope must
 // carry the adapter_type field: the per-scope reconciler resolves the pod
@@ -86,7 +87,7 @@ func TestLifecycleFromEnvelopeResolvesAdapterType(t *testing.T) {
 		"adapter":             "intake",
 		"adapter_type":        "shell",
 		"digest":              "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
-		"scope_instance_id":   "root",
+		"scope_instance_id":   "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
 		"shim_listen_address": "[::]:7778",
 		"token_ref":           "/data/.criteria/runs/cri-140/token",
 	})
@@ -107,7 +108,7 @@ func TestLifecycleFromEnvelopeResolvesAdapterType(t *testing.T) {
 	assert.True(t, got.IsProvisionWanted())
 	assert.Equal(t, "intake", got.AdapterName, "the adapter field is the workflow's adapter node (instance)")
 	assert.Equal(t, "shell", got.AdapterType, "adapter_type is the implementation kind and must not be lost on the wire")
-	assert.Equal(t, "root", got.ScopeID)
+	assert.Equal(t, "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46", got.ScopeID)
 	assert.Equal(t, "CRI-140", got.RunID)
 	assert.Equal(t, "[::]:7778", got.ShimAddress)
 	assert.Equal(t, "/data/.criteria/runs/cri-140/token", got.TokenFile)

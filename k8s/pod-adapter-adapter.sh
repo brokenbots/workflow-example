@@ -73,6 +73,10 @@ fi
 # credentials reach the adapter over the OpenSession SDK contract; this
 # wrapper exports only the connection/digest metadata from discovery files
 # or from the per-scope values supplied by the operator.
+# Prefer the binary found on PATH when present: tests stub the runner via a
+# PATH shim, while the image places the real binary at the absolute path
+# below (non-root, PATH not writable, so the shim cannot be injected at
+# runtime).
 if command -v criteria-adapter-remote-runner > /dev/null 2>&1; then
     exec criteria-adapter-remote-runner
 fi

@@ -165,11 +165,12 @@ func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
 	r, cl := newPerScopeTestReconciler(t, run)
 
 	// The castle-derived event equivalent to the v0.5.22-shaped emission:
-	// every value is what lifecycleFromEnvelope yields for it.
+	// every value is what lifecycleFromEnvelope yields for it. ScopeID is
+	// UUID-shaped, as the engine emits (uuid.NewString()).
 	scope := events.LifecycleEvent{
 		Event:       events.EventProvisionWanted,
 		RunID:       "CRI-140",
-		ScopeID:     "root",
+		ScopeID:     "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
 		AdapterName: "intake",
 		AdapterType: "shell",
 		Digest:      "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
@@ -181,7 +182,7 @@ func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
 
 	pods := listAdapterPods(t, cl, "default")
 	require.Len(t, pods, 1, "exactly one per-scope adapter pod must be created")
-	assert.Equal(t, jobbuilder.PerScopeAdapterPodName(run, "shell", "root"), pods[0].Name)
+	assert.Equal(t, jobbuilder.PerScopeAdapterPodName(run, "shell", "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"), pods[0].Name)
 
 	container := pods[0].Spec.Containers[0]
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", container.Image,
@@ -212,7 +213,7 @@ func TestReconcilePerScopeAdaptersBuildsFallbackPodWithoutAdapterType(t *testing
 	scope := events.LifecycleEvent{
 		Event:       events.EventProvisionWanted,
 		RunID:       "CRI-140",
-		ScopeID:     "root",
+		ScopeID:     "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
 		AdapterName: "intake",
 	}
 

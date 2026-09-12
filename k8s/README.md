@@ -84,6 +84,9 @@ versions resolve their own digest.
 
 Adapters poll those files and then connect to the shim. The adapter's identity
 is verified against the pinned digest and the `accept_token` bearer token.
+Both wrapper scripts resolve the per-run directory under
+`CRITERIA_RUN_DIR_ROOT` (default `/data/.criteria/runs`); tests set it to a
+temporary root.
 
 ---
 

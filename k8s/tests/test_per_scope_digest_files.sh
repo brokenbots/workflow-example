@@ -32,8 +32,12 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # ---------------------------------------------------------------- part 1
-# Extract the runner's digest-resolution functions and publish digests into a
-# temp discovery directory, exactly as the runner script does at startup.
+# Extract the runner's digest-resolution functions and its actual digest-
+# publication statements, then execute the runner's own block against the
+# real workflow lockfile. The publication block is eval'd verbatim — never
+# re-typed here — so a regression in k8s/pod-adapter-runner.sh's publication
+# (a deleted or renamed instance-keyed write, or a deleted kind-keyed loop)
+# fails this test instead of passing while per-scope pods wedge.
 
 eval "$(awk '/^adapter_digest\(\) \{/,/^\}/' "$RUNNER")" || fail "cannot extract adapter_digest from the runner script"
 eval "$(awk '/^adapter_entry_digests\(\) \{/,/^\}/' "$RUNNER")" || fail "cannot extract adapter_entry_digests from the runner script"
@@ -44,12 +48,22 @@ lockfile="$LOCKFILE"
 run_dir="$tmp/runs/cri-140"
 mkdir -p "$run_dir"
 
-for kind in shell copilot; do
-    printf 'sha256:%s' "$(adapter_digest "$kind")" > "$run_dir/digest-$kind"
-done
-adapter_entry_digests | while read -r entry_instance entry_digest; do
-    printf 'sha256:%s' "$entry_digest" > "$run_dir/digest-$entry_instance"
-done
+# The runner's publication call site, extracted from the "Publish the
+# digests keyed by kind" comment through the instance-keyed loop's closing
+# "done". The guards below make marker drift fail loudly instead of
+# silently eval'ing a truncated block.
+publication_block="$(awk '
+    /^# Publish the digests keyed by kind/ { f = 1 }
+    /^# Publish the runner dial address/    { f = 0 }
+    f { print }
+' "$RUNNER")"
+printf '%s\n' "$publication_block" | grep -q '^for kind in shell copilot; do$' || \
+    fail "cannot extract the kind-keyed publication loop from k8s/pod-adapter-runner.sh"
+printf '%s\n' "$publication_block" | grep -q '^adapter_entry_digests | while read -r entry_instance entry_digest; do$' || \
+    fail "cannot extract the instance-keyed publication loop from k8s/pod-adapter-runner.sh"
+[ "$(printf '%s\n' "$publication_block" | grep -c '^done$')" -eq 2 ] || \
+    fail "digest publication block extraction is truncated (expected both loops closed)"
+eval "$publication_block"
 
 digest_of() {
     [ -f "$run_dir/digest-$1" ] || fail "discovery directory is missing digest-$1"
