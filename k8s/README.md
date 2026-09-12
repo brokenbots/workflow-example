@@ -73,6 +73,14 @@ writes per-run connection metadata to `/data/.criteria/runs/<job-name>/`:
 | `token` | Per-run `accept_token` bearer token. |
 | `digest-shell` | Pinned SHA256 digest of the `shell` adapter. |
 | `digest-copilot` | Pinned SHA256 digest of the `copilot` adapter. |
+| `digest-<adapter-node>` | Pinned SHA256 digest keyed by the workflow's adapter instance name (e.g. `digest-intake`), read in preference to the kind-keyed file by per-scope adapter pods (CRI-140). |
+
+Run-duration adapter Jobs (`ADAPTER_KIND=shell`/`copilot`) read the kind-keyed
+`digest-<kind>` files. Per-scope adapter pods — provisioned per
+`provision_wanted` scope event — prefer the instance-keyed
+`digest-<adapter-node>` file (falling back to the kind-keyed one only when the
+instance has no lockfile entry), so instances of one kind pinned to different
+versions resolve their own digest.
 
 Adapters poll those files and then connect to the shim. The adapter's identity
 is verified against the pinned digest and the `accept_token` bearer token.
