@@ -18,6 +18,12 @@ type Outcome struct {
 }
 
 // Parse scans an ndjson events stream and extracts the best-known outcome.
+//
+// The operator's reconcile path no longer reads events files (CRI-135);
+// Parse/ParseBytes remain as the reference parser for the engine's
+// dual-write events.ndjson format. The wire tests use them to pin the
+// castle envelope conversion to verbatim CRI-132 captures, and the file
+// itself stays on the PVC for debugging during the transition window.
 func Parse(r *bufio.Reader) (*Outcome, error) {
 	out := &Outcome{}
 	scanner := bufio.NewScanner(r)

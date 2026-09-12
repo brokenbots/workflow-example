@@ -174,6 +174,14 @@ if [ -z "$events_file" ]; then
     events_file="$INTAKE_ROOT/$TICKET_ID/events.ndjson"
 fi
 
+# Server mode (CRI-134 dual-write): when CASTLE_ADDR is set, criteria
+# publishes run lifecycle to the castle control plane in addition to the
+# events.ndjson mirror below. Unset keeps the historical local file mode.
+: "${CASTLE_ADDR:=}"
+if [ -n "$CASTLE_ADDR" ]; then
+    set -- "$@" --server "$CASTLE_ADDR"
+fi
+
 # Secret variables are passed as file: OriginRefs: the engine resolves them
 # through the FileProvider at run start (resolveSecretVarOrigins). Raw token
 # values never appear in argv - only the mount paths.
@@ -183,4 +191,5 @@ fi
     --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
     --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
     --events-file "$events_file" \
+    "$@" \
     --output concise

@@ -54,6 +54,11 @@ type Defaults struct {
 	RepoPVC         string
 	Namespace       string
 	ProviderBaseURL string
+	// CastleAddr is the castle orchestrator address handed to runner Jobs.
+	// When set, runners execute criteria in server mode (CRI-134 dual-write:
+	// lifecycle is published to castle and mirrored to events.ndjson). Empty
+	// keeps the runner in local file mode.
+	CastleAddr string
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
@@ -212,7 +217,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 		repoCloneContainer(image, repoURL, repoDir),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits),
+		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits, defaults.CastleAddr),
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
@@ -302,7 +307,7 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 	}
 }
 
-func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL string, maxVisits int) corev1.Container {
+func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL string, maxVisits int, castleAddr string) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "TICKET_ID", Value: run.Spec.TicketID},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
@@ -335,6 +340,9 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 				},
 			},
 		},
+	}
+	if castleAddr != "" {
+		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: castleAddr})
 	}
 
 	return corev1.Container{

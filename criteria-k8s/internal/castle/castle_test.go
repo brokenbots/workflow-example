@@ -3,6 +3,7 @@ package castle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -71,7 +72,7 @@ func (s *stubServer) ListRunEvents(ctx context.Context, req *connect.Request[v1.
 	return connect.NewResponse(out), nil
 }
 
-func newTestServer(t *testing.T, handler *stubServer) *httptest.Server {
+func newTestServer(t *testing.T, handler criteriav1connect.ServerServiceHandler) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	path, h := criteriav1connect.NewServerServiceHandler(handler)
@@ -241,18 +242,36 @@ func TestObserveTerminalFallbackFromRunRecord(t *testing.T) {
 	assert.Equal(t, "failed", obs.Terminal.FinalState)
 }
 
-// No run for the ticket yet is a normal pre-admission state, not an error.
-func TestObserveNoRunForTicket(t *testing.T) {
+// No run for the ticket yet is "unknown", not an authoritative empty
+// history: it must surface as an error so the caller aborts the pass
+// instead of converging desired state (which would delete live adapter
+// pods). The same applies to an empty ticket.
+func TestObserveNoRunForTicketIsAnError(t *testing.T) {
 	server := &stubServer{}
 	srv := newTestServer(t, server)
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
-	require.NoError(t, err)
-	assert.Equal(t, "", obs.RunID)
-	assert.Empty(t, obs.Lifecycle)
-	assert.Nil(t, obs.Terminal)
+	_, err := c.Observe(context.Background(), "CRI-42", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no castle run registered for ticket CRI-42")
+
+	_, err = c.Observe(context.Background(), "", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires a ticket")
+}
+
+// Discovery that exhausts its page budget with more pages remaining is
+// inconclusive and must not be reported as an empty observation.
+func TestObserveDiscoveryPageCapIsAnError(t *testing.T) {
+	pages := &stubPagedRuns{totalPages: maxDiscoveryPages + 2}
+	srv := newTestServer(t, pages)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	_, err := c.Observe(context.Background(), "CRI-42", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not conclude within")
 }
 
 // Discovery prefers the newest non-terminal run for the ticket and falls
@@ -294,7 +313,7 @@ func TestObserveSendsTokenHeader(t *testing.T) {
 }
 
 // Castle outages are transient: the client surfaces the error so the
-// reconciler can skip the observation and retry on the next interval.
+// reconciler can abort the pass and retry on the next interval.
 func TestObserveServerErrorIsSurfaced(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -304,4 +323,68 @@ func TestObserveServerErrorIsSurfaced(t *testing.T) {
 	c := New(Config{Addr: srv.URL}, nil)
 	_, err := c.Observe(context.Background(), "CRI-42", "")
 	require.Error(t, err)
+}
+
+// stubPagedRuns serves totalPages pages of one run each, chaining
+// NextPageToken, to exercise the discovery page budget.
+type stubPagedRuns struct {
+	criteriav1connect.ServerServiceHandler
+
+	totalPages int
+}
+
+func (s *stubPagedRuns) ListRuns(ctx context.Context, req *connect.Request[v1.ListRunsRequest]) (*connect.Response[v1.ListRunsResponse], error) {
+	page := 0
+	if req.Msg.PageToken != "" {
+		fmt.Sscanf(req.Msg.PageToken, "%d", &page)
+	}
+	if page >= s.totalPages {
+		return connect.NewResponse(&v1.ListRunsResponse{}), nil
+	}
+	return connect.NewResponse(&v1.ListRunsResponse{
+		Runs:          []*v1.Run{{RunId: fmt.Sprintf("run-%d", page), Ticket: "CRI-27", Status: "running"}},
+		NextPageToken: fmt.Sprintf("%d", page+1),
+	}), nil
+}
+
+// A terminal observation evicts the per-run client state, so a long-lived
+// operator does not accumulate caches for every finished run; a repeat
+// observation of the terminal run still reconstructs the same result.
+func TestObserveEvictsTerminalRunState(t *testing.T) {
+	server := &stubServer{
+		runs: []*v1.Run{{
+			RunId: "run-1", Ticket: "CRI-42", Status: "succeeded", FinalState: "done",
+			PrUrl: "https://github.com/brokenbots/workflow-example/pull/7",
+		}},
+		events: map[string][]*v1.Envelope{
+			"run-1": {
+				provisionEnvelope("run-1", 1, "scope-a", "default"),
+				{RunId: "run-1", Seq: 2, Payload: &v1.Envelope_RunCompleted{RunCompleted: &v1.RunCompleted{Success: true, FinalState: "done"}}},
+			},
+		},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	require.NoError(t, err)
+	require.NotNil(t, obs.Terminal)
+	assert.Equal(t, "7", obs.Terminal.PRNumber)
+	require.Len(t, obs.Lifecycle, 1)
+
+	c.mu.Lock()
+	evicted := len(c.cursors) == 0 && len(c.scopes) == 0 && len(c.lifecycle) == 0 && len(c.terminals) == 0
+	c.mu.Unlock()
+	assert.True(t, evicted, "terminal run state must be evicted from the client caches")
+
+	// A later observation of the same terminal run re-drains from scratch and
+	// reconstructs the same terminal result.
+	obs, err = c.Observe(context.Background(), "CRI-42", obs.RunID)
+	require.NoError(t, err)
+	require.NotNil(t, obs.Terminal)
+	assert.True(t, obs.Terminal.Success)
+	assert.Equal(t, "7", obs.Terminal.PRNumber)
+	assert.Equal(t, "done", obs.Terminal.TicketState)
+	require.Len(t, obs.Lifecycle, 1)
 }

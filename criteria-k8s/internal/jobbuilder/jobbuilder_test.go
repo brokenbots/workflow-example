@@ -141,6 +141,8 @@ func TestBuildRunnerJob(t *testing.T) {
 	assert.Equal(t, "localhost:5000/linear-intake-remote:dev", runner.Image)
 	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "PROVIDER_BASE_URL", Value: "http://provider/v1"})
 	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "JOB_NAME", Value: job.Name})
+	assert.NotContains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"},
+		"without Defaults.CastleAddr the runner stays in local file mode")
 
 	var podIP corev1.EnvVar
 	for _, e := range runner.Env {
@@ -274,4 +276,26 @@ func findJob(t *testing.T, jobs []*batchv1.Job, name string) *batchv1.Job {
 	}
 	t.Fatalf("job %q not found", name)
 	return nil
+}
+
+// With Defaults.CastleAddr set, the runner receives CASTLE_ADDR so criteria
+// publishes lifecycle to castle in server mode (CRI-134 dual-write keeps the
+// events.ndjson mirror). When unset, the env var is absent entirely and the
+// runner's local-mode behaviour is unchanged.
+func TestBuildRunnerJobCastleAddr(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-42",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data", CastleAddr: "http://castle:9443"})
+	runner := job.Spec.Template.Spec.Containers[0]
+	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: "http://castle:9443"})
+
+	localJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	localRunner := localJob.Spec.Template.Spec.Containers[0]
+	assert.NotContains(t, localRunner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"})
 }

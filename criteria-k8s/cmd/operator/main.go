@@ -98,6 +98,7 @@ func main() {
 			Image:           *defaultImage,
 			DataPVC:         *dataPVC,
 			ProviderBaseURL: *providerBaseURL,
+			CastleAddr:      *castleAddr,
 		},
 		Queue: queue,
 	}

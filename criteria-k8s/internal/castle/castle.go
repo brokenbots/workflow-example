@@ -124,14 +124,20 @@ func (c *Client) Disabled() bool {
 }
 
 // Observe drains castle events for the run backing the given ticket and
-// returns the accumulated observation. When no castle run exists for the
-// ticket yet, an empty Observation (RunID == "") is returned with a nil
-// error: the engine registers runs at CreateRun, so the run may simply not
-// have started.
+// returns the accumulated observation. It distinguishes "unavailable or not
+// yet known" (error) from an authoritative observation: a castle outage, a
+// ticket with no registered run yet, an empty ticket, or discovery that
+// cannot conclude within the page budget all return an error so the caller
+// aborts the reconcile pass instead of converging desired state against an
+// empty history (which would delete live adapter pods). The caller retries
+// on the next reconcile interval.
 func (c *Client) Observe(ctx context.Context, ticket, knownRunID string) (*Observation, error) {
 	obs := &Observation{}
 	if c.Disabled() {
 		return obs, nil
+	}
+	if ticket == "" {
+		return nil, fmt.Errorf("castle observation requires a ticket: run discovery is ticket-keyed")
 	}
 
 	runID := knownRunID
@@ -141,7 +147,10 @@ func (c *Client) Observe(ctx context.Context, ticket, knownRunID string) (*Obser
 			return nil, fmt.Errorf("discovering castle run for ticket %s: %w", ticket, err)
 		}
 		if discovered == nil {
-			return obs, nil
+			// The engine registers runs at CreateRun, so a missing run means
+			// it has not started (or castle lost it). Either way the operator
+			// must not treat this as an authoritative empty history.
+			return nil, fmt.Errorf("no castle run registered for ticket %s yet", ticket)
 		}
 		runID = discovered.GetRunId()
 	}
@@ -177,13 +186,36 @@ func (c *Client) Observe(ctx context.Context, ticket, knownRunID string) (*Obser
 			obs.Terminal.TicketState = resp.Msg.GetFinalState()
 		}
 	}
+
+	// The controller stamps the CR terminal from this observation and stops
+	// reconciling, so the per-run caches are no longer needed. Evict them so
+	// a long-lived operator does not accumulate state for every finished
+	// run. A later observation for the same run re-drains from seq 0 and
+	// reconstructs terminal state from the stream or the run record.
+	if obs.Terminal != nil {
+		c.evictRun(runID)
+	}
 	return obs, nil
+}
+
+// evictRun drops all per-run client state. The caller must have already
+// built the observation for the terminal run.
+func (c *Client) evictRun(runID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.cursors, runID)
+	delete(c.scopes, runID)
+	delete(c.lifecycle, runID)
+	delete(c.terminals, runID)
 }
 
 // findRunByTicket resolves the castle run backing a ticket via paged
 // ListRuns (which has no ticket filter). Non-terminal runs are preferred;
 // when every run for the ticket is terminal, the newest one is returned so
-// the controller can still stamp completion.
+// the controller can still stamp completion. Discovery that exhausts the
+// page budget with more pages remaining is inconclusive and surfaces as an
+// error: silently reporting "no run" would make the controller converge
+// against an empty history.
 func (c *Client) findRunByTicket(ctx context.Context, ticket string) (*v1.Run, error) {
 	if ticket == "" {
 		return nil, nil
@@ -210,13 +242,13 @@ func (c *Client) findRunByTicket(ctx context.Context, ticket string) (*v1.Run, e
 		}
 		pageToken = resp.Msg.GetNextPageToken()
 		if pageToken == "" {
-			break
+			if newestActive != nil {
+				return newestActive, nil
+			}
+			return newestTerminal, nil
 		}
 	}
-	if newestActive != nil {
-		return newestActive, nil
-	}
-	return newestTerminal, nil
+	return nil, fmt.Errorf("run discovery for ticket %s did not conclude within %d pages (more pages remain); refusing to report an empty observation", ticket, maxDiscoveryPages)
 }
 
 // drain incrementally fetches run events from the last consumed sequence and

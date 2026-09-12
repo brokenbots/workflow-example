@@ -148,7 +148,15 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// consumed below. One status write.
 	update.Status.Phase = derivePhase(runnerJob)
 	update.Status.JobName = runnerJob.Name
-	obs := r.observeCastle(ctx, &run, update, logger)
+	obs, err := r.observeCastle(ctx, &run, update, logger)
+	if err != nil {
+		// An unavailable or inconclusive castle source must not converge
+		// desired state: abort before any status write and before the
+		// per-scope reconcile, so no adapter pod is touched off a history we
+		// could not see. controller-runtime retries with backoff and the
+		// next successful observation resumes normal reconciliation.
+		return ctrl.Result{}, fmt.Errorf("observing castle lifecycle for %s: %w", run.Name, err)
+	}
 
 	if !statusEqual(&run.Status, &update.Status) {
 		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
@@ -159,10 +167,22 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	phase := update.Status.Phase
 
-	// Reconcile per-scope adapter pods from the castle event stream.
-	activeAdapters, err := r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
-	if err != nil {
-		return ctrl.Result{}, err
+	// Reconcile per-scope adapter pods from the castle event stream. Only an
+	// authoritative observation (a known castle run) may drive desired
+	// state; an unregistered run or a disabled source is skipped so live
+	// pods are never deleted off an empty history.
+	activeAdapters := 0
+	if obs.RunID != "" {
+		activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	} else if run.Spec.PerScopeSessions {
+		if r.Castle == nil || r.Castle.Disabled() {
+			logger.Info("castle observation disabled; per-scope adapter reconcile requires --castle-addr (castle is the only lifecycle source since CRI-135)")
+		} else {
+			logger.Info("castle run not yet known; skipping per-scope reconcile until observation succeeds")
+		}
 	}
 
 	// Release the queue slot when the run has finished. If another run is
@@ -213,19 +233,20 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 
 // observeCastle observes the run's lifecycle from castle and layers it onto
 // the pending status update: the castle run id, terminal completion, and the
-// run outcome (PR number, ticket state). Transient castle failures are
-// logged and skipped — castle observation must never block k8s actuation,
-// and the reconcile cadence retries on the next pass.
-func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) *castle.Observation {
-	empty := &castle.Observation{}
+// run outcome (PR number, ticket state). An unavailable or inconclusive
+// source (castle outage, run not registered yet, discovery that cannot
+// conclude) returns an error so the caller aborts the pass: desired state
+// must never be converged from an empty history, and no status field is
+// stamped from a source we could not actually observe.
+func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (*castle.Observation, error) {
 	if r.Castle == nil || r.Castle.Disabled() {
-		return empty
+		return &castle.Observation{}, nil
 	}
 
 	obs, err := r.Castle.Observe(ctx, run.Spec.TicketID, run.Status.CastleRunID)
 	if err != nil {
 		logger.Error(err, "observing run lifecycle from castle")
-		return empty
+		return nil, err
 	}
 
 	if obs.RunID != "" && obs.RunID != run.Status.CastleRunID {
@@ -244,7 +265,7 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 		update.Status.PRNumber = obs.Terminal.PRNumber
 		update.Status.TicketState = obs.Terminal.TicketState
 	}
-	return obs
+	return obs, nil
 }
 
 func eventsPath(run *criteriav1.CriteriaRun) string {

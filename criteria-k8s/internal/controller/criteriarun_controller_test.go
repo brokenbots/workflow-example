@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -307,7 +308,7 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 		WithObjects(run).
 		Build()
 
-	castleStub := &fakeCastle{observation: &castle.Observation{Lifecycle: eventsData}}
+	castleStub := &fakeCastle{observation: &castle.Observation{RunID: "castle-run-1", Lifecycle: eventsData}}
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
@@ -356,6 +357,7 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 
 	// Now the engine releases both scopes (full history) and reconcile again.
 	castleStub.observation = &castle.Observation{
+		RunID:     "castle-run-1",
 		Lifecycle: []events.LifecycleEvent{provisionShell, provisionCopilot, releaseShell, releaseCopilot},
 	}
 
@@ -367,6 +369,9 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 	assert.Empty(t, pods.Items)
 }
 
+// A castle run that is known to exist with an authoritative empty event
+// history labels an adapter pod as an orphan: nothing in the run's history
+// provisions it, so it is cleaned up.
 func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
 	scheme := newScheme(t)
 	run := &criteriav1.CriteriaRun{
@@ -398,10 +403,13 @@ func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
 		WithObjects(run, orphan).
 		Build()
 
+	// The castle run exists (discovered by ticket) and has no provisioning
+	// events: the observation is authoritative, so the pod is not desired.
+	castleStub := &fakeCastle{observation: &castle.Observation{RunID: "castle-run-1"}}
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Castle:   &fakeCastle{},
+		Castle:   castleStub,
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    controller.NewRunQueue(),
 	}
@@ -412,6 +420,135 @@ func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
 	var pods corev1.PodList
 	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
 	assert.Empty(t, pods.Items)
+}
+
+// An unavailable castle source must not converge desired state: a castle
+// outage must leave a live per-scope adapter pod untouched and must not
+// stamp any castle-derived status. Once observation succeeds again, normal
+// reconciliation resumes (desired pods are created).
+func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116",
+			Namespace: "default",
+			UID:       types.UID("run-uid"),
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID:         "CRI-116",
+			PerScopeSessions: true,
+		},
+	}
+	// The live pod is the canonical desired pod for scope root: the outage
+	// must not delete it, and recovery must not churn it.
+	livePod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, provisionShell)
+	livePod.Namespace = "default"
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, livePod).
+		Build()
+
+	castleStub := &fakeCastle{err: errors.New("castle unavailable: connection refused")}
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Castle:   castleStub,
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.Error(t, err, "an unavailable source aborts the pass with an error so it is retried")
+
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	require.Len(t, pods.Items, 1, "the live adapter pod must survive a castle outage")
+	assert.Equal(t, livePod.Name, pods.Items[0].Name)
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Empty(t, updated.Status.Phase, "no castle-derived status may be stamped from an unavailable source")
+	assert.Empty(t, updated.Status.PRNumber)
+	assert.Empty(t, updated.Status.TicketState)
+	assert.Empty(t, updated.Status.CastleRunID)
+
+	// Castle recovers and reports the live scope as desired: reconcile
+	// resumes normally and is idempotent — the satisfied scope's pod is
+	// neither deleted nor duplicated.
+	castleStub.err = nil
+	castleStub.observation = &castle.Observation{
+		RunID:     "castle-run-1",
+		Lifecycle: []events.LifecycleEvent{provisionShell},
+	}
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
+
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	require.Len(t, pods.Items, 1, "the satisfied scope must not churn the live pod")
+	assert.Equal(t, livePod.Name, pods.Items[0].Name)
+	assert.Equal(t, "root", pods.Items[0].Labels["criteria.brokenbots.dev/scope-id"])
+	assert.Equal(t, "shell", pods.Items[0].Labels["criteria.brokenbots.dev/adapter-kind"])
+}
+
+// A source that reports an inconclusive observation (empty, nil error — the
+// run is not registered yet) must equally not converge desired state: the
+// adapter pod survives, no castle run id is stamped, and the reconcile
+// polls again on the interval.
+func TestReconcileCastleRunNotRegisteredPreservesAdapterPods(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116",
+			Namespace: "default",
+			UID:       types.UID("run-uid"),
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID:         "CRI-116",
+			PerScopeSessions: true,
+		},
+	}
+	livePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-116-adp-shell-deadbeef",
+			Namespace: "default",
+			Labels: map[string]string{
+				"criteria.brokenbots.dev/run":  "cri-116",
+				"criteria.brokenbots.dev/role": "adapter",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, livePod).
+		Build()
+
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Castle:   &fakeCastle{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res, "the reconcile keeps polling for the run to register")
+
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	require.Len(t, pods.Items, 1, "the live adapter pod must survive an unregistered castle run")
+	assert.Equal(t, "cri-116-adp-shell-deadbeef", pods.Items[0].Name)
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Empty(t, updated.Status.PRNumber)
+	assert.Empty(t, updated.Status.TicketState)
+	assert.Empty(t, updated.Status.CastleRunID)
 }
 
 func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
