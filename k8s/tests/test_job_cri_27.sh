@@ -18,6 +18,16 @@ export TICKET_ID="CRI-27"
 export REPO_URL="brokenbots/workflow-example"
 export DRY_RUN="1"
 
+# This test can run inside a live criteria intake session, whose ambient env
+# carries launcher inputs (JOB_NAME, BASE_BRANCH, ...). Unset every optional
+# input so the render is deterministic against the documented defaults and the
+# pod-adapter-cri-27* name assertions below hold regardless of the caller.
+unset JOB_NAME IMAGE ADAPTER_SHELL_IMAGE ADAPTER_COPILOT_IMAGE NAMESPACE \
+      DATA_PVC REPO_PVC LINEAR_REVIEW_STATE LINEAR_TRIAGE_STATE \
+      LINEAR_WORK_STATE LINEAR_DONE_STATE BASE_BRANCH BUILD_CMD TEST_CMD \
+      CI_GATE_CMD TEST_REFS MAIN_REF STABLE_REF DESIGN_INTENT_FILE \
+      REPRO_WORKFLOW_DIR ALLOW_DIRTY
+
 manifest="$(mktemp)"
 trap 'rm -f "$manifest"' EXIT
 "$LAUNCHER" > "$manifest"
@@ -97,8 +107,8 @@ lacks 'subPath: reviewer_github_token' || fail "workflow-runner mounts reviewer_
 has 'mountPath: /home/criteria/secrets' || fail "workflow-runner does not mount copilot-secrets at /home/criteria/secrets"
 
 # The repo-clone init container mounts the workflow token from copilot-spc
-# (shell-spc was retired) and clones into the per-ticket repo path.
-clone_block=$(awk '/name: repo-clone/{flag=1; print; next} flag{print} /name: workflow-runner/{flag=0; exit}' "$manifest")
+# (shell-spc was retired) and clones into the per-ticket repo path; the
+# checks below grep the whole rendered manifest for these properties.
 has 'name: copilot-secrets' || fail "repo-clone does not mount copilot-secrets"
 has 'mountPath: /home/criteria/secrets' || fail "repo-clone does not mount secrets at /home/criteria/secrets"
 lacks 'name: shell-secrets' || fail "repo-clone still mounts shell-secrets"

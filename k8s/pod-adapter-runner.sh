@@ -59,6 +59,7 @@ printf '%s' "$token" > "$run_dir/token"
 # Resolve the pinned adapter digests from the workflow lockfile using the same
 # awk the local container entrypoint uses.
 lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
+
 adapter_digest() {
     kind="$1"
     digest=$(awk -v k="criteria-adapter-${kind}" '
@@ -71,8 +72,46 @@ adapter_digest() {
     fi
     printf '%s' "$digest"
 }
-printf 'sha256:%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
-printf 'sha256:%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
+
+# Emit "<instance> sha256:<digest>" for every adapter entry in the lockfile.
+# Entries are declared as `adapter "<kind>" "<instance>"`; instance keying is
+# required because a lockfile may pin several instances of one kind to
+# different versions.
+adapter_entry_digests() {
+    awk '
+        /^[[:space:]]*adapter[[:space:]]+"/ && !in_entry {
+            decl = $0
+            sub(/^[[:space:]]*adapter[[:space:]]+"/, "", decl)
+            split(decl, q, "\"")
+            if (q[1] == "" || q[3] == "") { next }
+            in_entry = 1
+            entry_instance = q[3]
+            next
+        }
+        in_entry && /^[[:space:]]*}/ { in_entry = 0; next }
+        in_entry && /resolved_digest/ {
+            digest = $0
+            gsub(/[ "]/, "", digest)
+            sub(/^resolved_digest=sha256:/, "", digest)
+            if (digest != "") { print entry_instance, digest }
+            in_entry = 0
+            next
+        }
+    ' "$lockfile"
+}
+
+# Publish the digests keyed by kind, so the run-duration adapter Jobs
+# (ADAPTER_KIND=shell/copilot) keep finding their pinned image digest...
+for kind in shell copilot; do
+    printf 'sha256:%s' "$(adapter_digest "$kind")" > "$run_dir/digest-$kind"
+done
+
+# ...and keyed by adapter instance name, so per-scope pods provisioned for a
+# workflow adapter node (e.g. instance "intake") find their own pinned digest
+# instead of polling forever for a file that never appears (CRI-140).
+adapter_entry_digests | while read -r entry_instance entry_digest; do
+    printf 'sha256:%s' "$entry_digest" > "$run_dir/digest-$entry_instance"
+done
 
 # Publish the runner dial address. The Kubernetes runtime widens the shim to
 # 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
