@@ -27,10 +27,17 @@ type stubServer struct {
 	criteriav1connect.ServerServiceHandler
 
 	mu     sync.Mutex
+	agents []*v1.Agent
 	runs   []*v1.Run
 	events map[string][]*v1.Envelope
 	// observed list-run-event requests, for cursor assertions.
 	eventReqs []*v1.ListRunEventsRequest
+}
+
+func (s *stubServer) ListAgents(ctx context.Context, req *connect.Request[v1.ListAgentsRequest]) (*connect.Response[v1.ListAgentsResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return connect.NewResponse(&v1.ListAgentsResponse{Agents: s.agents}), nil
 }
 
 func (s *stubServer) ListRuns(ctx context.Context, req *connect.Request[v1.ListRunsRequest]) (*connect.Response[v1.ListRunsResponse], error) {
@@ -113,18 +120,20 @@ func releaseEnvelope(runID string, seq uint64, scopeID, adapter string) *v1.Enve
 func TestObserveDisabled(t *testing.T) {
 	c := New(Config{}, nil)
 	require.True(t, c.Disabled())
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	assert.Equal(t, &Observation{}, obs)
 }
 
-// Discovery path: no known run id -> paged ListRuns by ticket, then drain of
-// that run's event history.
-func TestObserveDiscoversRunByTicketAndDrains(t *testing.T) {
+// Discovery path: no known run id -> agent lookup by runner job (the engine
+// registers an agent named after the runner pod's hostname) -> run lookup by
+// criteria id -> drain of that run's event history. The run carries only
+// fields the engine writes (no ticket).
+func TestObserveDiscoversRunByRunnerAgentAndDrains(t *testing.T) {
 	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12", Status: "online"}},
 		runs: []*v1.Run{{
-			RunId: "run-1", Ticket: "CRI-42", Status: "running",
-			RepoUrl: "https://github.com/brokenbots/workflow-example.git",
+			RunId: "run-1", CriteriaId: "crit-42", WorkflowName: "linear_intake_v1", Status: "running",
 		}},
 		events: map[string][]*v1.Envelope{
 			"run-1": {
@@ -137,7 +146,7 @@ func TestObserveDiscoversRunByTicketAndDrains(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	assert.Equal(t, "run-1", obs.RunID)
 	require.Len(t, obs.Lifecycle, 2)
@@ -152,7 +161,8 @@ func TestObserveDiscoversRunByTicketAndDrains(t *testing.T) {
 // the cursor; the resolved release adapter is remembered across calls.
 func TestObserveIncrementalCursorAndPersistentScopes(t *testing.T) {
 	server := &stubServer{
-		runs: []*v1.Run{{RunId: "run-1", Ticket: "CRI-42", Status: "running"}},
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "running"}},
 		events: map[string][]*v1.Envelope{
 			"run-1": {provisionEnvelope("run-1", 1, "scope-a", "default")},
 		},
@@ -161,7 +171,7 @@ func TestObserveIncrementalCursorAndPersistentScopes(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	require.Len(t, obs.Lifecycle, 1)
 
@@ -173,7 +183,7 @@ func TestObserveIncrementalCursorAndPersistentScopes(t *testing.T) {
 		provisionEnvelope("run-1", 3, "scope-b", "default"))
 	server.mu.Unlock()
 
-	obs, err = c.Observe(context.Background(), "CRI-42", obs.RunID)
+	obs, err = c.Observe(context.Background(), "cri-42", obs.RunID)
 	require.NoError(t, err)
 	assert.Equal(t, "run-1", obs.RunID)
 	require.Len(t, obs.Lifecycle, 3, "the observation carries the full accumulated history")
@@ -193,8 +203,9 @@ func TestObserveIncrementalCursorAndPersistentScopes(t *testing.T) {
 // record's pr_url.
 func TestObserveTerminalFromEnvelopeAndRunRecord(t *testing.T) {
 	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
 		runs: []*v1.Run{{
-			RunId: "run-1", Ticket: "CRI-42", Status: "succeeded", FinalState: "done",
+			RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded", FinalState: "done",
 			PrUrl: "https://github.com/brokenbots/workflow-example/pull/42",
 		}},
 		events: map[string][]*v1.Envelope{
@@ -208,7 +219,7 @@ func TestObserveTerminalFromEnvelopeAndRunRecord(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)
@@ -222,8 +233,9 @@ func TestObserveTerminalFromEnvelopeAndRunRecord(t *testing.T) {
 // GetRun so the operator does not wait forever.
 func TestObserveTerminalFallbackFromRunRecord(t *testing.T) {
 	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
 		runs: []*v1.Run{{
-			RunId: "run-1", Ticket: "CRI-42", Status: "failed", FinalState: "failed",
+			RunId: "run-1", CriteriaId: "crit-42", Status: "failed", FinalState: "failed",
 			FailureReason: "workflow step crashed",
 		}},
 		events: map[string][]*v1.Envelope{
@@ -234,7 +246,7 @@ func TestObserveTerminalFallbackFromRunRecord(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "run-1")
+	obs, err := c.Observe(context.Background(), "cri-42", "run-1")
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.False(t, obs.Terminal.Success)
@@ -242,59 +254,134 @@ func TestObserveTerminalFallbackFromRunRecord(t *testing.T) {
 	assert.Equal(t, "failed", obs.Terminal.FinalState)
 }
 
-// No run for the ticket yet is "unknown", not an authoritative empty
-// history: it must surface as an error so the caller aborts the pass
-// instead of converging desired state (which would delete live adapter
-// pods). The same applies to an empty ticket.
-func TestObserveNoRunForTicketIsAnError(t *testing.T) {
+// A run that is not registered yet is "unknown", not an authoritative empty
+// history: it must surface as an error so the caller aborts the pass instead
+// of converging desired state (which would delete live adapter pods). The
+// same applies to an empty runner job name, and to an agent whose run has
+// not appeared yet.
+func TestObserveRunNotYetKnownIsAnError(t *testing.T) {
 	server := &stubServer{}
 	srv := newTestServer(t, server)
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	_, err := c.Observe(context.Background(), "CRI-42", "")
+	_, err := c.Observe(context.Background(), "cri-42", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no castle run registered for ticket CRI-42")
+	assert.Contains(t, err.Error(), "no castle agent registered for runner job cri-42")
 
 	_, err = c.Observe(context.Background(), "", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires a ticket")
-}
+	assert.Contains(t, err.Error(), "requires a runner job name")
 
-// Discovery that exhausts its page budget with more pages remaining is
-// inconclusive and must not be reported as an empty observation.
-func TestObserveDiscoveryPageCapIsAnError(t *testing.T) {
-	pages := &stubPagedRuns{totalPages: maxDiscoveryPages + 2}
-	srv := newTestServer(t, pages)
-	defer srv.Close()
-
-	c := New(Config{Addr: srv.URL}, nil)
-	_, err := c.Observe(context.Background(), "CRI-42", "")
+	// The runner registered, but the run has not been created yet.
+	server.mu.Lock()
+	server.agents = []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}}
+	server.mu.Unlock()
+	_, err = c.Observe(context.Background(), "cri-42", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "did not conclude within")
+	assert.Contains(t, err.Error(), "no castle run for criteria crit-42")
 }
 
-// Discovery prefers the newest non-terminal run for the ticket and falls
-// back to the newest terminal one (a retried ticket's earlier failed run).
-func TestObserveDiscoveryPrefersNewestNonTerminalRun(t *testing.T) {
+// More than one agent matching the runner job with distinct criteria ids is
+// ambiguous: the operator must not guess which run is the CR's.
+func TestObserveAmbiguousAgentsIsAnError(t *testing.T) {
 	server := &stubServer{
-		runs: []*v1.Run{
-			{RunId: "run-old", Ticket: "CRI-42", Status: "failed", CreatedAt: timestamppb.New(time.Unix(1, 0))},
-			{RunId: "run-new", Ticket: "CRI-42", Status: "running", CreatedAt: timestamppb.New(time.Unix(2, 0))},
+		agents: []*v1.Agent{
+			{CriteriaId: "crit-42", Name: "cri-42-abc12"},
+			{CriteriaId: "crit-43", Name: "cri-42-def34"},
 		},
 	}
 	srv := newTestServer(t, server)
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	_, err := c.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous castle agents for runner job cri-42")
+}
+
+// Discovery that exhausts its page budget with more pages remaining is
+// inconclusive and must not be reported as an empty observation — for both
+// the agent walk and the run walk.
+func TestObserveDiscoveryPageCapIsAnError(t *testing.T) {
+	agentPages := &stubPagedAgents{totalPages: maxDiscoveryPages + 2}
+	srv := newTestServer(t, agentPages)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	_, err := c.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent discovery for runner job cri-42 did not conclude within")
+
+	runPages := &stubPagedRuns{totalPages: maxDiscoveryPages + 2}
+	srv2 := newTestServer(t, runPages)
+	defer srv2.Close()
+
+	c2 := New(Config{Addr: srv2.URL}, nil)
+	_, err = c2.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "run discovery for criteria crit-27 did not conclude within")
+}
+
+// Discovery prefers the newest non-terminal run for the criteria and falls
+// back to the newest terminal one (a retried run's earlier failure).
+func TestObserveDiscoveryPrefersNewestNonTerminalRun(t *testing.T) {
+	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
+		runs: []*v1.Run{
+			{RunId: "run-old", CriteriaId: "crit-42", Status: "failed", CreatedAt: timestamppb.New(time.Unix(1, 0))},
+			{RunId: "run-new", CriteriaId: "crit-42", Status: "running", CreatedAt: timestamppb.New(time.Unix(2, 0))},
+		},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	assert.Equal(t, "run-new", obs.RunID)
 }
 
+// A fresh run becomes discoverable and reaches a terminal phase purely from
+// castle: the first observation sees the active run, then the engine finishes
+// it and the next observation stamps the terminal state.
+func TestObserveFreshRunReachesTerminalFromCastle(t *testing.T) {
+	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "running"}},
+		events: map[string][]*v1.Envelope{
+			"run-1": {provisionEnvelope("run-1", 1, "scope-a", "default")},
+		},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	obs, err := c.Observe(context.Background(), "cri-42", "")
+	require.NoError(t, err)
+	assert.Equal(t, "run-1", obs.RunID)
+	assert.Nil(t, obs.Terminal)
+
+	server.mu.Lock()
+	server.runs[0].Status = "succeeded"
+	server.runs[0].FinalState = "done"
+	server.events["run-1"] = append(server.events["run-1"],
+		&v1.Envelope{RunId: "run-1", Seq: 2, Payload: &v1.Envelope_RunCompleted{RunCompleted: &v1.RunCompleted{Success: true, FinalState: "done"}}})
+	server.mu.Unlock()
+
+	obs, err = c.Observe(context.Background(), "cri-42", obs.RunID)
+	require.NoError(t, err)
+	require.NotNil(t, obs.Terminal)
+	assert.True(t, obs.Terminal.Success)
+	assert.Equal(t, "done", obs.Terminal.TicketState)
+}
+
 // The client authenticates with the shared token on every call.
 func TestObserveSendsTokenHeader(t *testing.T) {
-	server := &stubServer{runs: []*v1.Run{{RunId: "run-1", Ticket: "CRI-42", Status: "running"}}}
+	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "running"}},
+	}
 
 	tokenSeen := make(chan string, 10)
 	path, inner := criteriav1connect.NewServerServiceHandler(server)
@@ -307,7 +394,7 @@ func TestObserveSendsTokenHeader(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL, Token: "sekrit-token"}, nil)
-	_, err := c.Observe(context.Background(), "CRI-42", "")
+	_, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	assert.Equal(t, "sekrit-token", <-tokenSeen)
 }
@@ -321,16 +408,22 @@ func TestObserveServerErrorIsSurfaced(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	_, err := c.Observe(context.Background(), "CRI-42", "")
+	_, err := c.Observe(context.Background(), "cri-42", "")
 	require.Error(t, err)
 }
 
 // stubPagedRuns serves totalPages pages of one run each, chaining
-// NextPageToken, to exercise the discovery page budget.
+// NextPageToken, to exercise the run discovery page budget.
 type stubPagedRuns struct {
 	criteriav1connect.ServerServiceHandler
 
 	totalPages int
+}
+
+func (s *stubPagedRuns) ListAgents(ctx context.Context, req *connect.Request[v1.ListAgentsRequest]) (*connect.Response[v1.ListAgentsResponse], error) {
+	return connect.NewResponse(&v1.ListAgentsResponse{
+		Agents: []*v1.Agent{{CriteriaId: "crit-27", Name: "cri-42-abc12"}},
+	}), nil
 }
 
 func (s *stubPagedRuns) ListRuns(ctx context.Context, req *connect.Request[v1.ListRunsRequest]) (*connect.Response[v1.ListRunsResponse], error) {
@@ -342,7 +435,29 @@ func (s *stubPagedRuns) ListRuns(ctx context.Context, req *connect.Request[v1.Li
 		return connect.NewResponse(&v1.ListRunsResponse{}), nil
 	}
 	return connect.NewResponse(&v1.ListRunsResponse{
-		Runs:          []*v1.Run{{RunId: fmt.Sprintf("run-%d", page), Ticket: "CRI-27", Status: "running"}},
+		Runs:          []*v1.Run{{RunId: fmt.Sprintf("run-%d", page), CriteriaId: "crit-27", Status: "running"}},
+		NextPageToken: fmt.Sprintf("%d", page+1),
+	}), nil
+}
+
+// stubPagedAgents serves totalPages pages of one agent each, chaining
+// NextPageToken, to exercise the agent discovery page budget.
+type stubPagedAgents struct {
+	criteriav1connect.ServerServiceHandler
+
+	totalPages int
+}
+
+func (s *stubPagedAgents) ListAgents(ctx context.Context, req *connect.Request[v1.ListAgentsRequest]) (*connect.Response[v1.ListAgentsResponse], error) {
+	page := 0
+	if req.Msg.PageToken != "" {
+		fmt.Sscanf(req.Msg.PageToken, "%d", &page)
+	}
+	if page >= s.totalPages {
+		return connect.NewResponse(&v1.ListAgentsResponse{}), nil
+	}
+	return connect.NewResponse(&v1.ListAgentsResponse{
+		Agents:        []*v1.Agent{{CriteriaId: "crit-27", Name: "other-agent"}},
 		NextPageToken: fmt.Sprintf("%d", page+1),
 	}), nil
 }
@@ -352,8 +467,9 @@ func (s *stubPagedRuns) ListRuns(ctx context.Context, req *connect.Request[v1.Li
 // observation of the terminal run still reconstructs the same result.
 func TestObserveEvictsTerminalRunState(t *testing.T) {
 	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
 		runs: []*v1.Run{{
-			RunId: "run-1", Ticket: "CRI-42", Status: "succeeded", FinalState: "done",
+			RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded", FinalState: "done",
 			PrUrl: "https://github.com/brokenbots/workflow-example/pull/7",
 		}},
 		events: map[string][]*v1.Envelope{
@@ -367,7 +483,7 @@ func TestObserveEvictsTerminalRunState(t *testing.T) {
 	defer srv.Close()
 
 	c := New(Config{Addr: srv.URL}, nil)
-	obs, err := c.Observe(context.Background(), "CRI-42", "")
+	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.Equal(t, "7", obs.Terminal.PRNumber)
@@ -380,7 +496,7 @@ func TestObserveEvictsTerminalRunState(t *testing.T) {
 
 	// A later observation of the same terminal run re-drains from scratch and
 	// reconstructs the same terminal result.
-	obs, err = c.Observe(context.Background(), "CRI-42", obs.RunID)
+	obs, err = c.Observe(context.Background(), "cri-42", obs.RunID)
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)

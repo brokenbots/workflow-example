@@ -28,7 +28,7 @@ const (
 	// maxEventPages bounds a single Observe drain so a pathological backlog
 	// cannot pin a reconcile pass.
 	maxEventPages = 50
-	// maxDiscoveryPages bounds ticket-based run discovery.
+	// maxDiscoveryPages bounds agent and run discovery paging.
 	maxDiscoveryPages = 10
 
 	// runStatusSucceeded is castle's terminal success status.
@@ -77,10 +77,10 @@ type Observation struct {
 // RunSource is the controller-facing observation surface. *Client implements
 // it; tests provide fakes.
 type RunSource interface {
-	// Observe drains castle for the run backing ticket. knownRunID
-	// short-circuits run discovery once the controller has persisted the
-	// castle run id.
-	Observe(ctx context.Context, ticket, knownRunID string) (*Observation, error)
+	// Observe drains castle for the run backing the given runner job.
+	// knownRunID short-circuits run discovery once the controller has
+	// persisted the castle run id.
+	Observe(ctx context.Context, runnerJob, knownRunID string) (*Observation, error)
 
 	// Disabled reports whether castle observation is configured off.
 	Disabled() bool
@@ -123,34 +123,28 @@ func (c *Client) Disabled() bool {
 	return c == nil || c.addr == ""
 }
 
-// Observe drains castle events for the run backing the given ticket and
+// Observe drains castle events for the run backing the given runner job and
 // returns the accumulated observation. It distinguishes "unavailable or not
 // yet known" (error) from an authoritative observation: a castle outage, a
-// ticket with no registered run yet, an empty ticket, or discovery that
-// cannot conclude within the page budget all return an error so the caller
-// aborts the reconcile pass instead of converging desired state against an
-// empty history (which would delete live adapter pods). The caller retries
-// on the next reconcile interval.
-func (c *Client) Observe(ctx context.Context, ticket, knownRunID string) (*Observation, error) {
+// runner whose agent/run is not registered yet, an empty runner job name, or
+// discovery that cannot conclude within the page budget all return an error
+// so the caller aborts the reconcile pass instead of converging desired
+// state against an empty history (which would delete live adapter pods).
+// The caller retries on the next reconcile interval.
+func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Observation, error) {
 	obs := &Observation{}
 	if c.Disabled() {
 		return obs, nil
 	}
-	if ticket == "" {
-		return nil, fmt.Errorf("castle observation requires a ticket: run discovery is ticket-keyed")
+	if runnerJob == "" {
+		return nil, fmt.Errorf("castle observation requires a runner job name: run discovery matches the agent the runner pod registers")
 	}
 
 	runID := knownRunID
 	if runID == "" {
-		discovered, err := c.findRunByTicket(ctx, ticket)
+		discovered, err := c.findRunByRunner(ctx, runnerJob)
 		if err != nil {
-			return nil, fmt.Errorf("discovering castle run for ticket %s: %w", ticket, err)
-		}
-		if discovered == nil {
-			// The engine registers runs at CreateRun, so a missing run means
-			// it has not started (or castle lost it). Either way the operator
-			// must not treat this as an authoritative empty history.
-			return nil, fmt.Errorf("no castle run registered for ticket %s yet", ticket)
+			return nil, fmt.Errorf("discovering castle run for runner job %s: %w", runnerJob, err)
 		}
 		runID = discovered.GetRunId()
 	}
@@ -209,17 +203,81 @@ func (c *Client) evictRun(runID string) {
 	delete(c.terminals, runID)
 }
 
-// findRunByTicket resolves the castle run backing a ticket via paged
-// ListRuns (which has no ticket filter). Non-terminal runs are preferred;
-// when every run for the ticket is terminal, the newest one is returned so
-// the controller can still stamp completion. Discovery that exhausts the
-// page budget with more pages remaining is inconclusive and surfaces as an
+// findRunByRunner resolves the castle run backing the given runner job.
+// The engine inside the runner pod registers a castle agent whose name is
+// the pod's hostname (pod name = "<job-name>-<suffix>") and whose criteria
+// id pins the workflow it executes; the run created for that criteria id is
+// the operator's run. Discovery keys only off fields the engine actually
+// writes (Agent.Name, Agent.CriteriaId, Run.CriteriaId): the Run.ticket
+// column is documented for k8s-native publishers but no merged engine or
+// castle build populates it (CRI-131's publisher was never merged).
+func (c *Client) findRunByRunner(ctx context.Context, runnerJob string) (*v1.Run, error) {
+	criteriaID, err := c.findCriteriaID(ctx, runnerJob)
+	if err != nil {
+		return nil, err
+	}
+	run, err := c.findRunForCriteria(ctx, criteriaID)
+	if err != nil {
+		return nil, fmt.Errorf("criteria %s (agent for runner job %s): %w", criteriaID, runnerJob, err)
+	}
+	return run, nil
+}
+
+// findCriteriaID resolves the criteria id of the agent the runner job's pod
+// registered. Agent names are pod hostnames, matched on the runner job name
+// with or without the pod-name suffix; more than one distinct criteria id
+// among the matches is ambiguous and surfaces as an error rather than a
+// guess. Non-conclusion within the page budget is an error too.
+func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, error) {
+	prefix := runnerJob + "-"
+	ids := map[string]struct{}{}
+	pageToken := ""
+	for page := 0; page < maxDiscoveryPages; page++ {
+		resp, err := c.runs.ListAgents(ctx, connect.NewRequest(&v1.ListAgentsRequest{
+			Limit:     defaultPageSize,
+			PageToken: pageToken,
+		}))
+		if err != nil {
+			return "", err
+		}
+		for _, agent := range resp.Msg.GetAgents() {
+			name := agent.GetName()
+			if name != runnerJob && !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			if id := agent.GetCriteriaId(); id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		pageToken = resp.Msg.GetNextPageToken()
+		if pageToken == "" {
+			switch len(ids) {
+			case 1:
+				for id := range ids {
+					return id, nil
+				}
+			case 0:
+				// The engine registers the agent when the runner starts, so a
+				// missing agent means it has not started (or castle lost it).
+				// Either way the operator must not treat this as an
+				// authoritative empty history.
+				return "", fmt.Errorf("no castle agent registered for runner job %s yet", runnerJob)
+			default:
+				return "", fmt.Errorf("ambiguous castle agents for runner job %s: %d distinct criteria ids", runnerJob, len(ids))
+			}
+		}
+	}
+	return "", fmt.Errorf("agent discovery for runner job %s did not conclude within %d pages (more pages remain)", runnerJob, maxDiscoveryPages)
+}
+
+// findRunForCriteria resolves the run for a criteria id via paged ListRuns
+// (which has no criteria filter). Non-terminal runs are preferred; when
+// every run for the criteria is terminal, the newest one is returned so the
+// controller can still stamp completion. Discovery that exhausts the page
+// budget with more pages remaining is inconclusive and surfaces as an
 // error: silently reporting "no run" would make the controller converge
 // against an empty history.
-func (c *Client) findRunByTicket(ctx context.Context, ticket string) (*v1.Run, error) {
-	if ticket == "" {
-		return nil, nil
-	}
+func (c *Client) findRunForCriteria(ctx context.Context, criteriaID string) (*v1.Run, error) {
 	var newestActive, newestTerminal *v1.Run
 	pageToken := ""
 	for page := 0; page < maxDiscoveryPages; page++ {
@@ -231,7 +289,7 @@ func (c *Client) findRunByTicket(ctx context.Context, ticket string) (*v1.Run, e
 			return nil, err
 		}
 		for _, run := range resp.Msg.GetRuns() {
-			if run.GetTicket() != ticket {
+			if run.GetCriteriaId() != criteriaID {
 				continue
 			}
 			if isTerminalRunStatus(run.GetStatus()) {
@@ -245,10 +303,13 @@ func (c *Client) findRunByTicket(ctx context.Context, ticket string) (*v1.Run, e
 			if newestActive != nil {
 				return newestActive, nil
 			}
-			return newestTerminal, nil
+			if newestTerminal != nil {
+				return newestTerminal, nil
+			}
+			return nil, fmt.Errorf("no castle run for criteria %s yet", criteriaID)
 		}
 	}
-	return nil, fmt.Errorf("run discovery for ticket %s did not conclude within %d pages (more pages remain); refusing to report an empty observation", ticket, maxDiscoveryPages)
+	return nil, fmt.Errorf("run discovery for criteria %s did not conclude within %d pages (more pages remain); refusing to report an empty observation", criteriaID, maxDiscoveryPages)
 }
 
 // drain incrementally fetches run events from the last consumed sequence and

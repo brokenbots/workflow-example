@@ -61,15 +61,15 @@ var capturedReleaseEvent = events.LifecycleEvent{
 
 // stubCastle is a castle.RunSource stub returning a fixed observation.
 type stubCastle struct {
-	observation *castle.Observation
-	calls       int
-	lastTicket  string
-	lastKnownID string
+	observation   *castle.Observation
+	calls         int
+	lastRunnerJob string
+	lastKnownID   string
 }
 
-func (s *stubCastle) Observe(ctx context.Context, ticket, knownRunID string) (*castle.Observation, error) {
+func (s *stubCastle) Observe(ctx context.Context, runnerJob, knownRunID string) (*castle.Observation, error) {
 	s.calls++
-	s.lastTicket = ticket
+	s.lastRunnerJob = runnerJob
 	s.lastKnownID = knownRunID
 	if s.observation == nil {
 		return &castle.Observation{}, nil
@@ -236,5 +236,5 @@ func TestReconcilePerScopeRequeuesOnIntervalWithCastleRunID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, castleStub.calls)
 	assert.Equal(t, "castle-run-9", castleStub.lastKnownID, "persisted run id must short-circuit discovery")
-	assert.Equal(t, "CRI-132", castleStub.lastTicket)
+	assert.Equal(t, "cri-132", castleStub.lastRunnerJob)
 }

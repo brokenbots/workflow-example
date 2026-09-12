@@ -176,7 +176,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 func (w *watcher) hasActiveRun(ctx context.Context, ticketID string) (bool, error) {
 	list := &criteriav1.CriteriaRunList{}
 	req := client.ListOptions{
-		Namespace: w.namespace,
+		Namespace:     w.namespace,
 		LabelSelector: mustSelector(map[string]string{"ticket": strings.ToLower(ticketID)}),
 	}
 	if err := w.client.List(ctx, list, &req); err != nil {
@@ -199,7 +199,7 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string) *criteria
 			Name:      name,
 			Namespace: w.namespace,
 			Labels: map[string]string{
-				"ticket":                       strings.ToLower(ticket),
+				"ticket":                         strings.ToLower(ticket),
 				"app.kubernetes.io/managed-by":   "criteria-linear-watcher",
 				"criteria.brokenbots.dev/source": "linear",
 			},

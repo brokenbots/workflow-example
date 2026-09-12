@@ -103,9 +103,9 @@ func TestExtractRepoURLRepro(t *testing.T) {
 	defaultRepoURL := "brokenbots/default-fallback"
 
 	cases := []struct {
-		name         string
-		issue        linear.Issue
-		wantRepoURL  string
+		name        string
+		issue       linear.Issue
+		wantRepoURL string
 	}{
 		{
 			name:        "config path false positive",

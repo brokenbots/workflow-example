@@ -123,7 +123,7 @@ func AdapterJobName(run *criteriav1.CriteriaRun, kind string) string {
 func baseLabels(run *criteriav1.CriteriaRun) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "criteria-run",
-		"app.kubernetes.io/managed-by":   "criteria-k8s",
+		"app.kubernetes.io/managed-by": "criteria-k8s",
 		"criteria.brokenbots.dev/run":  run.Name,
 		"ticket":                       safeLabelValue(run.Spec.TicketID),
 	}
@@ -452,7 +452,7 @@ func scriptsVolume() corev1.Volume {
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "pod-adapter-scripts"},
-				DefaultMode:            int32Ptr(0755),
+				DefaultMode:          int32Ptr(0755),
 			},
 		},
 	}
@@ -467,10 +467,10 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func boolPtr(b bool) *bool          { return &b }
-func intPtr(i int32) *int32         { return &i }
-func int32Ptr(i int32) *int32       { return &i }
-func int64Ptr(i int64) *int64       { return &i }
+func boolPtr(b bool) *bool    { return &b }
+func intPtr(i int32) *int32   { return &i }
+func int32Ptr(i int32) *int32 { return &i }
+func int64Ptr(i int64) *int64 { return &i }
 func resourceQuantity(q string) resource.Quantity {
 	return resource.MustParse(q)
 }

@@ -15,9 +15,9 @@ import (
 
 // Client calls the Linear GraphQL API.
 type Client struct {
-	BaseURL   string
-	APIKey    string
-	HTTP      *http.Client
+	BaseURL string
+	APIKey  string
+	HTTP    *http.Client
 }
 
 // Issue represents a Linear issue relevant to the watcher.
@@ -57,8 +57,8 @@ type graphqlRequest struct {
 
 // graphqlResponse is a minimal response envelope.
 type graphqlResponse struct {
-	Data   json.RawMessage   `json:"data"`
-	Errors []graphqlError    `json:"errors"`
+	Data   json.RawMessage `json:"data"`
+	Errors []graphqlError  `json:"errors"`
 }
 
 type graphqlError struct {
@@ -119,7 +119,7 @@ type project struct {
 // FindProjectID returns the project ID for the given project name.
 func (c *Client) FindProjectID(ctx context.Context, name string) (string, error) {
 	req := graphqlRequest{
-		Query: `query($name: String!) { projects(filter: {name: {eq: $name}}) { nodes { id name } } }`,
+		Query:     `query($name: String!) { projects(filter: {name: {eq: $name}}) { nodes { id name } } }`,
 		Variables: map[string]interface{}{"name": name},
 	}
 	var result struct {

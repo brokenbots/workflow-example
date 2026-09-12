@@ -9,11 +9,11 @@ import (
 type CriteriaRunPhase string
 
 const (
-	PhasePending    CriteriaRunPhase = "Pending"
-	PhaseRunning    CriteriaRunPhase = "Running"
-	PhaseSucceeded  CriteriaRunPhase = "Succeeded"
-	PhaseFailed     CriteriaRunPhase = "Failed"
-	PhaseUnknown    CriteriaRunPhase = "Unknown"
+	PhasePending   CriteriaRunPhase = "Pending"
+	PhaseRunning   CriteriaRunPhase = "Running"
+	PhaseSucceeded CriteriaRunPhase = "Succeeded"
+	PhaseFailed    CriteriaRunPhase = "Failed"
+	PhaseUnknown   CriteriaRunPhase = "Unknown"
 )
 
 // CriteriaRunSpec defines the desired state of a CriteriaRun.

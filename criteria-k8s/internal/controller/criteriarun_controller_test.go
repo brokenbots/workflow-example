@@ -143,7 +143,7 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 	assert.Equal(t, "42", updated.Status.PRNumber)
 	assert.Equal(t, "Done", updated.Status.TicketState)
 	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID)
-	assert.Equal(t, "CRI-42", castleStub.lastTicket, "observation is keyed on the run's ticket")
+	assert.Equal(t, "cri-42", castleStub.lastRunnerJob, "observation is keyed on the runner job name")
 }
 
 // Without any castle terminal (or observation disabled), the runner Job's
@@ -765,16 +765,16 @@ func TestQueueFairnessFIFO(t *testing.T) {
 }
 
 type fakeCastle struct {
-	observation *castle.Observation
-	err         error
-	calls       int
-	lastTicket  string
-	lastKnownID string
+	observation   *castle.Observation
+	err           error
+	calls         int
+	lastRunnerJob string
+	lastKnownID   string
 }
 
-func (f *fakeCastle) Observe(ctx context.Context, ticket, knownRunID string) (*castle.Observation, error) {
+func (f *fakeCastle) Observe(ctx context.Context, runnerJob, knownRunID string) (*castle.Observation, error) {
 	f.calls++
-	f.lastTicket = ticket
+	f.lastRunnerJob = runnerJob
 	f.lastKnownID = knownRunID
 	if f.err != nil {
 		return nil, f.err

@@ -38,9 +38,9 @@ type CriteriaRunReconciler struct {
 	// Castle observes run lifecycle from the castle control plane (CRI-133
 	// API). Nil or disabled means observation is off; the reconciler then
 	// relies purely on Job conditions for phase stamping.
-	Castle    castle.RunSource
-	Defaults  jobbuilder.Defaults
-	Queue     *RunQueue
+	Castle   castle.RunSource
+	Defaults jobbuilder.Defaults
+	Queue    *RunQueue
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -243,7 +243,10 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 		return &castle.Observation{}, nil
 	}
 
-	obs, err := r.Castle.Observe(ctx, run.Spec.TicketID, run.Status.CastleRunID)
+	// The runner job name is the agent-name key: the engine registers a
+	// castle agent named after the runner pod's hostname, which carries the
+	// job name as its prefix.
+	obs, err := r.Castle.Observe(ctx, jobbuilder.JobName(run), run.Status.CastleRunID)
 	if err != nil {
 		logger.Error(err, "observing run lifecycle from castle")
 		return nil, err
@@ -328,4 +331,3 @@ func statusEqual(a, b *criteriav1.CriteriaRunStatus) bool {
 	}
 	return reflect.DeepEqual(a, b)
 }
-
