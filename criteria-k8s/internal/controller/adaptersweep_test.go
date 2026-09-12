@@ -3,9 +3,12 @@ package controller
 // Regression tests for CRI-144: the adapter sweep must reap adapter Pods and
 // legacy-path adapter Jobs whose owning CriteriaRun no longer exists —
 // regardless of how the CR was deleted — and must adopt ownerReference-less
-// adapter objects so GC reaps them at CR deletion. Objects that cannot be
-// attributed to a CriteriaRun, adapter objects of a live run, and objects
-// outside the swept namespace are left untouched.
+// adapter objects of live runs so GC reaps them at CR deletion. Deletion is
+// gated on CriteriaRun ownership evidence: only objects carrying a
+// CriteriaRun ownerReference to a gone (or name-recycled) run are deleted.
+// Adapter Jobs and Pods of manually launched runs are labeled but have no
+// CriteriaRun and no ownerReference, so they are left untouched; objects
+// outside the swept namespace are never touched.
 
 import (
 	"context"
@@ -105,7 +108,12 @@ func getSweptPod(t *testing.T, cl client.Client, namespace, name string) (*corev
 	return &pod, nil
 }
 
-func TestAdapterSweeperDeletesOrphanPodByRunLabel(t *testing.T) {
+// A run label alone is attribution, not ownership: manually launched runs
+// (k8s/launch-pod-adapter-job.sh) label their adapter Jobs and Pods
+// criteria.brokenbots.dev/run=<job name> without any CriteriaRun existing
+// for them. A label-only lookup that comes up empty must never trigger a
+// delete — the sweep would otherwise kill live manually launched work.
+func TestAdapterSweeperKeepsLabelOnlyPodOfMissingRun(t *testing.T) {
 	pod := adapterPod("adp-cri-130-0", "default", "cri-130")
 	cl := newSweepClient(t, pod)
 	s := &AdapterSweeper{Client: cl, Scheme: cl.Scheme(), Namespace: "default"}
@@ -113,7 +121,7 @@ func TestAdapterSweeperDeletesOrphanPodByRunLabel(t *testing.T) {
 	s.sweep(context.Background(), logr.Discard())
 
 	_, err := getSweptPod(t, cl, "default", "adp-cri-130-0")
-	require.True(t, apierrors.IsNotFound(err), "orphan adapter pod must be swept")
+	require.NoError(t, err, "adapter pod attributable only by run label must never be swept, even when no CriteriaRun of that name exists")
 }
 
 func TestAdapterSweeperDeletesOrphanPodByOwnerRefOnly(t *testing.T) {
@@ -225,8 +233,11 @@ func TestAdapterSweeperIsNamespaceScoped(t *testing.T) {
 	require.NoError(t, err, "pods outside the swept namespace must never be touched")
 }
 
-func TestAdapterSweeperDeletesOrphanLegacyAdapterJob(t *testing.T) {
-	job := adapterJob("cri-130-adapter", "default", "cri-130")
+// A labeled legacy adapter Job with no ownerReference is never swept — same
+// ownership-evidence rule as pods. Manually launched runs (k8s/launch-pod-adapter-job.sh)
+// label their adapter Jobs without any CriteriaRun existing for them.
+func TestAdapterSweeperKeepsLabelOnlyLegacyAdapterJobOfMissingRun(t *testing.T) {
+	job := adapterJob("pod-adapter-cri-27-adapter", "default", "pod-adapter-cri-27")
 	cl := newSweepClient(t, job)
 	s := &AdapterSweeper{Client: cl, Scheme: cl.Scheme(), Namespace: "default"}
 
@@ -234,7 +245,20 @@ func TestAdapterSweeperDeletesOrphanLegacyAdapterJob(t *testing.T) {
 
 	var jobs batchv1.JobList
 	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
-	assert.Empty(t, jobs.Items, "legacy adapter Job of a deleted run must be swept")
+	require.Len(t, jobs.Items, 1, "legacy adapter Job attributable only by run label must never be swept")
+}
+
+func TestAdapterSweeperDeletesOrphanLegacyAdapterJobByOwnerRef(t *testing.T) {
+	job := adapterJob("cri-130-adapter", "default", "cri-130")
+	withCriteriaRunOwnerRef(job, "cri-130", "uid-130", true)
+	cl := newSweepClient(t, job)
+	s := &AdapterSweeper{Client: cl, Scheme: cl.Scheme(), Namespace: "default"}
+
+	s.sweep(context.Background(), logr.Discard())
+
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	assert.Empty(t, jobs.Items, "legacy adapter Job whose CriteriaRun ownerReference names a gone run must be swept")
 }
 
 func TestAdapterSweeperKeepsLegacyAdapterJobOfLiveRun(t *testing.T) {
@@ -261,6 +285,7 @@ func TestNewAdapterSweeperDefaultsInterval(t *testing.T) {
 
 func TestAdapterSweeperRunSweepsAtStartup(t *testing.T) {
 	pod := adapterPod("adp-cri-130-0", "default", "cri-130")
+	withCriteriaRunOwnerRef(pod, "cri-130", "uid-130", true)
 	cl := newSweepClient(t, pod)
 	s := NewAdapterSweeper(cl, cl.Scheme(), "default", time.Hour)
 

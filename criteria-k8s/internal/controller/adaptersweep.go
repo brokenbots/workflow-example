@@ -27,18 +27,21 @@ import (
 // them. The stale pods keep dialing the old runner's shim forever ("scope
 // ... is not registered" every 2s). The sweep is the safety net that closes
 // both gaps, alongside the finalize and terminal-pass cleanups:
-//   - every adapter pod or adapter Job (legacy path) labeled
-//     criteria.brokenbots.dev/role=adapter whose owning CriteriaRun is gone
-//     is deleted — namespace-scoped to the managed namespace, so pods in
-//     other namespaces are never touched;
+//   - every adapter pod or adapter Job (legacy path) carrying a CriteriaRun
+//     ownerReference whose run is gone is deleted — namespace-scoped to the
+//     managed namespace, so pods in other namespaces are never touched;
 //   - a stale ownerReference UID (a deleted run whose name a new run
 //     recycled) is treated as gone: the pod belonged to the deleted run;
-//   - adapter objects whose run still exists but that carry no
-//     ownerReference at all get one set, so GC reaps them at CR deletion.
+//   - adapter objects of a live run that carry no ownerReference at all get
+//     one set, so GC reaps them at CR deletion.
 //
-// Objects that cannot be attributed to a CriteriaRun (no run label and no
-// CriteriaRun ownerReference) are left untouched and logged: the sweep only
-// ever deletes what it can prove is orphaned.
+// Objects without a CriteriaRun ownerReference are never deleted, even when
+// they carry a run label: the label is attribution, not ownership. Adapter
+// Jobs and Pods of manually launched runs (k8s/launch-pod-adapter-job.sh)
+// are labeled but have no CriteriaRun, so an empty lookup by run name proves
+// nothing about the object being orphaned. They are left untouched and
+// logged: the sweep only ever deletes what it can prove is orphaned via a
+// CriteriaRun ownerReference.
 type AdapterSweeper struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -104,8 +107,11 @@ func (s *AdapterSweeper) sweep(ctx context.Context, logger logr.Logger) {
 	} else {
 		for i := range jobs.Items {
 			job := &jobs.Items[i]
-			if s.sweepObject(ctx, "Job", job, logger) == sweepDeleted {
+			switch s.sweepObject(ctx, "Job", job, logger) {
+			case sweepDeleted:
 				jobsDeleted++
+			case sweepAdopted:
+				adopted++
 			}
 		}
 	}
@@ -121,11 +127,50 @@ const (
 	sweepAdopted
 )
 
-// sweepObject reaps or repairs one adapter Pod or legacy adapter Job. The
-// owning CriteriaRun is resolved from the run label first, then from a
-// CriteriaRun ownerReference.
+// sweepObject reaps or repairs one adapter Pod or legacy adapter Job.
+//
+// Deletion is gated on CriteriaRun ownership evidence: the object must carry
+// a CriteriaRun ownerReference whose run is gone, or whose UID no longer
+// matches the live run of the same name (name recycling). A run label alone
+// is attribution, not ownership — manually launched adapter Jobs and Pods
+// carry the run label but have no CriteriaRun and no ownerReference — so
+// labeled objects without an ownerReference are never deleted here.
 func (s *AdapterSweeper) sweepObject(ctx context.Context, kind string, obj client.Object, logger logr.Logger) sweepOutcome {
-	runName := runNameOf(obj)
+	if ref := criteriaRunOwnerRefOf(obj); ref != nil {
+		return s.sweepOwnedObject(ctx, kind, obj, ref, logger)
+	}
+	return s.adoptByRunLabel(ctx, kind, obj, logger)
+}
+
+// sweepOwnedObject verifies a CriteriaRun ownerReference against the live
+// run: a missing run or a stale UID means the object is an orphan of a
+// deleted run and is reaped.
+func (s *AdapterSweeper) sweepOwnedObject(ctx context.Context, kind string, obj client.Object, ref *metav1.OwnerReference, logger logr.Logger) sweepOutcome {
+	var run criteriav1.CriteriaRun
+	err := s.Client.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: ref.Name}, &run)
+	switch {
+	case apierrors.IsNotFound(err):
+		return s.deleteAdapterObject(ctx, kind, obj, ref.Name, logger, "owning CriteriaRun not found")
+	case err != nil:
+		logger.Error(err, "getting owning CriteriaRun for adapter object", "run", ref.Name, "name", obj.GetName())
+		return sweepKept
+	case ref.UID != "" && ref.UID != run.UID:
+		// The ownerReference belongs to a deleted run whose name the
+		// current one recycled: the object is orphaned even though the
+		// name resolves.
+		return s.deleteAdapterObject(ctx, kind, obj, ref.Name, logger, "ownerReference belongs to a deleted CriteriaRun (name recycled)")
+	}
+	// The ownerReference already points at the live run: nothing to repair.
+	return sweepKept
+}
+
+// adoptByRunLabel handles objects without a CriteriaRun ownerReference. The
+// run label never justifies deletion: when the labeled run does not exist —
+// including manually launched runs that have no CriteriaRun at all — the
+// object is left untouched and logged. When it does, the object is adopted
+// so GC reaps it at CR deletion.
+func (s *AdapterSweeper) adoptByRunLabel(ctx context.Context, kind string, obj client.Object, logger logr.Logger) sweepOutcome {
+	runName := obj.GetLabels()[jobbuilder.LabelRun]
 	if runName == "" {
 		logger.Info("adapter object carries no CriteriaRun attribution; leaving untouched",
 			"kind", kind, "namespace", obj.GetNamespace(), "name", obj.GetName())
@@ -134,37 +179,34 @@ func (s *AdapterSweeper) sweepObject(ctx context.Context, kind string, obj clien
 
 	var run criteriav1.CriteriaRun
 	err := s.Client.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: runName}, &run)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return s.deleteAdapterObject(ctx, kind, obj, runName, logger, "owning CriteriaRun not found")
-		}
-		logger.Error(err, "getting owning CriteriaRun for adapter object", "run", runName, "name", obj.GetName())
+	if apierrors.IsNotFound(err) {
+		logger.Info("adapter object labeled for a CriteriaRun that does not exist; leaving untouched (label alone is not ownership evidence)",
+			"kind", kind, "namespace", obj.GetNamespace(), "name", obj.GetName(), "run", runName)
 		return sweepKept
 	}
-
-	// A CriteriaRun ownerReference whose UID does not match the live run
-	// belongs to a deleted run whose name the current one recycled: the
-	// object is orphaned even though the name resolves.
-	if ref := criteriaRunOwnerRefOf(obj); ref != nil && ref.UID != "" && ref.UID != run.UID {
-		return s.deleteAdapterObject(ctx, kind, obj, runName, logger, "ownerReference belongs to a deleted CriteriaRun (name recycled)")
+	if err != nil {
+		logger.Error(err, "getting labeled CriteriaRun for adapter object", "run", runName, "name", obj.GetName())
+		return sweepKept
 	}
+	return s.adoptObject(ctx, kind, obj, &run, runName, logger)
+}
 
-	// Repair missing ownerReferences so GC reaps the object at CR deletion.
-	// Objects already controlled by something else (e.g. the Job owning its
-	// own pods) are left alone.
-	if criteriaRunOwnerRefOf(obj) == nil && metav1.GetControllerOf(obj) == nil {
-		if err := controllerutil.SetControllerReference(&run, obj, s.Scheme); err != nil {
-			logger.Error(err, "setting CriteriaRun ownerReference on adapter object", "run", runName, "name", obj.GetName())
-			return sweepKept
-		}
-		if err := s.Client.Update(ctx, obj); err != nil {
-			logger.Error(err, "adopting adapter object for its CriteriaRun", "run", runName, "name", obj.GetName())
-			return sweepKept
-		}
-		return sweepAdopted
+// adoptObject repairs a missing CriteriaRun ownerReference so GC reaps the
+// object at CR deletion. Objects already controlled by something else (e.g.
+// the Job owning its own pods) are left alone.
+func (s *AdapterSweeper) adoptObject(ctx context.Context, kind string, obj client.Object, run *criteriav1.CriteriaRun, runName string, logger logr.Logger) sweepOutcome {
+	if metav1.GetControllerOf(obj) != nil {
+		return sweepKept
 	}
-
-	return sweepKept
+	if err := controllerutil.SetControllerReference(run, obj, s.Scheme); err != nil {
+		logger.Error(err, "setting CriteriaRun ownerReference on adapter object", "run", runName, "name", obj.GetName())
+		return sweepKept
+	}
+	if err := s.Client.Update(ctx, obj); err != nil {
+		logger.Error(err, "adopting adapter object for its CriteriaRun", "run", runName, "name", obj.GetName())
+		return sweepKept
+	}
+	return sweepAdopted
 }
 
 func (s *AdapterSweeper) deleteAdapterObject(ctx context.Context, kind string, obj client.Object, runName string, logger logr.Logger, reason string) sweepOutcome {
@@ -180,19 +222,6 @@ func (s *AdapterSweeper) deleteAdapterObject(ctx context.Context, kind string, o
 		return sweepKept
 	}
 	return sweepDeleted
-}
-
-// runNameOf resolves the CriteriaRun name an adapter object belongs to: the
-// run label first (what the reconciler keys on), then a CriteriaRun
-// ownerReference.
-func runNameOf(obj client.Object) string {
-	if name := obj.GetLabels()[jobbuilder.LabelRun]; name != "" {
-		return name
-	}
-	if ref := criteriaRunOwnerRefOf(obj); ref != nil {
-		return ref.Name
-	}
-	return ""
 }
 
 // criteriaRunOwnerRefOf returns the object's ownerReference to a CriteriaRun,
