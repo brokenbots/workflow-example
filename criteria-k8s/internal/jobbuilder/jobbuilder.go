@@ -54,6 +54,11 @@ type Defaults struct {
 	RepoPVC         string
 	Namespace       string
 	ProviderBaseURL string
+	// CastleAddr is the castle orchestrator address handed to runner Jobs.
+	// When set, runners execute criteria in server mode (CRI-134 dual-write:
+	// lifecycle is published to castle and mirrored to events.ndjson). Empty
+	// keeps the runner in local file mode.
+	CastleAddr string
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
@@ -118,7 +123,7 @@ func AdapterJobName(run *criteriav1.CriteriaRun, kind string) string {
 func baseLabels(run *criteriav1.CriteriaRun) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "criteria-run",
-		"app.kubernetes.io/managed-by":   "criteria-k8s",
+		"app.kubernetes.io/managed-by": "criteria-k8s",
 		"criteria.brokenbots.dev/run":  run.Name,
 		"ticket":                       safeLabelValue(run.Spec.TicketID),
 	}
@@ -212,7 +217,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 		repoCloneContainer(image, repoURL, repoDir),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits),
+		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits, defaults.CastleAddr),
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
@@ -302,7 +307,7 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 	}
 }
 
-func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL string, maxVisits int) corev1.Container {
+func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL string, maxVisits int, castleAddr string) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "TICKET_ID", Value: run.Spec.TicketID},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
@@ -335,6 +340,9 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 				},
 			},
 		},
+	}
+	if castleAddr != "" {
+		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: castleAddr})
 	}
 
 	return corev1.Container{
@@ -444,7 +452,7 @@ func scriptsVolume() corev1.Volume {
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "pod-adapter-scripts"},
-				DefaultMode:            int32Ptr(0755),
+				DefaultMode:          int32Ptr(0755),
 			},
 		},
 	}
@@ -459,10 +467,10 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func boolPtr(b bool) *bool          { return &b }
-func intPtr(i int32) *int32         { return &i }
-func int32Ptr(i int32) *int32       { return &i }
-func int64Ptr(i int64) *int64       { return &i }
+func boolPtr(b bool) *bool    { return &b }
+func intPtr(i int32) *int32   { return &i }
+func int32Ptr(i int32) *int32 { return &i }
+func int64Ptr(i int64) *int64 { return &i }
 func resourceQuantity(q string) resource.Quantity {
 	return resource.MustParse(q)
 }

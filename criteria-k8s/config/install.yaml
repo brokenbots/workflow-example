@@ -112,13 +112,32 @@ spec:
                   description: Name of the reconciled child Job.
                 prNumber:
                   type: string
-                  description: Pull request number produced by the run, when known.
+                  description: >-
+                    Pull request number produced by the run, when known.
+                    Informational only: castle supplies no pr_url producer
+                    today, so the castle path leaves this empty in practice,
+                    and the terminal-completion gate does not depend on it.
                 ticketState:
                   type: string
-                  description: Final Linear ticket state read from run events.
+                  description: >-
+                    Final Linear ticket state (CRI-132 semantics). The castle
+                    path leaves it unset: castle carries no Linear
+                    ticket-state source (RunCompleted.final_state is the
+                    engine's workflow terminal state, not the Linear state).
+                    Not part of the terminal-completion gate.
                 eventsPath:
                   type: string
                   description: Absolute path to the run's events file on /data.
+                castleRunId:
+                  type: string
+                  description: Run id in the castle control plane backing this run.
+                castleTerminalObserved:
+                  type: boolean
+                  description: >-
+                    Set when a castle observation delivered the run's
+                    terminal outcome (the run record's terminal status
+                    and/or RunCompleted/RunFailed envelopes). Gates terminal
+                    requeue completion.
                 observedGeneration:
                   type: integer
                   format: int64

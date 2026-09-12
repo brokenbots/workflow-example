@@ -9,11 +9,11 @@ import (
 type CriteriaRunPhase string
 
 const (
-	PhasePending    CriteriaRunPhase = "Pending"
-	PhaseRunning    CriteriaRunPhase = "Running"
-	PhaseSucceeded  CriteriaRunPhase = "Succeeded"
-	PhaseFailed     CriteriaRunPhase = "Failed"
-	PhaseUnknown    CriteriaRunPhase = "Unknown"
+	PhasePending   CriteriaRunPhase = "Pending"
+	PhaseRunning   CriteriaRunPhase = "Running"
+	PhaseSucceeded CriteriaRunPhase = "Succeeded"
+	PhaseFailed    CriteriaRunPhase = "Failed"
+	PhaseUnknown   CriteriaRunPhase = "Unknown"
 )
 
 // CriteriaRunSpec defines the desired state of a CriteriaRun.
@@ -76,14 +76,37 @@ type CriteriaRunStatus struct {
 	// JobName is the name of the reconciled child Job.
 	JobName string `json:"jobName,omitempty"`
 
-	// PRNumber records the pull request number produced by the run, when known.
+	// PRNumber records the pull request number produced by the run, when
+	// known. Informational only: castle supplies no pr_url producer today
+	// (nothing publishes run.metadata), so the castle path leaves this empty
+	// in practice, and the terminal-completion gate does not depend on it.
 	PRNumber string `json:"prNumber,omitempty"`
 
-	// TicketState records the final Linear ticket state read from the run events.
+	// TicketState records the final Linear ticket state (CRI-132 semantics).
+	// The castle path leaves it unset: castle carries no Linear ticket-state
+	// source (the engine's RunCompleted.final_state is the workflow terminal
+	// state name, not the Linear state), so this field is reserved until a
+	// ticket-state producer exists. Not part of the terminal-completion gate.
 	TicketState string `json:"ticketState,omitempty"`
 
-	// EventsPath is the absolute path to the run's events file on the shared /data volume.
+	// EventsPath is the absolute path to the run's events file on the shared
+	// /data volume. Recorded for observability only: the operator no longer
+	// reads the file (the engine dual-writes it during the transition
+	// window).
 	EventsPath string `json:"eventsPath,omitempty"`
+
+	// CastleRunID is the run id in the castle control plane backing this
+	// run, resolved by castle agent/run discovery keyed off the runner
+	// pod's registered agent, and persisted to short-circuit subsequent
+	// observations.
+	CastleRunID string `json:"castleRunId,omitempty"`
+
+	// CastleTerminalObserved records that a castle observation delivered the
+	// run's terminal outcome (the run record's terminal status and/or
+	// RunCompleted/RunFailed envelopes). It is the completion signal for the
+	// terminal requeue: castle does not supply prNumber/ticketState today,
+	// so completion is gated on this marker, not on those fields.
+	CastleTerminalObserved bool `json:"castleTerminalObserved,omitempty"`
 
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

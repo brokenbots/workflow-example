@@ -16,8 +16,11 @@ import (
 // Sweep policy:
 //   - /data/intake/<TICKET> is removed after Retention (default 7d) from the
 //     newest mtime among the directory itself and its well-known artifact
-//     files (events.ndjson, approved-plan.json, review-notes.md).
-//   - /data/triage/<TICKET> follows the same rule.
+//     files (approved-plan.json, review-notes.md). events.ndjson is ignored:
+//     the engine owns that file (CRI-134 dual-write keeps it on the PVC for
+//     debugging), so it no longer reflects operator-visible activity.
+//   - /data/triage/<TICKET> follows the same rule and still considers
+//     events.ndjson.
 //   - Castle's own database files live at /data root and are never touched.
 type RetentionSweeper struct {
 	// DataRoot is the path backing the criteria-data PVC (default /data).
@@ -63,14 +66,17 @@ func (s *RetentionSweeper) sweep(logger logr.Logger) {
 	cutoff := time.Now().Add(-s.Retention)
 	removed, kept := 0, 0
 
-	for _, root := range []string{
-		filepath.Join(s.DataRoot, "intake"),
-		filepath.Join(s.DataRoot, "triage"),
+	for _, target := range []struct {
+		root   string
+		intake bool
+	}{
+		{filepath.Join(s.DataRoot, "intake"), true},
+		{filepath.Join(s.DataRoot, "triage"), false},
 	} {
-		entries, err := os.ReadDir(root)
+		entries, err := os.ReadDir(target.root)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				logger.Error(err, "reading retention root", "root", root)
+				logger.Error(err, "reading retention root", "root", target.root)
 			}
 			continue
 		}
@@ -78,15 +84,19 @@ func (s *RetentionSweeper) sweep(logger logr.Logger) {
 			if !entry.IsDir() {
 				continue
 			}
-			dir := filepath.Join(root, entry.Name())
+			dir := filepath.Join(target.root, entry.Name())
 			info, err := os.Stat(dir)
 			if err != nil {
 				continue
 			}
 			// The directory mtime only updates on direct-child churn; a run
 			// writes deep into its tree, so also consider the newest mtime of
-			// the well-known artifact files.
-			if maxMod(dir, info.ModTime()).After(cutoff) {
+			// the well-known artifact files. events.ndjson is excluded for
+			// intake: the engine owns it during the dual-write transition, so
+			// engine-side writes alone must not keep an operator-expired
+			// directory alive.
+			candidates := artifactFiles(target.intake)
+			if maxMod(dir, info.ModTime(), candidates).After(cutoff) {
 				kept++
 				continue
 			}
@@ -101,17 +111,24 @@ func (s *RetentionSweeper) sweep(logger logr.Logger) {
 	logger.Info("retention sweep complete", "removed", removed, "kept", kept, "retention", s.Retention.String())
 }
 
+// artifactFiles returns the well-known artifact file names whose mtimes keep
+// a ticket directory alive. events.ndjson only counts for triage; for intake
+// the engine owns it (CRI-134 dual-write) and the operator must not extend
+// retention based on engine-side writes.
+func artifactFiles(intake bool) []string {
+	if intake {
+		return []string{"approved-plan.json", "review-notes.md"}
+	}
+	return []string{"events.ndjson", "approved-plan.json", "review-notes.md"}
+}
+
 // maxMod returns the newest mtime among dir itself and a bounded set of
 // well-known artifact files inside it. It avoids a full recursive walk while
 // still respecting active runs that append to files created early in the run.
-func maxMod(dir string, base time.Time) time.Time {
-	candidates := []string{
-		filepath.Join(dir, "events.ndjson"),
-		filepath.Join(dir, "approved-plan.json"),
-		filepath.Join(dir, "review-notes.md"),
-	}
+func maxMod(dir string, base time.Time, candidates []string) time.Time {
 	recent := base
-	for _, c := range candidates {
+	for _, name := range candidates {
+		c := filepath.Join(dir, name)
 		if info, err := os.Stat(c); err == nil && info.ModTime().After(recent) {
 			recent = info.ModTime()
 		}

@@ -7,4 +7,3 @@ import (
 
 // GroupVersion is group version used to register these objects.
 var GroupVersion = schema.GroupVersion{Group: "criteria.brokenbots.dev", Version: "v1"}
-

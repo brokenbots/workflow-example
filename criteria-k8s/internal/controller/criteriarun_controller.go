@@ -2,22 +2,16 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -27,95 +21,24 @@ import (
 	logr "github.com/go-logr/logr"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
-	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 )
 
 const (
-	criteriaRunFinalizer      = "criteriarun.criteria.brokenbots.dev/finalizer"
-	perScopeRequeueInterval   = 10 * time.Second
-	queueRequeueInterval      = 5 * time.Second
+	criteriaRunFinalizer    = "criteriarun.criteria.brokenbots.dev/finalizer"
+	perScopeRequeueInterval = 10 * time.Second
+	queueRequeueInterval    = 5 * time.Second
 )
-
-// EventsReader reads the events ndjson file produced by a completed run.
-type EventsReader interface {
-	// Read returns the events file content for the given CriteriaRun.
-	Read(ctx context.Context, run *criteriav1.CriteriaRun) ([]byte, error)
-}
-
-// PodExecReader reads the events file by exec'ing into a pod owned by the run's Job.
-type PodExecReader struct {
-	Config *rest.Config
-}
-
-// Read executes `cat` on the run's events file inside the first available pod.
-func (r *PodExecReader) Read(ctx context.Context, run *criteriav1.CriteriaRun) ([]byte, error) {
-	if run.Status.JobName == "" {
-		return nil, fmt.Errorf("no job associated with run")
-	}
-	cl, err := kubernetes.NewForConfig(r.Config)
-	if err != nil {
-		return nil, fmt.Errorf("building kubernetes client: %w", err)
-	}
-	podList, err := cl.CoreV1().Pods(run.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("job-name=%s", run.Status.JobName),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing pods: %w", err)
-	}
-	if len(podList.Items) == 0 {
-		return nil, fmt.Errorf("no pods found for job %s", run.Status.JobName)
-	}
-
-	// Prefer a pod that has reached a terminal phase.
-	var target *corev1.Pod
-	for i := range podList.Items {
-		p := &podList.Items[i]
-		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			target = p
-			break
-		}
-	}
-	if target == nil {
-		target = &podList.Items[0]
-	}
-
-	eventsPath := eventsPath(run)
-	req := cl.CoreV1().RESTClient().
-		Post().
-		Resource("pods").
-		Name(target.Name).
-		Namespace(target.Namespace).
-		SubResource("exec").
-		Param("container", "workflow-runner").
-		Param("command", "sh").
-		Param("command", "-c").
-		Param("command", fmt.Sprintf("cat %s 2>/dev/null || true", shellQuote(eventsPath))).
-		Param("stdout", "true").
-		Param("stderr", "false").
-		Param("tty", "false")
-
-	exec, err := remotecommand.NewSPDYExecutor(r.Config, "POST", req.URL())
-	if err != nil {
-		return nil, fmt.Errorf("creating executor: %w", err)
-	}
-	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("exec stream: %w (stderr: %s)", err, stderr.String())
-	}
-	return stdout.Bytes(), nil
-}
 
 // CriteriaRunReconciler reconciles a CriteriaRun object into a batch/v1 Job.
 type CriteriaRunReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Config   *rest.Config
-	Reader   EventsReader
+	Scheme *runtime.Scheme
+	// Castle observes run lifecycle from the castle control plane (CRI-133
+	// API). Nil or disabled means observation is off; the reconciler then
+	// relies purely on Job conditions for phase stamping.
+	Castle   castle.RunSource
 	Defaults jobbuilder.Defaults
 	Queue    *RunQueue
 }
@@ -124,8 +47,7 @@ type CriteriaRunReconciler struct {
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 
 func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx).WithValues("criteriarun", req.NamespacedName)
@@ -162,7 +84,25 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
 			}
 		}
-		return ctrl.Result{}, nil
+		if castleTerminalObserved(&run.Status) || r.Castle == nil || r.Castle.Disabled() {
+			return ctrl.Result{}, nil
+		}
+		// The Job is terminal but castle has not recorded the terminal yet
+		// (ingest lag, or the pass that stamped the phase errored): keep
+		// observing castle and stamping the terminal marker and outcome
+		// fields, without re-entering the queue or the child-job reconcile.
+		update := run.DeepCopy()
+		if _, err := r.observeCastle(ctx, &run, update, logger); err != nil {
+			logger.Error(err, "observing castle terminal for Job-terminal CriteriaRun")
+		} else if !statusEqual(&run.Status, &update.Status) {
+			if err := r.Status().Update(ctx, update); err != nil {
+				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
+			}
+		}
+		if castleTerminalObserved(&update.Status) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
 	// Enqueue the run for repo-keyed admission control. Only admitted runs
@@ -220,17 +160,50 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("no runner job found in desired set")
 	}
 
-	// Sync status from the runner Job.
-	if err := r.applyJobStatus(ctx, &run, runnerJob, update, logger); err != nil {
-		return ctrl.Result{}, err
+	// Base status mirrors the runner Job, then the castle observation layers
+	// on top: the castle run id, terminal completion (RunCompleted/RunFailed
+	// from castle, not the events file), and the per-scope lifecycle events
+	// consumed below. One status write.
+	update.Status.Phase = derivePhase(runnerJob)
+	update.Status.JobName = runnerJob.Name
+	obs, obsErr := r.observeCastle(ctx, &run, update, logger)
+	if obsErr != nil {
+		// An unavailable or inconclusive castle source must not converge
+		// desired state: no castle-derived status was stamped and the
+		// per-scope reconcile below is skipped, so no adapter pod is touched
+		// off a history we could not see. The Job-derived phase is still
+		// persisted and the queue still releases so the run cannot stall its
+		// repo queue; the observation is retried via the requeue below.
+		logger.Error(obsErr, "observing run lifecycle from castle; continuing with Job-derived status only", "criteriarun", run.Name)
 	}
 
-	phase := derivePhase(runnerJob)
+	if !statusEqual(&run.Status, &update.Status) {
+		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
+		if err := r.Status().Update(ctx, update); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+		}
+	}
 
-	// Reconcile per-scope adapter pods from the run event stream.
-	activeAdapters, err := r.reconcilePerScopeAdapters(ctx, &run, logger)
-	if err != nil {
-		return ctrl.Result{}, err
+	phase := update.Status.Phase
+
+	// Reconcile per-scope adapter pods from the castle event stream. Only an
+	// authoritative observation (a known castle run, no observation error)
+	// may drive desired state; an unregistered run, a failed observation, or
+	// a disabled source is skipped so live pods are never deleted off an
+	// empty history.
+	activeAdapters := 0
+	if obsErr == nil && obs.RunID != "" {
+		var err error
+		activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	} else if obsErr == nil && run.Spec.PerScopeSessions {
+		if obs.RunID == "" && (r.Castle == nil || r.Castle.Disabled()) {
+			logger.Info("castle observation disabled; per-scope adapter reconcile requires --castle-addr (castle is the only lifecycle source since CRI-135)")
+		} else {
+			logger.Info("castle run not yet known; skipping per-scope reconcile until observation succeeds")
+		}
 	}
 
 	// Release the queue slot when the run has finished. If another run is
@@ -243,8 +216,20 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Keep polling the event stream while the run is using per-scope adapters.
+	// Requeue policy:
+	//   - an observation error retries on the poll interval (the Job-derived
+	//   status above is already persisted, so the error must not abort the
+	//   pass);
+	//   - per-scope runs keep polling until every scope is released;
+	//   - a terminal run keeps polling until castle has recorded the
+	//   terminal outcome, unless castle is disabled.
+	if obsErr != nil {
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
 	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(phase)) {
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
+	if isTerminalPhase(phase) && !castleTerminalObserved(&update.Status) && !(r.Castle == nil || r.Castle.Disabled()) {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
@@ -255,30 +240,16 @@ func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
 }
 
-func (r *CriteriaRunReconciler) applyJobStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, update *criteriav1.CriteriaRun, logger logr.Logger) error {
-	phase := derivePhase(job)
-
-	update.Status.Phase = phase
-	update.Status.JobName = job.Name
-	update.Status.ObservedGeneration = run.Generation
-
-	if phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed {
-		outcome, err := r.readOutcome(ctx, run)
-		if err != nil {
-			logger.Error(err, "reading run outcome from events file")
-		} else {
-			update.Status.PRNumber = outcome.PRNumber
-			update.Status.TicketState = outcome.TicketState
-		}
-	}
-
-	if !statusEqual(&run.Status, &update.Status) {
-		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
-		if err := r.Status().Update(ctx, update); err != nil {
-			return fmt.Errorf("updating status: %w", err)
-		}
-	}
-	return nil
+// castleTerminalObserved reports whether a castle observation has already
+// delivered this run's terminal outcome (CastleTerminalObserved is set by
+// observeCastle whenever the observation carries a castle terminal — the run
+// record's terminal status and/or RunCompleted/RunFailed envelopes). That is
+// the only terminal signal castle actually provides: prNumber/ticketState
+// have no castle producer today, so the completion gate must not depend on
+// them. Until the marker is recorded, a Job-terminal run keeps polling
+// castle so the terminal is stamped once it lands there.
+func castleTerminalObserved(status *criteriav1.CriteriaRunStatus) bool {
+	return status != nil && status.CastleTerminalObserved
 }
 
 func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
@@ -304,25 +275,55 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 	return criteriav1.PhasePending
 }
 
-func eventsPath(run *criteriav1.CriteriaRun) string {
-	return fmt.Sprintf("/data/intake/%s/events.ndjson", run.Spec.TicketID)
-}
+// observeCastle observes the run's lifecycle from castle and layers it onto
+// the pending status update: the castle run id, terminal completion, and the
+// recorded terminal marker. An unavailable or inconclusive source (castle
+// outage, run not registered yet, discovery that cannot conclude) returns an
+// error; the caller must then not reconcile per-scope desired state (desired
+// state must never be converged from an empty history) and must treat any
+// castle-derived stamping in the update as absent, while the Job-derived
+// phase it already set still persists.
+func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (*castle.Observation, error) {
+	if r.Castle == nil || r.Castle.Disabled() {
+		return &castle.Observation{}, nil
+	}
 
-// shellQuote returns a single-quoted shell literal for s.
-// It assumes the remote shell is POSIX /bin/sh.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
-}
-
-func (r *CriteriaRunReconciler) readOutcome(ctx context.Context, run *criteriav1.CriteriaRun) (*events.Outcome, error) {
-	data, err := r.Reader.Read(ctx, run)
+	// The runner job name is the agent-name key: the engine registers a
+	// castle agent named after the runner pod's hostname, which carries the
+	// job name as its prefix.
+	obs, err := r.Castle.Observe(ctx, jobbuilder.JobName(run), run.Status.CastleRunID)
 	if err != nil {
+		logger.Error(err, "observing run lifecycle from castle")
 		return nil, err
 	}
-	if len(data) == 0 {
-		return &events.Outcome{}, nil
+
+	if obs.RunID != "" && obs.RunID != run.Status.CastleRunID {
+		update.Status.CastleRunID = obs.RunID
 	}
-	return events.ParseBytes(data)
+	if obs.Terminal != nil {
+		// Terminal stamping comes from castle (the run record's terminal
+		// status and/or RunCompleted/RunFailed envelopes), keeping the same
+		// phase semantics the Job conditions use. Job conditions remain the
+		// base phase so the queue can still release if castle goes silent.
+		//
+		// The marker is the completion signal: it is the only satisfiable
+		// record that a castle observation delivered the terminal. The
+		// prNumber/ticketState fields are informational only — castle
+		// supplies no pr_url or ticket-state producer today — so they are
+		// enriched when present but never gate completion.
+		update.Status.CastleTerminalObserved = true
+		if obs.Terminal.Success {
+			update.Status.Phase = criteriav1.PhaseSucceeded
+		} else {
+			update.Status.Phase = criteriav1.PhaseFailed
+		}
+		update.Status.PRNumber = obs.Terminal.PRNumber
+	}
+	return obs, nil
+}
+
+func eventsPath(run *criteriav1.CriteriaRun) string {
+	return fmt.Sprintf("/data/intake/%s/events.ndjson", run.Spec.TicketID)
 }
 
 func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (ctrl.Result, error) {
@@ -381,4 +382,3 @@ func statusEqual(a, b *criteriav1.CriteriaRunStatus) bool {
 	}
 	return reflect.DeepEqual(a, b)
 }
-
