@@ -205,15 +205,14 @@ func TestObserveIncrementalCursorAndPersistentScopes(t *testing.T) {
 	assert.Equal(t, uint64(1), last.SinceSeq, "second read starts strictly after the first page")
 }
 
-// RunCompleted envelopes stamp terminal state; PR number comes from the run
-// record's pr_url.
+// RunCompleted envelopes stamp terminal state with only the fields the real
+// castle contract supplies: run records carry no final_state column and
+// nothing populates pr_url, so the stub record carries just the terminal
+// status and the terminal carries no PR number.
 func TestObserveTerminalFromEnvelopeAndRunRecord(t *testing.T) {
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
-		runs: []*v1.Run{{
-			RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded", FinalState: "done",
-			PrUrl: "https://github.com/brokenbots/workflow-example/pull/42",
-		}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded"}},
 		events: map[string][]*v1.Envelope{
 			"run-1": {
 				provisionEnvelope("run-1", 1, "scope-a", "default"),
@@ -229,21 +228,20 @@ func TestObserveTerminalFromEnvelopeAndRunRecord(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)
-	assert.Equal(t, "42", obs.Terminal.PRNumber)
-	assert.Equal(t, "done", obs.Terminal.TicketState)
+	assert.Equal(t, "done", obs.Terminal.FinalState)
+	assert.Empty(t, obs.Terminal.PRNumber)
 	assert.True(t, terminalFromRun(server.runs[0]).Success)
 }
 
 // When the event stream carries no terminal envelope yet the run record is
 // already terminal (e.g. cancelled server-side), the client falls back to
-// GetRun so the operator does not wait forever.
+// GetRun so the operator does not wait forever. The record contributes only
+// the verdict: no final_state/failure_reason columns exist, so those stay
+// empty on the record path.
 func TestObserveTerminalFallbackFromRunRecord(t *testing.T) {
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
-		runs: []*v1.Run{{
-			RunId: "run-1", CriteriaId: "crit-42", Status: "failed", FinalState: "failed",
-			FailureReason: "workflow step crashed",
-		}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "failed"}},
 		events: map[string][]*v1.Envelope{
 			"run-1": {provisionEnvelope("run-1", 1, "scope-a", "default")},
 		},
@@ -256,8 +254,8 @@ func TestObserveTerminalFallbackFromRunRecord(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.False(t, obs.Terminal.Success)
-	assert.Equal(t, "workflow step crashed", obs.Terminal.Reason)
-	assert.Equal(t, "failed", obs.Terminal.FinalState)
+	assert.Empty(t, obs.Terminal.Reason)
+	assert.Empty(t, obs.Terminal.FinalState)
 }
 
 // A run that is not registered yet is "unknown", not an authoritative empty
@@ -421,7 +419,6 @@ func TestObserveFreshRunReachesTerminalFromCastle(t *testing.T) {
 
 	server.mu.Lock()
 	server.runs[0].Status = "succeeded"
-	server.runs[0].FinalState = "done"
 	server.events["run-1"] = append(server.events["run-1"],
 		&v1.Envelope{RunId: "run-1", Seq: 2, Payload: &v1.Envelope_RunCompleted{RunCompleted: &v1.RunCompleted{Success: true, FinalState: "done"}}})
 	server.mu.Unlock()
@@ -430,7 +427,7 @@ func TestObserveFreshRunReachesTerminalFromCastle(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)
-	assert.Equal(t, "done", obs.Terminal.TicketState)
+	assert.Equal(t, "done", obs.Terminal.FinalState)
 }
 
 // The client authenticates with the shared token on every call.
@@ -519,20 +516,22 @@ func (s *stubPagedAgents) ListAgents(ctx context.Context, req *connect.Request[v
 	}), nil
 }
 
-// A terminal observation evicts the per-run client state, so a long-lived
-// operator does not accumulate caches for every finished run; a repeat
-// observation of the terminal run still reconstructs the same result.
-func TestObserveEvictsTerminalRunState(t *testing.T) {
+// Per-run state (cursor, scopes, lifecycle history) survives a terminal
+// observation: the controller may re-observe a terminal run, and evicting
+// the cursor then would restart the ListRunEvents drain at since_seq=0 —
+// re-reading the run's whole event stream. The repeat observation resumes
+// strictly after the last read sequence and reconstructs the same terminal
+// from the cached state.
+func TestObserveRetainsTerminalStateAndResumesCursor(t *testing.T) {
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
-		runs: []*v1.Run{{
-			RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded", FinalState: "done",
-			PrUrl: "https://github.com/brokenbots/workflow-example/pull/7",
-		}},
+		// Real castle contract: the record carries only status — no
+		// final_state, no pr_url.
+		runs: []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded"}},
 		events: map[string][]*v1.Envelope{
 			"run-1": {
 				provisionEnvelope("run-1", 1, "scope-a", "default"),
-				{RunId: "run-1", Seq: 2, Payload: &v1.Envelope_RunCompleted{RunCompleted: &v1.RunCompleted{Success: true, FinalState: "done"}}},
+				{RunId: "run-1", Seq: 2, Payload: &v1.Envelope_RunCompleted{RunCompleted: &v1.RunCompleted{Success: true, FinalState: "handler_complete"}}},
 			},
 		},
 	}
@@ -543,21 +542,27 @@ func TestObserveEvictsTerminalRunState(t *testing.T) {
 	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
-	assert.Equal(t, "7", obs.Terminal.PRNumber)
+	assert.True(t, obs.Terminal.Success)
+	assert.Equal(t, "handler_complete", obs.Terminal.FinalState)
+	assert.Empty(t, obs.Terminal.PRNumber)
 	require.Len(t, obs.Lifecycle, 1)
 
 	c.mu.Lock()
-	evicted := len(c.cursors) == 0 && len(c.scopes) == 0 && len(c.lifecycle) == 0 && len(c.terminals) == 0
+	retained := len(c.cursors) == 1 && c.cursors["run-1"] == 2 &&
+		len(c.scopes) == 1 && len(c.lifecycle) == 1 && len(c.terminals) == 1
 	c.mu.Unlock()
-	assert.True(t, evicted, "terminal run state must be evicted from the client caches")
+	assert.True(t, retained, "terminal run state must be retained, including the event cursor")
 
-	// A later observation of the same terminal run re-drains from scratch and
-	// reconstructs the same terminal result.
+	// A later observation of the same terminal run must not re-drain the
+	// event stream from the beginning: the drain resumes strictly after the
+	// last read sequence.
 	obs, err = c.Observe(context.Background(), "cri-42", obs.RunID)
 	require.NoError(t, err)
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)
-	assert.Equal(t, "7", obs.Terminal.PRNumber)
-	assert.Equal(t, "done", obs.Terminal.TicketState)
+	assert.Equal(t, "handler_complete", obs.Terminal.FinalState)
 	require.Len(t, obs.Lifecycle, 1)
+	assert.Len(t, server.eventReqs, 2)
+	assert.Equal(t, uint64(2), server.eventReqs[1].SinceSeq,
+		"post-terminal observation must resume from the retained cursor, not since_seq=0")
 }

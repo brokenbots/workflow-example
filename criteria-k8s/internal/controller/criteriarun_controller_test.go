@@ -122,10 +122,12 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 		Build()
 
 	// Castle reports the run completed successfully; terminal stamping comes
-	// from castle, not the events file.
+	// from castle, not the events file. The real castle contract delivers a
+	// bare verdict (no pr_url/ticket-state producer), so the outcome fields
+	// stay empty and completion is recorded via the terminal marker.
 	castleStub := &fakeCastle{observation: &castle.Observation{
 		RunID:    "castle-run-1",
-		Terminal: castleTerminal(true, "42", "Done"),
+		Terminal: castleTerminal(true),
 	}}
 	r := &controller.CriteriaRunReconciler{
 		Client: cl,
@@ -140,8 +142,9 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
-	assert.Equal(t, "42", updated.Status.PRNumber)
-	assert.Equal(t, "Done", updated.Status.TicketState)
+	assert.True(t, updated.Status.CastleTerminalObserved, "the terminal marker records castle's verdict")
+	assert.Empty(t, updated.Status.PRNumber)
+	assert.Empty(t, updated.Status.TicketState)
 	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID)
 	assert.Equal(t, "cri-42", castleStub.lastRunnerJob, "observation is keyed on the runner job name")
 }
@@ -222,7 +225,7 @@ func TestReconcileCastleTerminalOverridesActiveJob(t *testing.T) {
 
 	castleStub := &fakeCastle{observation: &castle.Observation{
 		RunID:    "castle-run-2",
-		Terminal: castleTerminal(false, "", "Failed"),
+		Terminal: castleTerminal(false),
 	}}
 	r := &controller.CriteriaRunReconciler{
 		Client: cl,
@@ -649,10 +652,14 @@ func TestReconcileCastleErrorStillStampsJobPhaseAndReleasesQueue(t *testing.T) {
 }
 
 // A Job-terminal run whose first castle pass returns before castle's
-// terminal lands (ingest lag) must not be finalized with empty outcome
-// fields: a later reconcile pass keeps polling and stamps the castle
-// terminal (PR number, ticket state) once it appears.
-func TestReconcileStampsCastleTerminalOnLaterPassAfterIngestLag(t *testing.T) {
+// terminal lands (ingest lag) must not be finalized without a recorded
+// terminal: a later reconcile pass keeps polling and stamps the castle
+// terminal once it appears. The terminal that castle actually delivers is
+// bare — only the success verdict; prNumber/ticketState have no castle
+// producer — so completion is gated on the persisted terminal marker, and
+// once it is recorded the operator stops polling entirely (no further
+// castle reads, hence no event-stream re-drain).
+func TestReconcileStopsPollingOnceCastleTerminalLands(t *testing.T) {
 	scheme := newScheme(t)
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -694,26 +701,41 @@ func TestReconcileStampsCastleTerminalOnLaterPassAfterIngestLag(t *testing.T) {
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
 	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID, "the run id persists as soon as discovery succeeds")
+	assert.False(t, updated.Status.CastleTerminalObserved)
 	assert.Empty(t, updated.Status.PRNumber)
 	assert.Empty(t, updated.Status.TicketState)
 
-	// Castle's terminal lands between the passes.
+	// Castle's terminal lands between the passes — with only the verdict the
+	// real castle contract supplies (no pr_url, no ticket state).
+	callsAfterFirstPass := castleStub.calls
 	castleStub.observation = &castle.Observation{
 		RunID:    "castle-run-1",
-		Terminal: castleTerminal(true, "42", "Done"),
+		Terminal: castleTerminal(true),
 	}
 
 	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, res, "the poll stops once the castle terminal is recorded")
+	assert.Equal(t, callsAfterFirstPass+1, castleStub.calls, "the terminal pass observes castle exactly once")
 
 	var stamped criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &stamped))
-	assert.Equal(t, "42", stamped.Status.PRNumber)
-	assert.Equal(t, "Done", stamped.Status.TicketState)
+	assert.True(t, stamped.Status.CastleTerminalObserved, "the bare castle terminal marks completion")
+	assert.Equal(t, criteriav1.PhaseSucceeded, stamped.Status.Phase)
+	assert.Empty(t, stamped.Status.PRNumber)
+	assert.Empty(t, stamped.Status.TicketState, "castle supplies no pr/ticket-state producer; they stay unset")
 	assert.Equal(t, "castle-run-1", stamped.Status.CastleRunID)
 	assert.Equal(t, "castle-run-1", castleStub.lastKnownID, "the persisted run id short-circuits discovery on the later pass")
 	assert.Equal(t, "cri-42", castleStub.lastRunnerJob)
+
+	// A subsequent pass must not touch castle at all: the recorded terminal
+	// short-circuits at the top of Reconcile, before any castle read, so the
+	// client never restarts ListRunEvents at since_seq=0.
+	callsAfterTerminal := castleStub.calls
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+	assert.Equal(t, callsAfterTerminal, castleStub.calls, "no further castle observations after the terminal is recorded")
 }
 
 func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
@@ -953,8 +975,11 @@ func (f *fakeCastle) Observe(ctx context.Context, runnerJob, knownRunID string) 
 
 func (f *fakeCastle) Disabled() bool { return false }
 
-func castleTerminal(success bool, pr, state string) *castle.Terminal {
-	return &castle.Terminal{Success: success, PRNumber: pr, TicketState: state, FinalState: state}
+// castleTerminal builds the terminal verdict castle actually delivers: only
+// the success flag (real castle run records carry no final_state and nothing
+// populates pr_url, so no PR number or ticket state is fabricated).
+func castleTerminal(success bool) *castle.Terminal {
+	return &castle.Terminal{Success: success}
 }
 
 // lifecycle events for per-scope tests, castle-sourced.

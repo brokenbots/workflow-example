@@ -89,8 +89,8 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		// The Job is terminal but castle has not recorded the terminal yet
 		// (ingest lag, or the pass that stamped the phase errored): keep
-		// observing castle and stamping the missing outcome fields, without
-		// re-entering the queue or the child-job reconcile.
+		// observing castle and stamping the terminal marker and outcome
+		// fields, without re-entering the queue or the child-job reconcile.
 		update := run.DeepCopy()
 		if _, err := r.observeCastle(ctx, &run, update, logger); err != nil {
 			logger.Error(err, "observing castle terminal for Job-terminal CriteriaRun")
@@ -240,14 +240,16 @@ func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
 }
 
-// castleTerminalObserved reports whether the run's status already carries
-// the terminal outcome recorded by a successful castle observation (the
-// castle run id plus a PR number or ticket state). Until then, a
-// Job-terminal run keeps polling castle so the outcome fields are stamped
-// once the terminal lands there.
+// castleTerminalObserved reports whether a castle observation has already
+// delivered this run's terminal outcome (CastleTerminalObserved is set by
+// observeCastle whenever the observation carries a castle terminal — the run
+// record's terminal status and/or RunCompleted/RunFailed envelopes). That is
+// the only terminal signal castle actually provides: prNumber/ticketState
+// have no castle producer today, so the completion gate must not depend on
+// them. Until the marker is recorded, a Job-terminal run keeps polling
+// castle so the terminal is stamped once it lands there.
 func castleTerminalObserved(status *criteriav1.CriteriaRunStatus) bool {
-	return status != nil && status.CastleRunID != "" &&
-		(status.PRNumber != "" || status.TicketState != "")
+	return status != nil && status.CastleTerminalObserved
 }
 
 func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
@@ -275,12 +277,12 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 
 // observeCastle observes the run's lifecycle from castle and layers it onto
 // the pending status update: the castle run id, terminal completion, and the
-// run outcome (PR number, ticket state). An unavailable or inconclusive
-// source (castle outage, run not registered yet, discovery that cannot
-// conclude) returns an error; the caller must then not reconcile per-scope
-// desired state (desired state must never be converged from an empty
-// history) and must treat any castle-derived stamping in the update as
-// absent, while the Job-derived phase it already set still persists.
+// recorded terminal marker. An unavailable or inconclusive source (castle
+// outage, run not registered yet, discovery that cannot conclude) returns an
+// error; the caller must then not reconcile per-scope desired state (desired
+// state must never be converged from an empty history) and must treat any
+// castle-derived stamping in the update as absent, while the Job-derived
+// phase it already set still persists.
 func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (*castle.Observation, error) {
 	if r.Castle == nil || r.Castle.Disabled() {
 		return &castle.Observation{}, nil
@@ -299,17 +301,23 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 		update.Status.CastleRunID = obs.RunID
 	}
 	if obs.Terminal != nil {
-		// Terminal state stamping comes from castle (RunCompleted/RunFailed),
-		// keeping the same phase semantics the Job conditions use. Job
-		// conditions remain the base phase so the queue can still release if
-		// castle goes silent.
+		// Terminal stamping comes from castle (the run record's terminal
+		// status and/or RunCompleted/RunFailed envelopes), keeping the same
+		// phase semantics the Job conditions use. Job conditions remain the
+		// base phase so the queue can still release if castle goes silent.
+		//
+		// The marker is the completion signal: it is the only satisfiable
+		// record that a castle observation delivered the terminal. The
+		// prNumber/ticketState fields are informational only — castle
+		// supplies no pr_url or ticket-state producer today — so they are
+		// enriched when present but never gate completion.
+		update.Status.CastleTerminalObserved = true
 		if obs.Terminal.Success {
 			update.Status.Phase = criteriav1.PhaseSucceeded
 		} else {
 			update.Status.Phase = criteriav1.PhaseFailed
 		}
 		update.Status.PRNumber = obs.Terminal.PRNumber
-		update.Status.TicketState = obs.Terminal.TicketState
 	}
 	return obs, nil
 }

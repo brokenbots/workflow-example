@@ -60,7 +60,10 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 }
 
 // terminalFromEnvelope converts a terminal castle Envelope (RunCompleted or
-// RunFailed) into a Terminal, or nil for any other payload.
+// RunFailed) into a Terminal, or nil for any other payload. FinalState is the
+// engine's workflow terminal state name (RunCompleted.final_state), not the
+// CRI-132 Linear ticket state; the wire carries no Linear ticket state, so
+// CriteriaRun.Status.TicketState is not populated from it.
 func terminalFromEnvelope(env *v1.Envelope) *Terminal {
 	if env == nil {
 		return nil

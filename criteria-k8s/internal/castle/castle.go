@@ -53,17 +53,19 @@ type Config struct {
 type Terminal struct {
 	// Success mirrors RunCompleted.success (false for RunFailed).
 	Success bool
-	// FinalState is the engine's final state for the run.
+	// FinalState is the engine's workflow terminal state name carried by the
+	// RunCompleted envelope (e.g. "handler_complete"). Castle run records
+	// carry no final_state column (mapRun never sets it), so on the record
+	// path this stays empty.
 	FinalState string
-	// PRNumber is the pull request number produced by the run, parsed from
-	// the castle Run's pr_url.
+	// PRNumber is the pull request number parsed from the castle Run's
+	// pr_url. No castle build populates pr_url today (nothing publishes
+	// run.metadata), so this stays empty in practice; it is informational
+	// enrichment and is never part of the controller's terminal-completion
+	// gate.
 	PRNumber string
 	// Reason is the RunFailed reason, when the run failed.
 	Reason string
-	// TicketState is the run's final_state from castle, mapped verbatim to
-	// CriteriaRun.Status.TicketState (CRI-132 wire mapping: the engine's
-	// RunCompleted.final_state is the final Linear ticket state).
-	TicketState string
 }
 
 // Observation is what one Observe pass consumed for a CriteriaRun.
@@ -163,10 +165,12 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	obs.Lifecycle = lifecycle
 	obs.Terminal = terminal
 
-	// The run record is authoritative for pr_url/final_state: terminal
-	// envelopes carry neither, so enrich from GetRun (and fall back to the
-	// record for runs that reached a terminal status without a terminal
-	// envelope, e.g. cancellation).
+	// The run record is authoritative for its terminal status and pr_url:
+	// terminal envelopes carry neither, so enrich from GetRun (and fall back
+	// to the record for runs that reached a terminal status without a
+	// terminal envelope, e.g. cancellation). castle run records carry no
+	// final_state column, so no ticket/workflow state comes from here; the
+	// envelope path is the only FinalState source.
 	resp, err := c.runs.GetRun(ctx, connect.NewRequest(&v1.GetRunRequest{RunId: runID}))
 	if err != nil {
 		if terminal == nil {
@@ -179,34 +183,16 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 		if obs.Terminal.PRNumber == "" {
 			obs.Terminal.PRNumber = prNumberFromURL(resp.Msg.GetPrUrl())
 		}
-		if obs.Terminal.FinalState == "" {
-			obs.Terminal.FinalState = resp.Msg.GetFinalState()
-		}
-		if obs.Terminal.TicketState == "" {
-			obs.Terminal.TicketState = resp.Msg.GetFinalState()
-		}
 	}
 
-	// The controller stamps the CR terminal from this observation and stops
-	// reconciling, so the per-run caches are no longer needed. Evict them so
-	// a long-lived operator does not accumulate state for every finished
-	// run. A later observation for the same run re-drains from seq 0 and
-	// reconstructs terminal state from the stream or the run record.
-	if obs.Terminal != nil {
-		c.evictRun(runID)
-	}
+	// Per-run state (cursor, scopes, accumulated lifecycle history) is
+	// retained for the client's lifetime, including after a terminal
+	// observation: the controller may re-observe a terminal run (e.g. a
+	// failed status write), and evicting the cursor then would restart the
+	// ListRunEvents drain at since_seq=0 — re-reading the run's whole event
+	// stream. Retention is bounded by the set of runs the operator observes
+	// within one process lifetime.
 	return obs, nil
-}
-
-// evictRun drops all per-run client state. The caller must have already
-// built the observation for the terminal run.
-func (c *Client) evictRun(runID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.cursors, runID)
-	delete(c.scopes, runID)
-	delete(c.lifecycle, runID)
-	delete(c.terminals, runID)
 }
 
 // findRunByRunner resolves the castle run backing the given runner job.
@@ -427,17 +413,18 @@ func isTerminalRunStatus(status string) bool {
 }
 
 // terminalFromRun derives a Terminal from a castle Run record, or nil when
-// the run is not terminal.
+// the run is not terminal. The record contributes only the success/failure
+// verdict (and pr_url, when a producer exists): castle run records carry no
+// final_state column, so FinalState stays empty here and terminal envelopes
+// are the only source for it.
 func terminalFromRun(run *v1.Run) *Terminal {
 	if run == nil || !isTerminalRunStatus(run.GetStatus()) {
 		return nil
 	}
 	return &Terminal{
-		Success:     run.GetStatus() == runStatusSucceeded,
-		FinalState:  run.GetFinalState(),
-		PRNumber:    prNumberFromURL(run.GetPrUrl()),
-		Reason:      run.GetFailureReason(),
-		TicketState: run.GetFinalState(),
+		Success:  run.GetStatus() == runStatusSucceeded,
+		PRNumber: prNumberFromURL(run.GetPrUrl()),
+		Reason:   run.GetFailureReason(),
 	}
 }
 
