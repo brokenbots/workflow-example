@@ -656,9 +656,13 @@ func TestReconcileCastleErrorStillStampsJobPhaseAndReleasesQueue(t *testing.T) {
 // terminal: a later reconcile pass keeps polling and stamps the castle
 // terminal once it appears. The terminal that castle actually delivers is
 // bare — only the success verdict; prNumber/ticketState have no castle
-// producer — so completion is gated on the persisted terminal marker, and
-// once it is recorded the operator stops polling entirely (no further
-// castle reads, hence no event-stream re-drain).
+// producer — so completion is gated on the persisted terminal marker. Once
+// it is recorded polling stops (no requeue), but every subsequent pass still
+// re-observes castle to re-derive the outcome: the recorded terminal can be
+// wrong (e.g. stamped by a previous operator pod from an earlier terminal
+// envelope), and the phase is corrected when it disagrees with castle's
+// final terminal. The re-observation never re-drains the event stream from
+// since_seq=0: the castle client retains the per-run event cursor.
 func TestReconcileStopsPollingOnceCastleTerminalLands(t *testing.T) {
 	scheme := newScheme(t)
 	run := &criteriav1.CriteriaRun{
@@ -728,14 +732,240 @@ func TestReconcileStopsPollingOnceCastleTerminalLands(t *testing.T) {
 	assert.Equal(t, "castle-run-1", castleStub.lastKnownID, "the persisted run id short-circuits discovery on the later pass")
 	assert.Equal(t, "cri-42", castleStub.lastRunnerJob)
 
-	// A subsequent pass must not touch castle at all: the recorded terminal
-	// short-circuits at the top of Reconcile, before any castle read, so the
-	// client never restarts ListRunEvents at since_seq=0.
+	// A subsequent pass still re-observes castle even though the marker is
+	// recorded: a stamp from an earlier operator pod (or an earlier terminal
+	// envelope) can disagree with the run's final castle outcome, so the
+	// terminal branch re-derives the outcome on every pass. Polling still
+	// stops: no requeue once the recorded marker and the re-derived terminal
+	// agree.
 	callsAfterTerminal := castleStub.calls
 	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, res)
-	assert.Equal(t, callsAfterTerminal, castleStub.calls, "no further castle observations after the terminal is recorded")
+	assert.Equal(t, callsAfterTerminal+1, castleStub.calls,
+		"the terminal pass re-observes castle to re-derive the recorded outcome")
+
+	var settled criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &settled))
+	assert.True(t, settled.Status.CastleTerminalObserved)
+	assert.Equal(t, criteriav1.PhaseSucceeded, settled.Status.Phase)
+}
+
+// A phase stamped by a previous operator pod can disagree with the run's
+// final castle outcome (CRI-138: cri-138-1789212800 carried phase=Failed
+// with CastleTerminalObserved=true while the castle run record and its
+// terminal envelope — RunCompleted success=true finalState=handler_complete —
+// say succeeded). The terminal branch must re-derive the outcome from castle
+// instead of early-returning on the recorded marker, and correct the phase.
+func TestReconcileReDerivesStaleFailedPhaseFromCastleTerminal(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-138-1789212800",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-138"},
+		Status: criteriav1.CriteriaRunStatus{
+			Phase:                  criteriav1.PhaseFailed,
+			CastleRunID:            "5af00d01-f837-4080-87e7-db39fe475ce3",
+			CastleTerminalObserved: true,
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-138-1789212800", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID:    "5af00d01-f837-4080-87e7-db39fe475ce3",
+		Terminal: castleTerminal(true),
+	}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res, "the corrected terminal stops polling")
+
+	var corrected criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &corrected))
+	assert.Equal(t, criteriav1.PhaseSucceeded, corrected.Status.Phase,
+		"the recorded Failed phase must be re-derived from the castle succeeded terminal")
+	assert.True(t, corrected.Status.CastleTerminalObserved)
+	assert.Equal(t, "5af00d01-f837-4080-87e7-db39fe475ce3", corrected.Status.CastleRunID)
+	assert.Empty(t, corrected.Status.PRNumber)
+	assert.Equal(t, "5af00d01-f837-4080-87e7-db39fe475ce3", castleStub.lastKnownID,
+		"re-derivation resumes from the persisted run id, not from discovery")
+	assert.Equal(t, "cri-138-1789212800", castleStub.lastRunnerJob)
+}
+
+// The re-derivation also corrects a recorded phase that disagrees in the
+// other direction: recorded Succeeded, castle terminal failed.
+func TestReconcileCorrectsStaleSucceededPhaseToCastleFailed(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-140",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-140"},
+		Status: criteriav1.CriteriaRunStatus{
+			Phase:                  criteriav1.PhaseSucceeded,
+			CastleRunID:            "castle-run-1",
+			CastleTerminalObserved: true,
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-140", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID:    "castle-run-1",
+		Terminal: castleTerminal(false),
+	}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var corrected criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &corrected))
+	assert.Equal(t, criteriav1.PhaseFailed, corrected.Status.Phase,
+		"a recorded Succeeded phase must be corrected when the castle terminal failed")
+	assert.True(t, corrected.Status.CastleTerminalObserved)
+}
+
+// A Job-terminal CriteriaRun whose runner agent deregistered (the runner pod
+// is gone, as for runs that predate castle's dual-write) can never produce a
+// castle terminal: discovery conclusively finds no run (ErrRunNotFound), so
+// the operator must stop polling instead of looping on the discovery error
+// every interval.
+func TestReconcileStopsPollingForJobTerminalRunWithoutCastleRecord(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-137",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-137"},
+		Status: criteriav1.CriteriaRunStatus{
+			Phase: criteriav1.PhaseFailed,
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-137", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	// The conclusive discovery negative surfaces through the same wrapping
+	// chain the real client produces.
+	castleStub := &fakeCastle{err: fmt.Errorf(
+		"discovering castle run for runner job cri-137: %w", castle.ErrRunNotFound)}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	for i := range 2 {
+		res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, res,
+			"pass %d must stop polling: the runner agent can never register once the Job is terminal", i+1)
+	}
+
+	var after criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &after))
+	assert.Equal(t, criteriav1.PhaseFailed, after.Status.Phase, "the Job-derived phase persists")
+	assert.False(t, after.Status.CastleTerminalObserved, "no castle terminal was ever observed")
+	assert.Empty(t, after.Status.CastleRunID, "discovery found no run, so no run id is stamped")
+	assert.Equal(t, 2, castleStub.calls, "each pass observes castle once; no discovery-error requeue loop")
+}
+
+// A run whose runner Job is still active has a runner pod that can still
+// register with castle: a conclusive not-found error must not stop polling
+// for it — the agent may appear on a later pass.
+func TestReconcileStillPollsForActiveJobWithoutCastleRecord(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-42",
+			Namespace: "default",
+			UID:       types.UID("run-uid"),
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-42"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{err: fmt.Errorf("observing run: %w", castle.ErrRunNotFound)}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res,
+		"an active runner can still register with castle, so polling continues")
 }
 
 func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {

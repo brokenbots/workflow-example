@@ -3,6 +3,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -84,17 +85,30 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
 			}
 		}
-		if castleTerminalObserved(&run.Status) || r.Castle == nil || r.Castle.Disabled() {
+		if r.Castle == nil || r.Castle.Disabled() {
 			return ctrl.Result{}, nil
 		}
-		// The Job is terminal but castle has not recorded the terminal yet
-		// (ingest lag, or the pass that stamped the phase errored): keep
-		// observing castle and stamping the terminal marker and outcome
-		// fields, without re-entering the queue or the child-job reconcile.
+		// Re-derive the terminal outcome from castle on every terminal pass,
+		// even when the marker is already recorded: a stamp from an earlier
+		// operator pod (or from an earlier terminal envelope) can disagree
+		// with the run's final castle outcome, so the recorded phase is
+		// reconciled against the castle run record and run events instead of
+		// being trusted blindly.
 		update := run.DeepCopy()
 		if _, err := r.observeCastle(ctx, &run, update, logger); err != nil {
+			if errors.Is(err, castle.ErrRunNotFound) {
+				// Conclusive: the runner Job is terminal, so the agent that
+				// registers from the runner pod can never appear and castle
+				// will never record a terminal for this run (e.g. a run that
+				// predates castle's dual-write). Stop polling instead of
+				// looping on discovery errors every interval.
+				logger.Info("stopping castle observation for Job-terminal CriteriaRun: the runner agent can no longer register with castle", "error", err)
+				return ctrl.Result{}, nil
+			}
 			logger.Error(err, "observing castle terminal for Job-terminal CriteriaRun")
-		} else if !statusEqual(&run.Status, &update.Status) {
+			return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+		}
+		if !statusEqual(&run.Status, &update.Status) {
 			if err := r.Status().Update(ctx, update); err != nil {
 				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
 			}
@@ -249,8 +263,10 @@ func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 // record's terminal status and/or RunCompleted/RunFailed envelopes). That is
 // the only terminal signal castle actually provides: prNumber/ticketState
 // have no castle producer today, so the completion gate must not depend on
-// them. Until the marker is recorded, a Job-terminal run keeps polling
-// castle so the terminal is stamped once it lands there.
+// them. A recorded marker does not exempt the run from observation: a later
+// pass re-derives the outcome from castle and corrects a recorded phase that
+// disagrees with the run's terminal (a stamp can predate the run's final
+// castle state, e.g. when a previous operator pod wrote it).
 func castleTerminalObserved(status *criteriav1.CriteriaRunStatus) bool {
 	return status != nil && status.CastleTerminalObserved
 }

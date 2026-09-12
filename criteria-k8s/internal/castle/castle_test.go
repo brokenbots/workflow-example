@@ -286,6 +286,66 @@ func TestObserveRunNotYetKnownIsAnError(t *testing.T) {
 	assert.Contains(t, err.Error(), "no castle run for criteria crit-42")
 }
 
+// A conclusive discovery negative — no agent for the runner job, or no run
+// for the criteria — is final for a runner Job that is already terminal (the
+// agent registers from the runner pod, which no longer exists). It surfaces
+// as ErrRunNotFound so the controller can stop polling, while transient
+// failures (transport errors) stay ordinary errors that keep the retry loop.
+func TestObserveRunNotFoundIsConclusive(t *testing.T) {
+	server := &stubServer{}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	_, err := c.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRunNotFound, "no agent for the runner job is conclusive")
+
+	server.mu.Lock()
+	server.agents = []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}}
+	server.mu.Unlock()
+	_, err = c.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRunNotFound, "no run for the criteria is conclusive")
+
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer unavailable.Close()
+
+	transport := New(Config{Addr: unavailable.URL}, nil)
+	_, err = transport.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRunNotFound, "a transport error is transient, not conclusive")
+}
+
+// Terminal envelopes fold last-wins: a RunFailed followed by a later
+// RunCompleted converges on the RunCompleted verdict. This is the re-derivation
+// path behind CRI-138 — a stamp from a pass that only saw the earlier
+// envelope must be corrected once the final terminal envelope lands.
+func TestObserveTerminalLaterEnvelopeWins(t *testing.T) {
+	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: "succeeded"}},
+		events: map[string][]*v1.Envelope{
+			"run-1": {
+				{RunId: "run-1", Seq: 1, Payload: &v1.Envelope_RunFailed{RunFailed: &v1.RunFailed{Reason: "transient"}}},
+				{RunId: "run-1", Seq: 2, Payload: &v1.Envelope_RunCompleted{RunCompleted: &v1.RunCompleted{Success: true, FinalState: "handler_complete"}}},
+			},
+		},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	obs, err := c.Observe(context.Background(), "cri-42", "")
+	require.NoError(t, err)
+	require.NotNil(t, obs.Terminal)
+	assert.True(t, obs.Terminal.Success, "the final terminal envelope decides the verdict")
+	assert.Equal(t, "handler_complete", obs.Terminal.FinalState)
+	assert.Empty(t, obs.Terminal.Reason)
+}
+
 // More than one agent matching the runner job with distinct criteria ids is
 // ambiguous: the operator must not guess which run is the CR's.
 func TestObserveAmbiguousAgentsIsAnError(t *testing.T) {
