@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ var (
 	linearAPIKey    = flag.String("linear-api-key", getenv("LINEAR_API_KEY", ""), "Linear API key (also read from /secrets/linear_api_key)")
 	projectName     = flag.String("linear-project-name", getenv("LINEAR_PROJECT_NAME", "Criteria K8s Workflow Runner"), "Linear project to watch")
 	triageState     = flag.String("linear-triage-state", getenv("LINEAR_TRIAGE_STATE", "Triage"), "Workflow state that triggers a run")
+	triggerLabel    = flag.String("linear-trigger-label", getenv("LINEAR_TRIGGER_LABEL", ""), "Require this label on the issue before triggering a run; empty means any issue in the triage state triggers")
 	pollInterval    = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s")), "How often to poll Linear")
 	image           = flag.String("image", getenv("CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
 	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
@@ -84,6 +86,7 @@ func main() {
 		namespace:       *namespace,
 		projectName:     *projectName,
 		triageState:     *triageState,
+		triggerLabel:    *triggerLabel,
 		pollInterval:    *pollInterval,
 		image:           *image,
 		providerBaseURL: *providerBaseURL,
@@ -109,6 +112,7 @@ type watcher struct {
 	namespace       string
 	projectName     string
 	triageState     string
+	triggerLabel    string
 	pollInterval    time.Duration
 	image           string
 	providerBaseURL string
@@ -149,6 +153,15 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		return err
 	}
 	for _, issue := range issues {
+		// CRI-147 gating: when a trigger label is configured, only issues
+		// carrying it fire a k8s run. Other tickets in the triage state stay
+		// untouched so teams can exercise their workflows locally without
+		// consuming cluster compute.
+		if w.triggerLabel != "" && !slices.Contains(issue.Labels, w.triggerLabel) {
+			w.log.V(1).Info("issue in triage state without trigger label; not firing a k8s run",
+				"ticket", issue.Identifier, "triggerLabel", w.triggerLabel)
+			continue
+		}
 		repoURL := linear.ExtractRepoURL(issue, w.defaultRepoURL, w.repoValidator)
 		if repoURL == "" {
 			w.log.Info("skipping Linear issue without repo URL", "ticket", issue.Identifier, "title", issue.Title)

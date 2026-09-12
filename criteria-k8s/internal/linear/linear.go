@@ -31,6 +31,8 @@ type Issue struct {
 	StateName   string `json:"stateName"`
 	// RepoLabel is an optional repository reference (owner/repo) configured on the issue.
 	RepoLabel string `json:"repoLabel,omitempty"`
+	// Labels holds the issue's Linear label names.
+	Labels []string `json:"labels,omitempty"`
 }
 
 // NewClient returns a Linear client using the provided API key.
@@ -165,6 +167,11 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 					ID   string `json:"id"`
 					Name string `json:"name"`
 				} `json:"project"`
+				Labels struct {
+					Nodes []struct {
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"labels"`
 			} `json:"nodes"`
 		} `json:"issues"`
 	}
@@ -173,7 +180,7 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 	}
 	out := make([]Issue, 0, len(result.Issues.Nodes))
 	for _, n := range result.Issues.Nodes {
-		out = append(out, Issue{
+		issue := Issue{
 			ID:          n.ID,
 			Identifier:  n.Identifier,
 			Title:       n.Title,
@@ -181,7 +188,11 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 			ProjectID:   n.Project.ID,
 			ProjectName: n.Project.Name,
 			StateName:   n.State.Name,
-		})
+		}
+		for _, l := range n.Labels.Nodes {
+			issue.Labels = append(issue.Labels, l.Name)
+		}
+		out = append(out, issue)
 	}
 	return out, nil
 }
