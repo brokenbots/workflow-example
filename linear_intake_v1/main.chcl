@@ -36,6 +36,13 @@ data "internal" "resume_approved_plan" {
     value = false
 }
 
+// Whether the fetched ticket carries the internal-reproduced label, set by
+// check_internal_label and read by route_internal_label.
+data "internal" "internal_reproduced" {
+    type  = bool
+    value = false
+}
+
 // Set by check_ticket_state. When true, the Linear ticket is in a terminal
 // state and the workflow should exit without modifying anything.
 data "internal" "ticket_terminal" {
@@ -189,7 +196,9 @@ switch "route_after_plan_check" {
         condition = data.internal.resume_approved_plan.value
         next      = step.set_bug_label
     }
-    default { next = step.classify_ticket }
+    // Non-resume runs hit the internal-reproduced gate before classification:
+    // a labeled ticket skips QA triage entirely (see route_internal_label).
+    default { next = step.check_internal_label }
 }
 
 // The intake agent reconstructs process state from the freshly fetched Linear
@@ -211,13 +220,19 @@ step "check_internal_label" {
             intake_root = var.intake_root
         })
     }
-    outcome "success" { next = switch.route_internal_label }
+    outcome "success" {
+        next = switch.route_internal_label
+        write {
+            target = data.internal.internal_reproduced.value
+            value  = output.stdout == "skip_triage"
+        }
+    }
     outcome "failure" { next = state.failed }
 }
 
 switch "route_internal_label" {
     match {
-        condition = output.check_internal_label.stdout == "skip_triage"
+        condition = data.internal.internal_reproduced.value
         next      = step.write_confirmed_workstream
     }
     default { next = step.classify_ticket }
