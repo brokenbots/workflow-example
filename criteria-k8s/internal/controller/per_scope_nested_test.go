@@ -13,6 +13,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	logr "github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -150,6 +152,95 @@ func TestReconcilePerScopeAdaptersCreatesPodForNestedProvision(t *testing.T) {
 	// adapter discovers the routable address from the shared discovery file.
 	_, hasHost := env["CRITERIA_REMOTE_HOST"]
 	assert.False(t, hasHost, "CRITERIA_REMOTE_HOST must not be set from the event's loopback shim address")
+}
+
+// The v0.5.22-shaped provision event (adapter instance "intake", kind
+// "shell") exercises the production reconcile path end-to-end: the built pod
+// must resolve the image, kind label, and env from adapter_type — never from
+// the instance name. A regression in the castle wire conversion
+// (castle/lifecycleFromEnvelope) surfaces here as the wedged
+// criteria-adapter-intake image.
+func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	// The castle-derived event equivalent to the v0.5.22-shaped emission:
+	// every value is what lifecycleFromEnvelope yields for it.
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-140",
+		ScopeID:     "root",
+		AdapterName: "intake",
+		AdapterType: "shell",
+		Digest:      "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+	}
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{scope}, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, active)
+
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1, "exactly one per-scope adapter pod must be created")
+	assert.Equal(t, jobbuilder.PerScopeAdapterPodName(run, "shell", "root"), pods[0].Name)
+
+	container := pods[0].Spec.Containers[0]
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", container.Image,
+		"the image must resolve to an existing registry image for the adapter KIND, never criteria-adapter-intake")
+	assert.Equal(t, "shell", pods[0].Labels["criteria.brokenbots.dev/adapter-kind"])
+
+	envNames := make(map[string]string)
+	for _, e := range container.Env {
+		envNames[e.Name] = e.Value
+	}
+	assert.Equal(t, "shell", envNames["ADAPTER_KIND"])
+	assert.Equal(t, "intake", envNames["CRITERIA_ADAPTER_NAME"],
+		"the pod carries the adapter instance name so adapter.sh resolves the instance-keyed digest file")
+	assert.Equal(t, "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635", envNames["CRITERIA_REMOTE_DIGEST"])
+}
+
+// A provision event without adapter_type (engines older than the pinned
+// v0.5.22) still builds the pod with the kind resolved from the adapter node
+// name — the reconciler's chosen CRI-140 semantics is log-and-continue, not
+// skip — and the error-level log carries the alertable structured field.
+func TestReconcilePerScopeAdaptersBuildsFallbackPodWithoutAdapterType(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	var logLines []string
+	logger := funcr.NewJSON(func(obj string) { logLines = append(logLines, obj) }, funcr.Options{})
+
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-140",
+		ScopeID:     "root",
+		AdapterName: "intake",
+	}
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{scope}, logger)
+	require.NoError(t, err, "a missing adapter_type must not fail the reconcile; it falls back")
+	assert.Equal(t, 1, active)
+
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1, "the fallback pod must still be built for older engines")
+	assert.Equal(t, "intake", pods[0].Labels["criteria.brokenbots.dev/adapter-kind"])
+	envNames := make(map[string]string)
+	for _, e := range pods[0].Spec.Containers[0].Env {
+		envNames[e.Name] = e.Value
+	}
+	assert.Equal(t, "intake", envNames["ADAPTER_KIND"])
+
+	// The alert hook: exactly the missing-adapter_type log, structured so the
+	// operator can alert on it. Other (info) lines may accompany it; filter
+	// for the alert line itself.
+	var alerts []string
+	for _, line := range logLines {
+		if strings.Contains(line, `"reason":"adapter_type_missing"`) {
+			alerts = append(alerts, line)
+		}
+	}
+	require.Len(t, alerts, 1, "exactly one alert log for the missing adapter_type")
+	assert.Contains(t, alerts[0], `"adapter":"intake"`)
+	assert.Contains(t, alerts[0], `"run":"cri-132"`)
 }
 
 // The reconcile is idempotent: a second pass over the same (full history)

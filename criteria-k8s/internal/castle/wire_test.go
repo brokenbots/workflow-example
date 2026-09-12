@@ -70,6 +70,58 @@ func TestLifecycleFromEnvelopeMatchesFileParserOnCapturedProvision(t *testing.T)
 	assert.Equal(t, parsed[0], got, "castle wire conversion must match the file parser on the captured emission")
 }
 
+// Verbatim v0.5.22-shaped provision_wanted emission: the pinned engine
+// publishes adapter_type (the implementation kind) alongside the workflow's
+// adapter node name (the instance, "intake") in payload.data — the shape the
+// production castle client actually receives, never the CRI-132 capture which
+// predates adapter_type.
+const v0522ProvisionWantedJSON = `{"schema_version":1,"seq":1,"run_id":"CRI-140","payload_type":"AdapterEvent","payload":{"adapter":"intake","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","scope_instance_id":"root","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-140/token"}}}`
+
+// The castle conversion of a v0.5.22-shaped provision_wanted envelope must
+// carry the adapter_type field: the per-scope reconciler resolves the pod
+// image kind from it, and scope.AdapterType is what the reconciler sees. A
+// conversion that drops it silently wedges per-scope pods in ImagePull again.
+func TestLifecycleFromEnvelopeResolvesAdapterType(t *testing.T) {
+	data := mustStruct(t, map[string]any{
+		"adapter":             "intake",
+		"adapter_type":        "shell",
+		"digest":              "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		"scope_instance_id":   "root",
+		"shim_listen_address": "[::]:7778",
+		"token_ref":           "/data/.criteria/runs/cri-140/token",
+	})
+	env := &v1.Envelope{
+		SchemaVersion: 1,
+		RunId:         "CRI-140",
+		Seq:           1,
+		Payload: &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{
+			Adapter: "intake",
+			Kind:    "adapter.lifecycle.provision_wanted",
+			Data:    data,
+		}},
+	}
+
+	got, ok := lifecycleFromEnvelope(env)
+	require.True(t, ok)
+	assert.Equal(t, events.EventProvisionWanted, got.Event)
+	assert.True(t, got.IsProvisionWanted())
+	assert.Equal(t, "intake", got.AdapterName, "the adapter field is the workflow's adapter node (instance)")
+	assert.Equal(t, "shell", got.AdapterType, "adapter_type is the implementation kind and must not be lost on the wire")
+	assert.Equal(t, "root", got.ScopeID)
+	assert.Equal(t, "CRI-140", got.RunID)
+	assert.Equal(t, "[::]:7778", got.ShimAddress)
+	assert.Equal(t, "/data/.criteria/runs/cri-140/token", got.TokenFile)
+	assert.Equal(t, "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635", got.Digest)
+
+	// Parity with the CRI-132 file parser over the equivalent v0.5.22
+	// emission; the reconciler only ever consumes castle-derived events, but
+	// the two parsers must agree so the fixture-shaped payloads stay honest.
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(v0522ProvisionWantedJSON))
+	require.NoError(t, err)
+	require.Len(t, parsed, 1)
+	assert.Equal(t, parsed[0], got, "castle wire conversion must match the file parser on the v0.5.22 emission")
+}
+
 // A nested released envelope converts to a release event carrying the
 // engine's verbatim adapter name; the client resolves the asymmetry against
 // the provisioned adapter for the scope instance.
