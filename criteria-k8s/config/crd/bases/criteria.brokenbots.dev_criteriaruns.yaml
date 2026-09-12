@@ -106,6 +106,12 @@ spec:
                 eventsPath:
                   type: string
                   description: Absolute path to the run's events file on /data.
+                castleRunId:
+                  type: string
+                  description: Run identifier in the castle control plane, set when the run lifecycle is published to castle.
+                castlePhase:
+                  type: string
+                  description: Last CriteriaRun phase successfully published to castle.
                 observedGeneration:
                   type: integer
                   format: int64

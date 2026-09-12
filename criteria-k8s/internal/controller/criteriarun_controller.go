@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/types/known/structpb"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,15 +28,29 @@ import (
 	logr "github.com/go-logr/logr"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 )
 
 const (
-	criteriaRunFinalizer      = "criteriarun.criteria.brokenbots.dev/finalizer"
-	perScopeRequeueInterval   = 10 * time.Second
-	queueRequeueInterval      = 5 * time.Second
+	criteriaRunFinalizer    = "criteriarun.criteria.brokenbots.dev/finalizer"
+	perScopeRequeueInterval = 10 * time.Second
+	queueRequeueInterval    = 5 * time.Second
+	castleRequeueInterval   = 10 * time.Second
+	criteriaFinalizedReason = "criteriarun finalized (deleted)"
 )
+
+// RunPublisher publishes CriteriaRun lifecycle state into the castle control
+// plane. Implemented by the castle package's Publisher; publishing is skipped
+// when Disabled returns true. All failures are best-effort: the reconciler
+// logs them and retries on a later reconcile, never failing the run.
+type RunPublisher interface {
+	Disabled() bool
+	EnsureRun(ctx context.Context, req castle.EnsureRunRequest) (string, error)
+	PublishEvent(ctx context.Context, runID string, payload any) error
+}
 
 // EventsReader reads the events ndjson file produced by a completed run.
 type EventsReader interface {
@@ -118,6 +133,7 @@ type CriteriaRunReconciler struct {
 	Reader   EventsReader
 	Defaults jobbuilder.Defaults
 	Queue    *RunQueue
+	Castle   RunPublisher
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -169,10 +185,20 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// are allowed to create child Jobs.
 	admitted, qstatus, prevRunning := r.Queue.Enqueue(&run)
 
+	// Publish the run into castle (idempotent per ticket); a castle outage
+	// only logs and requeues, it never blocks job creation.
+	castleRunID, castlePending := r.ensureCastleRun(ctx, &run, logger)
+
 	update := run.DeepCopy()
 	update.Status.ObservedGeneration = run.Generation
 	update.Status.EventsPath = eventsPath(&run)
 	update.Status.Queue = qstatus
+	if castleRunID != "" {
+		// Persisted together with the phase below so the castle run id and
+		// the k8s status share one write and never fight over the
+		// resourceVersion.
+		update.Status.CastleRunID = castleRunID
+	}
 
 	if !admitted {
 		update.Status.Phase = criteriav1.PhasePending
@@ -221,9 +247,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Sync status from the runner Job.
-	if err := r.applyJobStatus(ctx, &run, runnerJob, update, logger); err != nil {
+	requeue, err := r.applyJobStatus(ctx, &run, runnerJob, update, castleRunID, logger)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
+	castlePending = castlePending || requeue
 
 	phase := derivePhase(runnerJob)
 
@@ -248,6 +276,12 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
+	if castlePending {
+		// Castle publishing did not complete; retry soon without failing the
+		// reconcile.
+		return ctrl.Result{RequeueAfter: castleRequeueInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -255,30 +289,169 @@ func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
 }
 
-func (r *CriteriaRunReconciler) applyJobStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, update *criteriav1.CriteriaRun, logger logr.Logger) error {
+func (r *CriteriaRunReconciler) applyJobStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, update *criteriav1.CriteriaRun, castleRunID string, logger logr.Logger) (bool, error) {
 	phase := derivePhase(job)
 
 	update.Status.Phase = phase
 	update.Status.JobName = job.Name
 	update.Status.ObservedGeneration = run.Generation
 
+	var outcome *events.Outcome
 	if phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed {
-		outcome, err := r.readOutcome(ctx, run)
+		out, err := r.readOutcome(ctx, run)
 		if err != nil {
 			logger.Error(err, "reading run outcome from events file")
-		} else {
-			update.Status.PRNumber = outcome.PRNumber
-			update.Status.TicketState = outcome.TicketState
+			out = &events.Outcome{}
 		}
+		outcome = out
+		update.Status.PRNumber = outcome.PRNumber
+		update.Status.TicketState = outcome.TicketState
 	}
 
 	if !statusEqual(&run.Status, &update.Status) {
 		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
 		if err := r.Status().Update(ctx, update); err != nil {
-			return fmt.Errorf("updating status: %w", err)
+			return false, fmt.Errorf("updating status: %w", err)
 		}
 	}
-	return nil
+
+	// Publish the phase transition into castle after the k8s status has been
+	// persisted; failures are logged and retried on the next reconcile.
+	return r.publishPhaseChange(ctx, run, castleRunID, phase, outcome, logger), nil
+}
+
+// ensureCastleRun makes sure the CriteriaRun is registered in castle,
+// returning the castle run identifier. It is idempotent: once the run has a
+// CastleRunID the castle side owns the ticket-backed dedupe. The identifier
+// is only recorded in memory here; the caller persists it with the next
+// status update. A castle outage is never an error — it logs and reports
+// requeue so the next reconcile retries.
+func (r *CriteriaRunReconciler) ensureCastleRun(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (string, bool) {
+	if r.Castle == nil || r.Castle.Disabled() {
+		return "", false
+	}
+	if run.Status.CastleRunID != "" {
+		return run.Status.CastleRunID, false
+	}
+	runID, err := r.Castle.EnsureRun(ctx, castle.EnsureRunRequest{
+		Ticket:       run.Spec.TicketID,
+		RepoURL:      run.Spec.RepoURL,
+		WorkflowName: "criteriarun/" + run.Name,
+	})
+	if err != nil {
+		// Log and retry with backoff on a later reconcile; the run keeps
+		// processing while castle is unreachable.
+		logger.Info("publishing CriteriaRun to castle deferred", "error", err, "ticket", run.Spec.TicketID)
+		return "", true
+	}
+	run.Status.CastleRunID = runID
+	logger.Info("published CriteriaRun to castle", "castleRunId", runID, "ticket", run.Spec.TicketID)
+	return runID, false
+}
+
+// publishPhaseChange emits the overlord lifecycle event for a CriteriaRun
+// phase transition. It returns true when publishing is still pending (castle
+// unreachable) so the caller can requeue. Events are published at most once
+// per phase, tracked by Status.CastlePhase.
+func (r *CriteriaRunReconciler) publishPhaseChange(ctx context.Context, run *criteriav1.CriteriaRun, castleRunID string, phase criteriav1.CriteriaRunPhase, outcome *events.Outcome, logger logr.Logger) bool {
+	if r.Castle == nil || r.Castle.Disabled() || castleRunID == "" || run.Status.CastlePhase == string(phase) {
+		return false
+	}
+
+	var payloads []any
+	switch phase {
+	case criteriav1.PhaseRunning:
+		payloads = append(payloads, &v1.RunStarted{})
+	case criteriav1.PhaseSucceeded:
+		if outcome != nil && outcome.PRNumber != "" {
+			if url := prURL(run.Spec.RepoURL, outcome.PRNumber); url != "" {
+				data, derr := structpb.NewStruct(map[string]any{"url": url})
+				if derr != nil {
+					logger.Info("building pr_link payload deferred", "error", derr)
+				} else {
+					payloads = append(payloads, &v1.AdapterEvent{Kind: "pr_link", Data: data})
+				}
+			}
+		}
+		payloads = append(payloads, &v1.RunCompleted{FinalState: "succeeded", Success: true})
+	case criteriav1.PhaseFailed:
+		payloads = append(payloads, &v1.RunFailed{Reason: failureReason(outcome)})
+	default:
+		// Pending has no overlord event: the run record is created in the
+		// pending state by EnsureRun.
+		return false
+	}
+
+	for _, payload := range payloads {
+		if err := r.Castle.PublishEvent(ctx, castleRunID, payload); err != nil {
+			logger.Info("publishing CriteriaRun phase to castle deferred", "phase", phase, "error", err)
+			return true
+		}
+	}
+
+	base := run.DeepCopy()
+	base.Status.CastlePhase = string(phase)
+	if err := r.Status().Patch(ctx, base, client.MergeFrom(run)); err != nil {
+		// The patch failing means the phase may be re-published on the next
+		// reconcile; castle tolerates duplicate lifecycle events.
+		logger.Info("recording published castle phase deferred", "error", err, "phase", phase)
+		return true
+	}
+	run.Status.CastlePhase = string(phase)
+	logger.Info("published CriteriaRun phase to castle", "phase", phase, "castleRunId", castleRunID)
+	return false
+}
+
+// prURL builds a GitHub pull request URL from the repo and PR number.
+// RepoURL may be an https URL or an "owner/name" shorthand.
+func prURL(repoURL, prNumber string) string {
+	if repoURL == "" || prNumber == "" {
+		return ""
+	}
+	if strings.HasPrefix(repoURL, "https://github.com/") || strings.HasPrefix(repoURL, "http://github.com/") {
+		repo := strings.TrimPrefix(strings.TrimPrefix(repoURL, "https://github.com/"), "http://github.com/")
+		repo = strings.TrimSuffix(repo, ".git")
+		return fmt.Sprintf("https://github.com/%s/pull/%s", repo, prNumber)
+	}
+	if !strings.Contains(repoURL, "://") {
+		return fmt.Sprintf("https://github.com/%s/pull/%s", strings.TrimSuffix(repoURL, ".git"), prNumber)
+	}
+	return ""
+}
+
+// failureReason maps a failed run's parsed outcome into the overlord
+// RunFailed.reason vocabulary.
+func failureReason(outcome *events.Outcome) string {
+	if outcome != nil && outcome.Terminal != "" {
+		return "criteriarun job failed: " + outcome.Terminal
+	}
+	return "criteriarun job failed"
+}
+
+// publishFinalize emits the terminal lifecycle event for a deleted CriteriaRun
+// so castle marks the run complete instead of leaving it dangling open. If the
+// run reached a terminal phase that was never published, the matching terminal
+// event is used so a succeeded run is not flipped to failed.
+func (r *CriteriaRunReconciler) publishFinalize(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) {
+	if r.Castle == nil || r.Castle.Disabled() || run.Status.CastleRunID == "" {
+		return
+	}
+	if run.Status.CastlePhase == string(criteriav1.PhaseSucceeded) ||
+		run.Status.CastlePhase == string(criteriav1.PhaseFailed) {
+		// Castle already recorded a terminal state for this run.
+		return
+	}
+	var payload any
+	if run.Status.Phase == criteriav1.PhaseSucceeded {
+		payload = &v1.RunCompleted{FinalState: "succeeded", Success: true}
+	} else {
+		payload = &v1.RunFailed{Reason: criteriaFinalizedReason}
+	}
+	if err := r.Castle.PublishEvent(ctx, run.Status.CastleRunID, payload); err != nil {
+		logger.Info("publishing finalize event to castle deferred", "error", err, "castleRunId", run.Status.CastleRunID)
+		return
+	}
+	logger.Info("published CriteriaRun finalize to castle", "castleRunId", run.Status.CastleRunID)
 }
 
 func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
@@ -354,6 +527,11 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 		}
 	}
 
+	// Emit the terminal event into castle so a deleted run is not left
+	// dangling open there. Best-effort: a castle outage must never block
+	// deletion, so the finalizer is removed regardless of the outcome.
+	r.publishFinalize(ctx, run, logger)
+
 	controllerutil.RemoveFinalizer(run, criteriaRunFinalizer)
 	if err := r.Update(ctx, run); err != nil {
 		return ctrl.Result{}, fmt.Errorf("removing finalizer: %w", err)
@@ -381,4 +559,3 @@ func statusEqual(a, b *criteriav1.CriteriaRunStatus) bool {
 	}
 	return reflect.DeepEqual(a, b)
 }
-

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	batchv1 "k8s.io/api/batch/v1"
@@ -32,6 +33,10 @@ var (
 	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	namespaceFlag   = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
 	development     = flag.Bool("development", false, "Enable development logging")
+	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle Connect endpoint (e.g. http://castle.criteria-jobs.svc.cluster.local:8080); empty disables publishing")
+	castleToken     = flag.String("castle-token", getenv("CASTLE_TOKEN", ""), "Criteria agent token for castle publishing (preferred, stable identity)")
+	castleBootstrap = flag.String("castle-bootstrap-token", getenv("CASTLE_BOOTSTRAP_TOKEN", ""), "Castle bootstrap token, exchanged for an agent token via Register when no agent token is configured")
+	castleAgentName = flag.String("castle-agent-name", getenv("CASTLE_AGENT_NAME", "criteria-k8s-operator"), "Agent name reported to castle during registration")
 )
 
 func main() {
@@ -80,6 +85,18 @@ func main() {
 
 	queue := controller.NewRunQueue()
 
+	publisher := castle.New(castle.Config{
+		Addr:           *castleAddr,
+		Token:          *castleToken,
+		BootstrapToken: *castleBootstrap,
+		AgentName:      *castleAgentName,
+	}, nil)
+	if publisher.Disabled() {
+		logger.Info("castle publishing disabled (CASTLE_ADDR is empty)")
+	} else {
+		logger.Info("castle publishing enabled", "addr", *castleAddr, "agent", *castleAgentName)
+	}
+
 	reconciler := &controller.CriteriaRunReconciler{
 		Client: mgr.GetClient(),
 		Scheme: scheme,
@@ -90,7 +107,8 @@ func main() {
 			DataPVC:         *dataPVC,
 			ProviderBaseURL: *providerBaseURL,
 		},
-		Queue: queue,
+		Queue:  queue,
+		Castle: publisher,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "setting up CriteriaRun reconciler")

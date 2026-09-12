@@ -9,11 +9,11 @@ import (
 type CriteriaRunPhase string
 
 const (
-	PhasePending    CriteriaRunPhase = "Pending"
-	PhaseRunning    CriteriaRunPhase = "Running"
-	PhaseSucceeded  CriteriaRunPhase = "Succeeded"
-	PhaseFailed     CriteriaRunPhase = "Failed"
-	PhaseUnknown    CriteriaRunPhase = "Unknown"
+	PhasePending   CriteriaRunPhase = "Pending"
+	PhaseRunning   CriteriaRunPhase = "Running"
+	PhaseSucceeded CriteriaRunPhase = "Succeeded"
+	PhaseFailed    CriteriaRunPhase = "Failed"
+	PhaseUnknown   CriteriaRunPhase = "Unknown"
 )
 
 // CriteriaRunSpec defines the desired state of a CriteriaRun.
@@ -84,6 +84,15 @@ type CriteriaRunStatus struct {
 
 	// EventsPath is the absolute path to the run's events file on the shared /data volume.
 	EventsPath string `json:"eventsPath,omitempty"`
+
+	// CastleRunID is the run identifier in the castle control plane, set when
+	// the CriteriaRun lifecycle is being published to castle (CRI-131). Empty
+	// when publishing is disabled or has not succeeded yet.
+	CastleRunID string `json:"castleRunId,omitempty"`
+
+	// CastlePhase records the last CriteriaRun phase successfully published to
+	// castle, so phase transitions are emitted exactly once per phase.
+	CastlePhase string `json:"castlePhase,omitempty"`
 
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

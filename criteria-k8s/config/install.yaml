@@ -119,6 +119,12 @@ spec:
                 eventsPath:
                   type: string
                   description: Absolute path to the run's events file on /data.
+                castleRunId:
+                  type: string
+                  description: Run identifier in the castle control plane, set when the run lifecycle is published to castle.
+                castlePhase:
+                  type: string
+                  description: Last CriteriaRun phase successfully published to castle.
                 observedGeneration:
                   type: integer
                   format: int64
@@ -249,6 +255,13 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+          env:
+            - name: CASTLE_ADDR
+              value: "http://castle.criteria-jobs.svc.cluster.local:8080"
+            # Optional auth for castle publishing (empty = server policy
+            # decides; publishing degrades gracefully without it):
+            # - name: CASTLE_TOKEN
+            #   valueFrom: {secretKeyRef: {name: criteria-secrets, key: castle-agent-token}}
           volumeMounts:
             - name: criteria-data
               mountPath: /data
