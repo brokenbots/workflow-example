@@ -21,6 +21,7 @@ import (
 	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
 	v1connect "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
+	"time"
 )
 
 // Page budgets for castle reads. Package-level vars (not consts) so tests
@@ -236,6 +237,8 @@ func (c *Client) findRunByRunner(ctx context.Context, runnerJob string) (*v1.Run
 func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, error) {
 	prefix := runnerJob + "-"
 	ids := map[string]struct{}{}
+	online := map[string]struct{}{}
+	lastSeen := map[string]string{}
 	pageToken := ""
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := c.runs.ListAgents(ctx, connect.NewRequest(&v1.ListAgentsRequest{
@@ -252,13 +255,41 @@ func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, 
 			}
 			if id := agent.GetCriteriaId(); id != "" {
 				ids[id] = struct{}{}
+				// CRI-137 follow-up: a runner restart registers a second
+				// agent for the same job while the dead one lingers
+				// offline. Prefer online agents; among equals take the
+				// most recently seen. An offline agent's registrations are
+				// dead state, not the run's identity.
+				if agent.GetStatus() == "online" {
+					online[id] = struct{}{}
+				}
+				if lastSeen[id] == "" || agent.GetLastSeenAt().AsTime().Format(time.RFC3339) > lastSeen[id] {
+					lastSeen[id] = agent.GetLastSeenAt().AsTime().Format(time.RFC3339)
+				}
 			}
 		}
 		pageToken = resp.Msg.GetNextPageToken()
 		if pageToken == "" {
-			switch len(ids) {
+			// Prefer online agents when the job's identity is ambiguous.
+			search := ids
+			if len(online) == 1 {
+				search = online
+			} else if len(online) > 1 {
+				// Multiple online agents for one job: pick the most
+				// recently seen rather than failing discovery.
+				best, bestSeen := "", ""
+				for id := range online {
+					if lastSeen[id] > bestSeen {
+						best, bestSeen = id, lastSeen[id]
+					}
+				}
+				if best != "" {
+					return best, nil
+				}
+			}
+			switch len(search) {
 			case 1:
-				for id := range ids {
+				for id := range search {
 					return id, nil
 				}
 			case 0:
