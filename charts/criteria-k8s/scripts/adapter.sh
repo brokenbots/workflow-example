@@ -10,7 +10,8 @@ if [ -z "${CRITERIA_RUN_JOB_NAME:-}" ]; then
     exit 1
 fi
 
-run_dir="/data/.criteria/runs/$CRITERIA_RUN_JOB_NAME"
+run_dir_root="${CRITERIA_RUN_DIR_ROOT:-/data/.criteria/runs}"
+run_dir="$run_dir_root/$CRITERIA_RUN_JOB_NAME"
 
 # In per-scope mode the operator passes the connection metadata directly via
 # the environment. When any value is missing we fall back to polling the
@@ -34,7 +35,17 @@ if [ -z "${CRITERIA_REMOTE_TOKEN:-}" ]; then
     fi
 fi
 if [ -z "${CRITERIA_REMOTE_DIGEST:-}" ]; then
-    CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$ADAPTER_KIND")
+    # Per-scope pods carry the workflow's adapter instance name; prefer its
+    # own pinned digest when the runner published one, so instances of the
+    # same kind pinned to different versions resolve correctly (CRI-140).
+    # The file is only used when it already exists: the runner publishes the
+    # instance digests at startup, so a missing file means the instance has
+    # no lockfile entry and the kind digest is the correct fallback.
+    if [ -n "${CRITERIA_ADAPTER_NAME:-}" ] && [ -r "$run_dir/digest-$CRITERIA_ADAPTER_NAME" ]; then
+        CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$CRITERIA_ADAPTER_NAME")
+    else
+        CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$ADAPTER_KIND")
+    fi
 fi
 
 export CRITERIA_REMOTE_HOST
@@ -62,4 +73,11 @@ fi
 # credentials reach the adapter over the OpenSession SDK contract; this
 # wrapper exports only the connection/digest metadata from discovery files
 # or from the per-scope values supplied by the operator.
+# Prefer the binary found on PATH when present: tests stub the runner via a
+# PATH shim, while the image places the real binary at the absolute path
+# below (non-root, PATH not writable, so the shim cannot be injected at
+# runtime).
+if command -v criteria-adapter-remote-runner > /dev/null 2>&1; then
+    exec criteria-adapter-remote-runner
+fi
 exec /usr/local/bin/criteria-adapter-remote-runner

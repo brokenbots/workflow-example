@@ -29,6 +29,18 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 
 	desired := make(map[string]*corev1.Pod, len(active))
 	for _, scope := range active {
+		if scope.AdapterType == "" {
+			// CRI-140 semantics, deliberately kept: engines older than the
+			// pinned v0.5.22 do not publish adapter_type, so the image kind
+			// falls back to the adapter node name — an image reference that
+			// does not exist in the registry and wedges the pod in
+			// ImagePull. The fallback is retained for such engines, and
+			// this error-level log line (always emitted, V(0)) is the
+			// operator's alert hook: alert on reason="adapter_type_missing".
+			// Every silent ImagePull wedge of this shape surfaces here.
+			logger.Error(nil, "per-scope provision_wanted carries no adapter_type; resolving image kind from the adapter node name, which likely does not exist in the registry (requires criteria >= v0.5.22)",
+				"reason", "adapter_type_missing", "run", run.Name, "adapter", scope.AdapterName, "scope", scope.ScopeID)
+		}
 		pod := jobbuilder.BuildPerScopeAdapterPod(run, r.Defaults, scope)
 		desired[pod.Name] = pod
 	}

@@ -100,6 +100,7 @@ data:
     # Resolve the pinned adapter digests from the workflow lockfile using the same
     # awk the local container entrypoint uses.
     lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
+    
     adapter_digest() {
         kind="$1"
         digest=$(awk -v k="criteria-adapter-${kind}" '
@@ -112,8 +113,46 @@ data:
         fi
         printf '%s' "$digest"
     }
-    printf 'sha256:%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
-    printf 'sha256:%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
+    
+    # Emit "<instance> sha256:<digest>" for every adapter entry in the lockfile.
+    # Entries are declared as `adapter "<kind>" "<instance>"`; instance keying is
+    # required because a lockfile may pin several instances of one kind to
+    # different versions.
+    adapter_entry_digests() {
+        awk '
+            /^[[:space:]]*adapter[[:space:]]+"/ && !in_entry {
+                decl = $0
+                sub(/^[[:space:]]*adapter[[:space:]]+"/, "", decl)
+                split(decl, q, "\"")
+                if (q[1] == "" || q[3] == "") { next }
+                in_entry = 1
+                entry_instance = q[3]
+                next
+            }
+            in_entry && /^[[:space:]]*}/ { in_entry = 0; next }
+            in_entry && /resolved_digest/ {
+                digest = $0
+                gsub(/[ "]/, "", digest)
+                sub(/^resolved_digest=sha256:/, "", digest)
+                if (digest != "") { print entry_instance, digest }
+                in_entry = 0
+                next
+            }
+        ' "$lockfile"
+    }
+    
+    # Publish the digests keyed by kind, so the run-duration adapter Jobs
+    # (ADAPTER_KIND=shell/copilot) keep finding their pinned image digest...
+    for kind in shell copilot; do
+        printf 'sha256:%s' "$(adapter_digest "$kind")" > "$run_dir/digest-$kind"
+    done
+    
+    # ...and keyed by adapter instance name, so per-scope pods provisioned for a
+    # workflow adapter node (e.g. instance "intake") find their own pinned digest
+    # instead of polling forever for a file that never appears (CRI-140).
+    adapter_entry_digests | while read -r entry_instance entry_digest; do
+        printf 'sha256:%s' "$entry_digest" > "$run_dir/digest-$entry_instance"
+    done
     
     # Publish the runner dial address. The Kubernetes runtime widens the shim to
     # 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
@@ -254,7 +293,8 @@ data:
         exit 1
     fi
     
-    run_dir="/data/.criteria/runs/$CRITERIA_RUN_JOB_NAME"
+    run_dir_root="${CRITERIA_RUN_DIR_ROOT:-/data/.criteria/runs}"
+    run_dir="$run_dir_root/$CRITERIA_RUN_JOB_NAME"
     
     # In per-scope mode the operator passes the connection metadata directly via
     # the environment. When any value is missing we fall back to polling the
@@ -278,7 +318,17 @@ data:
         fi
     fi
     if [ -z "${CRITERIA_REMOTE_DIGEST:-}" ]; then
-        CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$ADAPTER_KIND")
+        # Per-scope pods carry the workflow's adapter instance name; prefer its
+        # own pinned digest when the runner published one, so instances of the
+        # same kind pinned to different versions resolve correctly (CRI-140).
+        # The file is only used when it already exists: the runner publishes the
+        # instance digests at startup, so a missing file means the instance has
+        # no lockfile entry and the kind digest is the correct fallback.
+        if [ -n "${CRITERIA_ADAPTER_NAME:-}" ] && [ -r "$run_dir/digest-$CRITERIA_ADAPTER_NAME" ]; then
+            CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$CRITERIA_ADAPTER_NAME")
+        else
+            CRITERIA_REMOTE_DIGEST=$(poll_file "$run_dir/digest-$ADAPTER_KIND")
+        fi
     fi
     
     export CRITERIA_REMOTE_HOST
@@ -306,4 +356,11 @@ data:
     # credentials reach the adapter over the OpenSession SDK contract; this
     # wrapper exports only the connection/digest metadata from discovery files
     # or from the per-scope values supplied by the operator.
+    # Prefer the binary found on PATH when present: tests stub the runner via a
+    # PATH shim, while the image places the real binary at the absolute path
+    # below (non-root, PATH not writable, so the shim cannot be injected at
+    # runtime).
+    if command -v criteria-adapter-remote-runner > /dev/null 2>&1; then
+        exec criteria-adapter-remote-runner
+    fi
     exec /usr/local/bin/criteria-adapter-remote-runner

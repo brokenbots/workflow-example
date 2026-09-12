@@ -47,6 +47,10 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Run engine pin regression test (CRI-140)
+        run: |
+          bash linear_intake_v1/tests/test_engine_pin.sh
+
   validate-manifests:
     runs-on: ubuntu-latest
     steps:

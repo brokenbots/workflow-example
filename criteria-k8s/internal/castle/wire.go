@@ -56,6 +56,11 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	ev.Digest = dataString(data, "digest")
 	ev.ShimAddress = dataString(data, "shim_listen_address", "shim_address")
 	ev.TokenFile = dataString(data, "token_ref", "token_file")
+	// The adapter implementation kind (shell, copilot, ...) is distinct from
+	// the workflow's adapter node name above. Emitted since v0.5.22; empty on
+	// older engines. The per-scope reconciler resolves the pod image kind
+	// from it, so it must survive the wire conversion.
+	ev.AdapterType = dataString(data, "adapter_type")
 	if ev.AdapterName == "" {
 		// Same skip rule as flat and nested events in the CRI-132 parser.
 		return events.LifecycleEvent{}, false

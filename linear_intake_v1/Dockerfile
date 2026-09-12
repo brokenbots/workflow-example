@@ -8,7 +8,12 @@ ARG TARGETARCH
 # comparisons in gate writes are evaluated correctly and the literal-bool
 # workaround in the durable-plan gates can be retired.
 # v0.5.19 adds CRI-115 remote adapter lifecycle events and per-scope tokens.
-ARG CRITERIA_VERSION=v0.5.20
+# v0.5.22 publishes adapter_type on lifecycle events (CRI-141): the operator's
+# per-scope reconciler (CRI-140) resolves the adapter KIND from it, so the
+# workflow image must be built from a release >= v0.5.22 or per-scope pods
+# would be built from the adapter node name and reference images that do not
+# exist in the registry (guarded by linear_intake_v1/tests/test_engine_pin.sh).
+ARG CRITERIA_VERSION=v0.5.22
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0
 ARG LINEAR_CLI_VERSION=0.0.5
