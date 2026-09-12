@@ -49,6 +49,10 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	data := ae.GetData()
 	ev.AdapterName = firstNonEmpty(dataString(data, "adapter", "adapter_name"), ae.GetAdapter())
 	ev.ScopeID = dataString(data, "scope_instance_id", "scope_id")
+	// The engine emits adapter_type (CRI-141): the implementation kind
+	// (shell/copilot/...), distinct from the workflow's adapter node name.
+	// The per-scope pod builder needs it to resolve adapter images.
+	ev.AdapterType = dataString(data, "adapter_type")
 	ev.Digest = dataString(data, "digest")
 	ev.ShimAddress = dataString(data, "shim_listen_address", "shim_address")
 	ev.TokenFile = dataString(data, "token_ref", "token_file")
