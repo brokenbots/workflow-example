@@ -39,6 +39,11 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+          env:
+            # Castle observation (CRI-135): run lifecycle is consumed from
+            # the castle ServerService API instead of the PVC event file.
+            - name: CASTLE_ADDR
+              value: http://castle:8080
           volumeMounts:
             - name: criteria-data
               mountPath: /data

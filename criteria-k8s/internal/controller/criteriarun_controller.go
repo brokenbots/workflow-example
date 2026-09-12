@@ -2,22 +2,16 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -27,105 +21,33 @@ import (
 	logr "github.com/go-logr/logr"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
-	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 )
 
 const (
-	criteriaRunFinalizer      = "criteriarun.criteria.brokenbots.dev/finalizer"
-	perScopeRequeueInterval   = 10 * time.Second
-	queueRequeueInterval      = 5 * time.Second
+	criteriaRunFinalizer    = "criteriarun.criteria.brokenbots.dev/finalizer"
+	perScopeRequeueInterval = 10 * time.Second
+	queueRequeueInterval    = 5 * time.Second
 )
-
-// EventsReader reads the events ndjson file produced by a completed run.
-type EventsReader interface {
-	// Read returns the events file content for the given CriteriaRun.
-	Read(ctx context.Context, run *criteriav1.CriteriaRun) ([]byte, error)
-}
-
-// PodExecReader reads the events file by exec'ing into a pod owned by the run's Job.
-type PodExecReader struct {
-	Config *rest.Config
-}
-
-// Read executes `cat` on the run's events file inside the first available pod.
-func (r *PodExecReader) Read(ctx context.Context, run *criteriav1.CriteriaRun) ([]byte, error) {
-	if run.Status.JobName == "" {
-		return nil, fmt.Errorf("no job associated with run")
-	}
-	cl, err := kubernetes.NewForConfig(r.Config)
-	if err != nil {
-		return nil, fmt.Errorf("building kubernetes client: %w", err)
-	}
-	podList, err := cl.CoreV1().Pods(run.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("job-name=%s", run.Status.JobName),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing pods: %w", err)
-	}
-	if len(podList.Items) == 0 {
-		return nil, fmt.Errorf("no pods found for job %s", run.Status.JobName)
-	}
-
-	// Prefer a pod that has reached a terminal phase.
-	var target *corev1.Pod
-	for i := range podList.Items {
-		p := &podList.Items[i]
-		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			target = p
-			break
-		}
-	}
-	if target == nil {
-		target = &podList.Items[0]
-	}
-
-	eventsPath := eventsPath(run)
-	req := cl.CoreV1().RESTClient().
-		Post().
-		Resource("pods").
-		Name(target.Name).
-		Namespace(target.Namespace).
-		SubResource("exec").
-		Param("container", "workflow-runner").
-		Param("command", "sh").
-		Param("command", "-c").
-		Param("command", fmt.Sprintf("cat %s 2>/dev/null || true", shellQuote(eventsPath))).
-		Param("stdout", "true").
-		Param("stderr", "false").
-		Param("tty", "false")
-
-	exec, err := remotecommand.NewSPDYExecutor(r.Config, "POST", req.URL())
-	if err != nil {
-		return nil, fmt.Errorf("creating executor: %w", err)
-	}
-	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("exec stream: %w (stderr: %s)", err, stderr.String())
-	}
-	return stdout.Bytes(), nil
-}
 
 // CriteriaRunReconciler reconciles a CriteriaRun object into a batch/v1 Job.
 type CriteriaRunReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Config   *rest.Config
-	Reader   EventsReader
-	Defaults jobbuilder.Defaults
-	Queue    *RunQueue
+	Scheme *runtime.Scheme
+	// Castle observes run lifecycle from the castle control plane (CRI-133
+	// API). Nil or disabled means observation is off; the reconciler then
+	// relies purely on Job conditions for phase stamping.
+	Castle    castle.RunSource
+	Defaults  jobbuilder.Defaults
+	Queue     *RunQueue
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 
 func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx).WithValues("criteriarun", req.NamespacedName)
@@ -220,15 +142,25 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("no runner job found in desired set")
 	}
 
-	// Sync status from the runner Job.
-	if err := r.applyJobStatus(ctx, &run, runnerJob, update, logger); err != nil {
-		return ctrl.Result{}, err
+	// Base status mirrors the runner Job, then the castle observation layers
+	// on top: the castle run id, terminal completion (RunCompleted/RunFailed
+	// from castle, not the events file), and the per-scope lifecycle events
+	// consumed below. One status write.
+	update.Status.Phase = derivePhase(runnerJob)
+	update.Status.JobName = runnerJob.Name
+	obs := r.observeCastle(ctx, &run, update, logger)
+
+	if !statusEqual(&run.Status, &update.Status) {
+		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
+		if err := r.Status().Update(ctx, update); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status: %w", err)
+		}
 	}
 
-	phase := derivePhase(runnerJob)
+	phase := update.Status.Phase
 
-	// Reconcile per-scope adapter pods from the run event stream.
-	activeAdapters, err := r.reconcilePerScopeAdapters(ctx, &run, logger)
+	// Reconcile per-scope adapter pods from the castle event stream.
+	activeAdapters, err := r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -243,7 +175,8 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Keep polling the event stream while the run is using per-scope adapters.
+	// Keep polling castle while the run is using per-scope adapters and has
+	// not reached a terminal phase.
 	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(phase)) {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
@@ -253,32 +186,6 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
-}
-
-func (r *CriteriaRunReconciler) applyJobStatus(ctx context.Context, run *criteriav1.CriteriaRun, job *batchv1.Job, update *criteriav1.CriteriaRun, logger logr.Logger) error {
-	phase := derivePhase(job)
-
-	update.Status.Phase = phase
-	update.Status.JobName = job.Name
-	update.Status.ObservedGeneration = run.Generation
-
-	if phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed {
-		outcome, err := r.readOutcome(ctx, run)
-		if err != nil {
-			logger.Error(err, "reading run outcome from events file")
-		} else {
-			update.Status.PRNumber = outcome.PRNumber
-			update.Status.TicketState = outcome.TicketState
-		}
-	}
-
-	if !statusEqual(&run.Status, &update.Status) {
-		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
-		if err := r.Status().Update(ctx, update); err != nil {
-			return fmt.Errorf("updating status: %w", err)
-		}
-	}
-	return nil
 }
 
 func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
@@ -304,25 +211,44 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 	return criteriav1.PhasePending
 }
 
+// observeCastle observes the run's lifecycle from castle and layers it onto
+// the pending status update: the castle run id, terminal completion, and the
+// run outcome (PR number, ticket state). Transient castle failures are
+// logged and skipped — castle observation must never block k8s actuation,
+// and the reconcile cadence retries on the next pass.
+func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) *castle.Observation {
+	empty := &castle.Observation{}
+	if r.Castle == nil || r.Castle.Disabled() {
+		return empty
+	}
+
+	obs, err := r.Castle.Observe(ctx, run.Spec.TicketID, run.Status.CastleRunID)
+	if err != nil {
+		logger.Error(err, "observing run lifecycle from castle")
+		return empty
+	}
+
+	if obs.RunID != "" && obs.RunID != run.Status.CastleRunID {
+		update.Status.CastleRunID = obs.RunID
+	}
+	if obs.Terminal != nil {
+		// Terminal state stamping comes from castle (RunCompleted/RunFailed),
+		// keeping the same phase semantics the Job conditions use. Job
+		// conditions remain the base phase so the queue can still release if
+		// castle goes silent.
+		if obs.Terminal.Success {
+			update.Status.Phase = criteriav1.PhaseSucceeded
+		} else {
+			update.Status.Phase = criteriav1.PhaseFailed
+		}
+		update.Status.PRNumber = obs.Terminal.PRNumber
+		update.Status.TicketState = obs.Terminal.TicketState
+	}
+	return obs
+}
+
 func eventsPath(run *criteriav1.CriteriaRun) string {
 	return fmt.Sprintf("/data/intake/%s/events.ndjson", run.Spec.TicketID)
-}
-
-// shellQuote returns a single-quoted shell literal for s.
-// It assumes the remote shell is POSIX /bin/sh.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
-}
-
-func (r *CriteriaRunReconciler) readOutcome(ctx context.Context, run *criteriav1.CriteriaRun) (*events.Outcome, error) {
-	data, err := r.Reader.Read(ctx, run)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) == 0 {
-		return &events.Outcome{}, nil
-	}
-	return events.ParseBytes(data)
 }
 
 func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (ctrl.Result, error) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
@@ -57,7 +58,7 @@ func TestReconcileCreatesJobs(t *testing.T) {
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   &fakeReader{outcome: &events.Outcome{PRNumber: "42", TicketState: "Done"}},
+		Castle:   &fakeCastle{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    controller.NewRunQueue(),
 	}
@@ -119,10 +120,16 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 		WithObjects(run, job).
 		Build()
 
+	// Castle reports the run completed successfully; terminal stamping comes
+	// from castle, not the events file.
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID:    "castle-run-1",
+		Terminal: castleTerminal(true, "42", "Done"),
+	}}
 	r := &controller.CriteriaRunReconciler{
 		Client: cl,
 		Scheme: scheme,
-		Reader: &fakeReader{outcome: &events.Outcome{PRNumber: "42", TicketState: "Done"}},
+		Castle: castleStub,
 		Queue:  controller.NewRunQueue(),
 	}
 
@@ -134,6 +141,103 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
 	assert.Equal(t, "42", updated.Status.PRNumber)
 	assert.Equal(t, "Done", updated.Status.TicketState)
+	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID)
+	assert.Equal(t, "CRI-42", castleStub.lastTicket, "observation is keyed on the run's ticket")
+}
+
+// Without any castle terminal (or observation disabled), the runner Job's
+// conditions still drive the phase, and no outcome fields are stamped: the
+// operator performs no reads of the events file.
+func TestReconcileJobTerminalWithoutCastleKeepsPhaseOnly(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-42",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-42"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-42",
+			Namespace: "default",
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: &fakeCastle{},
+		Queue:  controller.NewRunQueue(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
+	assert.Empty(t, updated.Status.PRNumber, "no file reads: PR number only comes from castle")
+	assert.Empty(t, updated.Status.TicketState)
+	assert.Empty(t, updated.Status.CastleRunID)
+}
+
+// A castle RunFailed terminal overrides the Job-condition-derived phase, so
+// the queue releases promptly even if the runner Job is still seen as active.
+func TestReconcileCastleTerminalOverridesActiveJob(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-42",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-42"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42", Namespace: "default"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID:    "castle-run-2",
+		Terminal: castleTerminal(false, "", "Failed"),
+	}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res, "terminal castle phase must not requeue")
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseFailed, updated.Status.Phase)
+	assert.Equal(t, "castle-run-2", updated.Status.CastleRunID)
 }
 
 func TestFinalizeDeletesJobs(t *testing.T) {
@@ -195,10 +299,7 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 		},
 	}
 
-	eventsData := []byte(strings.Join([]string{
-		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"shell","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-shell","digest":"abc"}`,
-		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"copilot","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-copilot","digest":"def"}`,
-	}, "\n"))
+	eventsData := []events.LifecycleEvent{provisionShell, provisionCopilot}
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -206,10 +307,11 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 		WithObjects(run).
 		Build()
 
+	castleStub := &fakeCastle{observation: &castle.Observation{Lifecycle: eventsData}}
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   &fakeReader{data: eventsData},
+		Castle:   castleStub,
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    controller.NewRunQueue(),
 	}
@@ -252,14 +354,10 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 	}
 	require.NoError(t, cl.Status().Update(context.Background(), runner))
 
-	// Now emit release events for both scopes and reconcile again.
-	releaseData := []byte(strings.Join([]string{
-		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"shell","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-shell","digest":"abc"}`,
-		`{"event":"provision_wanted","run_id":"CRI-116","scope_id":"root","adapter_name":"copilot","shim_address":"10.0.0.1:7778","token_file":"/data/intake/CRI-116/tokens/root-copilot","digest":"def"}`,
-		`{"event":"release","run_id":"CRI-116","scope_id":"root","adapter_name":"shell"}`,
-		`{"event":"release","run_id":"CRI-116","scope_id":"root","adapter_name":"copilot"}`,
-	}, "\n"))
-	r.Reader = &fakeReader{data: releaseData}
+	// Now the engine releases both scopes (full history) and reconcile again.
+	castleStub.observation = &castle.Observation{
+		Lifecycle: []events.LifecycleEvent{provisionShell, provisionCopilot, releaseShell, releaseCopilot},
+	}
 
 	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
@@ -303,7 +401,7 @@ func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   &fakeReader{},
+		Castle:   &fakeCastle{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    controller.NewRunQueue(),
 	}
@@ -340,7 +438,7 @@ func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   &fakeReader{},
+		Castle:   &fakeCastle{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    controller.NewRunQueue(),
 	}
@@ -373,12 +471,12 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 		WithObjects(runA, runB).
 		Build()
 
-	reader := &fakeReader{outcome: &events.Outcome{PRNumber: "117", TicketState: "Done"}}
+	reader := &fakeCastle{}
 	queue := controller.NewRunQueue()
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   reader,
+		Castle:   reader,
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    queue,
 	}
@@ -461,7 +559,7 @@ func TestQueueDoesNotBlockDifferentRepoRuns(t *testing.T) {
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   &fakeReader{},
+		Castle:   &fakeCastle{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    queue,
 	}
@@ -506,7 +604,7 @@ func TestQueueFairnessFIFO(t *testing.T) {
 	r := &controller.CriteriaRunReconciler{
 		Client:   cl,
 		Scheme:   scheme,
-		Reader:   &fakeReader{},
+		Castle:   &fakeCastle{},
 		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
 		Queue:    queue,
 	}
@@ -529,17 +627,37 @@ func TestQueueFairnessFIFO(t *testing.T) {
 	assert.Equal(t, 1, second.Status.Queue.Position)
 }
 
-type fakeReader struct {
-	outcome *events.Outcome
-	data    []byte
+type fakeCastle struct {
+	observation *castle.Observation
+	err         error
+	calls       int
+	lastTicket  string
+	lastKnownID string
 }
 
-func (f *fakeReader) Read(ctx context.Context, run *criteriav1.CriteriaRun) ([]byte, error) {
-	if len(f.data) > 0 {
-		return f.data, nil
+func (f *fakeCastle) Observe(ctx context.Context, ticket, knownRunID string) (*castle.Observation, error) {
+	f.calls++
+	f.lastTicket = ticket
+	f.lastKnownID = knownRunID
+	if f.err != nil {
+		return nil, f.err
 	}
-	if f.outcome != nil {
-		return []byte(`{"pr_number":"` + f.outcome.PRNumber + `","state":"` + f.outcome.TicketState + `"}`), nil
+	if f.observation == nil {
+		return &castle.Observation{}, nil
 	}
-	return nil, nil
+	return f.observation, nil
 }
+
+func (f *fakeCastle) Disabled() bool { return false }
+
+func castleTerminal(success bool, pr, state string) *castle.Terminal {
+	return &castle.Terminal{Success: success, PRNumber: pr, TicketState: state, FinalState: state}
+}
+
+// lifecycle events for per-scope tests, castle-sourced.
+var (
+	provisionShell   = events.LifecycleEvent{Event: events.EventProvisionWanted, RunID: "CRI-116", ScopeID: "root", AdapterName: "shell", ShimAddress: "10.0.0.1:7778", TokenFile: "/data/intake/CRI-116/tokens/root-shell", Digest: "abc"}
+	provisionCopilot = events.LifecycleEvent{Event: events.EventProvisionWanted, RunID: "CRI-116", ScopeID: "root", AdapterName: "copilot", ShimAddress: "10.0.0.1:7778", TokenFile: "/data/intake/CRI-116/tokens/root-copilot", Digest: "def"}
+	releaseShell     = events.LifecycleEvent{Event: events.EventRelease, RunID: "CRI-116", ScopeID: "root", AdapterName: "shell"}
+	releaseCopilot   = events.LifecycleEvent{Event: events.EventRelease, RunID: "CRI-116", ScopeID: "root", AdapterName: "copilot"}
+)

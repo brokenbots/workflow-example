@@ -56,6 +56,14 @@ spec:
               value: {{ .Values.pvc.data.name | quote }}
             - name: PROVIDER_BASE_URL
               value: {{ .Values.operator.providerBaseUrl | quote }}
+            # Castle observation (CRI-135): run lifecycle is consumed from
+            # the castle ServerService API instead of the PVC event file.
+            # An empty address disables observation entirely. Reads are
+            # anonymous against this stack's castle (dev mode runs with
+            # --allow-anon-reads); a pre-shared token can be added by
+            # patching CASTLE_TOKEN into the deployment env.
+            - name: CASTLE_ADDR
+              value: {{ .Values.operator.castleAddr | quote }}
           {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
           volumeMounts:
             - name: criteria-data

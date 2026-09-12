@@ -48,6 +48,10 @@ operator:
   retentionInterval: 1h
   # Ollama-compatible provider endpoint handed to adapter workflows.
   providerBaseUrl: http://192.168.17.116:11434/v1
+  # Castle observation (CRI-135): the operator polls the castle ServerService
+  # API for run/adapter lifecycle instead of reading events.ndjson off the
+  # data PVC. Empty disables observation (Job conditions only).
+  castleAddr: http://castle:8080
   resources:
     requests:
       memory: 128Mi

@@ -14,27 +14,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// reconcilePerScopeAdapters tails the run event stream and reconciles adapter
-// Pods so that exactly the active provision-wanted events have a matching pod.
-// Release events remove their scope's pod. Deletions are applied before
-// creations so sequential scopes never share a pod name. It returns the
-// number of still-active provisions so the caller can decide whether to keep
-// polling the event stream.
-func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (int, error) {
+// reconcilePerScopeAdapters consumes the castle-derived lifecycle event
+// history and reconciles adapter Pods so that exactly the active
+// provision-wanted events have a matching pod. Release events remove their
+// scope's pod. Deletions are applied before creations so sequential scopes
+// never share a pod name. It returns the number of still-active provisions
+// so the caller can decide whether to keep polling castle.
+func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
 	if !run.Spec.PerScopeSessions {
 		return 0, nil
-	}
-
-	data, err := r.Reader.Read(ctx, run)
-	if err != nil {
-		logger.Error(err, "reading run events for per-scope reconciliation")
-		return 0, fmt.Errorf("reading run events: %w", err)
-	}
-
-	lifecycleEvents, err := events.ParseLifecycleEventsBytes(data)
-	if err != nil {
-		logger.Error(err, "parsing lifecycle events")
-		return 0, fmt.Errorf("parsing lifecycle events: %w", err)
 	}
 
 	active := events.ActiveProvisions(lifecycleEvents)

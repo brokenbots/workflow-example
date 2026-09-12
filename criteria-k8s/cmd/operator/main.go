@@ -7,6 +7,7 @@ import (
 	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	batchv1 "k8s.io/api/batch/v1"
@@ -28,6 +29,8 @@ var (
 	defaultImage    = flag.String("default-image", getenv("DEFAULT_CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
 	dataPVC         = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
+	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
+	castleToken     = getenv("CASTLE_TOKEN", "")
 	retentionPeriod = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
 	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	namespaceFlag   = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
@@ -80,11 +83,17 @@ func main() {
 
 	queue := controller.NewRunQueue()
 
+	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
+	// of reading events.ndjson off the PVC. The operator is read-only
+	// towards castle: the runs themselves populate it (CRI-134 server-mode
+	// dual-write). The token comes from the CASTLE_TOKEN environment only so
+	// it never leaks into argv.
+	castleClient := castle.New(castle.Config{Addr: *castleAddr, Token: castleToken}, nil)
+
 	reconciler := &controller.CriteriaRunReconciler{
 		Client: mgr.GetClient(),
 		Scheme: scheme,
-		Config: cfg,
-		Reader: &controller.FileEventsReader{DataRoot: "/data"},
+		Castle: castleClient,
 		Defaults: jobbuilder.Defaults{
 			Image:           *defaultImage,
 			DataPVC:         *dataPVC,

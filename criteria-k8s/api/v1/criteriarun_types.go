@@ -82,8 +82,16 @@ type CriteriaRunStatus struct {
 	// TicketState records the final Linear ticket state read from the run events.
 	TicketState string `json:"ticketState,omitempty"`
 
-	// EventsPath is the absolute path to the run's events file on the shared /data volume.
+	// EventsPath is the absolute path to the run's events file on the shared
+	// /data volume. Recorded for observability only: the operator no longer
+	// reads the file (the engine dual-writes it during the transition
+	// window).
 	EventsPath string `json:"eventsPath,omitempty"`
+
+	// CastleRunID is the run id in the castle control plane backing this
+	// run, resolved by ticket discovery and persisted to short-circuit
+	// subsequent observations.
+	CastleRunID string `json:"castleRunId,omitempty"`
 
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

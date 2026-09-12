@@ -106,6 +106,9 @@ spec:
                 eventsPath:
                   type: string
                   description: Absolute path to the run's events file on /data.
+                castleRunId:
+                  type: string
+                  description: Run id in the castle control plane backing this run.
                 observedGeneration:
                   type: integer
                   format: int64
