@@ -17,8 +17,8 @@ import (
 //   - /data/intake/<TICKET> is removed after Retention (default 7d) from the
 //     newest mtime among the directory itself and its well-known artifact
 //     files (approved-plan.json, review-notes.md). events.ndjson is ignored:
-//     the engine owns that file (CRI-134 dual-write keeps it on the PVC for
-//     debugging), so it no longer reflects operator-visible activity.
+//     it is engine-side output (the retired CRI-134 dual-write, debug-only
+//     since CRI-136), so it does not reflect operator-visible activity.
 //   - /data/triage/<TICKET> follows the same rule and still considers
 //     events.ndjson.
 //   - Castle's own database files live at /data root and are never touched.
@@ -92,7 +92,7 @@ func (s *RetentionSweeper) sweep(logger logr.Logger) {
 			// The directory mtime only updates on direct-child churn; a run
 			// writes deep into its tree, so also consider the newest mtime of
 			// the well-known artifact files. events.ndjson is excluded for
-			// intake: the engine owns it during the dual-write transition, so
+			// intake: it is engine-side output (debug-only since CRI-136), so
 			// engine-side writes alone must not keep an operator-expired
 			// directory alive.
 			candidates := artifactFiles(target.intake)
@@ -113,8 +113,8 @@ func (s *RetentionSweeper) sweep(logger logr.Logger) {
 
 // artifactFiles returns the well-known artifact file names whose mtimes keep
 // a ticket directory alive. events.ndjson only counts for triage; for intake
-// the engine owns it (CRI-134 dual-write) and the operator must not extend
-// retention based on engine-side writes.
+// it is engine-side output (debug-only since CRI-136) and must not extend
+// retention beyond operator-visible activity.
 func artifactFiles(intake bool) []string {
 	if intake {
 		return []string{"approved-plan.json", "review-notes.md"}
