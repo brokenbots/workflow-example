@@ -107,7 +107,7 @@ func TestBuildPerScopeAdapterPodResolvesKindFromAdapterType(t *testing.T) {
 
 	container := pod.Spec.Containers[0]
 	assert.Equal(t, "adapter-shell", container.Name)
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", container.Image,
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", container.Image,
 		"the per-scope pod image must resolve to an existing registry image for the adapter KIND")
 	assert.Equal(t, "shell", pod.Labels["criteria.brokenbots.dev/adapter-kind"])
 
@@ -116,8 +116,8 @@ func TestBuildPerScopeAdapterPodResolvesKindFromAdapterType(t *testing.T) {
 		envNames[e.Name] = e.Value
 	}
 	assert.Equal(t, "shell", envNames["ADAPTER_KIND"])
-	assert.Equal(t, "intake", envNames["CRITERIA_ADAPTER_NAME"],
-		"the pod carries the adapter instance name so adapter.sh resolves the instance-keyed digest file")
+	assert.Equal(t, "shell", envNames["CRITERIA_ADAPTER_NAME"],
+		"the handshake presents the adapter TYPE; the lockfile digest verifier keys by type and has no instance-level entries")
 }
 
 func TestBuildPerScopeAdapterPodFallsBackToAdapterNameWithoutType(t *testing.T) {
@@ -175,7 +175,7 @@ func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
 	require.NotNil(t, pod)
 
 	container := pod.Spec.Containers[0]
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", container.Image,
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", container.Image,
 		"a shell/intake provision_wanted must resolve to the shell adapter image, not criteria-adapter-intake")
 	assert.NotContains(t, container.Image, "criteria-adapter-intake",
 		"no code path may reference a criteria-adapter-intake image for this declaration")
@@ -186,7 +186,8 @@ func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
 		envNames[e.Name] = e.Value
 	}
 	assert.Equal(t, "shell", envNames["ADAPTER_KIND"])
-	assert.Equal(t, "intake", envNames["CRITERIA_ADAPTER_NAME"])
+	assert.Equal(t, "shell", envNames["CRITERIA_ADAPTER_NAME"],
+		"the handshake presents the adapter TYPE for the type-keyed lockfile verifier")
 }
 
 func TestBuildAllPerScopeSessionsOmitsAdapterJobs(t *testing.T) {

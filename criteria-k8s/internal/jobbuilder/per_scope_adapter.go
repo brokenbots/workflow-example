@@ -55,13 +55,13 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 
 	env := []corev1.EnvVar{
 		{Name: "ADAPTER_KIND", Value: kind},
-		// CRITERIA_ADAPTER_NAME is the workflow's adapter node (instance,
-		// e.g. "intake"), distinct from ADAPTER_KIND: the per-scope pod
-		// resolves its pinned digest from the instance-keyed discovery file
-		// (digest-intake), not the kind-keyed one (digest-shell), since a
-		// lockfile may pin several instances of one kind to different
-		// versions.
-		{Name: "CRITERIA_ADAPTER_NAME", Value: scope.AdapterName},
+		// CRITERIA_ADAPTER_NAME is the adapter TYPE presented in the
+		// identity handshake; the engine's lockfile digest verifier keys by
+		// type. The workflow's adapter node name (instance) is NOT usable
+		// here: the lockfile has no instance-level entries, so verifying by
+		// node name fails with "adapter not found in lockfile". The instance
+		// identity is already bound by the scope handshake.
+		{Name: "CRITERIA_ADAPTER_NAME", Value: kind},
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
 		// CRITERIA_REMOTE_HOST is deliberately NOT set here. The event's
 		// ShimListenAddress is the engine's bind address on its own loopback

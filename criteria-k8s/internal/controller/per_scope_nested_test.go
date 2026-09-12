@@ -185,7 +185,7 @@ func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
 	assert.Equal(t, jobbuilder.PerScopeAdapterPodName(run, "shell", "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"), pods[0].Name)
 
 	container := pods[0].Spec.Containers[0]
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", container.Image,
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", container.Image,
 		"the image must resolve to an existing registry image for the adapter KIND, never criteria-adapter-intake")
 	assert.Equal(t, "shell", pods[0].Labels["criteria.brokenbots.dev/adapter-kind"])
 
@@ -194,8 +194,8 @@ func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
 		envNames[e.Name] = e.Value
 	}
 	assert.Equal(t, "shell", envNames["ADAPTER_KIND"])
-	assert.Equal(t, "intake", envNames["CRITERIA_ADAPTER_NAME"],
-		"the pod carries the adapter instance name so adapter.sh resolves the instance-keyed digest file")
+	assert.Equal(t, "shell", envNames["CRITERIA_ADAPTER_NAME"],
+		"the handshake presents the adapter TYPE for the type-keyed lockfile verifier")
 	assert.Equal(t, "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635", envNames["CRITERIA_REMOTE_DIGEST"])
 }
 
