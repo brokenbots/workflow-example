@@ -3,6 +3,19 @@ criteria_value_2={{ .criteria_value_2 | shellquote }}
 criteria_value_3={{ .criteria_value_3 | shellquote }}
 set -euo pipefail
 scratch="$criteria_value_1/scratch"
+# Reuse an existing scratch worktree instead of recreating it: a run restart
+# (e.g. the engine crash-restart path) re-executes this script while the
+# previous attempt's triage session may still hold the scratch dir as its
+# working directory. Recreating it pulls the cwd out from under that session
+# and every subsequent process spawn fails with "No such file or directory".
+# Fresh-run semantics are preserved: a healthy scratch at the pinned ref is
+# exactly what a fresh run wants, so verify instead of rebuild.
+if [ -d "$scratch/.git" ] || [ -f "$scratch/.git" ]; then
+    if git -C "$scratch" rev-parse --short HEAD > /dev/null 2>&1; then
+        echo "reusing existing scratch worktree at $scratch ($(git -C "$scratch" rev-parse --short HEAD))"
+        exit 0
+    fi
+fi
 git -C "$criteria_value_2" worktree remove --force "$scratch" 2>/dev/null || true
 git -C "$criteria_value_2" worktree prune 2>/dev/null || true
 rm -rf "$scratch"
