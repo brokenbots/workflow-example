@@ -63,11 +63,17 @@ func TestBuildPerScopeAdapterPod(t *testing.T) {
 	for _, e := range container.Env {
 		envNames[e.Name] = e.Value
 	}
-	assert.Equal(t, "10.0.0.5:7778", envNames["CRITERIA_REMOTE_HOST"])
 	assert.Equal(t, "sha256:deadbeef", envNames["CRITERIA_REMOTE_DIGEST"])
 	assert.Equal(t, "root", envNames["CRITERIA_SCOPE_ID"])
 	assert.Equal(t, "root-scope", envNames["CRITERIA_SCOPE_TAG"])
 	assert.Equal(t, "/data/intake/CRI-116/tokens/root-shell", envNames["CRITERIA_REMOTE_TOKEN_FILE"])
+
+	// CRITERIA_REMOTE_HOST must be absent: the event's ShimListenAddress is
+	// the engine's own-loopback bind address, unreachable from a separate
+	// pod. adapter.sh discovers the routable address (POD_IP:7778) from the
+	// shared discovery file when this env is unset.
+	_, hasHost := envNames["CRITERIA_REMOTE_HOST"]
+	assert.False(t, hasHost, "CRITERIA_REMOTE_HOST must not be set from the event's loopback shim address")
 
 	assert.ElementsMatch(t, []string{"data", "scripts"}, volumeMountNames(container.VolumeMounts))
 

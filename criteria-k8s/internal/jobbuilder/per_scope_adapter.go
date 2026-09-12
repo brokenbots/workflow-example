@@ -50,7 +50,13 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 	env := []corev1.EnvVar{
 		{Name: "ADAPTER_KIND", Value: kind},
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
-		{Name: "CRITERIA_REMOTE_HOST", Value: scope.ShimAddress},
+		// CRITERIA_REMOTE_HOST is deliberately NOT set here. The event's
+		// ShimListenAddress is the engine's bind address on its own loopback
+		// (e.g. "[::]:7778") - unreachable from a separate adapter pod. The
+		// runner publishes its routable address (POD_IP:7778) to the shared
+		// discovery file; adapter.sh falls back to polling it when this env
+		// is unset. An engine-side fix to emit a routable address in the
+		// event can reintroduce the env later.
 		{Name: "CRITERIA_REMOTE_DIGEST", Value: digest},
 		{Name: "CRITERIA_SCOPE_ID", Value: scope.ScopeID},
 	}
