@@ -49,8 +49,8 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	if err := r.List(ctx, &existing,
 		client.InNamespace(run.Namespace),
 		client.MatchingLabels(map[string]string{
-			"criteria.brokenbots.dev/run":  run.Name,
-			"criteria.brokenbots.dev/role": "adapter",
+			jobbuilder.LabelRun:  run.Name,
+			jobbuilder.LabelRole: jobbuilder.RoleAdapter,
 		}),
 	); err != nil {
 		return 0, fmt.Errorf("listing adapter pods: %w", err)

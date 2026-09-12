@@ -44,7 +44,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 
 	labels := baseLabels(run)
-	labels["criteria.brokenbots.dev/role"] = "adapter"
+	labels[LabelRole] = RoleAdapter
 	labels["criteria.brokenbots.dev/adapter-kind"] = kind
 	labels["criteria.brokenbots.dev/scope-id"] = safeLabelValue(scope.ScopeID)
 

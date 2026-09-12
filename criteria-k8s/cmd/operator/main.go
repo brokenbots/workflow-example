@@ -34,8 +34,12 @@ var (
 	debugEventsFile = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
 	retentionPeriod = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
 	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
-	namespaceFlag   = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
-	development     = flag.Bool("development", false, "Enable development logging")
+	// CRI-144: reap adapter pods and legacy adapter Jobs whose owning
+	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers
+	// deletionTimestamp-propagated deletes). 0 disables the sweep.
+	adapterSweepInterval = flag.Duration("adapter-sweep-interval", getDuration("ADAPTER_SWEEP_INTERVAL", 30*time.Second), "How often adapter pods/jobs of deleted CriteriaRuns are swept (0 disables)")
+	namespaceFlag        = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
+	development          = flag.Bool("development", false, "Enable development logging")
 )
 
 func main() {
@@ -130,6 +134,19 @@ func main() {
 		logger.Info("retention sweep enabled", "period", retentionPeriod.String(), "interval", sweepInterval.String())
 	} else {
 		logger.Info("retention sweep disabled (retention-period=0)")
+	}
+
+	// Adapter sweep reaps adapter pods and legacy adapter Jobs whose owning
+	// CriteriaRun no longer exists (CRI-144): force-deleted CRs orphan their
+	// pods, and those keep dialing the dead runner's shim forever. Uses the
+	// direct (uncached) client so a sweep can never act on a stale view of
+	// which runs exist. Shares the manager's lifecycle.
+	if *adapterSweepInterval > 0 {
+		adapterSweeper := controller.NewAdapterSweeper(directClient, scheme, *namespaceFlag, *adapterSweepInterval)
+		go adapterSweeper.Run(ctx)
+		logger.Info("adapter sweep enabled", "interval", adapterSweepInterval.String(), "namespace", *namespaceFlag)
+	} else {
+		logger.Info("adapter sweep disabled (adapter-sweep-interval=0)")
 	}
 
 	logger.Info("starting criteria-k8s operator")

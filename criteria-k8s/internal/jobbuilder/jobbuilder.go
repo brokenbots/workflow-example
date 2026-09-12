@@ -15,6 +15,19 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 )
 
+// Labels shared by every child object the operator reconciles. The
+// per-scope reconcile, the finalize path, and the adapter sweeper key on
+// the run/role pair, so the values must stay in one place.
+const (
+	// LabelRun carries the name of the owning CriteriaRun.
+	LabelRun = "criteria.brokenbots.dev/run"
+	// LabelRole distinguishes the runner from the adapter children.
+	LabelRole = "criteria.brokenbots.dev/role"
+	// RoleRunner / RoleAdapter are the LabelRole values in use.
+	RoleRunner  = "runner"
+	RoleAdapter = "adapter"
+)
+
 var nonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
 var nonLabel = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
@@ -130,7 +143,7 @@ func baseLabels(run *criteriav1.CriteriaRun) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "criteria-run",
 		"app.kubernetes.io/managed-by": "criteria-k8s",
-		"criteria.brokenbots.dev/run":  run.Name,
+		LabelRun:                       run.Name,
 		"ticket":                       safeLabelValue(run.Spec.TicketID),
 	}
 }
@@ -214,7 +227,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	triageRoot := "/data/triage"
 
 	labels := baseLabels(run)
-	labels["criteria.brokenbots.dev/role"] = "runner"
+	labels[LabelRole] = RoleRunner
 
 	job := buildJobBase(run, jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
@@ -240,7 +253,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 
 	labels := baseLabels(run)
-	labels["criteria.brokenbots.dev/role"] = "adapter"
+	labels[LabelRole] = RoleAdapter
 	labels["criteria.brokenbots.dev/adapter-kind"] = kind
 
 	job := buildJobBase(run, jobName, labels)
