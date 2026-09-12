@@ -53,7 +53,7 @@ data:
   runner.sh: |
     #!/bin/sh
     set -eu
-    
+
     # Read the Linear API key from the CSI mount. The workflow-runner container is
     # intentionally not given any GitHub token mounts.
     LINEAR_API_KEY=""
@@ -64,7 +64,7 @@ data:
         echo "LINEAR_API_KEY is required via /secrets/linear_api_key" >&2
         exit 1
     fi
-    
+
     if [ -z "${TICKET_ID:-}" ]; then
         echo "TICKET_ID is required" >&2
         exit 1
@@ -81,7 +81,7 @@ data:
         echo "POD_IP is required" >&2
         exit 1
     fi
-    
+
     case "$ALLOW_DIRTY" in
         true|false) ;;
         *) echo "ALLOW_DIRTY must be true or false" >&2; exit 2 ;;
@@ -90,25 +90,25 @@ data:
         ''|*[!0-9]*) echo "MAX_AGENT_VISITS must be a positive integer" >&2; exit 2 ;;
         0) echo "MAX_AGENT_VISITS must be a positive integer" >&2; exit 2 ;;
     esac
-    
+
     mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"
-    
+
     # Git refuses repositories whose on-disk owner differs from the current user
     # (the emptyDir/PV clone runs under a different effective ownership view).
     git config --global --add safe.directory "$REPO_DIR"
     git config --global --add safe.directory "$REPO_DIR/**"
-    
+
     # Per-run discovery directory. Adapters poll this path by convention to learn
     # the runner's dial address, the per-run bearer token, and the pinned adapter
     # digests. The directory is removed on exit so a subsequent run cannot reuse
     # the token.
     run_dir="/data/.criteria/runs/$JOB_NAME"
     mkdir -p "$run_dir"
-    
+
     # Generate a per-run bearer token and publish it for the adapters.
     token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
     printf '%s' "$token" > "$run_dir/token"
-    
+
     # Resolve the pinned adapter digests from the workflow lockfile using the same
     # awk the local container entrypoint uses.
     lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
@@ -126,17 +126,17 @@ data:
     }
     printf 'sha256:%s' "$(adapter_digest shell)" > "$run_dir/digest-shell"
     printf 'sha256:%s' "$(adapter_digest copilot)" > "$run_dir/digest-copilot"
-    
+
     # Publish the runner dial address. The Kubernetes runtime widens the shim to
     # 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
     # 127.0.0.1:7778 unchanged.
     printf '%s' "${POD_IP}:7778" > "$run_dir/host"
-    
+
     workflow_src=/workflows
     workflow_tmp=/tmp/workflows
     rm -rf "$workflow_tmp"
     cp -a "$workflow_src" "$workflow_tmp"
-    
+
     # Substitute the placeholders in every subworkflow's remote environment block
     # so each shim and the adapter pods share the generated bearer token. The
     # legacy placeholder literal is assembled at runtime so the launcher template
@@ -153,14 +153,14 @@ data:
                 "$f"
         done
     ' sh "$token" "$old_token_placeholder" {} +
-    
+
     # The declarative workflow keeps 127.0.0.1:7778 as its portable default. Only
     # the Kubernetes runtime widens the listen address so separate adapter pods can
     # phone home. accept_token stays enabled because the engine requires it for
     # non-loopback listen addresses.
     find "$workflow_tmp" -name 'adapters.chcl' -exec sed -i \
         -e 's|listen_address = "127\.0\.0\.1:7778"|listen_address = "0.0.0.0:7778"|g' {} +
-    
+
     # The workflow HCL keeps its var.workflow_github_token / var.reviewer_github_token
     # secret references untouched: the compiler requires direct var.<name> bindings.
     # Instead the runner passes file: OriginRefs for those variables (--var below);
@@ -168,14 +168,14 @@ data:
     # stack (FileProvider) at run start and delivers the values to adapters over
     # OpenSession - the SDK contract (D69: adapters never read their own process
     # environment for workflow secrets). Tokens never appear as env vars or argv.
-    
+
     runtime_dir=$(mktemp -d)
     runtime_vars="$runtime_dir/vars.json"
     cleanup() {
         rm -rf "$run_dir" "$runtime_dir"
     }
     trap cleanup EXIT
-    
+
     jq -n \
         --arg ticket_id "$TICKET_ID" \
         --arg repo_dir "$REPO_DIR" \
@@ -219,14 +219,24 @@ data:
             allow_dirty: $allow_dirty,
             max_agent_visits: $max_agent_visits
         }' > "$runtime_vars"
-    
-    # shellcheck disable=SC2153
-    : "${EVENTS_FILE:=}"
-    events_file="$EVENTS_FILE"
-    if [ -z "$events_file" ]; then
-        events_file="$INTAKE_ROOT/$TICKET_ID/events.ndjson"
+
+    # Server mode (CRI-133/134): when CASTLE_ADDR is set, criteria publishes run
+    # lifecycle to the castle control plane. Unset keeps the historical local
+    # file mode.
+    : "${CASTLE_ADDR:=}"
+    if [ -n "$CASTLE_ADDR" ]; then
+        set -- "$@" --server "$CASTLE_ADDR"
     fi
-    
+
+    # Debug-only events mirror (CRI-136): the events.ndjson dual-write is
+    # retired. Only an explicit EVENTS_FILE makes criteria additionally write
+    # the lifecycle stream to that path, for local debugging. Unset (default)
+    # runs castle-only: no events.ndjson is written anywhere in the run.
+    : "${EVENTS_FILE:=}"
+    if [ -n "$EVENTS_FILE" ]; then
+        set -- "$@" --events-file "$EVENTS_FILE"
+    fi
+
     # Secret variables are passed as file: OriginRefs: the engine resolves them
     # through the FileProvider at run start (resolveSecretVarOrigins). Raw token
     # values never appear in argv - only the mount paths.
@@ -235,8 +245,9 @@ data:
         --var "linear_api_key=$LINEAR_API_KEY" \
         --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
         --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
-        --events-file "$events_file" \
+        "$@" \
         --output concise
+
   adapter.sh: |
     #!/bin/sh
     set -eu
@@ -421,8 +432,10 @@ spec:
               value: "2"
             - name: PROVIDER_BASE_URL
               value: "http://192.168.17.116:11434/v1"
+            # Debug-only: an explicit EVENTS_FILE makes criteria also mirror
+            # lifecycle events to that path (CRI-136). Empty runs castle-only.
             - name: EVENTS_FILE
-              value: "/data/intake/CRI-114/events.ndjson"
+              value: ""
             - name: JOB_NAME
               value: "pod-adapter-cri-105"
             - name: POD_IP

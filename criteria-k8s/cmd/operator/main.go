@@ -31,6 +31,7 @@ var (
 	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
 	castleToken     = getenv("CASTLE_TOKEN", "")
+	debugEventsFile = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
 	retentionPeriod = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
 	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	namespaceFlag   = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
@@ -99,6 +100,7 @@ func main() {
 			DataPVC:         *dataPVC,
 			ProviderBaseURL: *providerBaseURL,
 			CastleAddr:      *castleAddr,
+			DebugEventsFile: *debugEventsFile,
 		},
 		Queue: queue,
 	}

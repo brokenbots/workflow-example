@@ -208,19 +208,21 @@ data:
             max_agent_visits: $max_agent_visits
         }' > "$runtime_vars"
     
-    # shellcheck disable=SC2153
-    : "${EVENTS_FILE:=}"
-    events_file="$EVENTS_FILE"
-    if [ -z "$events_file" ]; then
-        events_file="$INTAKE_ROOT/$TICKET_ID/events.ndjson"
-    fi
-    
-    # Server mode (CRI-134 dual-write): when CASTLE_ADDR is set, criteria
-    # publishes run lifecycle to the castle control plane in addition to the
-    # events.ndjson mirror below. Unset keeps the historical local file mode.
+    # Server mode (CRI-133/134): when CASTLE_ADDR is set, criteria publishes run
+    # lifecycle to the castle control plane. Unset keeps the historical local
+    # file mode.
     : "${CASTLE_ADDR:=}"
     if [ -n "$CASTLE_ADDR" ]; then
         set -- "$@" --server "$CASTLE_ADDR"
+    fi
+    
+    # Debug-only events mirror (CRI-136): the events.ndjson dual-write is
+    # retired. Only an explicit EVENTS_FILE makes criteria additionally write
+    # the lifecycle stream to that path, for local debugging. Unset (default)
+    # runs castle-only: no events.ndjson is written anywhere in the run.
+    : "${EVENTS_FILE:=}"
+    if [ -n "$EVENTS_FILE" ]; then
+        set -- "$@" --events-file "$EVENTS_FILE"
     fi
     
     # Secret variables are passed as file: OriginRefs: the engine resolves them
@@ -231,7 +233,6 @@ data:
         --var "linear_api_key=$LINEAR_API_KEY" \
         --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
         --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
-        --events-file "$events_file" \
         "$@" \
         --output concise
   adapter.sh: |

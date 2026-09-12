@@ -55,10 +55,16 @@ type Defaults struct {
 	Namespace       string
 	ProviderBaseURL string
 	// CastleAddr is the castle orchestrator address handed to runner Jobs.
-	// When set, runners execute criteria in server mode (CRI-134 dual-write:
-	// lifecycle is published to castle and mirrored to events.ndjson). Empty
-	// keeps the runner in local file mode.
+	// When set, runners execute criteria in server mode: lifecycle is
+	// published to castle (CRI-133/134), which is the operator's only run
+	// observation surface. Empty keeps the runner in local file mode.
 	CastleAddr string
+	// DebugEventsFile is the debug-only events.ndjson path handed to runner
+	// Jobs via EVENTS_FILE (CRI-136). The events.ndjson dual-write is
+	// retired: only an explicitly configured debug path makes criteria
+	// additionally mirror lifecycle events to a file. Empty (default) runs
+	// castle-only with no events.ndjson write anywhere in the run.
+	DebugEventsFile string
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
@@ -206,7 +212,6 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	repoDir := fmt.Sprintf("/data/intake/%s/repo", ticket)
 	intakeRoot := "/data/intake"
 	triageRoot := "/data/triage"
-	eventsFile := fmt.Sprintf("%s/%s/events.ndjson", intakeRoot, ticket)
 
 	labels := baseLabels(run)
 	labels["criteria.brokenbots.dev/role"] = "runner"
@@ -217,7 +222,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 		repoCloneContainer(image, repoURL, repoDir),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL, maxVisits, defaults.CastleAddr),
+		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, providerBaseURL, maxVisits, defaults),
 	}
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		dataVolume(dataPVC),
@@ -307,7 +312,7 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 	}
 }
 
-func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, eventsFile, providerBaseURL string, maxVisits int, castleAddr string) corev1.Container {
+func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "TICKET_ID", Value: run.Spec.TicketID},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
@@ -330,7 +335,6 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		{Name: "ALLOW_DIRTY", Value: "false"},
 		{Name: "MAX_AGENT_VISITS", Value: fmt.Sprintf("%d", maxVisits)},
 		{Name: "PROVIDER_BASE_URL", Value: providerBaseURL},
-		{Name: "EVENTS_FILE", Value: eventsFile},
 		{Name: "JOB_NAME", Value: JobName(run)},
 		{
 			Name: "POD_IP",
@@ -341,8 +345,14 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 			},
 		},
 	}
-	if castleAddr != "" {
-		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: castleAddr})
+	// Debug-only events mirror (CRI-136): the env var is only injected when
+	// the operator is explicitly configured with a debug events path, so the
+	// default runner writes no events.ndjson anywhere.
+	if defaults.DebugEventsFile != "" {
+		env = append(env, corev1.EnvVar{Name: "EVENTS_FILE", Value: defaults.DebugEventsFile})
+	}
+	if defaults.CastleAddr != "" {
+		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CastleAddr})
 	}
 
 	return corev1.Container{
