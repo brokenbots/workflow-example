@@ -32,6 +32,8 @@ type stubServer struct {
 	events map[string][]*v1.Envelope
 	// observed list-run-event requests, for cursor assertions.
 	eventReqs []*v1.ListRunEventsRequest
+	// observed list-runs requests, for filter assertions.
+	runReqs []*v1.ListRunsRequest
 }
 
 func (s *stubServer) ListAgents(ctx context.Context, req *connect.Request[v1.ListAgentsRequest]) (*connect.Response[v1.ListAgentsResponse], error) {
@@ -43,8 +45,12 @@ func (s *stubServer) ListAgents(ctx context.Context, req *connect.Request[v1.Lis
 func (s *stubServer) ListRuns(ctx context.Context, req *connect.Request[v1.ListRunsRequest]) (*connect.Response[v1.ListRunsResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.runReqs = append(s.runReqs, req.Msg)
 	out := &v1.ListRunsResponse{}
 	for _, r := range s.runs {
+		if req.Msg.CriteriaId != "" && r.CriteriaId != req.Msg.CriteriaId {
+			continue
+		}
 		if req.Msg.Status != "" && r.Status != req.Msg.Status {
 			continue
 		}
@@ -304,6 +310,13 @@ func TestObserveAmbiguousAgentsIsAnError(t *testing.T) {
 // inconclusive and must not be reported as an empty observation — for both
 // the agent walk and the run walk.
 func TestObserveDiscoveryPageCapIsAnError(t *testing.T) {
+	// The budgets are package-level vars so tests can lower them.
+	origPages, origSize := maxDiscoveryPages, defaultPageSize
+	t.Cleanup(func() {
+		maxDiscoveryPages, defaultPageSize = origPages, origSize
+	})
+	maxDiscoveryPages = 2
+
 	agentPages := &stubPagedAgents{totalPages: maxDiscoveryPages + 2}
 	srv := newTestServer(t, agentPages)
 	defer srv.Close()
@@ -323,14 +336,36 @@ func TestObserveDiscoveryPageCapIsAnError(t *testing.T) {
 	assert.Contains(t, err.Error(), "run discovery for criteria crit-27 did not conclude within")
 }
 
-// Discovery prefers the newest non-terminal run for the criteria and falls
-// back to the newest terminal one (a retried run's earlier failure).
-func TestObserveDiscoveryPrefersNewestNonTerminalRun(t *testing.T) {
+// More than one non-terminal run for the same criteria id is ambiguous: the
+// operator must not bind a run it cannot attribute. Two concurrently running
+// CriteriaRuns with the same criteria id would otherwise bind each other's
+// run and converge adapter pods off the wrong run's lifecycle. (Regression
+// for the review defect: discovery used to prefer the newest active run.)
+func TestObserveAmbiguousActiveRunsIsAnError(t *testing.T) {
+	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
+		runs: []*v1.Run{
+			{RunId: "run-1", CriteriaId: "crit-42", Status: "running", CreatedAt: timestamppb.New(time.Unix(1, 0))},
+			{RunId: "run-2", CriteriaId: "crit-42", Status: "running", CreatedAt: timestamppb.New(time.Unix(2, 0))},
+		},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	_, err := c.Observe(context.Background(), "cri-42", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous castle runs for criteria crit-42: 2 active")
+}
+
+// When every run for the criteria is terminal, discovery falls back to the
+// newest terminal one so the controller can still stamp completion.
+func TestObserveDiscoveryFallsBackToNewestTerminalRun(t *testing.T) {
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12"}},
 		runs: []*v1.Run{
 			{RunId: "run-old", CriteriaId: "crit-42", Status: "failed", CreatedAt: timestamppb.New(time.Unix(1, 0))},
-			{RunId: "run-new", CriteriaId: "crit-42", Status: "running", CreatedAt: timestamppb.New(time.Unix(2, 0))},
+			{RunId: "run-new", CriteriaId: "crit-42", Status: "succeeded", CreatedAt: timestamppb.New(time.Unix(2, 0))},
 		},
 	}
 	srv := newTestServer(t, server)
@@ -340,6 +375,28 @@ func TestObserveDiscoveryPrefersNewestNonTerminalRun(t *testing.T) {
 	obs, err := c.Observe(context.Background(), "cri-42", "")
 	require.NoError(t, err)
 	assert.Equal(t, "run-new", obs.RunID)
+}
+
+// Run discovery filters server-side: the ListRuns request carries the
+// criteria id instead of paging the whole run table client-side.
+func TestObserveDiscoverySendsCriteriaIDFilter(t *testing.T) {
+	server := &stubServer{
+		agents: []*v1.Agent{{CriteriaId: "criterias-XYZ", Name: "cri-42-abc12"}},
+		runs:   []*v1.Run{{RunId: "run-1", CriteriaId: "criterias-XYZ", Status: "running"}},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	obs, err := c.Observe(context.Background(), "cri-42", "")
+	require.NoError(t, err)
+	assert.Equal(t, "run-1", obs.RunID)
+
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	require.NotEmpty(t, server.runReqs)
+	assert.Equal(t, "criterias-XYZ", server.runReqs[0].GetCriteriaId(),
+		"the first ListRuns page must carry the criteria_id filter")
 }
 
 // A fresh run becomes discoverable and reaches a terminal phase purely from

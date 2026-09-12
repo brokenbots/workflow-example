@@ -363,7 +363,8 @@ func TestReconcilePerScopeCreatesAndDeletesPods(t *testing.T) {
 
 	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, res)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res,
+		"the run keeps polling castle until the terminal is recorded there")
 
 	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
 	assert.Empty(t, pods.Items)
@@ -424,8 +425,10 @@ func TestReconcilePerScopeDeletesOrphanPods(t *testing.T) {
 
 // An unavailable castle source must not converge desired state: a castle
 // outage must leave a live per-scope adapter pod untouched and must not
-// stamp any castle-derived status. Once observation succeeds again, normal
-// reconciliation resumes (desired pods are created).
+// stamp any castle-derived status. The Job-derived phase still persists and
+// the reconcile requeues on the poll interval to retry the observation. Once
+// observation succeeds again, normal reconciliation resumes (desired pods
+// are created).
 func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
 	scheme := newScheme(t)
 	run := &criteriav1.CriteriaRun{
@@ -459,8 +462,9 @@ func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
 		Queue:    controller.NewRunQueue(),
 	}
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
-	require.Error(t, err, "an unavailable source aborts the pass with an error so it is retried")
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err, "an observation failure must not abort the pass; it requeues instead")
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res, "the reconcile retries the observation on the poll interval")
 
 	var pods corev1.PodList
 	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
@@ -469,8 +473,8 @@ func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
 
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
-	assert.Empty(t, updated.Status.Phase, "no castle-derived status may be stamped from an unavailable source")
-	assert.Empty(t, updated.Status.PRNumber)
+	assert.Equal(t, criteriav1.PhasePending, updated.Status.Phase, "the Job-derived phase persists despite the castle error")
+	assert.Empty(t, updated.Status.PRNumber, "no castle-derived status may be stamped from an unavailable source")
 	assert.Empty(t, updated.Status.TicketState)
 	assert.Empty(t, updated.Status.CastleRunID)
 
@@ -482,7 +486,7 @@ func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
 		RunID:     "castle-run-1",
 		Lifecycle: []events.LifecycleEvent{provisionShell},
 	}
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
 
@@ -549,6 +553,167 @@ func TestReconcileCastleRunNotRegisteredPreservesAdapterPods(t *testing.T) {
 	assert.Empty(t, updated.Status.PRNumber)
 	assert.Empty(t, updated.Status.TicketState)
 	assert.Empty(t, updated.Status.CastleRunID)
+}
+
+// A castle observation error must not starve the Job-derived lifecycle: the
+// phase and job name still persist, a terminal Job still releases its repo
+// admission slot so the next queued run starts promptly, and no adapter pod
+// is touched. (Regression for the review defect: the error used to abort the
+// pass before the status write and the queue release, deadlocking the repo
+// queue for every other run.)
+func TestReconcileCastleErrorStillStampsJobPhaseAndReleasesQueue(t *testing.T) {
+	scheme := newScheme(t)
+	repo := "https://github.com/brokenbots/workflow-example.git"
+
+	runA := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-118-a",
+			Namespace:  "default",
+			UID:        types.UID("uid-a"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID:         "CRI-118-A",
+			RepoURL:          repo,
+			Image:            "localhost:5000/linear-intake-remote:dev",
+			PerScopeSessions: true,
+		},
+	}
+	runB := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-118-b", Namespace: "default", UID: types.UID("uid-b")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-118-B", RepoURL: repo, Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+	// The live adapter pod is the canonical desired pod for scope root: the
+	// failed observation must not delete or churn it.
+	livePod := jobbuilder.BuildPerScopeAdapterPod(runA, jobbuilder.Defaults{DataPVC: "criteria-data"}, provisionShell)
+	livePod.Namespace = "default"
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(runA, runB).
+		WithObjects(runA, runB, livePod).
+		Build()
+
+	castleStub := &fakeCastle{err: errors.New("castle unavailable: connection refused")}
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Castle:   castleStub,
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
+	}
+
+	// A is admitted first while its runner job is still pending, and B
+	// queues behind it on the same repo.
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runA)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
+
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runB)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 5 * time.Second}, res)
+
+	// The runner job fails while castle is unreachable for every pass.
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-118-a", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}},
+		},
+	}
+	require.NoError(t, cl.Status().Update(context.Background(), failedJob))
+
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runA)})
+	require.NoError(t, err, "an observation failure must not abort the pass; it requeues instead")
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
+
+	var updatedA criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runA), &updatedA))
+	assert.Equal(t, criteriav1.PhaseFailed, updatedA.Status.Phase, "the Job-derived phase persists despite the castle error")
+	assert.Equal(t, "cri-118-a", updatedA.Status.JobName)
+	assert.Empty(t, updatedA.Status.PRNumber, "no castle-derived status may be stamped from an unavailable source")
+	assert.Empty(t, updatedA.Status.TicketState)
+	assert.Empty(t, updatedA.Status.CastleRunID)
+
+	// The queue slot was released: the queued run is admitted promptly.
+	var updatedB criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &updatedB))
+	require.NotNil(t, updatedB.Status.Queue)
+	assert.Equal(t, 0, updatedB.Status.Queue.Position, "the queued run must be admitted after the failed run released its slot")
+	assert.Equal(t, "cri-118-b", updatedB.Status.Queue.Running)
+
+	// No adapter pod was touched off the unobservable history.
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	require.Len(t, pods.Items, 1, "the live adapter pod must survive the castle error")
+	assert.Equal(t, livePod.Name, pods.Items[0].Name)
+}
+
+// A Job-terminal run whose first castle pass returns before castle's
+// terminal lands (ingest lag) must not be finalized with empty outcome
+// fields: a later reconcile pass keeps polling and stamps the castle
+// terminal (PR number, ticket state) once it appears.
+func TestReconcileStampsCastleTerminalOnLaterPassAfterIngestLag(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-42",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-42"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{RunID: "castle-run-1"}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res, "the run polls castle until the terminal is recorded")
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
+	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID, "the run id persists as soon as discovery succeeds")
+	assert.Empty(t, updated.Status.PRNumber)
+	assert.Empty(t, updated.Status.TicketState)
+
+	// Castle's terminal lands between the passes.
+	castleStub.observation = &castle.Observation{
+		RunID:    "castle-run-1",
+		Terminal: castleTerminal(true, "42", "Done"),
+	}
+
+	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res, "the poll stops once the castle terminal is recorded")
+
+	var stamped criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &stamped))
+	assert.Equal(t, "42", stamped.Status.PRNumber)
+	assert.Equal(t, "Done", stamped.Status.TicketState)
+	assert.Equal(t, "castle-run-1", stamped.Status.CastleRunID)
+	assert.Equal(t, "castle-run-1", castleStub.lastKnownID, "the persisted run id short-circuits discovery on the later pass")
+	assert.Equal(t, "cri-42", castleStub.lastRunnerJob)
 }
 
 func TestReconcilePerScopeDoesNotCreateRunAdapterJobs(t *testing.T) {
@@ -656,7 +821,8 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 
 	res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runA)})
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, res)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res,
+		"A keeps polling castle until the terminal is recorded there")
 
 	var updatedA criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runA), &updatedA))

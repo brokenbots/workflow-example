@@ -22,7 +22,9 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 )
 
-const (
+// Page budgets for castle reads. Package-level vars (not consts) so tests
+// can lower the budgets.
+var (
 	// defaultPageSize bounds ListRunEvents/ListRuns pages.
 	defaultPageSize = 200
 	// maxEventPages bounds a single Observe drain so a pathological backlog
@@ -30,7 +32,9 @@ const (
 	maxEventPages = 50
 	// maxDiscoveryPages bounds agent and run discovery paging.
 	maxDiscoveryPages = 10
+)
 
+const (
 	// runStatusSucceeded is castle's terminal success status.
 	runStatusSucceeded = "succeeded"
 )
@@ -56,7 +60,9 @@ type Terminal struct {
 	PRNumber string
 	// Reason is the RunFailed reason, when the run failed.
 	Reason string
-	// TicketState is the engine-reported final ticket state.
+	// TicketState is the run's final_state from castle, mapped verbatim to
+	// CriteriaRun.Status.TicketState (CRI-132 wire mapping: the engine's
+	// RunCompleted.final_state is the final Linear ticket state).
 	TicketState string
 }
 
@@ -224,17 +230,19 @@ func (c *Client) findRunByRunner(ctx context.Context, runnerJob string) (*v1.Run
 }
 
 // findCriteriaID resolves the criteria id of the agent the runner job's pod
-// registered. Agent names are pod hostnames, matched on the runner job name
-// with or without the pod-name suffix; more than one distinct criteria id
-// among the matches is ambiguous and surfaces as an error rather than a
-// guess. Non-conclusion within the page budget is an error too.
+// registered. ListAgentsRequest carries no filter field, so discovery pages
+// the whole agent table. Agent names are pod hostnames, matched on the
+// runner job name with or without the pod-name suffix; more than one
+// distinct criteria id among the matches is ambiguous and surfaces as an
+// error rather than a guess. Non-conclusion within the page budget is an
+// error too.
 func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, error) {
 	prefix := runnerJob + "-"
 	ids := map[string]struct{}{}
 	pageToken := ""
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := c.runs.ListAgents(ctx, connect.NewRequest(&v1.ListAgentsRequest{
-			Limit:     defaultPageSize,
+			Limit:     int32(defaultPageSize),
 			PageToken: pageToken,
 		}))
 		if err != nil {
@@ -270,36 +278,46 @@ func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, 
 	return "", fmt.Errorf("agent discovery for runner job %s did not conclude within %d pages (more pages remain)", runnerJob, maxDiscoveryPages)
 }
 
-// findRunForCriteria resolves the run for a criteria id via paged ListRuns
-// (which has no criteria filter). Non-terminal runs are preferred; when
-// every run for the criteria is terminal, the newest one is returned so the
-// controller can still stamp completion. Discovery that exhausts the page
-// budget with more pages remaining is inconclusive and surfaces as an
-// error: silently reporting "no run" would make the controller converge
-// against an empty history.
+// findRunForCriteria resolves the run for a criteria id via paged ListRuns,
+// filtered server-side by the request's criteria_id field (the vendored
+// ListRunsRequest carries it; the agent table has no equivalent, so agent
+// discovery above still pages the whole table). Runs are partitioned
+// client-side by terminal status because the server-side status filter
+// accepts a single value. More than one non-terminal run for the criteria id
+// is ambiguous and surfaces as an error rather than a guess (matching the
+// agent-discovery ambiguity rule): two concurrently running CriteriaRuns
+// with the same criteria id must not bind each other's run. When every run
+// for the criteria is terminal, the newest one is returned so the controller
+// can still stamp completion. Discovery that exhausts the page budget with
+// more pages remaining is inconclusive and surfaces as an error: silently
+// reporting "no run" would make the controller converge against an empty
+// history.
 func (c *Client) findRunForCriteria(ctx context.Context, criteriaID string) (*v1.Run, error) {
 	var newestActive, newestTerminal *v1.Run
+	activeRuns := 0
 	pageToken := ""
 	for page := 0; page < maxDiscoveryPages; page++ {
 		resp, err := c.runs.ListRuns(ctx, connect.NewRequest(&v1.ListRunsRequest{
-			Limit:     defaultPageSize,
-			PageToken: pageToken,
+			CriteriaId: criteriaID,
+			Limit:      int32(defaultPageSize),
+			PageToken:  pageToken,
 		}))
 		if err != nil {
 			return nil, err
 		}
 		for _, run := range resp.Msg.GetRuns() {
-			if run.GetCriteriaId() != criteriaID {
-				continue
-			}
 			if isTerminalRunStatus(run.GetStatus()) {
 				newestTerminal = newerRun(newestTerminal, run)
 			} else {
+				activeRuns++
 				newestActive = newerRun(newestActive, run)
 			}
 		}
 		pageToken = resp.Msg.GetNextPageToken()
 		if pageToken == "" {
+			if activeRuns > 1 {
+				return nil, fmt.Errorf("ambiguous castle runs for criteria %s: %d active", criteriaID, activeRuns)
+			}
 			if newestActive != nil {
 				return newestActive, nil
 			}
@@ -326,7 +344,7 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 		resp, err := c.runs.ListRunEvents(ctx, connect.NewRequest(&v1.ListRunEventsRequest{
 			RunId:    runID,
 			SinceSeq: since,
-			Limit:    defaultPageSize,
+			Limit:    int32(defaultPageSize),
 		}))
 		if err != nil {
 			return nil, nil, err

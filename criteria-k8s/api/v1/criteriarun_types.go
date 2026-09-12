@@ -89,8 +89,9 @@ type CriteriaRunStatus struct {
 	EventsPath string `json:"eventsPath,omitempty"`
 
 	// CastleRunID is the run id in the castle control plane backing this
-	// run, resolved by ticket discovery and persisted to short-circuit
-	// subsequent observations.
+	// run, resolved by castle agent/run discovery keyed off the runner
+	// pod's registered agent, and persisted to short-circuit subsequent
+	// observations.
 	CastleRunID string `json:"castleRunId,omitempty"`
 
 	// ObservedGeneration tracks the last reconciled generation of the resource.

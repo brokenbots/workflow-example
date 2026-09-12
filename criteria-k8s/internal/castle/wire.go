@@ -17,9 +17,12 @@ const (
 
 // lifecycleFromEnvelope converts a castle Envelope into the operator's
 // LifecycleEvent. Only adapter lifecycle kinds are mapped; every other
-// payload is skipped, mirroring the CRI-132 file parser. The envelope's
-// top-level run_id is authoritative (payload data.run_id is empty at the
-// engine's emission site).
+// payload is skipped, mirroring the CRI-132 file parser. One deliberate
+// deviation: unlike the file parser, the castle client resolves the
+// release-event adapter asymmetry (released events report the shim
+// registration name, e.g. "noop.default") after this mapping, via
+// resolveReleaseAdapter. The envelope's top-level run_id is authoritative
+// (payload data.run_id is empty at the engine's emission site).
 func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	if env == nil {
 		return events.LifecycleEvent{}, false

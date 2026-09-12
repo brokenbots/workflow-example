@@ -84,7 +84,25 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
 			}
 		}
-		return ctrl.Result{}, nil
+		if castleTerminalObserved(&run.Status) || r.Castle == nil || r.Castle.Disabled() {
+			return ctrl.Result{}, nil
+		}
+		// The Job is terminal but castle has not recorded the terminal yet
+		// (ingest lag, or the pass that stamped the phase errored): keep
+		// observing castle and stamping the missing outcome fields, without
+		// re-entering the queue or the child-job reconcile.
+		update := run.DeepCopy()
+		if _, err := r.observeCastle(ctx, &run, update, logger); err != nil {
+			logger.Error(err, "observing castle terminal for Job-terminal CriteriaRun")
+		} else if !statusEqual(&run.Status, &update.Status) {
+			if err := r.Status().Update(ctx, update); err != nil {
+				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
+			}
+		}
+		if castleTerminalObserved(&update.Status) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
 	// Enqueue the run for repo-keyed admission control. Only admitted runs
@@ -148,14 +166,15 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// consumed below. One status write.
 	update.Status.Phase = derivePhase(runnerJob)
 	update.Status.JobName = runnerJob.Name
-	obs, err := r.observeCastle(ctx, &run, update, logger)
-	if err != nil {
+	obs, obsErr := r.observeCastle(ctx, &run, update, logger)
+	if obsErr != nil {
 		// An unavailable or inconclusive castle source must not converge
-		// desired state: abort before any status write and before the
-		// per-scope reconcile, so no adapter pod is touched off a history we
-		// could not see. controller-runtime retries with backoff and the
-		// next successful observation resumes normal reconciliation.
-		return ctrl.Result{}, fmt.Errorf("observing castle lifecycle for %s: %w", run.Name, err)
+		// desired state: no castle-derived status was stamped and the
+		// per-scope reconcile below is skipped, so no adapter pod is touched
+		// off a history we could not see. The Job-derived phase is still
+		// persisted and the queue still releases so the run cannot stall its
+		// repo queue; the observation is retried via the requeue below.
+		logger.Error(obsErr, "observing run lifecycle from castle; continuing with Job-derived status only", "criteriarun", run.Name)
 	}
 
 	if !statusEqual(&run.Status, &update.Status) {
@@ -168,17 +187,19 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	phase := update.Status.Phase
 
 	// Reconcile per-scope adapter pods from the castle event stream. Only an
-	// authoritative observation (a known castle run) may drive desired
-	// state; an unregistered run or a disabled source is skipped so live
-	// pods are never deleted off an empty history.
+	// authoritative observation (a known castle run, no observation error)
+	// may drive desired state; an unregistered run, a failed observation, or
+	// a disabled source is skipped so live pods are never deleted off an
+	// empty history.
 	activeAdapters := 0
-	if obs.RunID != "" {
+	if obsErr == nil && obs.RunID != "" {
+		var err error
 		activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-	} else if run.Spec.PerScopeSessions {
-		if r.Castle == nil || r.Castle.Disabled() {
+	} else if obsErr == nil && run.Spec.PerScopeSessions {
+		if obs.RunID == "" && (r.Castle == nil || r.Castle.Disabled()) {
 			logger.Info("castle observation disabled; per-scope adapter reconcile requires --castle-addr (castle is the only lifecycle source since CRI-135)")
 		} else {
 			logger.Info("castle run not yet known; skipping per-scope reconcile until observation succeeds")
@@ -195,9 +216,20 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Keep polling castle while the run is using per-scope adapters and has
-	// not reached a terminal phase.
+	// Requeue policy:
+	//   - an observation error retries on the poll interval (the Job-derived
+	//   status above is already persisted, so the error must not abort the
+	//   pass);
+	//   - per-scope runs keep polling until every scope is released;
+	//   - a terminal run keeps polling until castle has recorded the
+	//   terminal outcome, unless castle is disabled.
+	if obsErr != nil {
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
 	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(phase)) {
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
+	if isTerminalPhase(phase) && !castleTerminalObserved(&update.Status) && !(r.Castle == nil || r.Castle.Disabled()) {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
@@ -206,6 +238,16 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
+}
+
+// castleTerminalObserved reports whether the run's status already carries
+// the terminal outcome recorded by a successful castle observation (the
+// castle run id plus a PR number or ticket state). Until then, a
+// Job-terminal run keeps polling castle so the outcome fields are stamped
+// once the terminal lands there.
+func castleTerminalObserved(status *criteriav1.CriteriaRunStatus) bool {
+	return status != nil && status.CastleRunID != "" &&
+		(status.PRNumber != "" || status.TicketState != "")
 }
 
 func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
@@ -235,9 +277,10 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 // the pending status update: the castle run id, terminal completion, and the
 // run outcome (PR number, ticket state). An unavailable or inconclusive
 // source (castle outage, run not registered yet, discovery that cannot
-// conclude) returns an error so the caller aborts the pass: desired state
-// must never be converged from an empty history, and no status field is
-// stamped from a source we could not actually observe.
+// conclude) returns an error; the caller must then not reconcile per-scope
+// desired state (desired state must never be converged from an empty
+// history) and must treat any castle-derived stamping in the update as
+// absent, while the Job-derived phase it already set still persists.
 func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (*castle.Observation, error) {
 	if r.Castle == nil || r.Castle.Disabled() {
 		return &castle.Observation{}, nil
