@@ -279,9 +279,8 @@ func findJob(t *testing.T, jobs []*batchv1.Job, name string) *batchv1.Job {
 }
 
 // With Defaults.CastleAddr set, the runner receives CASTLE_ADDR so criteria
-// publishes lifecycle to castle in server mode (CRI-134 dual-write keeps the
-// events.ndjson mirror). When unset, the env var is absent entirely and the
-// runner's local-mode behaviour is unchanged.
+// publishes lifecycle to castle in server mode. When unset, the env var is
+// absent entirely and the runner's local-mode behaviour is unchanged.
 func TestBuildRunnerJobCastleAddr(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-42"},
@@ -298,4 +297,33 @@ func TestBuildRunnerJobCastleAddr(t *testing.T) {
 	localJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
 	localRunner := localJob.Spec.Template.Spec.Containers[0]
 	assert.NotContains(t, localRunner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"})
+}
+
+// CRI-136 retired the events.ndjson dual-write: by default the runner
+// container must not receive EVENTS_FILE at all, so runner.sh passes no
+// --events-file and the run writes no events.ndjson anywhere. Only an
+// explicitly configured debug path injects the env var, keeping the flag
+// available for debugging.
+func TestBuildRunnerJobEventsFileDebugOnly(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-42",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+
+	defaultJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	defaultRunner := defaultJob.Spec.Template.Spec.Containers[0]
+	assert.NotContains(t, defaultRunner.Env, corev1.EnvVar{Name: "EVENTS_FILE"})
+
+	debugJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+		DataPVC:         "criteria-data",
+		DebugEventsFile: "/data/intake/CRI-42/debug-events.ndjson",
+	})
+	debugRunner := debugJob.Spec.Template.Spec.Containers[0]
+	assert.Contains(t, debugRunner.Env, corev1.EnvVar{
+		Name:  "EVENTS_FILE",
+		Value: "/data/intake/CRI-42/debug-events.ndjson",
+	})
 }

@@ -111,7 +111,10 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	update := run.DeepCopy()
 	update.Status.ObservedGeneration = run.Generation
-	update.Status.EventsPath = eventsPath(&run)
+	// EventsPath records the debug-only events.ndjson mirror (CRI-136); it is
+	// only meaningful when the operator was configured with a debug path, and
+	// stays empty for the castle-only default.
+	update.Status.EventsPath = r.Defaults.DebugEventsFile
 	update.Status.Queue = qstatus
 
 	if !admitted {
@@ -320,10 +323,6 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 		update.Status.PRNumber = obs.Terminal.PRNumber
 	}
 	return obs, nil
-}
-
-func eventsPath(run *criteriav1.CriteriaRun) string {
-	return fmt.Sprintf("/data/intake/%s/events.ndjson", run.Spec.TicketID)
 }
 
 func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (ctrl.Result, error) {

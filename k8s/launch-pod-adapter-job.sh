@@ -70,6 +70,9 @@ tmpl_var REPRO_WORKFLOW_DIR   "${REPRO_WORKFLOW_DIR:-}"
 tmpl_var ALLOW_DIRTY          "${ALLOW_DIRTY:-false}"
 tmpl_var MAX_AGENT_VISITS     "${MAX_AGENT_VISITS:-2}"
 tmpl_var PROVIDER_BASE_URL    "${PROVIDER_BASE_URL:-http://192.168.17.116:11434/v1}"
+# EVENTS_FILE is debug-only (CRI-136): empty by default, so the runner passes
+# no --events-file and the run writes no events.ndjson. Set it to a path to
+# mirror lifecycle events to a file for debugging.
 tmpl_var EVENTS_FILE          "${EVENTS_FILE:-}"
 
 LOWER_TICKET="$(printf '%s' "$TICKET_ID" | tr '[:upper:]' '[:lower:]')"

@@ -89,10 +89,10 @@ type CriteriaRunStatus struct {
 	// ticket-state producer exists. Not part of the terminal-completion gate.
 	TicketState string `json:"ticketState,omitempty"`
 
-	// EventsPath is the absolute path to the run's events file on the shared
-	// /data volume. Recorded for observability only: the operator no longer
-	// reads the file (the engine dual-writes it during the transition
-	// window).
+	// EventsPath is the debug-only events.ndjson mirror path (CRI-136) the
+	// runner was handed via EVENTS_FILE. Recorded for observability only:
+	// the operator reads run lifecycle from castle, and the file exists just
+	// when the operator was explicitly configured with a debug events path.
 	EventsPath string `json:"eventsPath,omitempty"`
 
 	// CastleRunID is the run id in the castle control plane backing this
