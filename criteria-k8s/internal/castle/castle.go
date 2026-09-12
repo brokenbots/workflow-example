@@ -10,6 +10,7 @@ package castle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,6 +39,16 @@ const (
 	// runStatusSucceeded is castle's terminal success status.
 	runStatusSucceeded = "succeeded"
 )
+
+// ErrRunNotFound reports that castle conclusively has no record of the run:
+// discovery paged the agent (and run) table to completion and found neither
+// the runner's agent nor a run for the criteria. For a runner Job that is
+// already terminal this is final — the agent registers from the runner pod,
+// which no longer exists, so no later pass can find it (pre-castle-native
+// runs whose runner never registered). Errors failing errors.Is(ErrRunNotFound)
+// are transient (transport failures, inconclusive paging, ingest lag) and
+// remain retryable.
+var ErrRunNotFound = errors.New("castle has no record of the run")
 
 // Config configures castle observation.
 type Config struct {
@@ -254,8 +265,11 @@ func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, 
 				// The engine registers the agent when the runner starts, so a
 				// missing agent means it has not started (or castle lost it).
 				// Either way the operator must not treat this as an
-				// authoritative empty history.
-				return "", fmt.Errorf("no castle agent registered for runner job %s yet", runnerJob)
+				// authoritative empty history. ErrRunNotFound lets the
+				// controller tell this conclusive negative apart from a
+				// transient failure: for a runner Job that is already
+				// terminal the agent can never appear, so polling stops.
+				return "", fmt.Errorf("%w: no castle agent registered for runner job %s yet", ErrRunNotFound, runnerJob)
 			default:
 				return "", fmt.Errorf("ambiguous castle agents for runner job %s: %d distinct criteria ids", runnerJob, len(ids))
 			}
@@ -310,7 +324,7 @@ func (c *Client) findRunForCriteria(ctx context.Context, criteriaID string) (*v1
 			if newestTerminal != nil {
 				return newestTerminal, nil
 			}
-			return nil, fmt.Errorf("no castle run for criteria %s yet", criteriaID)
+			return nil, fmt.Errorf("%w: no castle run for criteria %s yet", ErrRunNotFound, criteriaID)
 		}
 	}
 	return nil, fmt.Errorf("run discovery for criteria %s did not conclude within %d pages (more pages remain); refusing to report an empty observation", criteriaID, maxDiscoveryPages)
