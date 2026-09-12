@@ -41,6 +41,7 @@ type payloadMessage struct {
 // payloadEventData carries the event content for a nested lifecycle event.
 type payloadEventData struct {
 	Adapter     string `json:"adapter"`
+	AdapterType string `json:"adapter_type"`
 	Digest      string `json:"digest"`
 	ScopeID     string `json:"scope_instance_id"`
 	ShimAddress string `json:"shim_listen_address"`
@@ -63,8 +64,13 @@ type LifecycleEvent struct {
 	// ScopeTag is a short human-readable scope tag used in the handshake.
 	ScopeTag string `json:"scope_tag,omitempty"`
 
-	// AdapterName is the adapter kind (e.g. shell or copilot).
+	// AdapterName is the workflow's adapter node name (e.g. "intake").
 	AdapterName string `json:"adapter_name"`
+
+	// AdapterType is the adapter implementation kind (shell, copilot, ...).
+	// Empty on events from engines that predate its emission; fall back to
+	// AdapterName then.
+	AdapterType string `json:"adapter_type,omitempty"`
 
 	// Digest is the pinned lockfile digest for the adapter image, including
 	// the "sha256:" prefix.
@@ -151,6 +157,7 @@ func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) 
 		RunID:       envelope.RunID,
 		ScopeID:     envelope.Payload.Data.ScopeID,
 		AdapterName: envelope.Payload.Data.Adapter,
+		AdapterType: envelope.Payload.Data.AdapterType,
 		Digest:      envelope.Payload.Data.Digest,
 		ShimAddress: envelope.Payload.Data.ShimAddress,
 		TokenFile:   envelope.Payload.Data.TokenFile,

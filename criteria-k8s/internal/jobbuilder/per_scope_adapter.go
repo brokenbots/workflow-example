@@ -33,7 +33,13 @@ func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) s
 // the shared data volume plus the pod-adapter scripts ConfigMap. The repo
 // clone lives on the data PVC at /data/intake/<ticket>/repo.
 func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent) *corev1.Pod {
+	// Prefer the adapter implementation kind (shell/copilot/...) from the
+	// event's adapter_type; older engines only carry the workflow's adapter
+	// node name (AdapterName), which is not an image kind.
 	kind := scope.AdapterName
+	if scope.AdapterType != "" {
+		kind = scope.AdapterType
+	}
 	name := PerScopeAdapterPodName(run, kind, scope.ScopeID)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 

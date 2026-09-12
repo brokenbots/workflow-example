@@ -140,11 +140,16 @@ func TestReconcilePerScopeAdaptersCreatesPodForNestedProvision(t *testing.T) {
 	for _, e := range pods[0].Spec.Containers[0].Env {
 		env[e.Name] = e.Value
 	}
-	assert.Equal(t, "127.0.0.1:38625", env["CRITERIA_REMOTE_HOST"])
 	assert.Equal(t, "13d83326-f18d-49ed-942d-29c5f291a305", env["CRITERIA_SCOPE_ID"])
 	assert.Equal(t, "/tmp/runs/58f12fe6/remote-tokens/13d83326-f18d-49ed-942d-29c5f291a305/noop.token", env["CRITERIA_REMOTE_TOKEN_FILE"])
 	assert.Equal(t, "default", env["ADAPTER_KIND"])
 	assert.Equal(t, "", env["CRITERIA_REMOTE_DIGEST"], "captured digest is empty and must not be synthesized")
+
+	// CRITERIA_REMOTE_HOST must be absent: the event's shim listen address is
+	// the runner's own-loopback bind, unreachable from a separate pod. The
+	// adapter discovers the routable address from the shared discovery file.
+	_, hasHost := env["CRITERIA_REMOTE_HOST"]
+	assert.False(t, hasHost, "CRITERIA_REMOTE_HOST must not be set from the event's loopback shim address")
 }
 
 // The reconcile is idempotent: a second pass over the same (full history)
