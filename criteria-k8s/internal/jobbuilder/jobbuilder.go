@@ -74,9 +74,9 @@ var adapterKinds = []string{"shell", "copilot"}
 func adapterImage(kind string) string {
 	switch kind {
 	case "shell":
-		return "localhost:5000/criteria-adapter-shell:k8s-0.5.3"
+		return "localhost:5000/criteria-adapter-shell:k8s-0.5.4"
 	case "copilot":
-		return "localhost:5000/criteria-adapter-copilot:k8s-0.5.6"
+		return "localhost:5000/criteria-adapter-copilot:k8s-0.5.7"
 	default:
 		return fmt.Sprintf("localhost:5000/criteria-adapter-%s:k8s-3", kind)
 	}
