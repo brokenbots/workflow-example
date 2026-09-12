@@ -72,6 +72,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_launch_template.sh
 	@echo "Running per-scope digest discovery regression test (CRI-140)..."
 	./k8s/tests/test_per_scope_digest_files.sh
+	@echo "Running engine pin regression test (CRI-140)..."
+	./linear_intake_v1/tests/test_engine_pin.sh
 	@echo "Running container-entrypoint token substitution regression test..."
 	./k8s/tests/test_container_entrypoint_substitution.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
@@ -95,6 +97,7 @@ lint: lint-criteria-k8s
 		k8s/verify-secrets-store-csi.sh \
 		k8s/tests/test_launch_template.sh \
 		k8s/tests/test_job_cri_27.sh \
+		linear_intake_v1/tests/test_engine_pin.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
 		k8s/tests/test_runner_server_tls.sh \
 		k8s/tests/test_container_entrypoint_substitution.sh \

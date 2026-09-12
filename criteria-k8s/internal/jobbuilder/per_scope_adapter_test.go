@@ -145,6 +145,50 @@ func TestBuildPerScopeAdapterPodFallsBackToAdapterNameWithoutType(t *testing.T) 
 	assert.Equal(t, "intake", envNames["ADAPTER_KIND"])
 }
 
+func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
+	// CRI-140 contract check for the pinned engine: the workflow image builds
+	// criteria >= v0.5.22 (linear_intake_v1/Dockerfile), which publishes the
+	// provision-wanted envelope with adapter_type (the implementation kind)
+	// in payload.data. The adapter node name ("intake") travels in "adapter".
+	// Running the nested envelope through the parser and the pod builder must
+	// yield an image that exists in the registry — never
+	// criteria-adapter-<node-name>, which wedged per-scope pods in ImagePull.
+	payload := `{"payload_type":"AdapterEvent","run_id":"CRI-140","payload":` +
+		`{"kind":"adapter.lifecycle.provision_wanted","data":` +
+		`{"adapter":"intake","adapter_type":"shell",` +
+		`"digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",` +
+		`"scope_instance_id":"root","shim_listen_address":"[::]:7778",` +
+		`"token_ref":"/data/.criteria/runs/cri-140/token"}}}`
+
+	evs, err := events.ParseLifecycleEventsBytes([]byte(payload))
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	require.Equal(t, "shell", evs[0].AdapterType,
+		"the pinned engine's payload must carry adapter_type for the builder to resolve the kind")
+	require.Equal(t, "intake", evs[0].AdapterName)
+
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-140", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-140"},
+	}
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, evs[0])
+	require.NotNil(t, pod)
+
+	container := pod.Spec.Containers[0]
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.3", container.Image,
+		"a shell/intake provision_wanted must resolve to the shell adapter image, not criteria-adapter-intake")
+	assert.NotContains(t, container.Image, "criteria-adapter-intake",
+		"no code path may reference a criteria-adapter-intake image for this declaration")
+	assert.Equal(t, "shell", pod.Labels["criteria.brokenbots.dev/adapter-kind"])
+
+	envNames := make(map[string]string)
+	for _, e := range container.Env {
+		envNames[e.Name] = e.Value
+	}
+	assert.Equal(t, "shell", envNames["ADAPTER_KIND"])
+	assert.Equal(t, "intake", envNames["CRITERIA_ADAPTER_NAME"])
+}
+
 func TestBuildAllPerScopeSessionsOmitsAdapterJobs(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-116"},

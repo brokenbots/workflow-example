@@ -29,6 +29,15 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 
 	desired := make(map[string]*corev1.Pod, len(active))
 	for _, scope := range active {
+		if scope.AdapterType == "" {
+			// CRI-140: engines before v0.5.22 do not publish adapter_type;
+			// falling back to the node name builds an image reference that
+			// does not exist in the registry (e.g. criteria-adapter-intake)
+			// and wedges the pod in ImagePull. The workflow image pins
+			// criteria >= v0.5.22 for exactly this reason.
+			logger.Error(nil, "per-scope provision_wanted carries no adapter_type; resolving image kind from the adapter node name, which likely does not exist in the registry (requires criteria >= v0.5.22)",
+				"run", run.Name, "adapter", scope.AdapterName, "scope", scope.ScopeID)
+		}
 		pod := jobbuilder.BuildPerScopeAdapterPod(run, r.Defaults, scope)
 		desired[pod.Name] = pod
 	}
