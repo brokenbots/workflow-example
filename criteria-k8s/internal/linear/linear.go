@@ -145,7 +145,7 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 	req := graphqlRequest{
 		Query: `query($project: ID!, $state: String!) {
             issues(filter: {project: {id: {eq: $project}}, state: {name: {eq: $state}}}) {
-                nodes { id identifier title description state { name } project { id name } }
+                nodes { id identifier title description state { name } project { id name } labels { nodes { name } } }
             }
         }`,
 		Variables: map[string]interface{}{
