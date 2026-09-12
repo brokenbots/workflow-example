@@ -335,6 +335,13 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		{Name: "ALLOW_DIRTY", Value: "false"},
 		{Name: "MAX_AGENT_VISITS", Value: fmt.Sprintf("%d", maxVisits)},
 		{Name: "PROVIDER_BASE_URL", Value: providerBaseURL},
+		// CRITERIA_HOME on the shared data PVC: the engine's run state
+		// (including rotated per-scope accept-token files) must be readable
+		// by the per-scope adapter pods, which mount /data but have no other
+		// view into the runner's container filesystem. The default
+		// (~/.local/criteria) is container-local and the token_ref paths in
+		// the lifecycle events would dangle for every adapter pod.
+		{Name: "CRITERIA_HOME", Value: "/data/criteria"},
 		{Name: "JOB_NAME", Value: JobName(run)},
 		{
 			Name: "POD_IP",
