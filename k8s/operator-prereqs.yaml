@@ -211,8 +211,14 @@ data:
     # Server mode (CRI-133/134): when CASTLE_ADDR is set, criteria publishes run
     # lifecycle to the castle control plane. Unset keeps the historical local
     # file mode.
+    #
+    # Castle dev mode serves plaintext. The engine client refuses plaintext
+    # connections to non-loopback hosts unless TLS mode is explicitly disabled
+    # (CRI-138), so server mode opts out through the CRITERIA_SERVER_TLS env
+    # fallback of the --server-tls flag.
     : "${CASTLE_ADDR:=}"
     if [ -n "$CASTLE_ADDR" ]; then
+        export CRITERIA_SERVER_TLS=disable
         set -- "$@" --server "$CASTLE_ADDR"
     fi
     

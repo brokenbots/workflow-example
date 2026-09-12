@@ -66,6 +66,8 @@ test: validate test-criteria-k8s
 	./k8s/generate-pod-adapter-manifest.sh
 	@echo "Running k8s pod-adapter regression test..."
 	./k8s/tests/test_job_cri_27.sh
+	@echo "Running runner server-mode TLS opt-out regression test..."
+	./k8s/tests/test_runner_server_tls.sh
 	@echo "Running k8s template regression test..."
 	./k8s/tests/test_launch_template.sh
 	@echo "Running container-entrypoint token substitution regression test..."
@@ -91,6 +93,7 @@ lint: lint-criteria-k8s
 		k8s/verify-secrets-store-csi.sh \
 		k8s/tests/test_launch_template.sh \
 		k8s/tests/test_job_cri_27.sh \
+		k8s/tests/test_runner_server_tls.sh \
 		k8s/tests/test_container_entrypoint_substitution.sh \
 		k8s/tests/test_secrets_store_csi.sh \
 		k8s/tests/test_example_manifest.sh \
