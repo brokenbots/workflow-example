@@ -64,6 +64,12 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 		// is unset. An engine-side fix to emit a routable address in the
 		// event can reintroduce the env later.
 		{Name: "CRITERIA_REMOTE_DIGEST", Value: digest},
+		// The remote-runner binary presents CRITERIA_REMOTE_SCOPE in the
+		// identity handshake; the shim registers scope tokens under
+		// <scopeName>/<scopeInstanceID> and rejects an empty scope in
+		// per-scope mode. ScopeTag is the human-readable tag (empty for the
+		// root scope) - the registration key is the name/scopeID pair.
+		{Name: "CRITERIA_REMOTE_SCOPE", Value: scope.ScopeTag + "/" + scope.ScopeID},
 		{Name: "CRITERIA_SCOPE_ID", Value: scope.ScopeID},
 	}
 	if scope.ScopeTag != "" {
