@@ -49,6 +49,12 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	data := ae.GetData()
 	ev.AdapterName = firstNonEmpty(dataString(data, "adapter", "adapter_name"), ae.GetAdapter())
 	ev.ScopeID = dataString(data, "scope_instance_id", "scope_id")
+	// The engine's scope_name (empty for the root scope) is half of the shim
+	// registration key <scopeName>/<scopeInstanceID>. The per-scope pod's
+	// CRITERIA_REMOTE_SCOPE must present the SAME key the engine registered,
+	// or every dial is rejected with `scope "..." is not registered` (named
+	// scopes only; the root scope's empty name matched by accident).
+	ev.ScopeTag = dataString(data, "scope_name", "scope_tag")
 	// The engine emits adapter_type (CRI-141): the implementation kind
 	// (shell/copilot/...), distinct from the workflow's adapter node name.
 	// The per-scope pod builder needs it to resolve adapter images.
@@ -56,11 +62,6 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	ev.Digest = dataString(data, "digest")
 	ev.ShimAddress = dataString(data, "shim_listen_address", "shim_address")
 	ev.TokenFile = dataString(data, "token_ref", "token_file")
-	// The adapter implementation kind (shell, copilot, ...) is distinct from
-	// the workflow's adapter node name above. Emitted since v0.5.22; empty on
-	// older engines. The per-scope reconciler resolves the pod image kind
-	// from it, so it must survive the wire conversion.
-	ev.AdapterType = dataString(data, "adapter_type")
 	if ev.AdapterName == "" {
 		// Same skip rule as flat and nested events in the CRI-132 parser.
 		return events.LifecycleEvent{}, false
