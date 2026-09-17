@@ -148,20 +148,24 @@ own tables; criteria janitors its own; nobody cross-deletes. Retention must
 exempt STOPPED runs when stop/resume exists. Bootstrap: static token in k8s
 secret (criteria-secrets pattern).
 
-## 12. TICKETS — FILED (by the parallel session, 2026-09-17 20:42)
+## 12. TICKETS — FILED + REFINED (2026-09-17 evening)
 
-The "lock in the plan" step was executed by another session while design
-discussions continued here. VERIFIED in Linear:
-- Project "Research Workflows on k8s - Stage 1: Checkpoint + Pause"
-  (cb4cd1a5-3e0b-42c6-b4e1-063695ea9bfc), milestones M1-M4, detailed
-  tickets CRI-199..CRI-208 (criteriadb state tables, client integration,
-  InfoResponse declaration, engine save/restore, pointer events, session
-  protocol pause verb, shell+copilot adapters, castle STOPPED, operator).
-- Project "Research Workflows on k8s - Stage 2: Stop/Resume"
-  (bbd957c7-33b3-4a21-a62d-f902199aaffa), spikes CRI-209/210.
-NOTE: ticket bodies predate the design refinements in THIS doc (sections
-4-6: transport ladder, castle-as-tenant RW revision, auth reality, viz
-target, PR #9 merge-first). CRI-199/200 implementers must read this doc;
-its sections carry the constraints the ticket text doesn't have.
+The "lock in the plan" step was executed by a parallel session (20:42), then
+THIS session refined the set to carry the design decisions above:
+- Stage 1 project (cb4cd1a5-3e0b-42c6-b4e1-063695ea9bfc), M1-M4:
+  CRI-199..CRI-208 originals + TWO new M1 tickets:
+  * CRI-212 transport authN ladder + tenant authZ + viz loopback (P2,
+    BLOCKS CRI-199 - relation set)
+  * CRI-213 publish releases + pinned GHCR artifacts (P3, after PR #9)
+  Rewritten with full design context: CRI-199 (KV face, retention
+  primitives, versioned migrations, tenant model, PR#9-first), CRI-200
+  (tenant model revision, transport ladder, DSN isolation), CRI-202
+  (criteria-driven retention, STOPPED-exempt), CRI-207 (tenant model).
+  Design-constraint appendices added: CRI-201, 203-206, 208, 209, 210.
+- Stage 2 project (bbd957c7-33b3-4a21-a62d-f902199aaffa): CRI-209/210
+  spikes, S0.
+- criteriadb PR #9 (audit hardening) APPROVED (handcaught) + SQUASH-MERGED
+  2026-09-17 ~21:59 UTC as 3c3ff89aa0 on main - verified via commits API.
 Schema-migrations ownership: criteriadb team, postgres level. User said
 criteria/castle/adapters just implement the criteriadb client.
+Status: work deferred ("a few more small threads to close first").
