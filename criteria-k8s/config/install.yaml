@@ -100,9 +100,8 @@ spec:
                   description: >-
                     Resolved workflow-library object stamped by the
                     linear-watcher (CRI-217) from the criteria-routes
-                    ConfigMap. Consumed by the jobbuilder (CRI-222);
-                    workflowSource for url modes arrives with CRI-231.
-                    Empty means the operator defaults apply.
+                    ConfigMap. Consumed by the jobbuilder (CRI-222). Empty
+                    means the operator defaults apply.
                   required:
                     - name
                     - type
@@ -193,6 +192,29 @@ spec:
                       description: Static environment variables set on every run of this workflow.
                       additionalProperties:
                         type: string
+                workflowSource:
+                  type: object
+                  description: >-
+                    Source mode (CRI-231, ADR-0005 D1): the run fetches and
+                    applies the declared workflow source at run time instead
+                    of the baked-tree image mode. Non-nil selects source
+                    mode; empty keeps the baked-tree path. Provenance is
+                    recorded by the criteria run-metadata publisher (CRI-225).
+                  required:
+                    - type
+                    - url
+                  properties:
+                    type:
+                      type: string
+                      enum:
+                        - url
+                      description: Workflow source type (ADR-0005 D1), declared never inferred.
+                    url:
+                      type: string
+                      description: Workflow source URL fetched and applied at run time.
+                    ref:
+                      type: string
+                      description: Operator-declared expected pin for fetched content (CRI-226).
             status:
               type: object
               properties:

@@ -76,6 +76,13 @@ type Defaults struct {
 	// additionally mirror lifecycle events to a file. Empty (default) runs
 	// castle-only with no events.ndjson write anywhere in the run.
 	DebugEventsFile string
+	// CriteriaBaseImage is the source-mode base image (CRI-230): the
+	// minimal image carrying the criteria binary, from which a
+	// spec.workflowSource run fetches and applies the workflow source. It
+	// is the image-mode Defaults.Image's counterpart for source mode and is
+	// never used by the baked-tree path. Empty falls back to the built-in
+	// criteria-base default.
+	CriteriaBaseImage string
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
@@ -209,10 +216,20 @@ func buildJobBase(run *criteriav1.CriteriaRun, namespace, name string, labels ma
 // The workflow object stamped on the run (CRI-222) supplies the target
 // namespace, the declared volumes, and the CSI secret delivery; the image
 // resolves from the run spec and the operator default.
+//
+// Two modes branch here (CRI-231):
+//   - Image mode (spec.workflowSource nil): the baked-tree path — the
+//     repo-clone init container plus the runner.sh workflow image, unchanged.
+//   - Source mode (spec.workflowSource set): no repo-clone; the runner
+//     executes on the base/provided image and fetches/applies the declared
+//     workflow source at run time.
 func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 	ticket := run.Spec.TicketID
 	jobName := JobName(run)
 	repoURL := run.Spec.RepoURL
+	if run.Spec.WorkflowSource != nil {
+		return buildSourceRunnerJob(run, defaults)
+	}
 	image := firstNonEmpty(run.Spec.Image, defaults.Image, "localhost:5000/linear-intake-remote:dev")
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	providerBaseURL := firstNonEmpty(run.Spec.ProviderBaseURL, defaults.ProviderBaseURL, "http://192.168.17.116:11434/v1")

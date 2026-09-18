@@ -36,6 +36,12 @@ images:
   workflow:
     repository: localhost:5000/linear-intake-remote
     tag: dev
+  # Source-mode base image (CRI-230): minimal criteria image that
+  # spec.workflowSource runs execute on when the run spec carries no image
+  # (url-only source mode; url+image runs stamp their own process image).
+  criteriaBase:
+    repository: localhost:5000/criteria-base
+    tag: dev
 
 # Operator: reconciles CriteriaRun resources into runner/adapter Jobs and
 # sweeps expired per-ticket artifacts off the data PVC.

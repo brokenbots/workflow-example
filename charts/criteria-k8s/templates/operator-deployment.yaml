@@ -52,6 +52,11 @@ spec:
             # Default Criteria workflow image recorded in CriteriaRuns.
             - name: DEFAULT_CRITERIA_IMAGE
               value: "{{ .Values.images.workflow.repository }}:{{ .Values.images.workflow.tag }}"
+            # Source-mode base image (CRI-230/CRI-231): what url-only
+            # spec.workflowSource runs execute on. url+image runs stamp
+            # spec.image from the route, so this is the url-only default.
+            - name: CRITERIA_BASE_IMAGE
+              value: "{{ .Values.images.criteriaBase.repository }}:{{ .Values.images.criteriaBase.tag }}"
             - name: CRITERIA_DATA_PVC
               value: {{ .Values.pvc.data.name | quote }}
             - name: PROVIDER_BASE_URL

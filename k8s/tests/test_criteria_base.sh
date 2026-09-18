@@ -12,7 +12,8 @@ set -euo pipefail
 #   - runtime ships only git + ca-certificates (no node/gh/jq, no baked
 #     /workflows tree);
 #   - uid 10001, CRITERIA_HOME=/data/criteria, restricted entrypoint;
-#   - the operator is NOT wired to the new image (CRI-231 owns that).
+#   - the operator's source-mode default is this image (CRI-231 wiring),
+#     while image-mode runs keep the baked workflow image.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
@@ -100,10 +101,16 @@ for t in test_criteria_base.sh test_criteria_base_entrypoint.sh; do
         fail "Makefile lint must shellcheck k8s/tests/$t"
 done
 
-# --- operator stays on the baked image (wiring deferred to CRI-231) --------
-if grep -rq 'criteria-base' "$REPO_ROOT/criteria-k8s/"; then
-    fail "operator (criteria-k8s/) must not reference criteria-base: wiring is CRI-231"
-fi
+# --- source-mode wiring: the criteria base image (CRI-231) -----------------
+# CRI-230 deferred the wiring to this ticket: source-mode runs (spec
+# .workflowSource) must default to the criteria base image, exposed by the
+# operator's criteria-base-image flag, while image-mode runs keep the baked
+# workflow image.
+have 'CriteriaBaseImageDefault = "localhost:5000/criteria-base:dev"' \
+    "$REPO_ROOT/criteria-k8s/internal/jobbuilder/source.go" || \
+    fail "jobbuilder must default source-mode runs to the criteria-base image (CRI-231)"
+have '"criteria-base-image"' "$REPO_ROOT/criteria-k8s/cmd/operator/main.go" || \
+    fail "operator must expose the criteria-base-image flag (CRI-231)"
 grep -q 'localhost:5000/linear-intake-remote:dev' "$REPO_ROOT/criteria-k8s/cmd/operator/main.go" || \
     fail "DEFAULT_CRITERIA_IMAGE must remain the baked workflow image"
 

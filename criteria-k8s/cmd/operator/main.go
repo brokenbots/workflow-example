@@ -24,16 +24,17 @@ import (
 )
 
 var (
-	metricsAddr     = flag.String("metrics-bind-address", ":8080", "Address for metrics endpoint")
-	probeAddr       = flag.String("health-probe-bind-address", ":8081", "Address for health probe endpoint")
-	defaultImage    = flag.String("default-image", getenv("DEFAULT_CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
-	dataPVC         = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
-	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
-	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
-	castleToken     = getenv("CASTLE_TOKEN", "")
-	debugEventsFile = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
-	retentionPeriod = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
-	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
+	metricsAddr       = flag.String("metrics-bind-address", ":8080", "Address for metrics endpoint")
+	probeAddr         = flag.String("health-probe-bind-address", ":8081", "Address for health probe endpoint")
+	defaultImage      = flag.String("default-image", getenv("DEFAULT_CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
+	criteriaBaseImage = flag.String("criteria-base-image", getenv("CRITERIA_BASE_IMAGE", jobbuilder.CriteriaBaseImageDefault), "Source-mode base image (CRI-230): minimal criteria image fetched-workflow runs execute on when the run spec carries no image")
+	dataPVC           = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
+	providerBaseURL   = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
+	castleAddr        = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
+	castleToken       = getenv("CASTLE_TOKEN", "")
+	debugEventsFile   = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
+	retentionPeriod   = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
+	sweepInterval     = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	// CRI-144: reap adapter pods and legacy adapter Jobs whose owning
 	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
@@ -101,11 +102,12 @@ func main() {
 		Recorder: mgr.GetEventRecorderFor("criteria-k8s-operator"),
 		Castle:   castleClient,
 		Defaults: jobbuilder.Defaults{
-			Image:           *defaultImage,
-			DataPVC:         *dataPVC,
-			ProviderBaseURL: *providerBaseURL,
-			CastleAddr:      *castleAddr,
-			DebugEventsFile: *debugEventsFile,
+			Image:             *defaultImage,
+			DataPVC:           *dataPVC,
+			ProviderBaseURL:   *providerBaseURL,
+			CastleAddr:        *castleAddr,
+			DebugEventsFile:   *debugEventsFile,
+			CriteriaBaseImage: *criteriaBaseImage,
 		},
 		Queue: queue,
 	}
