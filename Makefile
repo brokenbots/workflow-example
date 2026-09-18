@@ -6,8 +6,8 @@
 WORKFLOW_IMAGE ?= localhost:5000/linear-intake-remote
 CRITERIA_K8S_IMAGE ?= localhost:5000/criteria-k8s
 # Minimal source-fetching base image (CRI-230): criteria binary + git +
-# ca-certs, fetched-and-applied at run time. Not wired into the operator yet
-# (CRI-231 owns the image/source branching).
+# ca-certs, fetched-and-applied at run time. Source-mode runs (CRI-231)
+# execute on it via the operator's CRITERIA_BASE_IMAGE default.
 CRITERIA_BASE_IMAGE ?= localhost:5000/criteria-base
 REGISTRY ?= localhost:5000
 
@@ -82,11 +82,13 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "Deploy the watcher with:"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
+	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
 
 deploy-images: images-push
 ifneq ($(CONTAINER_TOOL),)
 	kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
+	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs rollout status deploy/criteria-linear-watcher --timeout=120s
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif

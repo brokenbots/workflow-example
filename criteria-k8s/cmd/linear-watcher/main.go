@@ -819,6 +819,38 @@ func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID s
 func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
 	ticket := issue.Identifier
 	name := fmt.Sprintf("%s-%d", strings.ToLower(ticket), time.Now().Unix())
+	spec := criteriav1.CriteriaRunSpec{
+		TicketID: ticket,
+		RepoURL:  repoURL,
+		// Per-scope sessions: the engine emits provision/release events,
+		// castle fans them out to the operator (CRI-133/134/135), and the
+		// operator reconciles per-scope adapter pods, tearing each scope's
+		// pod down on release instead of leaving idle adapter jobs running
+		// after the workflow finishes. The operator's lifecycle parser has
+		// understood the engine's nested event envelope since CRI-132, so
+		// this is safe to enable again (CRI-136). Workflows can opt out by
+		// flipping this field on the created CriteriaRun.
+		PerScopeSessions: true,
+		// CRI-217: the workflow resolved from the routes ConfigMap
+		// (project default or workflows-label-group override) is stamped
+		// here for the jobbuilder to consume (CRI-222). Nil means the
+		// operator's defaults apply.
+		Workflow: convertWorkflow(sel.Name, sel.Workflow),
+		// CRI-231: url-type routes run in source mode — spec.workflowSource
+		// carries the fetched source (and the fail-closed ref pin), and
+		// url+image additionally stamps spec.image as the process image
+		// (URL is content, image is process). Url-only leaves spec.image
+		// unset so the base image applies; type=image runs keep it unset
+		// so the operator's --default-image remains the single source of
+		// truth for the baked workflow image, so bumping that image only
+		// requires one deployment update.
+		BuildCmd:        w.buildCmd,
+		TestCmd:         w.testCmd,
+		CIGateCmd:       w.ciGateCmd,
+		MaxAgentVisits:  w.maxAgentVisits,
+		ProviderBaseURL: w.providerBaseURL,
+	}
+	stampWorkflowSource(&spec, sel.Workflow)
 	return &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -829,35 +861,29 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *rout
 				"criteria.brokenbots.dev/source": "linear",
 			},
 		},
-		Spec: criteriav1.CriteriaRunSpec{
-			TicketID: ticket,
-			RepoURL:  repoURL,
-			// Per-scope sessions: the engine emits provision/release events,
-			// castle fans them out to the operator (CRI-133/134/135), and the
-			// operator reconciles per-scope adapter pods, tearing each scope's
-			// pod down on release instead of leaving idle adapter jobs running
-			// after the workflow finishes. The operator's lifecycle parser has
-			// understood the engine's nested event envelope since CRI-132, so
-			// this is safe to enable again (CRI-136). Workflows can opt out by
-			// flipping this field on the created CriteriaRun.
-			PerScopeSessions: true,
-			// CRI-217: the workflow resolved from the routes ConfigMap
-			// (project default or workflows-label-group override) is stamped
-			// here for the jobbuilder to consume (CRI-222). Nil means the
-			// operator's defaults apply.
-			Workflow: convertWorkflow(sel.Name, sel.Workflow),
-			// Image is intentionally unset: the operator's --default-image
-			// (CRITERIA_IMAGE on the operator deployment) is the single
-			// source of truth for the workflow image, so bumping the image
-			// only requires one deployment update. A stamped workflow's
-			// image/url/ref is consumed by the jobbuilder (CRI-222; CRI-231
-			// adds workflowSource for url modes).
-			BuildCmd:        w.buildCmd,
-			TestCmd:         w.testCmd,
-			CIGateCmd:       w.ciGateCmd,
-			MaxAgentVisits:  w.maxAgentVisits,
-			ProviderBaseURL: w.providerBaseURL,
-		},
+		Spec: spec,
+	}
+}
+
+// stampWorkflowSource resolves the source-mode spec fields from a url-type
+// routes workflow object (CRI-231): spec.workflowSource carries the URL the
+// runner fetches and applies at run time (plus the operator's fail-closed
+// ref pin), and url+image routes additionally stamp spec.image so the
+// process executes in the route-provided image. Image-type routes (baked
+// tree) leave both unset. Type/url validation is the routes package's job
+// (k8s/routes.schema.json); the guards here only keep an unvalidated
+// declaration from stamping an unusable source.
+func stampWorkflowSource(spec *criteriav1.CriteriaRunSpec, wf routes.Workflow) {
+	if wf.Type != routes.TypeURL || strings.TrimSpace(wf.URL) == "" {
+		return
+	}
+	spec.WorkflowSource = &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  wf.URL,
+		Ref:  wf.Ref,
+	}
+	if strings.TrimSpace(wf.Image) != "" {
+		spec.Image = wf.Image
 	}
 }
 

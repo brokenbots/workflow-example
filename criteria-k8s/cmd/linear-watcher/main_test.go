@@ -1061,6 +1061,84 @@ func TestPollRoutesBehavior(t *testing.T) {
 		// spec.image stays unset: the operator's default image remains the
 		// source of truth for pre-workflow behavior.
 		assert.Empty(t, spec.Image)
+		// CRI-231: image-mode routes stamp no workflowSource — the run keeps
+		// the baked-tree path.
+		assert.Nil(t, spec.WorkflowSource)
+	})
+}
+
+// routesJSONURLImage declares a url+image library object: the URL is
+// content, the image is the process (CRI-231), with a ref pin.
+const routesJSONURLImage = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-url-image": {
+      "type": "url",
+      "url": "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+      "ref": "28777aacc3cfbe85005ddb27f548116e692c0eb4",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "routes": [
+    {"name": "url-image-intake", "workflow": "linear-intake-url-image", "project": "Criteria K8s Workflow Runner", "states": ["Triage"]}
+  ]
+}`
+
+// CRI-231: the watcher stamps spec.workflowSource from the route's
+// workflow object (type=url) and spec.image from the route for url+image,
+// so the jobbuilder branches between source mode and image mode.
+func TestPollStampsWorkflowSource(t *testing.T) {
+	t.Run("url-only workflow stamps workflowSource without an image", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-13", "CRI-13", gateLabel(), groupLabel("linear-intake-url", "workflows")))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
+		assert.Equal(t, "url", spec.WorkflowSource.Type)
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1", spec.WorkflowSource.URL)
+		assert.Empty(t, spec.WorkflowSource.Ref, "the library object declares no ref")
+		assert.Empty(t, spec.Image, "url-only runs on the criteria base image: no spec.image")
+	})
+
+	t.Run("url+image workflow stamps workflowSource and the process image", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONURLImage)
+		tw.linearS.setIssues(issue("i-14", "CRI-14", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		require.NotNil(t, spec.WorkflowSource)
+		assert.Equal(t, "url", spec.WorkflowSource.Type)
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1", spec.WorkflowSource.URL)
+		assert.Equal(t, "28777aacc3cfbe85005ddb27f548116e692c0eb4", spec.WorkflowSource.Ref,
+			"the library object's ref pin reaches the run spec")
+		assert.Equal(t, "localhost:5000/linear-intake-remote:dev", spec.Image,
+			"the library object's image is the url+image process image")
+	})
+
+	t.Run("image-mode route stamps neither field", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-15", "CRI-15", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		assert.Nil(t, runs[0].Spec.WorkflowSource)
+		assert.Empty(t, runs[0].Spec.Image)
+	})
+
+	t.Run("blank url on a url workflow fails closed instead of stamping", func(t *testing.T) {
+		blankURL := strings.Replace(routesJSONURLImage, "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1", "", 1)
+		if blankURL == routesJSONURLImage {
+			t.Fatal("fixture rewrite did not apply")
+		}
+		tw := newTestWatcher(t, blankURL)
+		tw.linearS.setIssues(issue("i-16", "CRI-16", gateLabel()))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "the routes loader must reject a url workflow with a blank url")
 	})
 }
 

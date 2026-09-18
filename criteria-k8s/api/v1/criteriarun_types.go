@@ -51,9 +51,38 @@ type CriteriaRunSpec struct {
 	// Workflow is the resolved workflow-library object stamped onto the run
 	// by the linear-watcher (CRI-217) from the criteria-routes ConfigMap.
 	// Nil means no workflow was assigned and the operator defaults apply.
-	// Consumed by the jobbuilder (CRI-222); workflowSource for url modes
-	// arrives with CRI-231.
+	// Consumed by the jobbuilder (CRI-222).
 	Workflow *RunWorkflow `json:"workflow,omitempty"`
+
+	// WorkflowSource selects source mode (CRI-231, ADR-0005 D1): the run
+	// executes on a base/provided image and the runner fetches and applies
+	// the declared workflow source at run time. Nil keeps image mode: the
+	// baked-tree path with the repo-clone init container. Non-nil requires
+	// Type "url" (declared, never inferred); URL is the fetched source and
+	// Ref the fail-closed expected pin (CRI-226). Run provenance (resolved
+	// source, ref, cache path) is recorded by the criteria binary's
+	// run-metadata publisher (CRI-225) at run admission.
+	WorkflowSource *RunWorkflowSource `json:"workflowSource,omitempty"`
+}
+
+// RunWorkflowSource declares a run's workflow source for source mode
+// (CRI-231). It mirrors the url/ref fields of the workflow-library object in
+// k8s/routes.schema.json; the routes workflow type "image" never produces
+// one (that is the baked-tree image mode).
+type RunWorkflowSource struct {
+	// Type is the workflow source type (ADR-0005 D1): "url" (fetched at
+	// run time). Declared, never inferred.
+	Type string `json:"type"`
+
+	// URL is the workflow source URL fetched and applied at run time. The
+	// URL is content: provenance records it via the criteria run-metadata
+	// publisher (CRI-225) with credentials redacted.
+	URL string `json:"url"`
+
+	// Ref is the operator-declared expected pin for the fetched content,
+	// enforced fail-closed by the criteria binary (CRI-226). Empty means no
+	// pin was declared.
+	Ref string `json:"ref,omitempty"`
 }
 
 // RunWorkflow is a workflow-library object resolved from the routes
@@ -229,6 +258,26 @@ func (in *CriteriaRunSpec) DeepCopyInto(out *CriteriaRunSpec) {
 		*out = new(RunWorkflow)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.WorkflowSource != nil {
+		in, out := &in.WorkflowSource, &out.WorkflowSource
+		*out = new(RunWorkflowSource)
+		**out = **in
+	}
+}
+
+// DeepCopyInto for RunWorkflowSource.
+func (in *RunWorkflowSource) DeepCopyInto(out *RunWorkflowSource) {
+	*out = *in
+}
+
+// DeepCopy creates a copy of RunWorkflowSource.
+func (in *RunWorkflowSource) DeepCopy() *RunWorkflowSource {
+	if in == nil {
+		return nil
+	}
+	out := new(RunWorkflowSource)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopyInto for RunWorkflow.

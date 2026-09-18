@@ -2,10 +2,11 @@
 // object stamped on the run (CRI-217) is the pod-construction source for
 // image-mode runs: it declares the target namespace, the volumes each
 // environment mounts, and the OpenBao/CSI secrets the adapter environments
-// consume. Only the stamped object is consumed — url/source modes (CRI-231)
-// are out of scope, and the run's spec.image/operator default still resolves
-// the image. Every builder consumes the plan; runs without a stamped
-// workflow keep the built-in defaults verbatim.
+// consume. Only the stamped object is consumed. Source-mode runs (CRI-231)
+// render the same plan for their declared volumes/secrets/env; only the
+// runner image and the runner entrypoint differ. Every builder consumes the
+// plan; runs without a stamped workflow keep the built-in defaults
+// verbatim.
 package jobbuilder
 
 import (
