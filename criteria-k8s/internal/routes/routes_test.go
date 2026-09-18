@@ -231,6 +231,26 @@ func TestParseDefaultsOmittedStatesToTriage(t *testing.T) {
 	}
 }
 
+// CRI-218: an explicit empty (or null) states list is rejected at parse
+// time — the schema of record declares minItems: 1, so the Go JSON path
+// must stay fail-closed instead of silently defaulting to [Triage]. This
+// pins the JSON decode path (not Validate in isolation) against drift.
+func TestParseRejectsExplicitEmptyOrNullStates(t *testing.T) {
+	const head = `{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"wf-default":{"type":"image","image":"i","namespace":"criteria-jobs"}},"routes":[{"name":"intake","workflow":"wf-default","project":"Runner"`
+	for _, statesJSON := range []string{`"states":[]`, `"states":null`} {
+		t.Run(statesJSON, func(t *testing.T) {
+			data := []byte(head + "," + statesJSON + `}]}`)
+			_, err := Parse(data)
+			if err == nil {
+				t.Fatalf("Parse(%s) succeeded; want an explicit states list of no entries to be rejected", statesJSON)
+			}
+			if !strings.Contains(err.Error(), "states") {
+				t.Fatalf("Parse(%s) err = %v; want a states validation error", statesJSON, err)
+			}
+		})
+	}
+}
+
 func TestResolveOmittedStatesBehavesAsTriage(t *testing.T) {
 	// One route omits states; the other declares [Triage] explicitly. Both
 	// must behave identically.

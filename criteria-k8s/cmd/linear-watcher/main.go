@@ -199,7 +199,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		})
 		if err != nil {
 			if errors.Is(err, routes.ErrNoRoute) {
-				w.log.Info("skipping ticket: no route in the routes map matches this project and state",
+				w.log.Info("skipping ticket: no route in the routes map matches this project, state, and tags",
 					"ticket", issue.Identifier, "project", issue.ProjectName, "state", issue.StateName)
 				continue
 			}

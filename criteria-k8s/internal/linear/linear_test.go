@@ -101,6 +101,35 @@ func TestFindTicketsInStates(t *testing.T) {
 	assert.Equal(t, "CRI-100", tickets[0].Identifier)
 }
 
+// The issues query must filter by the states list with the `in` comparator:
+// a regression to `eq` would make the watcher poll a single state and miss
+// every other declared state (CRI-218).
+func TestIssuesQueryUsesInComparator(t *testing.T) {
+	var queries []string
+	ts := newLinearTestServer(t, nil, &queries)
+	defer ts.Close()
+
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+	_, err := client.FindTicketsInStates(context.Background(), "Criteria K8s Workflow Runner", []string{"Triage", "In Progress"})
+	require.NoError(t, err)
+	require.NotEmpty(t, queries)
+
+	issuesQuery := ""
+	for _, q := range queries {
+		if strings.Contains(q, "issues(") {
+			issuesQuery = q
+			break
+		}
+	}
+	require.NotEmpty(t, issuesQuery, "an issues query was issued")
+
+	compact := strings.Join(strings.Fields(issuesQuery), "")
+	assert.Contains(t, compact, "state:{name:{in:$states}}",
+		"issues query must filter the state name with the in comparator, got: %s", issuesQuery)
+	assert.NotContains(t, compact, "state:{name:{eq:",
+		"issues query must not filter a single state name, got: %s", issuesQuery)
+}
+
 // Fail closed: with no states to query, the client must not send an issues
 // query at all and must report no tickets.
 func TestFindTicketsInStatesWithoutStatesQueriesNothing(t *testing.T) {

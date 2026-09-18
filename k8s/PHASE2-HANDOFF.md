@@ -57,9 +57,11 @@ this topology autonomously: classify -> develop -> PR #21 -> merge -> Done.
   all k8s privilege stays in the operator; the engine only emits events.
 - accept_token auth for now (no mTLS yet) - user deferred mTLS to focus
   on remote environment semantics.
-- Watcher triggers on Triage state ONLY. A future, separate agent will
-  watch the New queue and decide ordering/promotion to Triage. Do not
-  change the watcher trigger.
+- Watcher triggers on the states each route declares (CRI-218: default
+  Triage, superseding the earlier Triage-only trigger per ADR-0005
+  §3.4). A future, separate agent will watch the New queue and decide
+  ordering/promotion to Triage. Do not change the per-route states
+  contract.
 - Adapters never read their own process env for workflow secrets (SDK
   contract D69); secrets reach them via OpenSession. The shell adapter
   overlays session secrets into child env (shell.go:141); copilot

@@ -112,8 +112,9 @@ type Route struct {
 	Tags     []string `json:"tags,omitempty"`
 	TagMatch string   `json:"tagMatch,omitempty"`
 	// States holds the Linear workflow state names this route triggers on.
-	// Omitted (or empty) in the payload defaults to [DefaultState] (CRI-218);
-	// Parse applies the default, so a parsed Route always carries states.
+	// Omitted in the payload defaults to [DefaultState] (CRI-218); an
+	// explicit empty or null list is rejected by Validate, mirroring the
+	// schema of record (minItems: 1).
 	States []string `json:"states"`
 }
 
@@ -137,24 +138,38 @@ func Parse(data []byte) (*Payload, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", DataKey, err)
 	}
-	p.applyDefaults()
+	var presence routeStatesPresence
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", DataKey, err)
+	}
+	p.applyDefaults(presence)
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	return &p, nil
 }
 
-// applyDefaults applies the payload defaults of k8s/routes.schema.json:
-// a route omitting states (or declaring an empty list, which the schema
-// rejects but Go cannot distinguish from omission) triggers on
-// [DefaultState] (CRI-218). Validate still rejects a programmatically
-// built Route without states, so hand-assembled payloads fail loudly
-// instead of silently routing everything to Triage.
-func (p *Payload) applyDefaults() {
+// routeStatesPresence shadows Route with a raw states field so JSON key
+// presence is observable: an omitted states key decodes to a nil
+// RawMessage, while an explicit "states": [] or "states": null decodes to
+// a non-nil one.
+type routeStatesPresence struct {
+	Routes []struct {
+		StatesRaw json.RawMessage `json:"states"`
+	} `json:"routes"`
+}
+
+// applyDefaults applies the payload defaults of k8s/routes.schema.json
+// (CRI-218): a route omitting the states key triggers on [DefaultState].
+// A route that declares states explicitly — empty, null, or a list — keeps
+// what it declared, so Validate rejects an empty or null list exactly as
+// the schema of record does (minItems: 1): fail closed, no silent [Triage].
+func (p *Payload) applyDefaults(presence routeStatesPresence) {
 	for i := range p.Routes {
-		if len(p.Routes[i].States) == 0 {
-			p.Routes[i].States = []string{DefaultState}
+		if i < len(presence.Routes) && presence.Routes[i].StatesRaw != nil {
+			continue
 		}
+		p.Routes[i].States = []string{DefaultState}
 	}
 }
 
@@ -206,7 +221,7 @@ func (p *Payload) Validate() error {
 			return fmt.Errorf("routes[%d] (%s): project is required", i, r.Name)
 		}
 		if len(r.States) == 0 {
-			return fmt.Errorf("routes[%d] (%s): states must not be empty", i, r.Name)
+			return fmt.Errorf("routes[%d] (%s): states must not be empty (omit the states key to default to [%s])", i, r.Name, DefaultState)
 		}
 		for _, s := range r.States {
 			if s == "" {

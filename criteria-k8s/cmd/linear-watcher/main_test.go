@@ -520,6 +520,10 @@ func TestPollPerRouteStates(t *testing.T) {
 
 	t.Run("route with states=[Triage] fires only for Triage tickets", func(t *testing.T) {
 		tw := newTestWatcher(t, routesJSON)
+		// Leaky server: both tickets reach the watcher even though only
+		// Triage was queried, so this exercises the per-route state gate
+		// itself, not just the Linear states filter.
+		tw.linearS.setLeakyFilter()
 		tw.linearS.setIssues(
 			issue("i-21", "CRI-21", gateLabel()),
 			withState(issue("i-22", "CRI-22", gateLabel()), "In Progress"),
@@ -528,6 +532,8 @@ func TestPollPerRouteStates(t *testing.T) {
 		runs := tw.runs(t)
 		require.Len(t, runs, 1, "only the Triage ticket fires")
 		assert.Equal(t, "CRI-21", runs[0].Spec.TicketID)
+		assert.True(t, tw.logs.contains("no route in the routes map"),
+			"the In Progress ticket is skipped by the per-route state gate")
 	})
 
 	t.Run("route with a custom states list fires for any listed state", func(t *testing.T) {
@@ -577,10 +583,9 @@ func TestPollPerRouteStates(t *testing.T) {
 		}
 	})
 
-	t.Run("empty routes union queries nothing and never fires", func(t *testing.T) {
-		// A payload the schema accepts but that declares no routes fails
-		// closed in Validate; assert the watcher still refuses to fire on
-		// any ticket when the union is empty.
+	t.Run("empty routes payload fails closed and never fires", func(t *testing.T) {
+		// Validate rejects a routes payload with no routes; the watcher
+		// logs the failure and skips the whole poll instead of firing.
 		tw := newTestWatcher(t, `{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"linear-intake-v1":{"type":"image","image":"i","namespace":"criteria-jobs"}},"routes":[]}`)
 		tw.linearS.setIssues(issue("i-28", "CRI-28", gateLabel()))
 		tw.pollOnce(t)

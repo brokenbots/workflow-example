@@ -7,7 +7,8 @@ a cluster. The recommended deployment is operator-based and autonomous:
 * The `criteria-k8s-operator` reconciles a `CriteriaRun` custom resource into
   a runner `Job` plus one adapter `Job` per adapter type.
 * The `criteria-linear-watcher` polls Linear and creates a `CriteriaRun` for each
-  ticket that reaches the configured Triage state.
+  ticket whose state is in a route's declared states list (routes omitting the
+  list default to Triage).
 * A manual path lets you create `CriteriaRun` objects by hand for testing.
 * The host-based launcher scripts remain available for local testing only.
 
@@ -54,7 +55,7 @@ Linear ticket in Triage
 | Resource | Role |
 |----------|------|
 | `CriteriaRun` | Custom resource that describes the ticket to process, repository, image, and runtime settings. |
-| `criteria-linear-watcher` | Polls Linear for tickets in the Triage state and creates a `CriteriaRun` for each one. |
+| `criteria-linear-watcher` | Polls Linear for tickets in the states each route declares (default Triage) and creates a `CriteriaRun` for each one. |
 | `criteria-k8s-operator` | Watches `CriteriaRun` resources and reconciles them into child Jobs. |
 | Runner Job | `repo-clone` init container clones the repository; `workflow-runner` runs `criteria apply` and hosts the remote shim. |
 | Adapter Job | One Job per adapter type (`shell`, `copilot`). Adapters phone home to the runner shim over the pod network. |

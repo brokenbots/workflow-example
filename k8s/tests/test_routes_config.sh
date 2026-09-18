@@ -367,6 +367,7 @@ negative = [
     ("unknown-top-level-field", True, mutate(lambda d: d.update(workflowLibraryTypo={}))),
     ("unknown-route-field", True, mutate(lambda d: d["routes"][0].update(workflowRef="x"))),
     ("route-empty-states", True, mutate(lambda d: d["routes"][0].update(states=[]))),
+    ("route-null-states", True, mutate(lambda d: d["routes"][0].update(states=None))),
     ("route-duplicate-states", True, mutate(lambda d: d["routes"][0].update(states=["Triage", "Triage"]))),
     ("route-bad-tagmatch", True, mutate(lambda d: d["routes"][0].update(tagMatch="some"))),
     ("route-dangling-workflow", False, mutate(lambda d: d["routes"][0].update(workflow="does-not-exist"))),
