@@ -273,6 +273,19 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 			w.log.V(1).Info("run already active", "ticket", issue.Identifier)
 			continue
 		}
+		// CRI-221 single-active invariant (skip side): the automation label
+		// gates firing even when no run matched the watcher's source
+		// selector — runs created outside the selector convention (e.g.
+		// legacy runs carrying a different label key) are invisible to the
+		// runs index, and the label is the only other witness the invariant
+		// has. A label orphaned by a deleted run was already converged to
+		// the dirty label by the sweep above, so a label still present here
+		// backs a live workflow.
+		if slices.Contains(issue.Labels, automationLabelName) {
+			w.log.Info("skipping CriteriaRun creation: ticket carries the automation label without a matching live run (single-active invariant)",
+				"ticket", issue.Identifier)
+			continue
+		}
 		run := w.buildCriteriaRun(issue, repoURL, sel)
 		if err := w.client.Create(ctx, run); err != nil {
 			w.log.Error(err, "creating CriteriaRun", "ticket", issue.Identifier)

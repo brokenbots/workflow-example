@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1219,3 +1220,187 @@ var (
 	releaseShell     = events.LifecycleEvent{Event: events.EventRelease, RunID: "CRI-116", ScopeID: "root", AdapterName: "shell"}
 	releaseCopilot   = events.LifecycleEvent{Event: events.EventRelease, RunID: "CRI-116", ScopeID: "root", AdapterName: "copilot"}
 )
+
+// jobNamesForRun lists the names of the Jobs owned by name-prefix matching,
+// so tests can assert which runs have actuated Jobs.
+func jobNamesForRun(t *testing.T, cl client.Client, runName string) []string {
+	t.Helper()
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	var names []string
+	for _, j := range jobs.Items {
+		if strings.HasPrefix(j.Name, runName) {
+			names = append(names, j.Name)
+		}
+	}
+	return names
+}
+
+// singleActiveRunFixture builds two fresh CriteriaRuns for one ticket that
+// differ only in name and creation time, plus a reconciler wired to a fake
+// client, a fake castle and a fake event recorder.
+func singleActiveRunFixture(t *testing.T) (*controller.CriteriaRunReconciler, *criteriav1.CriteriaRun, *criteriav1.CriteriaRun, *record.FakeRecorder, client.Client) {
+	t.Helper()
+	scheme := newScheme(t)
+	base := time.Now().Truncate(time.Second).UTC()
+
+	newRun := func(name string, created time.Time) *criteriav1.CriteriaRun {
+		return &criteriav1.CriteriaRun{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				Namespace:         "default",
+				UID:               types.UID("uid-" + name),
+				CreationTimestamp: metav1.NewTime(created),
+			},
+			Spec: criteriav1.CriteriaRunSpec{
+				TicketID:        "CRI-42",
+				RepoURL:         "https://github.com/brokenbots/workflow-example.git",
+				Image:           "localhost:5000/linear-intake-remote:dev",
+				MaxAgentVisits:  2,
+				ProviderBaseURL: "http://provider/v1",
+			},
+		}
+	}
+
+	older := newRun("cri-42-a", base)
+	newer := newRun("cri-42-b", base.Add(time.Second))
+
+	recorder := record.NewFakeRecorder(10)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&criteriav1.CriteriaRun{}).
+		WithObjects(older, newer).
+		Build()
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Recorder: recorder,
+		Castle:   &fakeCastle{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
+	}
+	return r, older, newer, recorder, cl
+}
+
+// TestReconcileRefusesSecondLiveRunForTicket covers the CRI-221 enforcement
+// side, including the two-race case: two un-actuated runs for one ticket,
+// the newer one reconciled first. Admission must refuse the newer run with
+// a warning event and no Jobs, admit the older one (exactly one admitted),
+// and admit the refused run once the winner goes terminal.
+func TestReconcileRefusesSecondLiveRunForTicket(t *testing.T) {
+	r, older, newer, recorder, cl := singleActiveRunFixture(t)
+	ctx := context.Background()
+
+	// The race loser (reconciled first, newer, un-actuated) is refused.
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(newer)})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cri-42-a", "the refusal names the live run holding the ticket")
+	assert.Contains(t, err.Error(), "at most one active workflow")
+
+	select {
+	case ev := <-recorder.Events:
+		assert.Contains(t, ev, "Warning")
+		assert.Contains(t, ev, "SecondActiveRunForTicket")
+		assert.Contains(t, ev, "cri-42-a")
+	default:
+		t.Fatal("expected an admission-refusal event on the refused run")
+	}
+	assert.Empty(t, jobNamesForRun(t, cl, "cri-42-b"),
+		"no Job may be created for the refused run")
+
+	// The race winner admits despite the refused sibling: the sibling is
+	// newer and un-actuated, so it blocks nothing. Exactly one admitted.
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(older)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+	assert.Len(t, jobNamesForRun(t, cl, "cri-42-a"), 3, "runner plus two adapters")
+	assert.Empty(t, jobNamesForRun(t, cl, "cri-42-b"), "still no Jobs for the refused run")
+
+	var admitted criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(older), &admitted))
+	assert.Equal(t, "cri-42-a", admitted.Status.JobName)
+
+	// The winner settles; its terminal reconcile releases the repo slot and
+	// the refusal clears: the previously refused run is now admitted.
+	runner := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42-a", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	}
+	require.NoError(t, cl.Status().Update(ctx, runner))
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(older)})
+	require.NoError(t, err)
+	var settled criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(older), &settled))
+	require.Equal(t, criteriav1.PhaseSucceeded, settled.Status.Phase)
+
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(newer)})
+	require.NoError(t, err)
+	assert.Len(t, jobNamesForRun(t, cl, "cri-42-b"), 3,
+		"the refused run is admitted once the first run is terminal")
+}
+
+// TestReconcileActuatedRunHoldsTicket covers the actuated-wins rule: an
+// already-actuated run holds its ticket regardless of age, so a newer
+// un-actuated run is refused — while the actuated run's own reconcile keeps
+// proceeding (refusing it would strand a run whose Jobs already exist).
+func TestReconcileActuatedRunHoldsTicket(t *testing.T) {
+	r, older, newer, recorder, cl := singleActiveRunFixture(t)
+	ctx := context.Background()
+
+	// The older run is already actuated: its runner Job exists.
+	older.Status.Phase = criteriav1.PhaseRunning
+	older.Status.JobName = "cri-42-a"
+	require.NoError(t, cl.Status().Update(ctx, older))
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(newer)})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cri-42-a")
+	select {
+	case ev := <-recorder.Events:
+		assert.Contains(t, ev, "SecondActiveRunForTicket")
+	default:
+		t.Fatal("expected an admission-refusal event on the refused run")
+	}
+	assert.Empty(t, jobNamesForRun(t, cl, "cri-42-b"))
+
+	// The actuated run's own reconcile is not gated by the assert.
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(older)})
+	require.NoError(t, err)
+	assert.Len(t, jobNamesForRun(t, cl, "cri-42-a"), 3)
+}
+
+// TestReconcileAdmitsRunsForDifferentTickets pins the assert's scoping: the
+// ticket id is the blocking key, so runs for different tickets never block
+// each other even when the repo queue admits both.
+func TestReconcileAdmitsRunsForDifferentTickets(t *testing.T) {
+	scheme := newScheme(t)
+	runA := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-42", Namespace: "default", UID: types.UID("uid-a")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-42", RepoURL: "https://github.com/org/repo-a.git", Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+	runB := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-43", Namespace: "default", UID: types.UID("uid-b")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-43", RepoURL: "https://github.com/org/repo-b.git", Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&criteriav1.CriteriaRun{}).
+		WithObjects(runA, runB).
+		Build()
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Castle:   &fakeCastle{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
+	}
+
+	for _, run := range []*criteriav1.CriteriaRun{runA, runB} {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+		require.NoError(t, err)
+		assert.NotEmpty(t, jobNamesForRun(t, cl, run.Name),
+			"a run for a different ticket is never blocked by the invariant")
+	}
+}
