@@ -3,14 +3,22 @@
 // /workflows tree: it executes on a base/provided image, fetches the
 // declared workflow source at run time, and applies it — mirroring the
 // criteria-base entrypoint contract (CRI-230). The URL is content; the
-// image is the process. Run provenance (resolved source, ref, cache path)
-// is recorded by the criteria binary's run-metadata publisher (CRI-225) at
-// run admission; nothing needs to be recorded on the Kubernetes side.
+// image is the process. Run provenance is recorded at admission on both
+// sides of the path (CRI-232): the criteria binary's run-metadata
+// publisher (CRI-225) records the resolver's origin under
+// CRITERIA_HOME/runs/<run-id>/ keyed by the run id it mints inside the
+// apply, and the runner records the k8s-side origin — the declared source
+// (redacted), the ref pin, and the url+image process image — under
+// CRITERIA_HOME/runs/<job-name>/, so provenance survives runs that fail
+// before the binary admits anything and carries what only the k8s path
+// knows.
 
 package jobbuilder
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +41,9 @@ const CriteriaBaseImageDefault = "localhost:5000/criteria-base:dev"
 //   - fail closed on an undeclared workflow source (D2: no baked tree to
 //     fall back to);
 //   - verify CRITERIA_HOME is a writable directory before any fetch;
+//   - record the workflow origin into run metadata at admission (CRI-232),
+//     degrading to a warning on failure: provenance recording must not
+//     fail the run it describes;
 //   - apply WORKFLOW_URL, pinning WORKFLOW_REF when declared (CRI-226).
 //
 // Discovery publishing is host-only: per-scope adapter pods learn the
@@ -64,6 +75,22 @@ fi
 # CRITERIA_HOME: export the verified path so criteria uses the same home
 # even when the container env did not declare one.
 export CRITERIA_HOME
+
+# CRI-232: record the run's workflow origin into run metadata at admission,
+# keyed by job name under the criteria state's runs/ layout. The criteria
+# binary's CRI-225 publisher keys its own origin record (the resolver's
+# source and ref) by the run id it mints inside the apply; this job-keyed
+# record adds what only the k8s path knows — the declared origin (source
+# pre-redacted by the operator, the ref pin) and the url+image process
+# image — and survives runs that fail before the binary admits anything.
+# WORKFLOW_ORIGIN_METADATA is operator-built JSON with the source already
+# redacted; the raw URL is never echoed here.
+if [ -n "${JOB_NAME:-}" ] && [ -n "${WORKFLOW_ORIGIN_METADATA:-}" ]; then
+    origin_dir="$criteria_home/runs/${JOB_NAME}"
+    if ! (umask 077 && mkdir -p "$origin_dir" && printf '%s' "$WORKFLOW_ORIGIN_METADATA" > "$origin_dir/run-metadata.json"); then
+        echo "warning: could not record workflow origin metadata under $criteria_home/runs/$JOB_NAME" >&2
+    fi
+fi
 
 # Publish the runner's routable dial address for per-scope adapter pods
 # polling the shared discovery directory. Only the host is published: the
@@ -145,6 +172,73 @@ func sourceModeImage(run *criteriav1.CriteriaRun, defaults Defaults) string {
 	return firstNonEmpty(run.Spec.Image, defaults.CriteriaBaseImage, CriteriaBaseImageDefault)
 }
 
+// workflowOriginMetadata is the k8s-path run metadata record the source-mode
+// runner writes at admission (CRI-232): runs/<job>/run-metadata.json under
+// CRITERIA_HOME, alongside the criteria binary's own CRI-225 record under
+// runs/<run-id>/. Every recorded field is credential-free: the source is
+// stored through RedactWorkflowSource (the criteria binary's
+// redactSourceForLog rules, pinned by tests).
+type workflowOriginMetadata struct {
+	// Job is the k8s runner job name keying the record.
+	Job string `json:"job"`
+	// Source is the declared workflow source with userinfo credentials
+	// redacted.
+	Source string `json:"source"`
+	// ResolvedRef is the declared workflow ref pin (CRI-226): the resolver
+	// must match it exactly or refuse to run, so for pinned runs it is the
+	// resolved ref. Unpinned runs omit it; the criteria binary's
+	// runs/<run-id>/ record carries the resolver's ref there.
+	ResolvedRef string `json:"resolved_ref,omitempty"`
+	// Image is the url+image process image reference (ADR-0005 D6): what
+	// only the k8s path knows. Empty in url-only mode.
+	Image string `json:"image,omitempty"`
+}
+
+// RedactWorkflowSource mirrors the criteria binary's redactSourceForLog
+// (workflow.RedactSource at the pinned criteria commit, CRI-225): it masks
+// URL userinfo credentials in the authority component so a
+// credential-bearing workflow source never reaches the recorded origin or
+// the logs. Sources without a "://" separator (local paths, scp-style git
+// forms) are returned unchanged; an "@" later in the path or query is not
+// mistaken for a userinfo delimiter.
+func RedactWorkflowSource(source string) string {
+	idx := strings.Index(source, "://")
+	if idx == -1 {
+		return source
+	}
+	rest := source[idx+3:]
+	// The userinfo delimiter can only appear in the authority component,
+	// which ends at the first "/", "?" or "#"; an "@" later in the path
+	// must not be mistaken for one. Within the authority, the first "@"
+	// is the delimiter (userinfo cannot contain a literal "@").
+	authority := rest
+	if end := strings.IndexAny(rest, "/?#"); end != -1 {
+		authority = rest[:end]
+	}
+	at := strings.Index(authority, "@")
+	if at == -1 {
+		return source
+	}
+	return source[:idx+3] + "redacted@" + rest[at+1:]
+}
+
+// workflowOriginRecord builds the JSON origin record the source-mode runner
+// records into run metadata at admission (CRI-232). The source is recorded
+// redacted; the image reference is recorded only in url+image mode, where
+// spec.image is the process image. The record is passed to the runner
+// verbatim (WORKFLOW_ORIGIN_METADATA) so the shell never touches the raw
+// source or builds JSON itself.
+func workflowOriginRecord(run *criteriav1.CriteriaRun, jobName string, source *criteriav1.RunWorkflowSource) string {
+	rec := workflowOriginMetadata{
+		Job:         jobName,
+		Source:      RedactWorkflowSource(source.URL),
+		ResolvedRef: source.Ref,
+		Image:       run.Spec.Image,
+	}
+	b, _ := json.Marshal(rec)
+	return string(b)
+}
+
 func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
 	source := run.Spec.WorkflowSource
 	env := []corev1.EnvVar{
@@ -163,6 +257,13 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 	if source.Ref != "" {
 		env = append(env, corev1.EnvVar{Name: "WORKFLOW_REF", Value: source.Ref})
 	}
+	// CRI-232: the runner records the workflow origin into run metadata at
+	// admission; the operator supplies the record (source already redacted,
+	// url+image process image included) so the shell only writes it.
+	env = append(env, corev1.EnvVar{
+		Name:  "WORKFLOW_ORIGIN_METADATA",
+		Value: workflowOriginRecord(run, JobName(run), source),
+	})
 	env = append(env, corev1.EnvVar{
 		Name: "POD_IP",
 		ValueFrom: &corev1.EnvVarSource{

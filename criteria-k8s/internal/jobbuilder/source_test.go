@@ -2,12 +2,12 @@ package jobbuilder_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -260,6 +260,31 @@ exit "${STUB_EXIT:-0}"
 	return stub
 }
 
+// runSourceRunnerScript runs a generated runner script with a stub criteria
+// binary and the given extra env (CRITERIA_HOME overrides the default temp
+// home), returning the exit status, the script's combined output, and the
+// stub's log.
+func runSourceRunnerScript(t *testing.T, script string, env map[string]string) (code int, out string, stubLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	stub := writeCriteriaStub(t, dir)
+	logPath := filepath.Join(dir, "stub.log")
+	cmdEnv := []string{
+		"STUB_LOG=" + logPath,
+		"CRITERIA_BIN=" + stub,
+		"CRITERIA_HOME=" + filepath.Join(dir, "home"),
+	}
+	for k, v := range env {
+		if k == "CRITERIA_HOME" {
+			cmdEnv[2] = "CRITERIA_HOME=" + v
+			continue
+		}
+		cmdEnv = append(cmdEnv, k+"="+v)
+	}
+	proc := execCommand(t, []string{"/bin/sh", "-c", script}, cmdEnv, dir)
+	return proc.code, proc.output, readStubLog(t, logPath)
+}
+
 func TestSourceRunnerScriptBehavior(t *testing.T) {
 	job := jobbuilder.BuildRunnerJob(urlRun("cri-231-script", &criteriav1.RunWorkflowSource{
 		Type: "url",
@@ -268,34 +293,6 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 	runner := job.Spec.Template.Spec.Containers[0]
 	require.Len(t, runner.Command, 3)
 	script := runner.Command[2]
-
-	runScript := func(t *testing.T, env map[string]string) (code int, out string, stubLog string) {
-		t.Helper()
-		dir := t.TempDir()
-		stub := writeCriteriaStub(t, dir)
-		logPath := filepath.Join(dir, "stub.log")
-		args := []string{"/bin/sh", "-c", script}
-		cmdEnv := []string{
-			"STUB_LOG=" + logPath,
-			"CRITERIA_BIN=" + stub,
-			"CRITERIA_HOME=" + filepath.Join(dir, "home"),
-		}
-		if home, ok := env["CRITERIA_HOME"]; ok {
-			for i, e := range cmdEnv {
-				if strings.HasPrefix(e, "CRITERIA_HOME=") {
-					cmdEnv[i] = "CRITERIA_HOME=" + home
-				}
-			}
-		}
-		for k, v := range env {
-			if k == "CRITERIA_HOME" {
-				continue
-			}
-			cmdEnv = append(cmdEnv, k+"="+v)
-		}
-		proc := execCommand(t, args, cmdEnv, dir)
-		return proc.code, proc.output, readStubLog(t, logPath)
-	}
 
 	t.Run("applies the workflow source with pin, server, events, and host file", func(t *testing.T) {
 		dir := t.TempDir()
@@ -327,7 +324,7 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 	})
 
 	t.Run("no castle or events config keeps the run local", func(t *testing.T) {
-		code, out, _ := runScript(t, map[string]string{
+		code, out, _ := runSourceRunnerScript(t, script, map[string]string{
 			"WORKFLOW_URL": "git::https://example.com/wf.git",
 		})
 		require.Equal(t, 0, code, out)
@@ -335,7 +332,7 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 
 	t.Run("undeclared workflow source fails closed without invoking criteria", func(t *testing.T) {
 		for _, bad := range []string{"", "   ", "\t"} {
-			code, out, _ := runScript(t, map[string]string{"WORKFLOW_URL": bad})
+			code, out, _ := runSourceRunnerScript(t, script, map[string]string{"WORKFLOW_URL": bad})
 			assert.Equal(t, 64, code, "empty WORKFLOW_URL must fail closed with exit 64: %q", out)
 			assert.Contains(t, out, "WORKFLOW_URL is not set")
 			assert.NotContains(t, out, "argv:", "criteria must not be invoked")
@@ -360,7 +357,7 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 	t.Run("unusable CRITERIA_HOME fails closed before any fetch", func(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "not-a-dir"), []byte("x"), 0o644))
-		code, out, _ := runScript(t, map[string]string{
+		code, out, _ := runSourceRunnerScript(t, script, map[string]string{
 			"WORKFLOW_URL":  "git::https://example.com/wf.git",
 			"CRITERIA_HOME": filepath.Join(dir, "not-a-dir/sub"),
 		})
@@ -372,7 +369,7 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 	t.Run("creatable CRITERIA_HOME is created and used", func(t *testing.T) {
 		dir := t.TempDir()
 		home := filepath.Join(dir, "deep", "home")
-		code, out, stubLog := runScript(t, map[string]string{
+		code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
 			"WORKFLOW_URL":  "git::https://example.com/wf.git",
 			"CRITERIA_HOME": home,
 		})
@@ -423,4 +420,229 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 		_, err := os.Stat(filepath.Join(dir, "runs"))
 		assert.True(t, os.IsNotExist(err), "no discovery dir without JOB_NAME/POD_IP")
 	})
+}
+
+// --- CRI-232: workflow origin provenance on the k8s runner path -------------
+
+// TestRedactWorkflowSourceMatchesCriteriaPublisher pins the k8s-side mirror
+// of the criteria binary's redactSourceForLog (workflow.RedactSource at the
+// pinned criteria commit, CRI-225): the recorded origin stores URL userinfo
+// credentials redacted, never raw. The cases are ported from the criteria
+// repo's redact_test.go so both sides redact identically.
+func TestRedactWorkflowSourceMatchesCriteriaPublisher(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "archive userinfo", source: "https://user:pass@host/x.tar.gz", want: "https://redacted@host/x.tar.gz"},
+		{name: "user only", source: "https://user@host/x.tar.gz", want: "https://redacted@host/x.tar.gz"},
+		{name: "no userinfo", source: "https://host/x.tar.gz", want: "https://host/x.tar.gz"},
+		{name: "git scheme", source: "https://user:token@github.com/org/repo.git?ref=v1", want: "https://redacted@github.com/org/repo.git?ref=v1"},
+		{name: "git force prefix keeps scheme redaction", source: "git::https://user:token@github.com/org/repo.git", want: "git::https://redacted@github.com/org/repo.git"},
+		{name: "at in path is not userinfo", source: "https://host/a@b/c", want: "https://host/a@b/c"},
+		{name: "userinfo kept out of query", source: "https://host/a?x=u@ser", want: "https://host/a?x=u@ser"},
+		{name: "userinfo kept out of fragment", source: "https://host/a#x=u@ser", want: "https://host/a#x=u@ser"},
+		{name: "local path unchanged", source: "./local/workflow", want: "./local/workflow"},
+		{name: "scp-style git form unchanged", source: "git@github.com:org/repo.git", want: "git@github.com:org/repo.git"},
+		{name: "malformed scheme only", source: "://", want: "://"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, jobbuilder.RedactWorkflowSource(tt.source))
+		})
+	}
+}
+
+// TestSourceModePublishesOriginMetadataEnv pins the origin record the
+// operator stamps onto the runner env (CRI-232): the declared source
+// (redacted when it carries credentials), the ref pin, and the url+image
+// process image. The record is the exact JSON the runner writes into
+// run-metadata.json at admission.
+func TestSourceModePublishesOriginMetadataEnv(t *testing.T) {
+	const wfURL = "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1"
+
+	t.Run("url-only records redacted source and job, no image", func(t *testing.T) {
+		run := urlRun("cri-232-url-only", &criteriav1.RunWorkflowSource{Type: "url", URL: wfURL}, "")
+		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{CriteriaBaseImage: "localhost:5000/criteria-base:abc123"})
+		env := job.Spec.Template.Spec.Containers[0].Env
+		assert.Equal(t, `{"job":"cri-232-url-only","source":"`+wfURL+`"}`,
+			envValue(env, "WORKFLOW_ORIGIN_METADATA"),
+			"url-only mode records the declared origin without an image reference")
+	})
+
+	t.Run("url+image additionally records the process image", func(t *testing.T) {
+		run := urlRun("cri-232-url-image", &criteriav1.RunWorkflowSource{
+			Type: "url",
+			URL:  wfURL,
+			Ref:  "28777aacc3cfbe85005ddb27f548116e692c0eb4",
+		}, "registry.example.com/team/process:1.2.3")
+		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{})
+		env := job.Spec.Template.Spec.Containers[0].Env
+		assert.Equal(t,
+			`{"job":"cri-232-url-image","source":"`+wfURL+`","resolved_ref":"28777aacc3cfbe85005ddb27f548116e692c0eb4","image":"registry.example.com/team/process:1.2.3"}`,
+			envValue(env, "WORKFLOW_ORIGIN_METADATA"),
+			"url+image mode records the ref pin and the process image alongside the source")
+	})
+
+	t.Run("credential-bearing source is recorded redacted", func(t *testing.T) {
+		run := urlRun("cri-232-redacted", &criteriav1.RunWorkflowSource{
+			Type: "url",
+			URL:  "https://ci-bot:s3cret@example.com/team/workflows.tar.gz",
+		}, "")
+		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{})
+		env := job.Spec.Template.Spec.Containers[0].Env
+		record := envValue(env, "WORKFLOW_ORIGIN_METADATA")
+		assert.Contains(t, record, "https://redacted@example.com/team/workflows.tar.gz",
+			"the recorded origin must be redacted per the criteria publisher's rules")
+		assert.NotContains(t, record, "ci-bot", "no userinfo may reach the recorded origin")
+		assert.NotContains(t, record, "s3cret", "no credential material may reach the recorded origin")
+	})
+}
+
+// TestImageModeUnchangedByOriginMetadata: the image-mode runner keeps the
+// baked-tree contract with no origin-metadata recording — origin provenance
+// is source-mode only (CRI-232).
+func TestImageModeUnchangedByOriginMetadata(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-232-image"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-232",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+		Image: "localhost:5000/linear-intake-remote:dev",
+	})
+	runner := job.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, "", envValue(runner.Env, "WORKFLOW_ORIGIN_METADATA"),
+		"image mode must not carry the origin record: its workflow is baked, not fetched")
+	assert.Equal(t, []string{"/opt/criteria-pod-adapter/runner.sh"}, runner.Command,
+		"image mode keeps the baked runner entrypoint")
+}
+
+// TestSourceRunnerOriginMetadataBehavior pins the runner's origin-recording
+// contract (CRI-232): the operator-supplied record lands at
+// CRITERIA_HOME/runs/<job>/run-metadata.json at admission — before the
+// criteria invocation, surviving a failing run — with restrictive
+// permissions, and no credential-bearing source reaches the script's output
+// (the pod log) or the recorded file.
+func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
+	job := jobbuilder.BuildRunnerJob(urlRun("cri-232-script", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://ci-bot:s3cret@example.com/org/workflows.git//linear_intake_v1",
+		Ref:  "28777aacc3cfbe85005ddb27f548116e692c0eb4",
+	}, "registry.example.com/team/process:1.2.3"), jobbuilder.Defaults{DataPVC: "criteria-data"})
+	runner := job.Spec.Template.Spec.Containers[0]
+	script := runner.Command[2]
+	record := envValue(runner.Env, "WORKFLOW_ORIGIN_METADATA")
+	require.NotEmpty(t, record)
+	require.NotContains(t, record, "s3cret", "the operator-supplied record must be pre-redacted")
+
+	baseEnv := func() map[string]string {
+		return map[string]string{
+			"WORKFLOW_URL":             "git::https://ci-bot:s3cret@example.com/org/workflows.git//linear_intake_v1",
+			"WORKFLOW_REF":             "28777aacc3cfbe85005ddb27f548116e692c0eb4",
+			"WORKFLOW_ORIGIN_METADATA": record,
+			"JOB_NAME":                 "cri-232-script",
+			"POD_IP":                   "10.42.0.9",
+			"CRITERIA_RUN_DIR_ROOT":    "/tmp/discovery-irrelevant",
+		}
+	}
+
+	t.Run("records the origin into run metadata at admission", func(t *testing.T) {
+		env := baseEnv()
+		dir := t.TempDir()
+		home := filepath.Join(dir, "home")
+		env["CRITERIA_HOME"] = home
+		code, out, stubLog := runSourceRunnerScript(t, script, env)
+		require.Equal(t, 0, code, out)
+		assert.Contains(t, stubLog, "argv:", "the criteria invocation must still happen")
+
+		b, err := os.ReadFile(originRecordPath(home, "cri-232-script"))
+		require.NoError(t, err, "the origin record must be written at admission")
+		assert.Equal(t, record, string(b), "the record lands verbatim, operator-built JSON")
+
+		// Restrictive state-file permissions, mirroring the criteria
+		// binary's CRI-225 record (0600 file, 0700 dir).
+		info, err := os.Stat(originRecordPath(home, "cri-232-script"))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "the origin record is a state file")
+		dirInfo, err := os.Stat(filepath.Dir(originRecordPath(home, "cri-232-script")))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm(), "the record directory is state-dir private")
+	})
+
+	t.Run("record content is the redacted origin with the image reference", func(t *testing.T) {
+		var parsed struct {
+			Job         string `json:"job"`
+			Source      string `json:"source"`
+			ResolvedRef string `json:"resolved_ref"`
+			Image       string `json:"image"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(record), &parsed))
+		assert.Equal(t, "cri-232-script", parsed.Job)
+		assert.Equal(t, "git::https://redacted@example.com/org/workflows.git//linear_intake_v1", parsed.Source)
+		assert.Equal(t, "28777aacc3cfbe85005ddb27f548116e692c0eb4", parsed.ResolvedRef)
+		assert.Equal(t, "registry.example.com/team/process:1.2.3", parsed.Image)
+	})
+
+	t.Run("no unredacted source reaches the pod log", func(t *testing.T) {
+		code, out, _ := runSourceRunnerScript(t, script, baseEnv())
+		require.Equal(t, 0, code, out)
+		assert.NotContains(t, out, "s3cret", "the credential must never appear in the script's output")
+		assert.NotContains(t, out, "ci-bot", "the userinfo must never appear in the script's output")
+	})
+
+	t.Run("origin record survives a failing run", func(t *testing.T) {
+		env := baseEnv()
+		dir := t.TempDir()
+		home := filepath.Join(dir, "home")
+		env["CRITERIA_HOME"] = home
+		env["STUB_EXIT"] = "42"
+		code, out, _ := runSourceRunnerScript(t, script, env)
+		assert.Equal(t, 42, code, "the criteria exit status still propagates: %s", out)
+		b, err := os.ReadFile(originRecordPath(home, "cri-232-script"))
+		require.NoError(t, err, "provenance must survive a run that fails at admission or after")
+		assert.Equal(t, record, string(b))
+	})
+
+	t.Run("recording failure degrades to a warning and does not fail the run", func(t *testing.T) {
+		env := baseEnv()
+		dir := t.TempDir()
+		home := filepath.Join(dir, "home")
+		env["CRITERIA_HOME"] = home
+		// A pre-existing file where the record directory must be created
+		// makes the record write fail without touching anything else.
+		require.NoError(t, os.MkdirAll(filepath.Join(home, "runs"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(home, "runs", "cri-232-script"), []byte("x"), 0o644))
+		code, out, stubLog := runSourceRunnerScript(t, script, env)
+		assert.Equal(t, 0, code, "a recording failure must not fail the run: %s", out)
+		assert.Contains(t, out, "warning: could not record workflow origin metadata")
+		assert.Contains(t, stubLog, "argv:", "the criteria invocation must still happen")
+	})
+
+	t.Run("no JOB_NAME or no record skips the origin record", func(t *testing.T) {
+		for name, mutate := range map[string]func(map[string]string){
+			"no JOB_NAME": func(env map[string]string) { delete(env, "JOB_NAME") },
+			"no record":   func(env map[string]string) { delete(env, "WORKFLOW_ORIGIN_METADATA") },
+		} {
+			t.Run(name, func(t *testing.T) {
+				env := baseEnv()
+				mutate(env)
+				dir := t.TempDir()
+				home := filepath.Join(dir, "home")
+				env["CRITERIA_HOME"] = home
+				code, out, _ := runSourceRunnerScript(t, script, env)
+				require.Equal(t, 0, code, out)
+				_, err := os.Stat(filepath.Join(home, "runs"))
+				assert.True(t, os.IsNotExist(err), "no run metadata without the record inputs")
+			})
+		}
+	})
+}
+
+// originRecordPath returns the record path the runner writes for a job.
+func originRecordPath(home, jobName string) string {
+	return filepath.Join(home, "runs", jobName, "run-metadata.json")
 }
