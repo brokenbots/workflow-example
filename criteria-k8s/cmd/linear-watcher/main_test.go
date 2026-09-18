@@ -57,6 +57,14 @@ func (r *logRecorder) contains(substr string) bool {
 	return false
 }
 
+// fakeLabel is a team-scoped Linear issue label in the fake server.
+type fakeLabel struct {
+	ID     string
+	Name   string
+	Color  string
+	TeamID string
+}
+
 // linearServer fakes the Linear GraphQL surface the watcher uses. The
 // issues query filters returned issues by the requested `states` variable,
 // mirroring Linear's `state: {name: {in: $states}}` filter.
@@ -66,12 +74,23 @@ type linearServer struct {
 	comments    []string
 	lastStates  []string
 	leakyFilter bool
-	ts          *httptest.Server
+	// CRI-219: label lifecycle state. issueLabelNames is the source of
+	// truth for an issue's labels; ids are synthesized as "lbl-"+name.
+	teamID          string
+	labels          []fakeLabel
+	issueLabelNames map[string][]string
+	labelUpdates    int      // issueUpdate mutation count (no-ops excluded)
+	lastLabelIDs    []string // labelIds payload of the most recent issueUpdate
+	failLabelEnsure bool
+	ts              *httptest.Server
 }
 
 func newLinearServer(t *testing.T) *linearServer {
 	t.Helper()
-	s := &linearServer{}
+	s := &linearServer{
+		teamID:          "team-1",
+		issueLabelNames: map[string][]string{},
+	}
 	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var raw struct {
 			Query     string          `json:"query"`
@@ -90,6 +109,16 @@ func newLinearServer(t *testing.T) *linearServer {
 					},
 				},
 			}
+		case strings.Contains(raw.Query, "teams"):
+			s.mu.Lock()
+			resp["data"] = map[string]interface{}{
+				"project": map[string]interface{}{
+					"teams": map[string]interface{}{
+						"nodes": []interface{}{map[string]interface{}{"id": s.teamID}},
+					},
+				},
+			}
+			s.mu.Unlock()
 		case strings.Contains(raw.Query, "issues"):
 			var variables struct {
 				States []string `json:"states"`
@@ -103,7 +132,7 @@ func newLinearServer(t *testing.T) *linearServer {
 			nodes := make([]interface{}, 0, len(s.issues))
 			for _, n := range s.issues {
 				if s.leakyFilter {
-					nodes = append(nodes, n)
+					nodes = append(nodes, s.servedIssueLocked(n))
 					continue
 				}
 				stateObj, _ := n["state"].(map[string]interface{})
@@ -111,7 +140,7 @@ func newLinearServer(t *testing.T) *linearServer {
 				// An issue with an unresolvable state (null or absent) can
 				// never match a non-empty states filter.
 				if state != "" && slices.Contains(variables.States, state) {
-					nodes = append(nodes, n)
+					nodes = append(nodes, s.servedIssueLocked(n))
 				}
 			}
 			s.mu.Unlock()
@@ -147,6 +176,124 @@ func newLinearServer(t *testing.T) *linearServer {
 					"comments": map[string]interface{}{"nodes": nodes},
 				},
 			}
+		case strings.Contains(raw.Query, "issueUpdate"):
+			var full struct {
+				ID    string `json:"id"`
+				Input struct {
+					LabelIDs []string `json:"labelIds"`
+				} `json:"input"`
+			}
+			if err := json.Unmarshal(raw.Variables, &full); err != nil {
+				t.Errorf("decoding issueUpdate variables: %v", err)
+				return
+			}
+			s.mu.Lock()
+			names := make([]string, 0, len(full.Input.LabelIDs))
+			for _, id := range full.Input.LabelIDs {
+				names = append(names, s.labelNameLocked(id))
+			}
+			s.issueLabelNames[full.ID] = names
+			s.labelUpdates++
+			s.lastLabelIDs = append([]string(nil), full.Input.LabelIDs...)
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issueUpdate": map[string]interface{}{"success": true},
+			}
+		case strings.Contains(raw.Query, "issueLabelCreate"):
+			s.mu.Lock()
+			fail := s.failLabelEnsure
+			s.mu.Unlock()
+			if fail {
+				resp = map[string]interface{}{
+					"errors": []interface{}{map[string]interface{}{"message": "label create down"}},
+				}
+				break
+			}
+			var full struct {
+				Input struct {
+					Name   string `json:"name"`
+					Color  string `json:"color"`
+					TeamID string `json:"teamId"`
+				} `json:"input"`
+			}
+			if err := json.Unmarshal(raw.Variables, &full); err != nil {
+				t.Errorf("decoding issueLabelCreate variables: %v", err)
+				return
+			}
+			s.mu.Lock()
+			id := "lbl-" + full.Input.Name
+			exists := false
+			for _, l := range s.labels {
+				if l.Name == full.Input.Name && l.TeamID == full.Input.TeamID {
+					id = l.ID
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				s.labels = append(s.labels, fakeLabel{
+					ID: id, Name: full.Input.Name, Color: full.Input.Color, TeamID: full.Input.TeamID,
+				})
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issueLabelCreate": map[string]interface{}{
+					"success":    true,
+					"issueLabel": map[string]interface{}{"id": id},
+				},
+			}
+		case strings.Contains(raw.Query, "issueLabels"):
+			s.mu.Lock()
+			fail := s.failLabelEnsure
+			s.mu.Unlock()
+			if fail {
+				resp = map[string]interface{}{
+					"errors": []interface{}{map[string]interface{}{"message": "label query down"}},
+				}
+				break
+			}
+			var variables struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(raw.Variables, &variables); err != nil {
+				t.Errorf("decoding issueLabels variables: %v", err)
+				return
+			}
+			s.mu.Lock()
+			nodes := []interface{}{}
+			for _, l := range s.labels {
+				if l.Name == variables.Name {
+					nodes = append(nodes, map[string]interface{}{
+						"id":   l.ID,
+						"name": l.Name,
+						"team": map[string]interface{}{"id": l.TeamID},
+					})
+				}
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issueLabels": map[string]interface{}{"nodes": nodes},
+			}
+		case strings.Contains(raw.Query, "issue(id:"):
+			var variables struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(raw.Variables, &variables); err != nil {
+				t.Errorf("decoding issue variables: %v", err)
+				return
+			}
+			s.mu.Lock()
+			names := append([]string(nil), s.issueLabelNames[variables.ID]...)
+			nodes := make([]interface{}, 0, len(names))
+			for _, name := range names {
+				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name)})
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issue": map[string]interface{}{
+					"labels": map[string]interface{}{"nodes": nodes},
+				},
+			}
 		default:
 			t.Errorf("unexpected query: %s", raw.Query)
 		}
@@ -157,11 +304,93 @@ func newLinearServer(t *testing.T) *linearServer {
 	return s
 }
 
-// setIssues installs the issues returned by the next issues query.
+// setIssues installs the issues returned by the next issues query. The
+// labels of each issue seed the fake's per-issue label state, which is then
+// the source of truth the issues and `issue(id:)` queries serve.
 func (s *linearServer) setIssues(issues ...map[string]interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.issues = issues
+	for _, n := range issues {
+		id, _ := n["id"].(string)
+		if id == "" {
+			continue
+		}
+		if _, ok := s.issueLabelNames[id]; ok {
+			continue
+		}
+		var names []string
+		if labelsObj, ok := n["labels"].(map[string]interface{}); ok {
+			if labelNodes, ok := labelsObj["nodes"].([]interface{}); ok {
+				for _, ln := range labelNodes {
+					lm, _ := ln.(map[string]interface{})
+					name, _ := lm["name"].(string)
+					if name != "" {
+						names = append(names, name)
+					}
+				}
+			}
+		}
+		s.issueLabelNames[id] = names
+	}
+}
+
+// servedIssueLocked returns the issue node with its labels derived from the
+// fake's per-issue label state (the lifecycle mutates labels at runtime, so
+// the static fixture must not shadow it). Fixture label nodes are kept —
+// they may carry group info the route resolver needs — and runtime-added
+// labels are synthesized as name-only nodes. Callers must hold s.mu.
+func (s *linearServer) servedIssueLocked(n map[string]interface{}) map[string]interface{} {
+	id, _ := n["id"].(string)
+	names, ok := s.issueLabelNames[id]
+	if !ok {
+		return n
+	}
+	fixtureNodes := map[string]interface{}{}
+	if labelsObj, ok := n["labels"].(map[string]interface{}); ok {
+		if labelNodes, ok := labelsObj["nodes"].([]interface{}); ok {
+			for _, ln := range labelNodes {
+				lm, _ := ln.(map[string]interface{})
+				name, _ := lm["name"].(string)
+				fixtureNodes[name] = ln
+			}
+		}
+	}
+	labelNodes := make([]interface{}, 0, len(names))
+	for _, name := range names {
+		if node, ok := fixtureNodes[name]; ok {
+			labelNodes = append(labelNodes, node)
+			continue
+		}
+		labelNodes = append(labelNodes, map[string]interface{}{"name": name})
+	}
+	clone := make(map[string]interface{}, len(n))
+	for k, v := range n {
+		clone[k] = v
+	}
+	clone["labels"] = map[string]interface{}{"nodes": labelNodes}
+	return clone
+}
+
+// labelNameLocked resolves a label ID to its name; unknown IDs follow the
+// fake's deterministic "lbl-"+name synthesis. Callers must hold s.mu.
+func (s *linearServer) labelNameLocked(id string) string {
+	for _, l := range s.labels {
+		if l.ID == id {
+			return l.Name
+		}
+	}
+	return strings.TrimPrefix(id, "lbl-")
+}
+
+// labelIDLocked resolves a label name to its ID. Callers must hold s.mu.
+func (s *linearServer) labelIDLocked(name string) string {
+	for _, l := range s.labels {
+		if l.Name == name {
+			return l.ID
+		}
+	}
+	return "lbl-" + name
 }
 
 // setLeakyFilter makes the server ignore the states filter on the next
@@ -184,6 +413,52 @@ func (s *linearServer) postedComments() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.comments...)
+}
+
+// issueLabelsOf returns a copy of the label names the issue currently
+// carries in the fake.
+func (s *linearServer) issueLabelsOf(issueID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.issueLabelNames[issueID]...)
+}
+
+// setIssueLabels replaces the issue's label state directly, simulating
+// out-of-band label changes (e.g. a human removing the trigger label).
+func (s *linearServer) setIssueLabels(issueID string, names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.issueLabelNames[issueID] = append([]string(nil), names...)
+}
+
+// setFailLabelServe makes the label ensure queries fail with a GraphQL
+// error until re-enabled.
+func (s *linearServer) setFailLabelServe(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failLabelEnsure = v
+}
+
+// createdLabels returns a copy of the fake's label registry.
+func (s *linearServer) createdLabels() []fakeLabel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]fakeLabel(nil), s.labels...)
+}
+
+// labelUpdateCount returns the number of issueUpdate mutations served.
+func (s *linearServer) labelUpdateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.labelUpdates
+}
+
+// lastLabelUpdateIDs returns the labelIds payload of the most recent
+// issueUpdate mutation.
+func (s *linearServer) lastLabelUpdateIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lastLabelIDs...)
 }
 
 // issue builds a Linear issue node with the given labels. Grouped labels map
@@ -312,7 +587,8 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 	if err := criteriav1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&criteriav1.CriteriaRun{}).Build()
 
 	lin := newLinearServer(t)
 	recorder := &logRecorder{}
@@ -334,10 +610,40 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 			routesFile:          routesPath,
 			workflowsLabelGroup: "workflows",
 			repoValidator:       func(string) bool { return true },
-			log:                 logr.New(recorder),
+			// The deployed watcher resolves the team in run(); tests set it
+			// directly (CRI-219 team-scoped labels).
+			teamID: lin.teamID,
+			log:    logr.New(recorder),
 		},
 	}
 	return tw
+}
+
+// restarted simulates killing and restarting the watcher: a fresh watcher
+// over the same fake Linear server and the same k8s client (both persist
+// across a restart), with a fresh log recorder and empty in-memory state.
+func (tw *testWatcher) restarted() *testWatcher {
+	recorder := &logRecorder{}
+	fresh := *tw.w
+	fresh.log = logr.New(recorder)
+	return &testWatcher{w: &fresh, linearS: tw.linearS, client: tw.client, logs: recorder}
+}
+
+// terminalizeRun moves the ticket's single CriteriaRun to the given final
+// phase in the fake k8s client.
+func (tw *testWatcher) terminalizeRun(t *testing.T, ticket string, phase criteriav1.CriteriaRunPhase) {
+	t.Helper()
+	list := &criteriav1.CriteriaRunList{}
+	if err := tw.client.List(context.Background(), list, client.InNamespace("criteria-jobs"),
+		client.MatchingLabels{"ticket": strings.ToLower(ticket)}); err != nil {
+		t.Fatal(err)
+	}
+	require.Len(t, list.Items, 1)
+	run := list.Items[0]
+	run.Status.Phase = phase
+	if err := tw.client.Status().Update(context.Background(), &run); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (tw *testWatcher) pollOnce(t *testing.T) {
@@ -602,4 +908,179 @@ func TestPollPerRouteStates(t *testing.T) {
 		assert.True(t, tw.logs.contains("no route in the routes map"),
 			"watcher logs the fail-closed skip for the empty state")
 	})
+}
+
+// CRI-219: automation label lifecycle.
+
+// TestPollEnsuresAutomationLabels proves the watcher creates both
+// team-scoped labels when missing (distinct colors), does not duplicate
+// them on later polls, and writes no label state onto issues without
+// CriteriaRuns.
+func TestPollEnsuresAutomationLabels(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1"))
+
+	tw.pollOnce(t)
+
+	created := tw.linearS.createdLabels()
+	require.Len(t, created, 2, "both automation labels are created when missing")
+	assert.Equal(t, "criteria-automation", created[0].Name)
+	assert.Equal(t, automationLabelColor, created[0].Color)
+	assert.Equal(t, "criteria-dirty", created[1].Name)
+	assert.Equal(t, dirtyLabelColor, created[1].Color)
+	assert.NotEqual(t, created[0].Color, created[1].Color, "the two labels must be visually distinct")
+	for _, l := range created {
+		assert.Equal(t, "team-1", l.TeamID, "labels are team-scoped")
+	}
+	assert.Equal(t, 0, tw.linearS.labelUpdateCount(),
+		"no label writes on an issue without CriteriaRuns")
+
+	// A second poll must not create duplicates.
+	tw.pollOnce(t)
+	assert.Len(t, tw.linearS.createdLabels(), 2, "no duplicate label on re-ensure")
+}
+
+// TestPollCreateRunAddsAutomationLabel covers the add on CriteriaRun
+// creation: the issue carries the automation label alongside every label it
+// already had. The write payload must be the full merged set — a regression
+// to a REPLACE-only delta would drop the issue's existing labels.
+func TestPollCreateRunAddsAutomationLabel(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(), groupLabel("fast", "speed")))
+
+	tw.pollOnce(t)
+
+	require.Len(t, tw.runs(t), 1)
+	assert.Equal(t, []string{"k8s-run", "fast", "criteria-automation"},
+		tw.linearS.issueLabelsOf("i-1"),
+		"the automation label is added without dropping existing labels")
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount())
+	assert.Equal(t, []string{"lbl-k8s-run", "lbl-fast", "lbl-criteria-automation"},
+		tw.linearS.lastLabelUpdateIDs(),
+		"the write must carry the full merged label set (REPLACE semantics)")
+	assert.True(t, tw.logs.contains("added Linear label"))
+}
+
+// TestPollSucceededRemovesAutomationNoDirty covers the clean terminal state:
+// when the CriteriaRun succeeds, the automation label is removed and the
+// dirty label is not added.
+func TestPollSucceededRemovesAutomationNoDirty(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(), groupLabel("fast", "speed")))
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+	assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+	// The run settles as Succeeded and the trigger label is cleared with
+	// it (as operator automation does on completion). The inflight marker
+	// is still on the issue: removing it is the watcher's job.
+	tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseSucceeded)
+	tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
+
+	writes := tw.linearS.labelUpdateCount()
+	tw.pollOnce(t)
+
+	assert.Equal(t, []string{"fast"}, tw.linearS.issueLabelsOf("i-1"),
+		"the automation label is removed and no dirty label is added")
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount()-writes, "exactly one removal write")
+	assert.Equal(t, []string{"lbl-fast"}, tw.linearS.lastLabelUpdateIDs(),
+		"the removal write carries only the remaining labels")
+	assert.True(t, tw.logs.contains("removed Linear label"))
+}
+
+// TestPollFailedRemovesAutomationAddsDirty covers the dirty terminal state:
+// when the CriteriaRun fails, the automation label is removed and the dirty
+// label is added.
+func TestPollFailedRemovesAutomationAddsDirty(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(), groupLabel("fast", "speed")))
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+	assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+	// The run fails and the trigger label is cleared with it. The inflight
+	// marker is still on the issue: the watcher must swap it for the dirty
+	// marker.
+	tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseFailed)
+	tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
+
+	writes := tw.linearS.labelUpdateCount()
+	tw.pollOnce(t)
+
+	assert.Equal(t, []string{"fast", "criteria-dirty"},
+		tw.linearS.issueLabelsOf("i-1"),
+		"automation label removed, dirty label present, other labels intact")
+	assert.Equal(t, 2, tw.linearS.labelUpdateCount()-writes, "one removal and one addition")
+	assert.True(t, tw.logs.contains("added Linear label"), "the dirty label add is logged")
+}
+
+// TestRestartConvergesLabelState proves restart-safety: a fresh watcher with
+// no in-memory run state reconciles label state from the observed
+// CriteriaRun phase and the issue's current labels, converging after a kill
+// between phase changes.
+func TestRestartConvergesLabelState(t *testing.T) {
+	t.Run("succeeded run: fresh watcher removes the inflight marker", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+		assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+		// The watcher dies; the run then succeeds and the trigger label is
+		// cleared before the replacement watcher starts.
+		tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseSucceeded)
+		tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
+
+		tw2 := tw.restarted()
+		writes := tw2.linearS.labelUpdateCount()
+		tw2.pollOnce(t)
+
+		assert.Equal(t, []string{"fast"}, tw2.linearS.issueLabelsOf("i-1"),
+			"no lingering criteria-automation after Succeeded, no dirty label")
+		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
+			"the fresh watcher performs the removal itself")
+	})
+
+	t.Run("failed run: fresh watcher removes the marker and marks dirty", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+
+		tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseFailed)
+		tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
+
+		tw2 := tw.restarted()
+		writes := tw2.linearS.labelUpdateCount()
+		tw2.pollOnce(t)
+
+		assert.Equal(t, []string{"fast", "criteria-dirty"}, tw2.linearS.issueLabelsOf("i-1"),
+			"no lingering criteria-automation after Failed and criteria-dirty present")
+		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes)
+	})
+}
+
+// TestPollEnsureFailureDoesNotBlockRunCreation covers the degraded Linear
+// path: when the label ensure fails, run creation still proceeds and label
+// writes are deferred; the next healthy poll converges the label.
+func TestPollEnsureFailureDoesNotBlockRunCreation(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+	tw.linearS.setFailLabelServe(true)
+
+	tw.pollOnce(t)
+
+	require.Len(t, tw.runs(t), 1, "run creation is not blocked by the label ensure failure")
+	assert.NotContains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName,
+		"no label write with unresolved label ids")
+	assert.Equal(t, 0, tw.linearS.labelUpdateCount())
+	assert.True(t, tw.logs.contains("ensuring automation label"))
+	assert.True(t, tw.logs.contains("ensuring dirty label"))
+
+	// The ensure heals on the next poll and reconciliation converges the
+	// label for the still-active run.
+	tw.linearS.setFailLabelServe(false)
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"k8s-run", "criteria-automation"},
+		tw.linearS.issueLabelsOf("i-1"), "the next poll converges the inflight marker")
 }

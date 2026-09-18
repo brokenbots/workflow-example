@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -281,6 +282,176 @@ func (c *Client) IssueComments(ctx context.Context, issueID string, limit int) (
 		bodies = append(bodies, n.Body)
 	}
 	return bodies, nil
+}
+
+// FindProjectTeamID returns the ID of the first team the given project
+// belongs to. It backs the team-scoped automation label creation (CRI-219).
+func (c *Client) FindProjectTeamID(ctx context.Context, projectID string) (string, error) {
+	req := graphqlRequest{
+		Query:     `query($id: String!) { project(id: $id) { teams { nodes { id } } } }`,
+		Variables: map[string]interface{}{"id": projectID},
+	}
+	var result struct {
+		Project struct {
+			Teams struct {
+				Nodes []struct {
+					ID string `json:"id"`
+				} `json:"nodes"`
+			} `json:"teams"`
+		} `json:"project"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return "", err
+	}
+	for _, t := range result.Project.Teams.Nodes {
+		if t.ID != "" {
+			return t.ID, nil
+		}
+	}
+	return "", fmt.Errorf("linear project %s has no team", projectID)
+}
+
+// EnsureTeamLabel returns the ID of the team-scoped issue label with the
+// given name, creating it with the given color when missing (CRI-219).
+// Labels matching the name but scoped to another team are ignored, so the
+// call never duplicates an existing label and never fails when the label
+// already exists.
+func (c *Client) EnsureTeamLabel(ctx context.Context, teamID, name, color string) (string, error) {
+	req := graphqlRequest{
+		Query: `query($name: String!, $first: Int!) {
+            issueLabels(filter: {name: {eq: $name}}, first: $first) {
+                nodes { id name team { id } }
+            }
+        }`,
+		Variables: map[string]interface{}{"name": name, "first": 250},
+	}
+	var result struct {
+		IssueLabels struct {
+			Nodes []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+				Team struct {
+					ID string `json:"id"`
+				} `json:"team"`
+			} `json:"nodes"`
+		} `json:"issueLabels"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return "", err
+	}
+	for _, n := range result.IssueLabels.Nodes {
+		if n.Name == name && n.Team.ID == teamID {
+			return n.ID, nil
+		}
+	}
+	return c.createTeamLabel(ctx, teamID, name, color)
+}
+
+// createTeamLabel creates a team-scoped issue label and returns its ID.
+func (c *Client) createTeamLabel(ctx context.Context, teamID, name, color string) (string, error) {
+	req := graphqlRequest{
+		Query: `mutation($input: IssueLabelCreateInput!) { issueLabelCreate(input: $input) { success issueLabel { id } } }`,
+		Variables: map[string]interface{}{
+			"input": map[string]interface{}{"name": name, "color": color, "teamId": teamID},
+		},
+	}
+	var result struct {
+		IssueLabelCreate struct {
+			Success    bool `json:"success"`
+			IssueLabel struct {
+				ID string `json:"id"`
+			} `json:"issueLabel"`
+		} `json:"issueLabelCreate"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return "", err
+	}
+	if !result.IssueLabelCreate.Success || result.IssueLabelCreate.IssueLabel.ID == "" {
+		return "", fmt.Errorf("linear issueLabelCreate did not succeed for label %q", name)
+	}
+	return result.IssueLabelCreate.IssueLabel.ID, nil
+}
+
+// issueLabelIDs returns the IDs of the issue's current labels.
+func (c *Client) issueLabelIDs(ctx context.Context, issueID string) ([]string, error) {
+	req := graphqlRequest{
+		Query:     `query($id: String!) { issue(id: $id) { labels { nodes { id } } } }`,
+		Variables: map[string]interface{}{"id": issueID},
+	}
+	var result struct {
+		Issue struct {
+			Labels struct {
+				Nodes []struct {
+					ID string `json:"id"`
+				} `json:"nodes"`
+			} `json:"labels"`
+		} `json:"issue"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(result.Issue.Labels.Nodes))
+	for _, n := range result.Issue.Labels.Nodes {
+		ids = append(ids, n.ID)
+	}
+	return ids, nil
+}
+
+// setIssueLabelIDs replaces the issue's label set. Linear labelIds have
+// REPLACE semantics: callers must pass the full desired set, never just the
+// delta (CRI-219).
+func (c *Client) setIssueLabelIDs(ctx context.Context, issueID string, labelIDs []string) error {
+	req := graphqlRequest{
+		Query: `mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`,
+		Variables: map[string]interface{}{
+			"id":    issueID,
+			"input": map[string]interface{}{"labelIds": labelIDs},
+		},
+	}
+	var result struct {
+		IssueUpdate struct {
+			Success bool `json:"success"`
+		} `json:"issueUpdate"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return err
+	}
+	if !result.IssueUpdate.Success {
+		return fmt.Errorf("linear issueUpdate did not succeed for issue %s", issueID)
+	}
+	return nil
+}
+
+// AddIssueLabel adds labelID to the issue's existing label set. The set is
+// read-modify-write: because Linear labelIds have REPLACE semantics, the
+// write always carries the full merged set, so no label the issue already
+// carries can be dropped. Adding a label the issue already carries is a
+// no-op.
+func (c *Client) AddIssueLabel(ctx context.Context, issueID, labelID string) error {
+	ids, err := c.issueLabelIDs(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(ids, labelID) {
+		return nil
+	}
+	return c.setIssueLabelIDs(ctx, issueID, append(slices.Clone(ids), labelID))
+}
+
+// RemoveIssueLabel removes labelID from the issue's label set, leaving
+// every other label untouched (read-modify-write; see AddIssueLabel).
+// Removing a label the issue does not carry is a no-op.
+func (c *Client) RemoveIssueLabel(ctx context.Context, issueID, labelID string) error {
+	ids, err := c.issueLabelIDs(ctx, issueID)
+	if err != nil {
+		return err
+	}
+	idx := slices.Index(ids, labelID)
+	if idx < 0 {
+		return nil
+	}
+	ids = slices.Delete(slices.Clone(ids), idx, idx+1)
+	return c.setIssueLabelIDs(ctx, issueID, ids)
 }
 
 // RepoValidator checks whether a short-form owner/repo reference names an existing

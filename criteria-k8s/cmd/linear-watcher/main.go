@@ -127,7 +127,11 @@ type watcher struct {
 	routesFile          string
 	workflowsLabelGroup string
 	repoValidator       linear.RepoValidator
-	log                 logr.Logger
+	// teamID is the Linear team the watched project belongs to; the
+	// automation labels are created in this team (CRI-219). Resolved once
+	// in run before the poll loop starts.
+	teamID string
+	log    logr.Logger
 }
 
 func (w *watcher) run(ctx context.Context) error {
@@ -136,7 +140,14 @@ func (w *watcher) run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve project: %w", err)
 	}
-	w.log.Info("watching Linear project", "project", w.projectName, "projectID", projectID, "interval", w.pollInterval)
+	// CRI-219: the automation labels are team-scoped, so the watcher needs
+	// the project's team before it can create or resolve them.
+	teamID, err := w.linear.FindProjectTeamID(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("resolve project team: %w", err)
+	}
+	w.teamID = teamID
+	w.log.Info("watching Linear project", "project", w.projectName, "projectID", projectID, "teamID", teamID, "interval", w.pollInterval)
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
@@ -172,7 +183,20 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
+	// CRI-219: the automation label lifecycle is driven from the CR phases
+	// observed each poll plus the issue's current label state, so it
+	// converges after a watcher restart without in-memory run state.
+	automationLabelID, dirtyLabelID := w.ensureAutomationLabels(ctx)
 	for _, issue := range issues {
+		ph, err := w.runPhases(ctx, issue.Identifier)
+		if err != nil {
+			w.log.Error(err, "checking CriteriaRun phases", "ticket", issue.Identifier)
+			continue
+		}
+		// CRI-219 label reconciliation runs before the run-firing gates: it
+		// only maintains labels for tickets with CriteriaRuns and must keep
+		// cleaning them even when the ticket no longer passes a gate.
+		w.reconcileAutomationLabels(ctx, issue, ph, automationLabelID, dirtyLabelID)
 		// CRI-147 gating: when a trigger label is configured, only issues
 		// carrying it fire a k8s run (this gate doubles as the k8s-run
 		// arming gate in deployments that configure it). Other tickets in a
@@ -216,12 +240,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 			w.log.Info("skipping Linear issue without repo URL", "ticket", issue.Identifier, "title", issue.Title)
 			continue
 		}
-		active, err := w.hasActiveRun(ctx, issue.Identifier)
-		if err != nil {
-			w.log.Error(err, "checking active run", "ticket", issue.Identifier)
-			continue
-		}
-		if active {
+		if ph.active {
 			w.log.V(1).Info("run already active", "ticket", issue.Identifier)
 			continue
 		}
@@ -232,26 +251,125 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		}
 		w.log.Info("created CriteriaRun", "ticket", issue.Identifier, "name", run.Name, "repoUrl", repoURL,
 			"workflow", sel.Name, "route", sel.Route.Name)
+		// CRI-219: mark the ticket as having an inflight CriteriaRun. The
+		// add merges with the issue's existing labels (the client does a
+		// read-modify-write, never a REPLACE), and reconciliation on later
+		// polls converges the label anyway, so a failed add here is not
+		// fatal.
+		w.addLinearLabel(ctx, issue, automationLabelName, automationLabelID)
 	}
 	return nil
 }
 
-func (w *watcher) hasActiveRun(ctx context.Context, ticketID string) (bool, error) {
+// runPhases captures what the watcher needs to know about a ticket's
+// CriteriaRuns from a single list: whether any run is still in flight
+// (hasActiveRun semantics, extended to count the empty phase a freshly
+// created run carries until the controller sets status as in flight),
+// whether any observed run failed, and whether any run exists at all. The
+// zero value means no run was observed.
+type runPhases struct {
+	active    bool
+	anyFailed bool
+	anyRun    bool
+}
+
+func (w *watcher) runPhases(ctx context.Context, ticketID string) (runPhases, error) {
 	list := &criteriav1.CriteriaRunList{}
 	req := client.ListOptions{
 		Namespace:     w.namespace,
 		LabelSelector: mustSelector(map[string]string{"ticket": strings.ToLower(ticketID)}),
 	}
 	if err := w.client.List(ctx, list, &req); err != nil {
-		return false, err
+		return runPhases{}, err
 	}
+	var ph runPhases
+	ph.anyRun = len(list.Items) > 0
 	for _, run := range list.Items {
 		switch run.Status.Phase {
-		case criteriav1.PhasePending, criteriav1.PhaseRunning, criteriav1.PhaseUnknown:
-			return true, nil
+		case criteriav1.PhaseFailed:
+			ph.anyFailed = true
+		case criteriav1.PhaseSucceeded:
+			// Settled clean: nothing in flight from this run.
+		default:
+			// Pending, Running, Unknown — and the empty phase a freshly
+			// created run carries until the controller sets status — are
+			// all in flight, so the watcher neither re-fires nor strips
+			// the inflight marker in that gap (CRI-219).
+			ph.active = true
 		}
 	}
-	return false, nil
+	return ph, nil
+}
+
+// ensureAutomationLabels resolves (or creates) the team-scoped automation
+// labels and returns their Linear IDs. Empty IDs mean ensure failed for that
+// label; label writes are then skipped (with a watcher log) until the next
+// poll re-ensures, so a transient Linear hiccup never blocks run creation.
+// Ensuring every poll self-heals a label deleted out-of-band and is
+// idempotent: issueLabelCreate only fires when the name is missing from the
+// team.
+func (w *watcher) ensureAutomationLabels(ctx context.Context) (automationLabelID, dirtyLabelID string) {
+	automationLabelID, err := w.linear.EnsureTeamLabel(ctx, w.teamID, automationLabelName, automationLabelColor)
+	if err != nil {
+		w.log.Error(err, "ensuring automation label; label lifecycle deferred to next poll", "label", automationLabelName, "teamID", w.teamID)
+		automationLabelID = ""
+	}
+	dirtyLabelID, err = w.linear.EnsureTeamLabel(ctx, w.teamID, dirtyLabelName, dirtyLabelColor)
+	if err != nil {
+		w.log.Error(err, "ensuring dirty label; label lifecycle deferred to next poll", "label", dirtyLabelName, "teamID", w.teamID)
+		dirtyLabelID = ""
+	}
+	return automationLabelID, dirtyLabelID
+}
+
+// reconcileAutomationLabels converges an issue's automation-label state with
+// the observed CriteriaRun phases:
+//   - runs in flight   → "criteria-automation" present,
+//   - all runs settled → "criteria-automation" absent,
+//   - any run failed   → "criteria-dirty" added.
+//
+// "criteria-dirty" is sticky: the watcher never removes it, because a failed
+// run needs human attention; clearing it is an operator decision on the
+// ticket. The issue's current labels are the source of truth, so this is
+// idempotent and restart-safe. Tickets with no observed CriteriaRuns are left
+// untouched (nothing to converge — e.g. runs garbage-collected).
+func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string) {
+	if !ph.anyRun {
+		return
+	}
+	hasAutomation := slices.Contains(issue.Labels, automationLabelName)
+	if ph.active && !hasAutomation {
+		w.addLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+	} else if !ph.active && hasAutomation {
+		w.removeLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+	}
+	if ph.anyFailed && !slices.Contains(issue.Labels, dirtyLabelName) {
+		w.addLinearLabel(ctx, issue, dirtyLabelName, dirtyLabelID)
+	}
+}
+
+func (w *watcher) addLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) {
+	if labelID == "" {
+		w.log.V(1).Info("skipping label add: label id unresolved (ensure failed this poll)", "ticket", issue.Identifier, "label", name)
+		return
+	}
+	if err := w.linear.AddIssueLabel(ctx, issue.ID, labelID); err != nil {
+		w.log.Error(err, "adding Linear label; retrying next poll", "ticket", issue.Identifier, "label", name)
+		return
+	}
+	w.log.Info("added Linear label", "ticket", issue.Identifier, "label", name)
+}
+
+func (w *watcher) removeLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) {
+	if labelID == "" {
+		w.log.V(1).Info("skipping label remove: label id unresolved (ensure failed this poll)", "ticket", issue.Identifier, "label", name)
+		return
+	}
+	if err := w.linear.RemoveIssueLabel(ctx, issue.ID, labelID); err != nil {
+		w.log.Error(err, "removing Linear label; retrying next poll", "ticket", issue.Identifier, "label", name)
+		return
+	}
+	w.log.Info("removed Linear label", "ticket", issue.Identifier, "label", name)
 }
 
 func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
@@ -364,6 +482,14 @@ const (
 	routingCommentPrefix = "criteria-linear-watcher: route lookup failed"
 	// commentDedupLimit bounds the comments fetched for dedup.
 	commentDedupLimit = 50
+
+	// CRI-219 automation label lifecycle. Both labels are team-scoped and
+	// ensured every poll; the names and colors are fixed by the ticket so
+	// every deployment observes the same marker vocabulary.
+	automationLabelName  = "criteria-automation"
+	dirtyLabelName       = "criteria-dirty"
+	automationLabelColor = "#0ea5e9" // inflight marker: blue
+	dirtyLabelColor      = "#f43f5e" // failed-run marker: red
 )
 
 // postRoutingComment posts the routing failure on the ticket, deduping by
