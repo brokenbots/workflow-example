@@ -82,7 +82,10 @@ type linearServer struct {
 	labelUpdates    int      // issueUpdate mutation count (no-ops excluded)
 	lastLabelIDs    []string // labelIds payload of the most recent issueUpdate
 	failLabelEnsure bool
-	ts              *httptest.Server
+	// CRI-220: when set, the orphan-sweep candidates query fails with a
+	// GraphQL error.
+	failCandidates bool
+	ts             *httptest.Server
 }
 
 func newLinearServer(t *testing.T) *linearServer {
@@ -119,6 +122,37 @@ func newLinearServer(t *testing.T) *linearServer {
 				},
 			}
 			s.mu.Unlock()
+		case strings.Contains(raw.Query, "labels: {some:"):
+			// CRI-220: the orphan sweep's candidates query. Filter the
+			// staged issues by their current label state (issueLabelNames
+			// is the runtime truth), regardless of workflow state —
+			// mirroring Linear's `labels: {some: {name: {eq: $label}}}`
+			// filter.
+			var variables struct {
+				Project string `json:"project"`
+				Label   string `json:"label"`
+			}
+			if err := json.Unmarshal(raw.Variables, &variables); err != nil {
+				t.Errorf("decoding candidates variables: %v", err)
+				return
+			}
+			s.mu.Lock()
+			fail := s.failCandidates
+			if fail {
+				s.mu.Unlock()
+				resp["errors"] = []interface{}{map[string]interface{}{"message": "candidates query down"}}
+				break
+			}
+			nodes := []interface{}{}
+			for _, n := range s.issues {
+				if slices.Contains(s.issueLabelNames[n["id"].(string)], variables.Label) {
+					nodes = append(nodes, s.servedIssueLocked(n))
+				}
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issues": map[string]interface{}{"nodes": nodes},
+			}
 		case strings.Contains(raw.Query, "issues"):
 			var variables struct {
 				States []string `json:"states"`
@@ -459,6 +493,14 @@ func (s *linearServer) setFailLabelServe(v bool) {
 	s.failLabelEnsure = v
 }
 
+// setFailCandidates makes the CRI-220 orphan-sweep candidates query fail
+// with a GraphQL error until re-enabled.
+func (s *linearServer) setFailCandidates(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failCandidates = v
+}
+
 // createdLabels returns a copy of the fake's label registry.
 func (s *linearServer) createdLabels() []fakeLabel {
 	s.mu.Lock()
@@ -649,9 +691,10 @@ func (tw *testWatcher) restarted() *testWatcher {
 	return &testWatcher{w: &fresh, linearS: tw.linearS, client: tw.client, logs: recorder}
 }
 
-// terminalizeRun moves the ticket's single CriteriaRun to the given final
-// phase in the fake k8s client.
-func (tw *testWatcher) terminalizeRun(t *testing.T, ticket string, phase criteriav1.CriteriaRunPhase) {
+// setRunPhase moves the ticket's single CriteriaRun to the given phase in
+// the fake k8s client. It covers live phases (Pending, Running, the empty
+// pre-status phase) as well as terminal ones.
+func (tw *testWatcher) setRunPhase(t *testing.T, ticket string, phase criteriav1.CriteriaRunPhase) {
 	t.Helper()
 	list := &criteriav1.CriteriaRunList{}
 	if err := tw.client.List(context.Background(), list, client.InNamespace("criteria-jobs"),
@@ -994,7 +1037,7 @@ func TestPollSucceededRemovesAutomationNoDirty(t *testing.T) {
 	// The run settles as Succeeded and the trigger label is cleared with
 	// it (as operator automation does on completion). The inflight marker
 	// is still on the issue: removing it is the watcher's job.
-	tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseSucceeded)
+	tw.setRunPhase(t, "CRI-1", criteriav1.PhaseSucceeded)
 	tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
 
 	writes := tw.linearS.labelUpdateCount()
@@ -1021,7 +1064,7 @@ func TestPollFailedRemovesAutomationAddsDirty(t *testing.T) {
 	// The run fails and the trigger label is cleared with it. The inflight
 	// marker is still on the issue: the watcher must swap it for the dirty
 	// marker.
-	tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseFailed)
+	tw.setRunPhase(t, "CRI-1", criteriav1.PhaseFailed)
 	tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
 
 	writes := tw.linearS.labelUpdateCount()
@@ -1048,7 +1091,7 @@ func TestRestartConvergesLabelState(t *testing.T) {
 
 		// The watcher dies; the run then succeeds and the trigger label is
 		// cleared before the replacement watcher starts.
-		tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseSucceeded)
+		tw.setRunPhase(t, "CRI-1", criteriav1.PhaseSucceeded)
 		tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
 
 		tw2 := tw.restarted()
@@ -1072,7 +1115,7 @@ func TestRestartConvergesLabelState(t *testing.T) {
 		tw.pollOnce(t)
 		require.Len(t, tw.runs(t), 1)
 
-		tw.terminalizeRun(t, "CRI-1", criteriav1.PhaseFailed)
+		tw.setRunPhase(t, "CRI-1", criteriav1.PhaseFailed)
 		tw.linearS.setIssueLabels("i-1", "fast", automationLabelName)
 
 		tw2 := tw.restarted()
@@ -1107,7 +1150,7 @@ func TestReconcileTicketOutsideRouteStates(t *testing.T) {
 
 		// The run succeeds; the workflow moves the ticket to "Done" (a
 		// state no route declares) and the trigger label stays armed.
-		tw.terminalizeRun(t, "CRI-9", criteriav1.PhaseSucceeded)
+		tw.setRunPhase(t, "CRI-9", criteriav1.PhaseSucceeded)
 		tw.linearS.setIssues(withState(
 			issue("i-9", "CRI-9", gateLabel(), groupLabel("fast", "speed")), "Done"))
 		tw.linearS.setIssueLabels("i-9", "k8s-run", "fast", automationLabelName)
@@ -1132,7 +1175,7 @@ func TestReconcileTicketOutsideRouteStates(t *testing.T) {
 
 		// The run fails; the workflow moves the ticket to "In Review" for
 		// triage (also outside the route-declared states).
-		tw.terminalizeRun(t, "CRI-9", criteriav1.PhaseFailed)
+		tw.setRunPhase(t, "CRI-9", criteriav1.PhaseFailed)
 		tw.linearS.setIssues(withState(
 			issue("i-9", "CRI-9", gateLabel(), groupLabel("fast", "speed")), "In Review"))
 		tw.linearS.setIssueLabels("i-9", "k8s-run", "fast", automationLabelName)
@@ -1174,4 +1217,294 @@ func TestPollEnsureFailureDoesNotBlockRunCreation(t *testing.T) {
 	tw.pollOnce(t)
 	assert.Equal(t, []string{"k8s-run", "criteria-automation"},
 		tw.linearS.issueLabelsOf("i-1"), "the next poll converges the inflight marker")
+}
+
+// CRI-220: orphaned automation-label sweep.
+
+// TestPollOrphanSweepDirtiesLabelWithoutRuns covers the orphan rule: a
+// ticket bearing criteria-automation with no live CriteriaRun in any phase
+// and no recorded terminal event gets the marker swapped for criteria-dirty
+// on the poll. The ticket sits in a state no route declares ("In
+// Progress", where the intake workflow leaves it) — the sweep's dedicated
+// candidates query is what reaches it. The sweep is idempotent: the next
+// poll writes nothing.
+func TestPollOrphanSweepDirtiesLabelWithoutRuns(t *testing.T) {
+	t.Run("orphaned marker outside the route-declared states is dirtied", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "In Progress"))
+		tw.linearS.setIssueLabels("i-1", "k8s-run", automationLabelName)
+
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
+			"automation marker removed, dirty marker added, unrelated labels intact")
+		assert.Equal(t, 2, tw.linearS.labelUpdateCount(), "one dirty add and one automation removal")
+		assert.True(t, tw.logs.contains("sweeping orphaned automation label"))
+		assert.True(t, tw.logs.contains("orphan sweep complete"))
+		assert.Empty(t, tw.runs(t), "no run exists for the orphaned ticket")
+
+		// Idempotent: with the marker gone, the next poll writes nothing.
+		writes := tw.linearS.labelUpdateCount()
+		tw.pollOnce(t)
+		assert.Equal(t, writes, tw.linearS.labelUpdateCount(),
+			"the swept ticket is no longer a candidate on the next poll")
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+	})
+
+	t.Run("orphaned tickets are swept in deterministic identifier order", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		// Staged in reverse identifier order: the sweep must still act on
+		// CRI-1 first, mirroring the operator's stale-adapter sweep.
+		tw.linearS.setIssues(
+			withState(issue("i-2", "CRI-2", map[string]interface{}{"name": "fast"}), "In Review"),
+			withState(issue("i-1", "CRI-1", gateLabel()), "In Progress"))
+		tw.linearS.setIssueLabels("i-2", "fast", automationLabelName)
+		tw.linearS.setIssueLabels("i-1", "k8s-run", automationLabelName)
+
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+		assert.Equal(t, []string{"fast", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-2"))
+		assert.Equal(t, 4, tw.linearS.labelUpdateCount(), "two writes per orphan")
+		assert.Equal(t, []string{"lbl-fast", "lbl-criteria-dirty"}, tw.linearS.lastLabelUpdateIDs(),
+			"the last write is CRI-2's removal: CRI-1 was processed first")
+	})
+}
+
+// TestPollOrphanSweepSparesLiveRuns covers the no-false-positive rule: a
+// ticket with criteria-automation and a live CriteriaRun in any phase —
+// including Pending and the empty phase a freshly created run carries until
+// the controller sets status — is left untouched by the sweep.
+func TestPollOrphanSweepSparesLiveRuns(t *testing.T) {
+	phases := []criteriav1.CriteriaRunPhase{"", criteriav1.PhasePending, criteriav1.PhaseRunning}
+	for _, phase := range phases {
+		t.Run("live run in phase "+string(phase), func(t *testing.T) {
+			tw := newTestWatcher(t, routesJSON)
+			tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+			tw.pollOnce(t)
+			require.Len(t, tw.runs(t), 1)
+			assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+			tw.setRunPhase(t, "CRI-1", phase)
+
+			writes := tw.linearS.labelUpdateCount()
+			tw.pollOnce(t)
+
+			assert.Equal(t, writes, tw.linearS.labelUpdateCount(),
+				"the sweep must not touch a ticket with a live run in phase "+string(phase))
+			assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName,
+				"the automation marker stays on a live ticket")
+			assert.NotContains(t, tw.linearS.issueLabelsOf("i-1"), dirtyLabelName,
+				"no dirty marker for a live run")
+			assert.False(t, tw.logs.contains("sweeping orphaned automation label"))
+		})
+	}
+}
+
+// TestPollOrphanSweepGuardRespectsTerminalEvents covers the terminal-event
+// guard: a ticket with criteria-automation, no live CriteriaRun, but a
+// recorded terminal event (its CriteriaRun settled Failed or Succeeded) is
+// not swept as orphaned — reconciliation owns that transition, so a
+// settled ticket converges without gaining a spurious dirty marker on
+// success.
+func TestPollOrphanSweepGuardRespectsTerminalEvents(t *testing.T) {
+	t.Run("succeeded run: reconciled clean, never swept", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+		assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+		// The intake workflow moves the ticket out of the route-declared
+		// states, then the run settles.
+		tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "In Progress"))
+		tw.setRunPhase(t, "CRI-1", criteriav1.PhaseSucceeded)
+
+		writes := tw.linearS.labelUpdateCount()
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run"}, tw.linearS.issueLabelsOf("i-1"),
+			"the automation marker is removed and no dirty marker is added for a succeeded run")
+		assert.Equal(t, 1, tw.linearS.labelUpdateCount()-writes, "exactly one removal write")
+		assert.False(t, tw.logs.contains("sweeping orphaned automation label"),
+			"a ticket with a recorded terminal event is not swept as orphaned")
+	})
+
+	t.Run("failed run: reconciled dirty by reconciliation, not swept", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+		assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+		tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "In Review"))
+		tw.setRunPhase(t, "CRI-1", criteriav1.PhaseFailed)
+
+		writes := tw.linearS.labelUpdateCount()
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+		assert.Equal(t, 2, tw.linearS.labelUpdateCount()-writes,
+			"reconciliation performs the removal and the dirty add")
+		assert.False(t, tw.logs.contains("sweeping orphaned automation label"),
+			"a ticket with a recorded terminal event is not swept as orphaned")
+	})
+}
+
+// TestPollDeletedWhileRunningRunDirtiesTicket covers edge case (a): a
+// CriteriaRun deleted manually while its ticket is running leaves the
+// automation marker orphaned with no live run and no terminal event; the
+// next poll detects the orphan and applies the dirty treatment, and no
+// successor run fires for the ticket outside the route-declared states.
+func TestPollDeletedWhileRunningRunDirtiesTicket(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+	assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+
+	// The CriteriaRun is deleted manually while running (the CRI-223-style
+	// case) and the intake workflow has moved the ticket out of the
+	// route-declared states.
+	runs := tw.runs(t)
+	require.NoError(t, tw.client.Delete(context.Background(), &runs[0]))
+	tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "In Progress"))
+
+	writes := tw.linearS.labelUpdateCount()
+	tw.pollOnce(t)
+
+	assert.Empty(t, tw.runs(t), "no successor run fires for the deleted run's ticket")
+	assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
+		"the deleted run's ticket receives the dirty treatment on the next poll")
+	assert.Equal(t, 2, tw.linearS.labelUpdateCount()-writes)
+	assert.True(t, tw.logs.contains("sweeping orphaned automation label"))
+}
+
+// TestPollOrphanSweepAfterRestart covers edge case (b): an automation
+// marker persisting across a watcher restart with no live CriteriaRun and
+// no terminal event is still treated as orphaned by the fresh watcher —
+// the sweep decides from observed state only, never remembered history.
+func TestPollOrphanSweepAfterRestart(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+
+	// The CriteriaRun is deleted and the ticket moved out of the
+	// route-declared states while the watcher is down; the automation
+	// marker persists on the ticket.
+	runs := tw.runs(t)
+	require.NoError(t, tw.client.Delete(context.Background(), &runs[0]))
+	tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "In Progress"))
+
+	tw2 := tw.restarted()
+	writes := tw2.linearS.labelUpdateCount()
+	tw2.pollOnce(t)
+
+	assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw2.linearS.issueLabelsOf("i-1"),
+		"the fresh watcher sweeps the persisted orphan")
+	assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes)
+	assert.True(t, tw2.logs.contains("sweeping orphaned automation label"))
+}
+
+// TestReArmAfterDirtyKeepsDirtyLabel covers edge case (c): criteria-dirty
+// is sticky. A ticket re-armed after the dirty marker was applied fires a
+// fresh run and regains the automation marker, but the dirty marker
+// survives the sweep, the run, and reconciliation — only a cleanup
+// workflow or a human removes it.
+func TestReArmAfterDirtyKeepsDirtyLabel(t *testing.T) {
+	t.Run("dirty marker survives a re-arm and its run", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		// An orphaned automation marker in a watched state (no trigger
+		// label): the first poll dirties it.
+		tw.linearS.setIssues(issue("i-1", "CRI-1"))
+		tw.linearS.setIssueLabels("i-1", automationLabelName)
+		tw.pollOnce(t)
+		assert.Equal(t, []string{"criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+
+		// Re-armed AFTER the dirty marker: a human (or workflow) adds the
+		// trigger label back.
+		tw.linearS.setIssueLabels("i-1", "k8s-run", "criteria-dirty")
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty", automationLabelName},
+			tw.linearS.issueLabelsOf("i-1"),
+			"the re-armed ticket fires a run and regains the automation marker, dirty intact")
+		require.Len(t, tw.runs(t), 1)
+
+		// The run settles; reconciliation clears the automation marker but
+		// the dirty marker persists.
+		tw.setRunPhase(t, "CRI-1", criteriav1.PhaseSucceeded)
+		tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "Done"))
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
+			"criteria-dirty survives the sweep after the re-arm; only a cleanup workflow or human removes it")
+	})
+
+	t.Run("dirty-only ticket is never a sweep candidate", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(withState(issue("i-1", "CRI-1"), "In Progress"))
+		tw.linearS.setIssueLabels("i-1", dirtyLabelName)
+
+		writes := tw.linearS.labelUpdateCount()
+		tw.pollOnce(t)
+
+		assert.Equal(t, writes, tw.linearS.labelUpdateCount(),
+			"a ticket without the automation marker is never a sweep candidate")
+		assert.Equal(t, []string{"criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
+			"the dirty marker is never removed")
+	})
+}
+
+// TestPollOrphanSweepDeferredWhenLabelEnsureFails covers the degraded
+// Linear path: the sweep is an atomic label-state transition and candidates
+// are only visible through the automation marker, so with unresolved label
+// ids it defers entirely — no partial removal that would lose the orphan
+// evidence. The next healthy poll converges the ticket.
+func TestPollOrphanSweepDeferredWhenLabelEnsureFails(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(withState(issue("i-1", "CRI-1"), "In Progress"))
+	tw.linearS.setIssueLabels("i-1", automationLabelName)
+	tw.linearS.setFailLabelServe(true)
+
+	writes := tw.linearS.labelUpdateCount()
+	tw.pollOnce(t)
+
+	assert.Equal(t, writes, tw.linearS.labelUpdateCount(),
+		"no label write with unresolved label ids")
+	assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName,
+		"the orphan evidence is preserved for the next poll")
+	assert.True(t, tw.logs.contains("skipping orphan sweep"))
+
+	// The ensure heals on the next poll and the sweep converges the ticket.
+	tw.linearS.setFailLabelServe(false)
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+}
+
+// TestPollOrphanSweepDeferredWhenCandidatesQueryFails covers the sweep's
+// own failure path: when the candidates query fails, the poll does not fail
+// and no label is written — the sweep defers to the next poll, preserving
+// the orphan evidence.
+func TestPollOrphanSweepDeferredWhenCandidatesQueryFails(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(withState(issue("i-1", "CRI-1"), "In Progress"))
+	tw.linearS.setIssueLabels("i-1", automationLabelName)
+	tw.linearS.setFailCandidates(true)
+
+	writes := tw.linearS.labelUpdateCount()
+	tw.pollOnce(t)
+
+	assert.Equal(t, writes, tw.linearS.labelUpdateCount(),
+		"no label write when the candidates query fails")
+	assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName,
+		"the orphan evidence is preserved for the next poll")
+	assert.True(t, tw.logs.contains("orphan sweep deferred"),
+		"the deferral is logged and the poll continues")
+
+	// The query heals on the next poll and the sweep converges the ticket.
+	tw.linearS.setFailCandidates(false)
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
 }

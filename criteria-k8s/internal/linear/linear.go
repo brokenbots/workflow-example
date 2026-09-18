@@ -229,6 +229,58 @@ func (c *Client) FindTicketsInStates(ctx context.Context, projectName string, st
 	return c.IssuesInProjectStates(ctx, projectID, states)
 }
 
+// IssuesWithLabel returns the issues in the given project carrying the
+// named label, regardless of workflow state. It backs the orphaned
+// automation-label sweep (CRI-220), which must reach tickets the
+// route-declared state list does not cover — the intake workflow moves
+// tickets out of the watched states while their runs execute, so an
+// orphaned marker usually sits on a ticket in another state. An empty
+// label name queries nothing and reports no issues: fail closed.
+func (c *Client) IssuesWithLabel(ctx context.Context, projectID, labelName string) ([]Issue, error) {
+	if labelName == "" {
+		return nil, nil
+	}
+	req := graphqlRequest{
+		Query: `query($project: ID!, $label: String!) {
+            issues(filter: {project: {id: {eq: $project}}, labels: {some: {name: {eq: $label}}}}) {
+                nodes { id identifier labels { nodes { name } } }
+            }
+        }`,
+		Variables: map[string]interface{}{
+			"project": projectID,
+			"label":   labelName,
+		},
+	}
+	var result struct {
+		Issues struct {
+			Nodes []struct {
+				ID         string `json:"id"`
+				Identifier string `json:"identifier"`
+				Labels     struct {
+					Nodes []struct {
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"labels"`
+			} `json:"nodes"`
+		} `json:"issues"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return nil, err
+	}
+	out := make([]Issue, 0, len(result.Issues.Nodes))
+	for _, n := range result.Issues.Nodes {
+		issue := Issue{
+			ID:         n.ID,
+			Identifier: n.Identifier,
+		}
+		for _, l := range n.Labels.Nodes {
+			issue.Labels = append(issue.Labels, l.Name)
+		}
+		out = append(out, issue)
+	}
+	return out, nil
+}
+
 // PostComment creates a comment on the given issue (CRI-217 routing
 // failure notifications).
 func (c *Client) PostComment(ctx context.Context, issueID, body string) error {

@@ -15,16 +15,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newLinearTestServer returns a server answering the project lookup and the
-// issues query, filtering issues by the queried `states` variable exactly
-// like Linear's `state: {name: {in: $states}}` filter would.
+// newLinearTestServer returns a server answering the project lookup, the
+// issues query (filtered by the queried `states` variable exactly like
+// Linear's `state: {name: {in: $states}}` filter) and the CRI-220
+// label-candidates query (filtered by the issue's current label names).
 func newLinearTestServer(t *testing.T, issues []map[string]interface{}, queries *[]string) *httptest.Server {
 	t.Helper()
+	issueLabelNames := func(issue map[string]interface{}) []string {
+		names := []string{}
+		if labelsObj, ok := issue["labels"].(map[string]interface{}); ok {
+			if labelNodes, ok := labelsObj["nodes"].([]interface{}); ok {
+				for _, ln := range labelNodes {
+					lm, _ := ln.(map[string]interface{})
+					name, _ := lm["name"].(string)
+					if name != "" {
+						names = append(names, name)
+					}
+				}
+			}
+		}
+		return names
+	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Query     string `json:"query"`
 			Variables struct {
 				States []string `json:"states"`
+				Label  string   `json:"label"`
 			} `json:"variables"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
@@ -41,6 +58,14 @@ func newLinearTestServer(t *testing.T, issues []map[string]interface{}, queries 
 					},
 				},
 			}
+		} else if strings.Contains(req.Query, "labels: {some:") {
+			matched := []interface{}{}
+			for _, issue := range issues {
+				if slices.Contains(issueLabelNames(issue), req.Variables.Label) {
+					matched = append(matched, issue)
+				}
+			}
+			resp["data"] = map[string]interface{}{"issues": map[string]interface{}{"nodes": matched}}
 		} else if strings.Contains(req.Query, "issues") {
 			matched := []interface{}{}
 			for _, issue := range issues {
@@ -150,6 +175,73 @@ func TestFindTicketsInStatesWithoutStatesQueriesNothing(t *testing.T) {
 	for _, q := range queries {
 		assert.NotContains(t, q, "issues", "issues query must not be sent without states")
 	}
+}
+
+// TestIssuesWithLabel covers the CRI-220 orphan-sweep candidates query: it
+// must return every project issue carrying the named label regardless of
+// workflow state (orphans usually sit on tickets the route-declared states
+// do not cover), filter with `labels: {some: {name: {eq: $label}}}` — not
+// client-side — and query nothing for an empty label name.
+func TestIssuesWithLabel(t *testing.T) {
+	issues := []map[string]interface{}{
+		{
+			"id":         "issue-1",
+			"identifier": "CRI-1",
+			"state":      map[string]interface{}{"name": "In Progress"},
+			"project":    map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
+			"labels":     map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"name": "criteria-automation"}}},
+		},
+		{
+			"id":         "issue-2",
+			"identifier": "CRI-2",
+			"state":      map[string]interface{}{"name": "Triage"},
+			"project":    map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
+			"labels":     map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"name": "k8s-run"}}},
+		},
+		// A stateless ticket must still match: the label filter ignores
+		// workflow state entirely.
+		{
+			"id":         "issue-3",
+			"identifier": "CRI-3",
+			"state":      nil,
+			"project":    map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
+			"labels":     map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"name": "criteria-automation"}}},
+		},
+	}
+	var queries []string
+	ts := newLinearTestServer(t, issues, &queries)
+	defer ts.Close()
+
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+	got, err := client.IssuesWithLabel(context.Background(), "proj-1", "criteria-automation")
+	require.NoError(t, err)
+	require.Len(t, got, 2, "both labeled tickets match, regardless of state")
+	assert.Equal(t, "CRI-1", got[0].Identifier)
+	assert.Equal(t, []string{"criteria-automation"}, got[0].Labels)
+	assert.Equal(t, "CRI-3", got[1].Identifier)
+	assert.Equal(t, []string{"criteria-automation"}, got[1].Labels)
+
+	var candidatesQuery string
+	for _, q := range queries {
+		if strings.Contains(q, "labels: {some:") {
+			candidatesQuery = q
+		}
+	}
+	require.NotEmpty(t, candidatesQuery, "a label-candidates query was issued")
+
+	compact := strings.Join(strings.Fields(candidatesQuery), "")
+	assert.Contains(t, compact, "project:{id:{eq:$project}}",
+		"candidates query must scope to the project, got: %s", candidatesQuery)
+	assert.Contains(t, compact, "labels:{some:{name:{eq:$label}}}",
+		"candidates query must filter the label server-side, got: %s", candidatesQuery)
+
+	// Fail closed: an empty label name queries nothing and reports no
+	// issues.
+	before := len(queries)
+	got, err = client.IssuesWithLabel(context.Background(), "proj-1", "")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Len(t, queries, before, "no query is sent for an empty label name")
 }
 
 func TestExtractRepoURL(t *testing.T) {

@@ -211,6 +211,16 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		}
 		w.reconcileAutomationLabels(ctx, issue, runs[ticket], automationLabelID, dirtyLabelID)
 	}
+	// CRI-220: reconciliation above only reaches tickets with observed
+	// CriteriaRuns. The orphan sweep closes the remaining gap: a ticket can
+	// carry the inflight marker with no CriteriaRun behind it at all (the
+	// run was deleted manually while running, or the label was orphaned by
+	// a watcher restart), leaving it invisible to the runs-driven
+	// reconciliation. Like the operator's stale-adapter sweep, it runs
+	// deterministically on every poll.
+	if err := w.sweepOrphanedAutomationLabels(ctx, projectID, runs, automationLabelID, dirtyLabelID); err != nil {
+		w.log.Error(err, "listing automation-label tickets; orphan sweep deferred to next poll")
+	}
 	for _, issue := range issues {
 		// CRI-147 gating: when a trigger label is configured, only issues
 		// carrying it fire a k8s run (this gate doubles as the k8s-run
@@ -397,7 +407,9 @@ func (w *watcher) ensureAutomationLabels(ctx context.Context) (automationLabelID
 //
 // The issue's current labels are the source of truth, so this is idempotent
 // and restart-safe. Tickets with no observed CriteriaRuns are left untouched
-// (nothing to converge — e.g. runs garbage-collected).
+// here — the orphan sweep owns that case (CRI-220): a ticket can carry the
+// inflight marker with no run behind it at all, and the sweep converges it
+// to the dirty marker.
 func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string) {
 	if !ph.anyRun {
 		return
@@ -428,28 +440,98 @@ func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Is
 	}
 }
 
-func (w *watcher) addLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) {
+// sweepOrphanedAutomationLabels implements the CRI-220 orphan rule: a
+// ticket bearing "criteria-automation" with no live CriteriaRun in any
+// phase (including Pending) and no recorded terminal event carries a marker
+// nothing lives behind — the run was deleted manually while running, or the
+// label was orphaned by a watcher restart — so the marker is swapped for
+// "criteria-dirty".
+//
+// The sweep mirrors the operator's stale-adapter sweep (CRI-144): it runs
+// deterministically on every poll, decides purely from what exists now and
+// never from remembered history, and acts once per orphan. The poll's
+// existing CriteriaRun index supplies both guards, so nothing additional is
+// listed on the k8s side:
+//   - a live run in any phase (Pending, Running, Unknown, or the empty
+//     phase a freshly created run carries until the controller sets status)
+//     leaves the label lifecycle to reconciliation;
+//   - a run that settled (Failed or Succeeded) recorded a terminal event:
+//     reconciliation owns that transition, so a Succeeded run must not gain
+//     the dirty marker here.
+//
+// Candidates are the project's tickets carrying "criteria-automation" in
+// any workflow state, so the sweep reaches tickets outside the
+// route-declared states. Iteration is ordered by identifier for
+// deterministic logs and write order.
+//
+// The sweep requires both label ids: it is an atomic label-state
+// transition, and candidates are only ever visible through the automation
+// label — removing that marker before the dirty marker is durable would
+// lose the orphan evidence with no retry. Writes are therefore ordered
+// dirty-marker first, and a failed dirty write defers the removal with it.
+// "criteria-dirty" itself is never removed here or anywhere in the watcher:
+// it is sticky until a cleanup workflow or a human clears it (CRI-220).
+func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID string, runs map[string]runPhases, automationLabelID, dirtyLabelID string) error {
+	if automationLabelID == "" || dirtyLabelID == "" {
+		w.log.V(1).Info("skipping orphan sweep: automation label ids unresolved (ensure failed this poll); deferred to next poll")
+		return nil
+	}
+	candidates, err := w.linear.IssuesWithLabel(ctx, projectID, automationLabelName)
+	if err != nil {
+		return err
+	}
+	slices.SortFunc(candidates, func(a, b linear.Issue) int {
+		return strings.Compare(a.Identifier, b.Identifier)
+	})
+	swept := 0
+	for _, issue := range candidates {
+		if ph := runs[issue.Identifier]; ph.anyRun {
+			// The ticket has observed CriteriaRuns: either one is still live
+			// (any phase, including Pending) or its runs all settled,
+			// recording a terminal event. Reconciliation owns the label
+			// lifecycle in both cases.
+			continue
+		}
+		w.log.Info("sweeping orphaned automation label: no live CriteriaRun and no recorded terminal event",
+			"ticket", issue.Identifier)
+		if !slices.Contains(issue.Labels, dirtyLabelName) {
+			if err := w.addLinearLabel(ctx, issue, dirtyLabelName, dirtyLabelID); err != nil {
+				w.log.V(1).Info("orphan sweep removal deferred with the failed dirty write",
+					"ticket", issue.Identifier)
+				continue
+			}
+		}
+		w.removeLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+		swept++
+	}
+	w.log.Info("orphan sweep complete", "candidates", len(candidates), "swept", swept)
+	return nil
+}
+
+func (w *watcher) addLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) error {
 	if labelID == "" {
 		w.log.V(1).Info("skipping label add: label id unresolved (ensure failed this poll)", "ticket", issue.Identifier, "label", name)
-		return
+		return nil
 	}
 	if err := w.linear.AddIssueLabel(ctx, issue.ID, labelID); err != nil {
 		w.log.Error(err, "adding Linear label; retrying next poll", "ticket", issue.Identifier, "label", name)
-		return
+		return err
 	}
 	w.log.Info("added Linear label", "ticket", issue.Identifier, "label", name)
+	return nil
 }
 
-func (w *watcher) removeLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) {
+func (w *watcher) removeLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) error {
 	if labelID == "" {
 		w.log.V(1).Info("skipping label remove: label id unresolved (ensure failed this poll)", "ticket", issue.Identifier, "label", name)
-		return
+		return nil
 	}
 	if err := w.linear.RemoveIssueLabel(ctx, issue.ID, labelID); err != nil {
 		w.log.Error(err, "removing Linear label; retrying next poll", "ticket", issue.Identifier, "label", name)
-		return
+		return err
 	}
 	w.log.Info("removed Linear label", "ticket", issue.Identifier, "label", name)
+	return nil
 }
 
 func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
