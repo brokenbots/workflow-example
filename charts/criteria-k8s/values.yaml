@@ -67,7 +67,7 @@ watcher:
   enabled: true
   replicaCount: 1
   linearProjectName: Criteria K8s Workflow Runner
-  pollInterval: 60s
+  pollInterval: 5m
   maxAgentVisits: 2
   providerBaseUrl: http://192.168.17.116:11434/v1
   # ConfigMap carrying the routes payload (key routes.json), mounted into the

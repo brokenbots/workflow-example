@@ -5,11 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
-	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -34,6 +35,11 @@ type Issue struct {
 	RepoLabel string `json:"repoLabel,omitempty"`
 	// Labels holds the issue's Linear label names.
 	Labels []string `json:"labels,omitempty"`
+	// LabelIDs holds the issue's Linear label IDs, parallel to Labels.
+	// It is populated by the queries that select label ids (CRI-252), so
+	// label writes can reuse the same poll's read instead of re-reading
+	// the issue's label set; absent for queries that do not select ids.
+	LabelIDs []string `json:"labelIds,omitempty"`
 	// LabelGroups maps a label name to the name of its Linear label
 	// group (Linear models label groups as parent labels marked
 	// isGroup). Labels without a group parent are absent from the map.
@@ -70,6 +76,9 @@ type graphqlResponse struct {
 
 type graphqlError struct {
 	Message string `json:"message"`
+	// Extensions is Linear's optional error extension payload (raw JSON:
+	// absent or non-object extensions must be tolerated).
+	Extensions json.RawMessage `json:"extensions"`
 }
 
 func (c *Client) do(ctx context.Context, req graphqlRequest, target interface{}) error {
@@ -94,6 +103,13 @@ func (c *Client) do(ctx context.Context, req graphqlRequest, target interface{})
 	if err != nil {
 		return fmt.Errorf("reading linear response: %w", err)
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &RateLimitError{
+			Status:   resp.StatusCode,
+			Body:     string(respBody),
+			Duration: retryAfterDuration(resp.Header.Get("Retry-After")),
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("linear returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -103,6 +119,9 @@ func (c *Client) do(ctx context.Context, req graphqlRequest, target interface{})
 		return fmt.Errorf("parsing linear response: %w", err)
 	}
 	if len(gr.Errors) > 0 {
+		if rl := rateLimitFromGraphQL(gr.Errors); rl != nil {
+			return rl
+		}
 		msgs := make([]string, len(gr.Errors))
 		for i, e := range gr.Errors {
 			msgs[i] = e.Message
@@ -115,6 +134,97 @@ func (c *Client) do(ctx context.Context, req graphqlRequest, target interface{})
 		}
 	}
 	return nil
+}
+
+// RateLimitError signals that Linear rejected a request because the shared
+// rate budget was exhausted (HTTP 429, or a GraphQL RATELIMITED error).
+// The watcher turns it into a poll skip plus back-off (CRI-252) instead of
+// retrying at full cost.
+type RateLimitError struct {
+	// Status is the HTTP status Linear answered with (429, or 400 for the
+	// RATELIMITED GraphQL error shape).
+	Status int
+	// Body is the raw response body or the GraphQL error message.
+	Body string
+	// Duration is how long to wait before the next request: Linear's
+	// rateLimitResult.duration or the Retry-After header when provided.
+	Duration time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	if e.Duration > 0 {
+		return fmt.Sprintf("linear: rate limited (status %d, retry after %s)", e.Status, e.Duration)
+	}
+	return fmt.Sprintf("linear: rate limited (status %d)", e.Status)
+}
+
+// IsRateLimit reports whether err is (or wraps) a Linear rate limit error.
+func IsRateLimit(err error) bool {
+	var rl *RateLimitError
+	return errors.As(err, &rl)
+}
+
+// rateLimitFromGraphQL reports whether a Linear error response represents a
+// rate limit rejection. Linear answers plain over-limit requests with
+// HTTP 429, but some rejections surface as GraphQL errors carrying a
+// RATELIMITED extension code plus a rateLimitResult duration in
+// milliseconds (CRI-252).
+func rateLimitFromGraphQL(errs []graphqlError) *RateLimitError {
+	for _, e := range errs {
+		var ext struct {
+			Code string          `json:"code"`
+			Meta json.RawMessage `json:"meta"`
+		}
+		if len(e.Extensions) > 0 && json.Unmarshal(e.Extensions, &ext) == nil {
+			if strings.EqualFold(strings.TrimSpace(ext.Code), "ratelimited") {
+				return &RateLimitError{
+					Status:   http.StatusBadRequest,
+					Body:     e.Message,
+					Duration: durationFromRateLimitMeta(ext.Meta),
+				}
+			}
+		}
+		if strings.Contains(strings.ToUpper(e.Message), "RATELIMITED") {
+			return &RateLimitError{Status: http.StatusBadRequest, Body: e.Message}
+		}
+	}
+	return nil
+}
+
+// durationFromRateLimitMeta extracts rateLimitResult.duration (in
+// milliseconds) from Linear's error extension meta, when present.
+func durationFromRateLimitMeta(meta json.RawMessage) time.Duration {
+	if len(meta) == 0 {
+		return 0
+	}
+	var parsed struct {
+		RateLimitResult struct {
+			Duration int64 `json:"duration"`
+		} `json:"rateLimitResult"`
+	}
+	if err := json.Unmarshal(meta, &parsed); err != nil {
+		return 0
+	}
+	if parsed.RateLimitResult.Duration <= 0 {
+		return 0
+	}
+	return time.Duration(parsed.RateLimitResult.Duration) * time.Millisecond
+}
+
+// retryAfterDuration parses a Retry-After header value (seconds) into a
+// duration, ignoring unparseable or non-positive values.
+func retryAfterDuration(header string) time.Duration {
+	value := strings.TrimSpace(header)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds > 0 {
+		return time.Duration(seconds * float64(time.Second))
+	}
+	return 0
 }
 
 // Project represents a Linear project.
@@ -145,6 +255,66 @@ func (c *Client) FindProjectID(ctx context.Context, name string) (string, error)
 	return "", fmt.Errorf("linear project %q not found", name)
 }
 
+// linearIssuesBatch is the page size for batched identifier lookups
+// (CRI-252): one query per 100 identifiers keeps each response well inside
+// Linear's complexity limits.
+const linearIssuesBatch = 100
+
+// issueNode is the GraphQL node shape shared by the issue listing queries
+// (IssuesInProjectStates, IssuesByIdentifiers): all of them select the same
+// issue fields, so every caller sees identical label data — names, group
+// membership, and label IDs (CRI-252).
+type issueNode struct {
+	ID          string `json:"id"`
+	Identifier  string `json:"identifier"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	State       struct {
+		Name string `json:"name"`
+	} `json:"state"`
+	Project struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"project"`
+	Labels struct {
+		Nodes []labelNode `json:"nodes"`
+	} `json:"labels"`
+}
+
+type labelNode struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Parent struct {
+		Name    string `json:"name"`
+		IsGroup bool   `json:"isGroup"`
+	} `json:"parent"`
+}
+
+func (n issueNode) toIssue() Issue {
+	issue := Issue{
+		ID:          n.ID,
+		Identifier:  n.Identifier,
+		Title:       n.Title,
+		Description: n.Description,
+		ProjectID:   n.Project.ID,
+		ProjectName: n.Project.Name,
+		StateName:   n.State.Name,
+	}
+	for _, l := range n.Labels.Nodes {
+		issue.Labels = append(issue.Labels, l.Name)
+		if l.ID != "" {
+			issue.LabelIDs = append(issue.LabelIDs, l.ID)
+		}
+		if l.Parent.IsGroup && l.Parent.Name != "" {
+			if issue.LabelGroups == nil {
+				issue.LabelGroups = make(map[string]string, len(n.Labels.Nodes))
+			}
+			issue.LabelGroups[l.Name] = l.Parent.Name
+		}
+	}
+	return issue
+}
+
 // IssuesInProjectStates returns issues in the project whose workflow state
 // name is any of states (CRI-218: the watcher polls the union of the
 // routes' declared states). With no states it queries nothing and returns
@@ -157,7 +327,7 @@ func (c *Client) IssuesInProjectStates(ctx context.Context, projectID string, st
 		Query: `query($project: ID!, $states: [String!]!) {
             issues(filter: {project: {id: {eq: $project}}, state: {name: {in: $states}}}) {
                 nodes { id identifier title description state { name } project { id name }
-                        labels { nodes { name parent { name isGroup } } } }
+                        labels { nodes { id name parent { name isGroup } } } }
             }
         }`,
 		Variables: map[string]interface{}{
@@ -167,28 +337,7 @@ func (c *Client) IssuesInProjectStates(ctx context.Context, projectID string, st
 	}
 	var result struct {
 		Issues struct {
-			Nodes []struct {
-				ID          string `json:"id"`
-				Identifier  string `json:"identifier"`
-				Title       string `json:"title"`
-				Description string `json:"description"`
-				State       struct {
-					Name string `json:"name"`
-				} `json:"state"`
-				Project struct {
-					ID   string `json:"id"`
-					Name string `json:"name"`
-				} `json:"project"`
-				Labels struct {
-					Nodes []struct {
-						Name   string `json:"name"`
-						Parent struct {
-							Name    string `json:"name"`
-							IsGroup bool   `json:"isGroup"`
-						} `json:"parent"`
-					} `json:"nodes"`
-				} `json:"labels"`
-			} `json:"nodes"`
+			Nodes []issueNode `json:"nodes"`
 		} `json:"issues"`
 	}
 	if err := c.do(ctx, req, &result); err != nil {
@@ -196,25 +345,7 @@ func (c *Client) IssuesInProjectStates(ctx context.Context, projectID string, st
 	}
 	out := make([]Issue, 0, len(result.Issues.Nodes))
 	for _, n := range result.Issues.Nodes {
-		issue := Issue{
-			ID:          n.ID,
-			Identifier:  n.Identifier,
-			Title:       n.Title,
-			Description: n.Description,
-			ProjectID:   n.Project.ID,
-			ProjectName: n.Project.Name,
-			StateName:   n.State.Name,
-		}
-		for _, l := range n.Labels.Nodes {
-			issue.Labels = append(issue.Labels, l.Name)
-			if l.Parent.IsGroup && l.Parent.Name != "" {
-				if issue.LabelGroups == nil {
-					issue.LabelGroups = make(map[string]string, len(n.Labels.Nodes))
-				}
-				issue.LabelGroups[l.Name] = l.Parent.Name
-			}
-		}
-		out = append(out, issue)
+		out = append(out, n.toIssue())
 	}
 	return out, nil
 }
@@ -243,7 +374,7 @@ func (c *Client) IssuesWithLabel(ctx context.Context, projectID, labelName strin
 	req := graphqlRequest{
 		Query: `query($project: ID!, $label: String!) {
             issues(filter: {project: {id: {eq: $project}}, labels: {some: {name: {eq: $label}}}}) {
-                nodes { id identifier labels { nodes { name } } }
+                nodes { id identifier labels { nodes { id name } } }
             }
         }`,
 		Variables: map[string]interface{}{
@@ -257,9 +388,7 @@ func (c *Client) IssuesWithLabel(ctx context.Context, projectID, labelName strin
 				ID         string `json:"id"`
 				Identifier string `json:"identifier"`
 				Labels     struct {
-					Nodes []struct {
-						Name string `json:"name"`
-					} `json:"nodes"`
+					Nodes []labelNode `json:"nodes"`
 				} `json:"labels"`
 			} `json:"nodes"`
 		} `json:"issues"`
@@ -275,6 +404,9 @@ func (c *Client) IssuesWithLabel(ctx context.Context, projectID, labelName strin
 		}
 		for _, l := range n.Labels.Nodes {
 			issue.Labels = append(issue.Labels, l.Name)
+			if l.ID != "" {
+				issue.LabelIDs = append(issue.LabelIDs, l.ID)
+			}
 		}
 		out = append(out, issue)
 	}
@@ -336,44 +468,48 @@ func (c *Client) IssueComments(ctx context.Context, issueID string, limit int) (
 	return bodies, nil
 }
 
-// IssueByIdentifier returns the Linear issue with the given human-readable
-// identifier (e.g. "CRI-1"; Linear's issue(id:) resolves identifiers as
-// well as UUIDs). It backs the watcher's CriteriaRun-driven label
-// reconciliation, which must reach tickets in any workflow state
-// (CRI-219). Unknown issues surface as GraphQL errors.
-func (c *Client) IssueByIdentifier(ctx context.Context, identifier string) (Issue, error) {
-	req := graphqlRequest{
-		Query:     `query($id: String!) { issue(id: $id) { id identifier title labels { nodes { name } } } }`,
-		Variables: map[string]interface{}{"id": identifier},
+// IssuesByIdentifiers resolves the given human-readable issue identifiers
+// (e.g. "CRI-1") with one batched query (CRI-252): Linear's
+// issues(id: {in: $ids}) filter accepts the same identifier values as the
+// per-ticket issue(id:) lookup, so the watcher resolves every runs-index
+// ticket in a single request per poll instead of one request per ticket.
+// Unknown identifiers are simply absent from the result. Identifiers are
+// queried in batches of linearIssuesBatch. The returned issues carry the
+// same label data — names, group membership, and label IDs — as the
+// state listing query. An empty input queries nothing.
+func (c *Client) IssuesByIdentifiers(ctx context.Context, identifiers []string) ([]Issue, error) {
+	if len(identifiers) == 0 {
+		return nil, nil
 	}
-	var result struct {
-		Issue struct {
-			ID         string `json:"id"`
-			Identifier string `json:"identifier"`
-			Title      string `json:"title"`
-			Labels     struct {
-				Nodes []struct {
-					Name string `json:"name"`
-				} `json:"nodes"`
-			} `json:"labels"`
-		} `json:"issue"`
+	out := make([]Issue, 0, len(identifiers))
+	for start := 0; start < len(identifiers); start += linearIssuesBatch {
+		end := min(start+linearIssuesBatch, len(identifiers))
+		batch := identifiers[start:end]
+		req := graphqlRequest{
+			Query: `query($ids: [ID!]!, $first: Int!) {
+            issues(filter: {id: {in: $ids}}, first: $first) {
+                nodes { id identifier title description state { name } project { id name }
+                        labels { nodes { id name parent { name isGroup } } } }
+            }
+        }`,
+			Variables: map[string]interface{}{
+				"ids":   batch,
+				"first": len(batch),
+			},
+		}
+		var result struct {
+			Issues struct {
+				Nodes []issueNode `json:"nodes"`
+			} `json:"issues"`
+		}
+		if err := c.do(ctx, req, &result); err != nil {
+			return nil, err
+		}
+		for _, n := range result.Issues.Nodes {
+			out = append(out, n.toIssue())
+		}
 	}
-	if err := c.do(ctx, req, &result); err != nil {
-		return Issue{}, err
-	}
-	if result.Issue.ID == "" {
-		return Issue{}, fmt.Errorf("linear issue %s not found", identifier)
-	}
-	labels := make([]string, 0, len(result.Issue.Labels.Nodes))
-	for _, n := range result.Issue.Labels.Nodes {
-		labels = append(labels, n.Name)
-	}
-	return Issue{
-		ID:         result.Issue.ID,
-		Identifier: result.Issue.Identifier,
-		Title:      result.Issue.Title,
-		Labels:     labels,
-	}, nil
+	return out, nil
 }
 
 // FindProjectTeamID returns the ID of the first team the given project
@@ -467,35 +603,13 @@ func (c *Client) createTeamLabel(ctx context.Context, teamID, name, color string
 	return result.IssueLabelCreate.IssueLabel.ID, nil
 }
 
-// issueLabelIDs returns the IDs of the issue's current labels.
-func (c *Client) issueLabelIDs(ctx context.Context, issueID string) ([]string, error) {
-	req := graphqlRequest{
-		Query:     `query($id: String!) { issue(id: $id) { labels { nodes { id } } } }`,
-		Variables: map[string]interface{}{"id": issueID},
-	}
-	var result struct {
-		Issue struct {
-			Labels struct {
-				Nodes []struct {
-					ID string `json:"id"`
-				} `json:"nodes"`
-			} `json:"labels"`
-		} `json:"issue"`
-	}
-	if err := c.do(ctx, req, &result); err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(result.Issue.Labels.Nodes))
-	for _, n := range result.Issue.Labels.Nodes {
-		ids = append(ids, n.ID)
-	}
-	return ids, nil
-}
-
-// setIssueLabelIDs replaces the issue's label set. Linear labelIds have
-// REPLACE semantics: callers must pass the full desired set, never just the
-// delta (CRI-219).
-func (c *Client) setIssueLabelIDs(ctx context.Context, issueID string, labelIDs []string) error {
+// SetIssueLabelIDs replaces the issue's label set. Linear labelIds have
+// REPLACE semantics: callers must pass the full desired set, never just
+// the delta (CRI-219). The watcher computes the desired set from the label
+// data already read in the same poll (CRI-252), so a write needs no
+// preceding per-issue label read; the write is skipped entirely when the
+// issue's label set already matches the desired one.
+func (c *Client) SetIssueLabelIDs(ctx context.Context, issueID string, labelIDs []string) error {
 	req := graphqlRequest{
 		Query: `mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`,
 		Variables: map[string]interface{}{
@@ -515,38 +629,6 @@ func (c *Client) setIssueLabelIDs(ctx context.Context, issueID string, labelIDs 
 		return fmt.Errorf("linear issueUpdate did not succeed for issue %s", issueID)
 	}
 	return nil
-}
-
-// AddIssueLabel adds labelID to the issue's existing label set. The set is
-// read-modify-write: because Linear labelIds have REPLACE semantics, the
-// write always carries the full merged set, so no label the issue already
-// carries can be dropped. Adding a label the issue already carries is a
-// no-op.
-func (c *Client) AddIssueLabel(ctx context.Context, issueID, labelID string) error {
-	ids, err := c.issueLabelIDs(ctx, issueID)
-	if err != nil {
-		return err
-	}
-	if slices.Contains(ids, labelID) {
-		return nil
-	}
-	return c.setIssueLabelIDs(ctx, issueID, append(slices.Clone(ids), labelID))
-}
-
-// RemoveIssueLabel removes labelID from the issue's label set, leaving
-// every other label untouched (read-modify-write; see AddIssueLabel).
-// Removing a label the issue does not carry is a no-op.
-func (c *Client) RemoveIssueLabel(ctx context.Context, issueID, labelID string) error {
-	ids, err := c.issueLabelIDs(ctx, issueID)
-	if err != nil {
-		return err
-	}
-	idx := slices.Index(ids, labelID)
-	if idx < 0 {
-		return nil
-	}
-	ids = slices.Delete(slices.Clone(ids), idx, idx+1)
-	return c.setIssueLabelIDs(ctx, issueID, ids)
 }
 
 // RepoValidator checks whether a short-form owner/repo reference names an existing

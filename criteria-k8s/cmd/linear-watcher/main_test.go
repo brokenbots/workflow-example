@@ -25,11 +25,17 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 )
 
-// logRecorder is a logr.LogSink collecting message strings, so tests can
-// assert the watcher logged a skip or a failure.
+// logRecorder is a logr.LogSink collecting log entries with their levels,
+// so tests can assert the watcher logged a skip or a failure and that
+// verbosity-gated messages (V(1)) appear exactly as often as intended.
+type logEntry struct {
+	level int // Info verbosity (0, 1, ...); -1 for Error
+	msg   string
+}
+
 type logRecorder struct {
 	mu      sync.Mutex
-	entries []string
+	entries []logEntry
 }
 
 func (r *logRecorder) Init(logr.RuntimeInfo) {}
@@ -37,12 +43,12 @@ func (r *logRecorder) Enabled(int) bool      { return true }
 func (r *logRecorder) Info(level int, msg string, kv ...interface{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.entries = append(r.entries, msg)
+	r.entries = append(r.entries, logEntry{level: level, msg: msg})
 }
 func (r *logRecorder) Error(err error, msg string, kv ...interface{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.entries = append(r.entries, msg+" ("+err.Error()+")")
+	r.entries = append(r.entries, logEntry{level: -1, msg: msg + " (" + err.Error() + ")"})
 }
 func (r *logRecorder) WithName(string) logr.LogSink           { return r }
 func (r *logRecorder) WithValues(...interface{}) logr.LogSink { return r }
@@ -51,11 +57,39 @@ func (r *logRecorder) contains(substr string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, e := range r.entries {
-		if strings.Contains(e, substr) {
+		if strings.Contains(e.msg, substr) {
 			return true
 		}
 	}
 	return false
+}
+
+// infoCount counts always-emitted (V(0)) Info entries whose message
+// contains substr.
+func (r *logRecorder) infoCount(substr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, e := range r.entries {
+		if e.level == 0 && strings.Contains(e.msg, substr) {
+			count++
+		}
+	}
+	return count
+}
+
+// v1InfoCount counts verbosity-gated (V(1)) Info entries whose message
+// contains substr.
+func (r *logRecorder) v1InfoCount(substr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, e := range r.entries {
+		if e.level == 1 && strings.Contains(e.msg, substr) {
+			count++
+		}
+	}
+	return count
 }
 
 // fakeLabel is a team-scoped Linear issue label in the fake server.
@@ -86,7 +120,18 @@ type linearServer struct {
 	// CRI-220: when set, the orphan-sweep candidates query fails with a
 	// GraphQL error.
 	failCandidates bool
-	ts             *httptest.Server
+	// CRI-252: request accounting and rate-limit injection. While
+	// rateLimited is set, every query is answered with a rate limit
+	// rejection instead of its normal response: HTTP 429 (with an optional
+	// Retry-After header) or a 200 GraphQL RATELIMITED error carrying a
+	// rateLimitResult duration in milliseconds.
+	requests            int
+	queriesServed       []string
+	rateLimited         bool
+	rateLimitHTTP429    bool
+	retryAfterHeader    string
+	rateLimitDurationMS int
+	ts                  *httptest.Server
 }
 
 func newLinearServer(t *testing.T) *linearServer {
@@ -102,6 +147,37 @@ func newLinearServer(t *testing.T) *linearServer {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			t.Errorf("decoding request: %v", err)
+		}
+		// CRI-252: count every request and, while the rate-limit injection
+		// is set, reject every query with a rate limit response before any
+		// normal handling.
+		s.mu.Lock()
+		s.requests++
+		s.queriesServed = append(s.queriesServed, raw.Query)
+		limited, four29, retryAfter, durationMS := s.rateLimited, s.rateLimitHTTP429, s.retryAfterHeader, s.rateLimitDurationMS
+		s.mu.Unlock()
+		if limited {
+			w.Header().Set("Content-Type", "application/json")
+			if four29 {
+				if retryAfter != "" {
+					w.Header().Set("Retry-After", retryAfter)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte("rate limited"))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []interface{}{map[string]interface{}{
+					"message": "Too many requests",
+					"extensions": map[string]interface{}{
+						"code": "RATELIMITED",
+						"meta": map[string]interface{}{
+							"rateLimitResult": map[string]interface{}{"duration": durationMS},
+						},
+					},
+				}},
+			})
+			return
 		}
 		resp := map[string]interface{}{}
 		switch {
@@ -147,6 +223,29 @@ func newLinearServer(t *testing.T) *linearServer {
 			nodes := []interface{}{}
 			for _, n := range s.issues {
 				if slices.Contains(s.issueLabelNames[n["id"].(string)], variables.Label) {
+					nodes = append(nodes, s.servedIssueLocked(n))
+				}
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issues": map[string]interface{}{"nodes": nodes},
+			}
+		case strings.Contains(raw.Query, "id: {in:"):
+			// CRI-252: the batched identifier lookup for change-driven
+			// reconciliation. Unknown identifiers are simply absent from
+			// the response.
+			var variables struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.Unmarshal(raw.Variables, &variables); err != nil {
+				t.Errorf("decoding batched ids variables: %v", err)
+				return
+			}
+			s.mu.Lock()
+			nodes := []interface{}{}
+			for _, n := range s.issues {
+				ident, _ := n["identifier"].(string)
+				if slices.Contains(variables.IDs, ident) {
 					nodes = append(nodes, s.servedIssueLocked(n))
 				}
 			}
@@ -309,46 +408,6 @@ func newLinearServer(t *testing.T) *linearServer {
 			resp["data"] = map[string]interface{}{
 				"issueLabels": map[string]interface{}{"nodes": nodes},
 			}
-		case strings.Contains(raw.Query, "issue(id:"):
-			var variables struct {
-				ID string `json:"id"`
-			}
-			if err := json.Unmarshal(raw.Variables, &variables); err != nil {
-				t.Errorf("decoding issue variables: %v", err)
-				return
-			}
-			s.mu.Lock()
-			// Linear's issue(id:) query accepts either the node id or the
-			// human identifier and returns the node's canonical id, so the
-			// fake resolves the fixture the same way.
-			var found map[string]interface{}
-			for _, n := range s.issues {
-				id, _ := n["id"].(string)
-				ident, _ := n["identifier"].(string)
-				if id == variables.ID || ident == variables.ID {
-					found = n
-				}
-			}
-			if found == nil {
-				s.mu.Unlock()
-				resp["errors"] = []interface{}{map[string]interface{}{"message": "issue not found"}}
-				break
-			}
-			issueID, _ := found["id"].(string)
-			issueIdentifier, _ := found["identifier"].(string)
-			names := append([]string(nil), s.issueLabelNames[issueID]...)
-			nodes := make([]interface{}, 0, len(names))
-			for _, name := range names {
-				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name), "name": name})
-			}
-			s.mu.Unlock()
-			resp["data"] = map[string]interface{}{
-				"issue": map[string]interface{}{
-					"id":         issueID,
-					"identifier": issueIdentifier,
-					"labels":     map[string]interface{}{"nodes": nodes},
-				},
-			}
 		default:
 			t.Errorf("unexpected query: %s", raw.Query)
 		}
@@ -394,7 +453,10 @@ func (s *linearServer) setIssues(issues ...map[string]interface{}) {
 // fake's per-issue label state (the lifecycle mutates labels at runtime, so
 // the static fixture must not shadow it). Fixture label nodes are kept —
 // they may carry group info the route resolver needs — and runtime-added
-// labels are synthesized as name-only nodes. Callers must hold s.mu.
+// labels are synthesized as name-only nodes. Every served label node gets
+// the fake's deterministic `lbl-`+name id (CRI-252: the batched query must
+// return the same label ids the per-ticket resolution did). Callers must
+// hold s.mu.
 func (s *linearServer) servedIssueLocked(n map[string]interface{}) map[string]interface{} {
 	id, _ := n["id"].(string)
 	names, ok := s.issueLabelNames[id]
@@ -413,11 +475,17 @@ func (s *linearServer) servedIssueLocked(n map[string]interface{}) map[string]in
 	}
 	labelNodes := make([]interface{}, 0, len(names))
 	for _, name := range names {
-		if node, ok := fixtureNodes[name]; ok {
-			labelNodes = append(labelNodes, node)
-			continue
+		node := map[string]interface{}{"name": name, "id": s.labelIDLocked(name)}
+		if fixture, ok := fixtureNodes[name]; ok {
+			if fm, ok := fixture.(map[string]interface{}); ok {
+				for k, v := range fm {
+					if k != "id" {
+						node[k] = v
+					}
+				}
+			}
 		}
-		labelNodes = append(labelNodes, map[string]interface{}{"name": name})
+		labelNodes = append(labelNodes, node)
 	}
 	clone := make(map[string]interface{}, len(n))
 	for k, v := range n {
@@ -500,6 +568,91 @@ func (s *linearServer) setFailCandidates(v bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failCandidates = v
+}
+
+// requestCount returns the number of Linear queries the server served.
+func (s *linearServer) requestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests
+}
+
+// resetRequests zeroes the request counter, so a subsequent poll can assert
+// its own request budget (CRI-252: a no-change poll must issue exactly two
+// listing queries — the states query and the orphan-sweep candidates query).
+func (s *linearServer) resetRequests() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = 0
+	s.queriesServed = nil
+}
+
+// queriesServed returns the query texts of every request served since the
+// last resetRequests, for debugging request-budget assertions.
+func (s *linearServer) queriesServedCopy() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.queriesServed...)
+}
+
+// queryKinds classifies every request served since the last resetRequests
+// into a stable vocabulary, so tests can pin exact Linear request budgets
+// (CRI-252) without matching raw GraphQL text.
+func (s *linearServer) queryKinds() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kinds := make([]string, 0, len(s.queriesServed))
+	for _, q := range s.queriesServed {
+		switch {
+		case strings.Contains(q, "id: {in:"):
+			kinds = append(kinds, "ticketBatch")
+		case strings.Contains(q, "labels: {some:"):
+			kinds = append(kinds, "sweepCandidates")
+		case strings.Contains(q, "issueUpdate"):
+			kinds = append(kinds, "labelWrite")
+		case strings.Contains(q, "commentCreate"):
+			kinds = append(kinds, "commentWrite")
+		case strings.Contains(q, "comments"):
+			kinds = append(kinds, "commentRead")
+		case strings.Contains(q, "issueLabelCreate"):
+			kinds = append(kinds, "labelCreate")
+		case strings.Contains(q, "issueLabels"):
+			kinds = append(kinds, "labelRead")
+		case strings.Contains(q, "projects"):
+			kinds = append(kinds, "projectLookup")
+		case strings.Contains(q, "teams"):
+			kinds = append(kinds, "teamLookup")
+		case strings.Contains(q, "issues"):
+			kinds = append(kinds, "stateListing")
+		default:
+			kinds = append(kinds, "unknown")
+		}
+	}
+	return kinds
+}
+
+// setRateLimited turns on rate-limit rejection. http429 selects the
+// transport-level rejection (with an optional Retry-After header);
+// otherwise the server answers 200 with a GraphQL RATELIMITED error
+// carrying durationMS — Linear reports the rateLimitResult duration in
+// milliseconds.
+func (s *linearServer) setRateLimited(http429 bool, retryAfter string, durationMS int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rateLimited = true
+	s.rateLimitHTTP429 = http429
+	s.retryAfterHeader = retryAfter
+	s.rateLimitDurationMS = durationMS
+}
+
+// clearRateLimited heals the server: queries are answered normally again.
+func (s *linearServer) clearRateLimited() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rateLimited = false
+	s.rateLimitHTTP429 = false
+	s.retryAfterHeader = ""
+	s.rateLimitDurationMS = 0
 }
 
 // createdLabels returns a copy of the fake's label registry.
@@ -688,6 +841,13 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 func (tw *testWatcher) restarted() *testWatcher {
 	recorder := &logRecorder{}
 	fresh := *tw.w
+	// CRI-252: a restart drops the watcher's in-memory state — the cached
+	// automation label ids and the recorded per-ticket phases — while the
+	// fake Linear server and the k8s objects persist across the restart.
+	fresh.automationLabelID = ""
+	fresh.dirtyLabelID = ""
+	fresh.lastPhases = nil
+	fresh.backoffAttempt = 0
 	fresh.log = logr.New(recorder)
 	return &testWatcher{w: &fresh, linearS: tw.linearS, client: tw.client, logs: recorder}
 }
@@ -1022,7 +1182,7 @@ func TestPollCreateRunAddsAutomationLabel(t *testing.T) {
 	assert.Equal(t, []string{"lbl-k8s-run", "lbl-fast", "lbl-criteria-automation"},
 		tw.linearS.lastLabelUpdateIDs(),
 		"the write must carry the full merged label set (REPLACE semantics)")
-	assert.True(t, tw.logs.contains("added Linear label"))
+	assert.True(t, tw.logs.contains("wrote Linear labels"))
 }
 
 // TestPollSucceededRemovesAutomationNoDirty covers the clean terminal state:
@@ -1049,7 +1209,7 @@ func TestPollSucceededRemovesAutomationNoDirty(t *testing.T) {
 	assert.Equal(t, 1, tw.linearS.labelUpdateCount()-writes, "exactly one removal write")
 	assert.Equal(t, []string{"lbl-fast"}, tw.linearS.lastLabelUpdateIDs(),
 		"the removal write carries only the remaining labels")
-	assert.True(t, tw.logs.contains("removed Linear label"))
+	assert.True(t, tw.logs.contains("wrote Linear labels"))
 }
 
 // TestPollFailedRemovesAutomationAddsDirty covers the dirty terminal state:
@@ -1074,8 +1234,9 @@ func TestPollFailedRemovesAutomationAddsDirty(t *testing.T) {
 	assert.Equal(t, []string{"fast", "criteria-dirty"},
 		tw.linearS.issueLabelsOf("i-1"),
 		"automation label removed, dirty label present, other labels intact")
-	assert.Equal(t, 2, tw.linearS.labelUpdateCount()-writes, "one removal and one addition")
-	assert.True(t, tw.logs.contains("added Linear label"), "the dirty label add is logged")
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount()-writes,
+		"a single REPLACE write performs the removal and the dirty add")
+	assert.True(t, tw.logs.contains("wrote Linear labels"), "the label write is logged")
 }
 
 // TestRestartConvergesLabelState proves restart-safety: a fresh watcher with
@@ -1125,11 +1286,12 @@ func TestRestartConvergesLabelState(t *testing.T) {
 
 		assert.Equal(t, []string{"fast", "criteria-dirty"}, tw2.linearS.issueLabelsOf("i-1"),
 			"no lingering criteria-automation after Failed and criteria-dirty present")
-		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes)
+		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
+			"a single REPLACE write performs the removal and the dirty add")
 
 		// Converged state stays converged: the next poll is a no-op.
 		tw2.pollOnce(t)
-		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes,
+		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
 			"the next poll performs no further label writes")
 	})
 }
@@ -1188,8 +1350,8 @@ func TestReconcileTicketOutsideRouteStates(t *testing.T) {
 		assert.Equal(t, []string{"k8s-run", "fast", "criteria-dirty"},
 			tw2.linearS.issueLabelsOf("i-9"),
 			"criteria-automation removed and criteria-dirty added outside the route-declared states")
-		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes,
-			"one removal and one addition")
+		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
+			"a single REPLACE write performs the removal and the dirty add")
 		assert.Len(t, tw2.runs(t), 1,
 			"run firing stays scoped to route-declared states; no successor run fires")
 	})
@@ -1239,7 +1401,8 @@ func TestPollOrphanSweepDirtiesLabelWithoutRuns(t *testing.T) {
 
 		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
 			"automation marker removed, dirty marker added, unrelated labels intact")
-		assert.Equal(t, 2, tw.linearS.labelUpdateCount(), "one dirty add and one automation removal")
+		assert.Equal(t, 1, tw.linearS.labelUpdateCount(),
+			"a single REPLACE write performs the removal and the dirty add")
 		assert.True(t, tw.logs.contains("sweeping orphaned automation label"))
 		assert.True(t, tw.logs.contains("orphan sweep complete"))
 		assert.Empty(t, tw.runs(t), "no run exists for the orphaned ticket")
@@ -1266,7 +1429,7 @@ func TestPollOrphanSweepDirtiesLabelWithoutRuns(t *testing.T) {
 
 		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
 		assert.Equal(t, []string{"fast", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-2"))
-		assert.Equal(t, 4, tw.linearS.labelUpdateCount(), "two writes per orphan")
+		assert.Equal(t, 2, tw.linearS.labelUpdateCount(), "one write per orphan")
 		assert.Equal(t, []string{"lbl-fast", "lbl-criteria-dirty"}, tw.linearS.lastLabelUpdateIDs(),
 			"the last write is CRI-2's removal: CRI-1 was processed first")
 	})
@@ -1345,8 +1508,8 @@ func TestPollOrphanSweepGuardRespectsTerminalEvents(t *testing.T) {
 		tw.pollOnce(t)
 
 		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
-		assert.Equal(t, 2, tw.linearS.labelUpdateCount()-writes,
-			"reconciliation performs the removal and the dirty add")
+		assert.Equal(t, 1, tw.linearS.labelUpdateCount()-writes,
+			"a single REPLACE write performs the removal and the dirty add")
 		assert.False(t, tw.logs.contains("sweeping orphaned automation label"),
 			"a ticket with a recorded terminal event is not swept as orphaned")
 	})
@@ -1377,7 +1540,7 @@ func TestPollDeletedWhileRunningRunDirtiesTicket(t *testing.T) {
 	assert.Empty(t, tw.runs(t), "no successor run fires for the deleted run's ticket")
 	assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
 		"the deleted run's ticket receives the dirty treatment on the next poll")
-	assert.Equal(t, 2, tw.linearS.labelUpdateCount()-writes)
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount()-writes)
 	assert.True(t, tw.logs.contains("sweeping orphaned automation label"))
 }
 
@@ -1404,7 +1567,7 @@ func TestPollOrphanSweepAfterRestart(t *testing.T) {
 
 	assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw2.linearS.issueLabelsOf("i-1"),
 		"the fresh watcher sweeps the persisted orphan")
-	assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes)
+	assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes)
 	assert.True(t, tw2.logs.contains("sweeping orphaned automation label"))
 }
 
@@ -1501,7 +1664,7 @@ func TestPollOrphanSweepDeferredWhenCandidatesQueryFails(t *testing.T) {
 		"no label write when the candidates query fails")
 	assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName,
 		"the orphan evidence is preserved for the next poll")
-	assert.True(t, tw.logs.contains("orphan sweep deferred"),
+	assert.True(t, tw.logs.contains("orphan sweep failed; deferred"),
 		"the deferral is logged and the poll continues")
 
 	// The query heals on the next poll and the sweep converges the ticket.
@@ -1557,4 +1720,240 @@ func TestPollSkipsWhenAutomationLabelPresentWithoutMatchingRun(t *testing.T) {
 	assert.Equal(t, "cri-1-legacy", runs[0].Name, "only the legacy run exists; no watcher run was created")
 	assert.True(t, tw.logs.contains("single-active invariant"),
 		"the skip is logged with the invariant reason")
+}
+
+// CRI-252: Linear API consumer discipline.
+
+// prewarmLabelIDs seeds the watcher's cached automation label ids, so a
+// poll issues no ensure queries at all (the steady-state request budget is
+// exactly the two listing queries).
+func (tw *testWatcher) prewarmLabelIDs() {
+	tw.w.automationLabelID = "lbl-" + automationLabelName
+	tw.w.dirtyLabelID = "lbl-" + dirtyLabelName
+}
+
+// liveRun builds a CriteriaRun in the given phase that matches the
+// watcher's source selector, without the watcher creating it.
+func liveRun(t *testing.T, tw *testWatcher, ticket string, phase criteriav1.CriteriaRunPhase) {
+	t.Helper()
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      strings.ToLower(ticket) + "-live",
+			Namespace: tw.w.namespace,
+			Labels: map[string]string{
+				"ticket":                         strings.ToLower(ticket),
+				"app.kubernetes.io/managed-by":   "criteria-linear-watcher",
+				"criteria.brokenbots.dev/source": "linear",
+			},
+		},
+		Spec:   criteriav1.CriteriaRunSpec{TicketID: ticket, RepoURL: "https://github.com/brokenbots/workflow-example"},
+		Status: criteriav1.CriteriaRunStatus{Phase: phase},
+	}
+	require.NoError(t, tw.client.Create(context.Background(), run))
+}
+
+// TestPollSteadyStateZeroRequests pins the CRI-252 exit criterion: a poll
+// in which no k8s CR phase changed issues exactly two Linear requests (the
+// states listing and the orphan-sweep candidates query), ZERO label reads,
+// ZERO label writes and ZERO constant lookups. A phase change triggers one
+// extra batched read and the required write — with no pre-write label read,
+// since the batched read already carries the label ids — and the next
+// unchanged poll is frugal again.
+func TestPollSteadyStateZeroRequests(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.prewarmLabelIDs()
+	// A running run for CRI-1 whose labels are already converged.
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(),
+		map[string]interface{}{"name": automationLabelName}))
+	liveRun(t, tw, "CRI-1", criteriav1.PhaseRunning)
+
+	// First sight: the fresh watcher reconciles from the batched read
+	// (labels already correct, so no write) and records the phase.
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"stateListing", "ticketBatch", "sweepCandidates"},
+		tw.linearS.queryKinds(), "first poll: the two listing queries plus one batched ticket read")
+	assert.Equal(t, 0, tw.linearS.labelUpdateCount())
+	assert.Len(t, tw.runs(t), 1)
+
+	// Steady state: nothing changed — exactly the two listing queries.
+	tw.linearS.resetRequests()
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"stateListing", "sweepCandidates"},
+		tw.linearS.queryKinds(),
+		"no-change poll: only the states and candidates queries, no ticket reads, no label reads")
+	assert.Equal(t, 0, tw.linearS.labelUpdateCount(), "no-change poll: zero label writes")
+
+	// The run succeeds: exactly one phase-change poll performs the
+	// reconciliation write. The intake workflow clears the trigger label as
+	// the run settles (as in TestPollSucceededRemovesAutomationNoDirty), so
+	// the ticket does not re-fire.
+	tw.setRunPhase(t, "CRI-1", criteriav1.PhaseSucceeded)
+	tw.linearS.setIssueLabels("i-1", automationLabelName)
+	tw.linearS.resetRequests()
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"stateListing", "ticketBatch", "labelWrite", "sweepCandidates"},
+		tw.linearS.queryKinds(),
+		"change poll: one batched read and one write with NO label read in between (write dedupe)")
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount(), "change poll: exactly one label write")
+	assert.Empty(t, tw.linearS.lastLabelUpdateIDs(),
+		"the write payload comes from the batched read: no pre-write label read")
+
+	// Converged again: back to the two-query budget with zero writes.
+	tw.linearS.resetRequests()
+	writes := tw.linearS.labelUpdateCount()
+	tw.pollOnce(t)
+	assert.Equal(t, []string{"stateListing", "sweepCandidates"},
+		tw.linearS.queryKinds(), "post-change steady state: back to the two-query budget")
+	assert.Equal(t, writes, tw.linearS.labelUpdateCount())
+}
+
+// TestPollRateLimitedSkipsAndBacksOff pins the CRI-252 rate-limit handling
+// at the poll boundary: a rate-limited query (HTTP 429 or a GraphQL
+// RATELIMITED error) aborts the poll with an IsRateLimit error before any
+// run is created, and Linear's rateLimitResult.duration is surfaced on the
+// error for the back-off loop to honor.
+func TestPollRateLimitedSkipsAndBacksOff(t *testing.T) {
+	t.Run("HTTP 429 skips the poll and creates no run", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.prewarmLabelIDs()
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.linearS.setRateLimited(true, "7", 0)
+
+		err := tw.w.poll(context.Background(), "proj-1")
+
+		require.Error(t, err, "the rate-limited poll must surface the failure")
+		assert.True(t, linear.IsRateLimit(err), "the poll error is a rate-limit error")
+		assert.Empty(t, tw.runs(t), "a rate-limited poll creates no run")
+		assert.Equal(t, 1, tw.linearS.requestCount(),
+			"the poll stops at the first rate-limited query instead of looping")
+	})
+
+	t.Run("GraphQL RATELIMITED error carries Linear's duration", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.prewarmLabelIDs()
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.linearS.setRateLimited(false, "", 40000)
+
+		err := tw.w.poll(context.Background(), "proj-1")
+
+		require.Error(t, err)
+		var rl *linear.RateLimitError
+		require.ErrorAs(t, err, &rl)
+		assert.Equal(t, 40*time.Second, rl.Duration,
+			"Linear's rateLimitResult.duration (milliseconds) is surfaced as a duration")
+		assert.Empty(t, tw.runs(t))
+		assert.Equal(t, 1, tw.linearS.requestCount())
+	})
+
+	t.Run("after the rate limit clears the poll fires normally", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.prewarmLabelIDs()
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+		tw.linearS.setRateLimited(true, "", 0)
+		require.Error(t, tw.w.poll(context.Background(), "proj-1"))
+
+		tw.linearS.clearRateLimited()
+		tw.pollOnce(t)
+
+		require.Len(t, tw.runs(t), 1, "the healed poll proceeds normally")
+		assert.Contains(t, tw.linearS.issueLabelsOf("i-1"), automationLabelName)
+	})
+}
+
+// TestRunRateLimitBackoffLoop pins the CRI-252 back-off loop: while Linear
+// rate-limits, the watcher skips polls and backs the interval off
+// exponentially (logging a single V(0) rate-limit event per back-off
+// window, with V(1) continuations, and never logging "poll failed"); when
+// the rate limit clears, the next poll succeeds, the interval returns to
+// normal, and the watcher resumes.
+func TestRunRateLimitBackoffLoop(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+	tw.w.pollInterval = 20 * time.Millisecond
+	tw.w.teamID = "team-1"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- tw.w.run(ctx) }()
+
+	// Let the healthy startup and first polls pass, then rate-limit.
+	time.Sleep(60 * time.Millisecond)
+	tw.linearS.setRateLimited(true, "", 0)
+	// Back off for a while (several polls at a doubling interval).
+	time.Sleep(100 * time.Millisecond)
+	tw.linearS.clearRateLimited()
+	// Let the healed poll run and the interval be restored.
+	time.Sleep(250 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not exit after context cancel")
+	}
+
+	assert.Equal(t, 1, tw.logs.infoCount("linear rate limited"),
+		"a single rate-limit event is logged per back-off window")
+	assert.True(t, tw.logs.v1InfoCount("linear rate limited") >= 1,
+		"back-off continuations are logged at V(1), not as new rate-limit events")
+	assert.False(t, tw.logs.contains("poll failed"),
+		"rate-limited polls are skipped, not reported as poll failures")
+	require.Len(t, tw.runs(t), 1, "the watcher resumed and fired the staged ticket")
+	assert.True(t, tw.logs.contains("poll interval restored"),
+		"a successful poll after back-off returns the interval to normal")
+}
+
+// TestNextBackoffInterval pins the back-off math: the interval doubles per
+// skipped poll up to the cap, Linear's advertised duration wins when
+// provided (even beyond the cap), and the rate-limit error alone does not
+// mutate the watcher state.
+func TestNextBackoffInterval(t *testing.T) {
+	t.Run("doubles the current interval", func(t *testing.T) {
+		w := &watcher{log: logr.New(&logRecorder{})}
+		assert.Equal(t, 2*time.Minute, w.nextBackoffInterval(time.Minute, &linear.RateLimitError{}))
+		assert.Equal(t, 1, w.backoffAttempt)
+	})
+	t.Run("compounds over repeated skips", func(t *testing.T) {
+		w := &watcher{log: logr.New(&logRecorder{})}
+		next := w.nextBackoffInterval(time.Minute, &linear.RateLimitError{})
+		assert.Equal(t, 2*time.Minute, next)
+		next = w.nextBackoffInterval(next, &linear.RateLimitError{})
+		assert.Equal(t, 4*time.Minute, next)
+		next = w.nextBackoffInterval(next, &linear.RateLimitError{})
+		assert.Equal(t, 8*time.Minute, next,
+			"the caller feeds the returned interval back in")
+	})
+	t.Run("caps at the configured cap", func(t *testing.T) {
+		w := &watcher{log: logr.New(&logRecorder{})}
+		assert.Equal(t, backoffCap, w.nextBackoffInterval(20*time.Minute, &linear.RateLimitError{}))
+		assert.Equal(t, backoffCap, w.nextBackoffInterval(backoffCap, &linear.RateLimitError{}))
+		assert.Equal(t, backoffCap, w.nextBackoffInterval(45*time.Minute, &linear.RateLimitError{}))
+	})
+	t.Run("Linear's duration wins over the computed next", func(t *testing.T) {
+		w := &watcher{log: logr.New(&logRecorder{})}
+		rl := &linear.RateLimitError{Duration: 17 * time.Minute}
+		assert.Equal(t, 17*time.Minute, w.nextBackoffInterval(8*time.Minute, rl),
+			"never back off less than Linear's advertised duration")
+	})
+	t.Run("Linear's duration wins even beyond the cap", func(t *testing.T) {
+		w := &watcher{log: logr.New(&logRecorder{})}
+		rl := &linear.RateLimitError{Duration: 45 * time.Minute}
+		assert.Equal(t, 45*time.Minute, w.nextBackoffInterval(backoffCap, rl))
+	})
+}
+
+// TestDefaultPollIntervalIsFiveMinutes pins the CRI-252 default poll
+// interval of 5m and its env override: the flag default parses
+// POLL_INTERVAL when set (falling back to 5m when absent or unparseable).
+func TestDefaultPollIntervalIsFiveMinutes(t *testing.T) {
+	assert.Equal(t, 5*time.Minute, defaultPollInterval)
+	assert.Equal(t, 5*time.Minute, *pollInterval,
+		"the built-in flag default is 5m (tests run without POLL_INTERVAL set)")
+	assert.Equal(t, 5*time.Minute, parseDuration("bogus"),
+		"an unparseable POLL_INTERVAL falls back to the 5m default")
+	assert.Equal(t, 90*time.Second, parseDuration("90s"))
+
+	t.Setenv("POLL_INTERVAL", "90s")
+	assert.Equal(t, 90*time.Second, parseDuration(getenv("POLL_INTERVAL", "5m")),
+		"POLL_INTERVAL overrides the default")
 }
