@@ -5,6 +5,10 @@
 # IfNotPresent, so every build gets a timestamped tag.
 WORKFLOW_IMAGE ?= localhost:5000/linear-intake-remote
 CRITERIA_K8S_IMAGE ?= localhost:5000/criteria-k8s
+# Minimal source-fetching base image (CRI-230): criteria binary + git +
+# ca-certs, fetched-and-applied at run time. Not wired into the operator yet
+# (CRI-231 owns the image/source branching).
+CRITERIA_BASE_IMAGE ?= localhost:5000/criteria-base
 REGISTRY ?= localhost:5000
 
 # Unique tag: date + short git sha (falls back to timestamp outside a repo).
@@ -41,10 +45,39 @@ ifneq ($(CONTAINER_TOOL),)
 	$(CONTAINER_TOOL) push $(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
 endif
 
-# Build both images with one unique tag.
-images: build build-criteria-k8s
+# Minimal criteria base image (CRI-230): builds criteria from the pinned
+# criteria main commit and publishes to the local registry. Without a
+# container tool this falls back to the structural regression test, which
+# still guards the image contract in CI.
+build-criteria-base:
+ifeq ($(CONTAINER_TOOL),)
+	@echo "No container tool found; running the criteria-base structural test instead of building."
+	./k8s/tests/test_criteria_base.sh
+else
+	$(CONTAINER_TOOL) build --build-arg TARGETARCH=amd64 -f criteria-base/Dockerfile -t $(CRITERIA_BASE_IMAGE):$(BUILD_TAG) criteria-base/
+	@echo "Built $(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
+endif
 
-images-push: build-push build-criteria-k8s-push
+build-criteria-base-push: build-criteria-base
+ifneq ($(CONTAINER_TOOL),)
+	$(CONTAINER_TOOL) push $(CRITERIA_BASE_IMAGE):$(BUILD_TAG)
+endif
+
+# Full docker-run smoke test (build + publish + fetch/apply e2e + pin
+# enforcement); needs a container tool and the local registry at
+# localhost:5000. See criteria-base/tests/smoke_test.sh.
+smoke-criteria-base:
+ifeq ($(CONTAINER_TOOL),)
+	@echo "No container tool found; the criteria-base smoke test needs docker/podman."
+	@exit 1
+else
+	CONTAINER_TOOL=$(CONTAINER_TOOL) CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE) ./criteria-base/tests/smoke_test.sh
+endif
+
+# Build all three images with one unique tag.
+images: build build-criteria-k8s build-criteria-base
+
+images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "Tag: $(BUILD_TAG)"
 	@echo "Deploy the watcher with:"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
@@ -84,6 +117,10 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_criteria_k8s_chart.sh
 	@echo "Running routes ConfigMap schema regression test (CRI-216)..."
 	./k8s/tests/test_routes_config.sh
+	@echo "Running criteria-base image structure regression test (CRI-230)..."
+	./k8s/tests/test_criteria_base.sh
+	@echo "Running criteria-base entrypoint behavior regression test (CRI-230)..."
+	./k8s/tests/test_criteria_base_entrypoint.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -106,7 +143,11 @@ lint: lint-criteria-k8s
 		k8s/tests/test_secrets_store_csi.sh \
 		k8s/tests/test_example_manifest.sh \
 		k8s/tests/test_criteria_k8s_chart.sh \
-		k8s/tests/test_routes_config.sh
+		k8s/tests/test_routes_config.sh \
+		criteria-base/entrypoint.sh \
+		criteria-base/tests/smoke_test.sh \
+		k8s/tests/test_criteria_base.sh \
+		k8s/tests/test_criteria_base_entrypoint.sh
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...
