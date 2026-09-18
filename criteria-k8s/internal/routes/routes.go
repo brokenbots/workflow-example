@@ -1,0 +1,484 @@
+// Package routes reads and resolves the Criteria routes ConfigMap
+// (CRI-216/217), the operator configuration of record assigning Linear
+// tickets to workflow-library objects. The payload of record is
+// k8s/routes.schema.json; k8s/examples/routes-configmap.yaml is the shipped
+// example. Lookup rules (CRI-217, per ADR-0005): the k8s-run gate stays
+// global (watcher-side, not here); the ticket's project must exist in the
+// routes map; the matching route's workflow is the project default; a ticket
+// label in the "workflows" label group names a workflow that overrides the
+// default; a missing workflow fails closed.
+package routes
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+)
+
+const (
+	// ConfigMapName is the ConfigMap carrying the routes payload.
+	ConfigMapName = "criteria-routes"
+	// DataKey is the single ConfigMap data key holding the JSON payload.
+	DataKey = "routes.json"
+	// DefaultFile is the in-pod path the watcher reads the payload from:
+	// the ConfigMap is mounted at /etc/criteria/routes and re-read every
+	// poll, so ConfigMap changes never depend on a watcher restart.
+	DefaultFile = "/etc/criteria/routes/routes.json"
+	// APIVersion and Kind constants of the routes payload.
+	APIVersion = "criteria.brokenbots.dev/v1"
+	Kind       = "Routes"
+)
+
+// Workflow source types (ADR-0005 D1/D2). The mode is declared, never
+// inferred: type=image is image-only, type=url is url-only or url+image.
+const (
+	TypeImage = "image"
+	TypeURL   = "url"
+)
+
+// Volume backing kinds.
+const (
+	VolumePVC = "pvc"
+	VolumeNFS = "nfs"
+	VolumeTmp = "tmp"
+)
+
+// TagMatch semantics for a route's tag subset.
+const (
+	TagMatchAll = "all"
+	TagMatchAny = "any"
+)
+
+// Payload is the routes ConfigMap payload (the 'routes.json' data key).
+type Payload struct {
+	APIVersion      string              `json:"apiVersion"`
+	Kind            string              `json:"kind"`
+	WorkflowLibrary map[string]Workflow `json:"workflowLibrary"`
+	Routes          []Route             `json:"routes"`
+}
+
+// Workflow is a workflow-library object: how a run obtains its workflow and
+// where/how it executes.
+type Workflow struct {
+	Type      string            `json:"type"`
+	Namespace string            `json:"namespace"`
+	Image     string            `json:"image,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Ref       string            `json:"ref,omitempty"`
+	Volumes   []Volume          `json:"volumes,omitempty"`
+	Secrets   []Secret          `json:"secrets,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+}
+
+// Volume is a storage volume of kind pvc, nfs, or tmp.
+type Volume struct {
+	Name      string            `json:"name"`
+	Kind      string            `json:"kind"`
+	MountPath string            `json:"mountPath"`
+	SubPath   string            `json:"subPath,omitempty"`
+	ReadOnly  bool              `json:"readOnly,omitempty"`
+	Claim     string            `json:"claim,omitempty"`
+	Server    string            `json:"server,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	SizeLimit string            `json:"sizeLimit,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+}
+
+// Secret is a secret reference (SecretProviderClass name, OpenBao via the
+// Secrets Store CSI driver). No credential material may appear in routes.
+type Secret struct {
+	Name                string            `json:"name"`
+	SecretProviderClass string            `json:"secretProviderClass"`
+	MountPath           string            `json:"mountPath"`
+	Env                 map[string]string `json:"env,omitempty"`
+}
+
+// Route assigns Linear tickets to a workflow-library object by project, tag
+// subset, and Linear workflow states.
+type Route struct {
+	Name     string   `json:"name"`
+	Workflow string   `json:"workflow"`
+	Project  string   `json:"project"`
+	Tags     []string `json:"tags,omitempty"`
+	TagMatch string   `json:"tagMatch,omitempty"`
+	States   []string `json:"states"`
+}
+
+var (
+	labelRe     = mustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	envNameRe   = mustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	secretKeyRe = mustCompile(`^[A-Za-z0-9._-]+$`)
+)
+
+func mustCompile(pattern string) *regexp.Regexp {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		panic("invalid pattern: " + err.Error())
+	}
+	return re
+}
+
+// Parse decodes and validates a routes payload.
+func Parse(data []byte) (*Payload, error) {
+	var p Payload
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", DataKey, err)
+	}
+	if err := p.Validate(); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// LoadFile reads and validates the routes payload from its in-pod file.
+// Callers re-invoke it per poll so ConfigMap changes are honored without a
+// watcher restart.
+func LoadFile(path string) (*Payload, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading routes file %s: %w", path, err)
+	}
+	return Parse(data)
+}
+
+// Validate enforces the fail-closed constraints of k8s/routes.schema.json:
+// the payload shape, the ADR-0005 D1/D2 source modes (declared, never
+// inferred), the pvc/nfs/tmp volume shapes, and route/library integrity.
+func (p *Payload) Validate() error {
+	if p.APIVersion != APIVersion {
+		return fmt.Errorf("apiVersion must be %q, got %q", APIVersion, p.APIVersion)
+	}
+	if p.Kind != Kind {
+		return fmt.Errorf("kind must be %q, got %q", Kind, p.Kind)
+	}
+	if len(p.WorkflowLibrary) == 0 {
+		return errors.New("workflowLibrary must not be empty")
+	}
+	for name, wf := range p.WorkflowLibrary {
+		if err := validateWorkflow(name, wf); err != nil {
+			return fmt.Errorf("workflowLibrary[%q]: %w", name, err)
+		}
+	}
+	if len(p.Routes) == 0 {
+		return errors.New("routes must not be empty")
+	}
+	seenRoutes := make(map[string]bool, len(p.Routes))
+	for i, r := range p.Routes {
+		if !labelRe.MatchString(r.Name) {
+			return fmt.Errorf("routes[%d].name %q is not a DNS-1123 label", i, r.Name)
+		}
+		if seenRoutes[r.Name] {
+			return fmt.Errorf("routes[%d].name %q is not unique", i, r.Name)
+		}
+		seenRoutes[r.Name] = true
+		if _, ok := p.WorkflowLibrary[r.Workflow]; !ok {
+			return fmt.Errorf("routes[%d] (%s): workflow %q is not present in workflowLibrary", i, r.Name, r.Workflow)
+		}
+		if r.Project == "" {
+			return fmt.Errorf("routes[%d] (%s): project is required", i, r.Name)
+		}
+		if len(r.States) == 0 {
+			return fmt.Errorf("routes[%d] (%s): states must not be empty", i, r.Name)
+		}
+		for _, s := range r.States {
+			if s == "" {
+				return fmt.Errorf("routes[%d] (%s): states must not contain empty names", i, r.Name)
+			}
+		}
+		for _, tag := range r.Tags {
+			if tag == "" {
+				return fmt.Errorf("routes[%d] (%s): tags must not contain empty names", i, r.Name)
+			}
+		}
+		switch r.TagMatch {
+		case "", TagMatchAll, TagMatchAny:
+		default:
+			return fmt.Errorf("routes[%d] (%s): tagMatch must be %q or %q, got %q", i, r.Name, TagMatchAll, TagMatchAny, r.TagMatch)
+		}
+	}
+	return nil
+}
+
+// validateWorkflow enforces the per-workflow constraints, including the
+// ADR-0005 D1/D2 mode mapping: type=image means image-only (no url/ref,
+// D2 fail-closed), type=url means the url is required (with or without an
+// image).
+func validateWorkflow(name string, wf Workflow) error {
+	if !labelRe.MatchString(name) {
+		return fmt.Errorf("name is not a DNS-1123 label")
+	}
+	switch wf.Type {
+	case TypeImage:
+		if wf.Image == "" {
+			return fmt.Errorf("type=image requires an image")
+		}
+		if wf.URL != "" || wf.Ref != "" {
+			// D2 fail-closed: an image-only run must not carry fetched
+			// content or a content pin.
+			return fmt.Errorf("type=image must not declare url or ref")
+		}
+	case TypeURL:
+		if wf.URL == "" {
+			return fmt.Errorf("type=url requires a url")
+		}
+	default:
+		return fmt.Errorf("type must be %q or %q, got %q", TypeImage, TypeURL, wf.Type)
+	}
+	if !labelRe.MatchString(wf.Namespace) {
+		return fmt.Errorf("namespace %q is not a DNS-1123 label", wf.Namespace)
+	}
+	if err := validateEnvMap(wf.Env, "env"); err != nil {
+		return err
+	}
+	seenVolumes := make(map[string]bool, len(wf.Volumes))
+	for i, v := range wf.Volumes {
+		if err := validateVolume(v); err != nil {
+			return fmt.Errorf("volumes[%d] (%s): %w", i, v.Name, err)
+		}
+		if seenVolumes[v.Name] {
+			return fmt.Errorf("volumes[%d] (%s): name is not unique within the workflow", i, v.Name)
+		}
+		seenVolumes[v.Name] = true
+	}
+	seenSecrets := make(map[string]bool, len(wf.Secrets))
+	for i, s := range wf.Secrets {
+		if err := validateSecret(s); err != nil {
+			return fmt.Errorf("secrets[%d] (%s): %w", i, s.Name, err)
+		}
+		if seenSecrets[s.Name] {
+			return fmt.Errorf("secrets[%d] (%s): name is not unique within the workflow", i, s.Name)
+		}
+		seenSecrets[s.Name] = true
+	}
+	return nil
+}
+
+// validateVolume enforces the pvc/nfs/tmp shapes: a pvc carries a claim, an
+// nfs carries server+path, and tmp carries only a sizeLimit; sibling-kind
+// fields must stay unset.
+func validateVolume(v Volume) error {
+	if !labelRe.MatchString(v.Name) {
+		return fmt.Errorf("name %q is not a DNS-1123 label", v.Name)
+	}
+	if !strings.HasPrefix(v.MountPath, "/") {
+		return fmt.Errorf("mountPath %q must be absolute", v.MountPath)
+	}
+	if err := validateEnvMap(v.Env, "env"); err != nil {
+		return err
+	}
+	switch v.Kind {
+	case VolumePVC:
+		if v.Claim == "" {
+			return fmt.Errorf("kind=pvc requires a claim")
+		}
+		if v.Server != "" || v.Path != "" || v.SizeLimit != "" {
+			return fmt.Errorf("kind=pvc must not declare server, path, or sizeLimit")
+		}
+	case VolumeNFS:
+		if v.Server == "" || v.Path == "" {
+			return fmt.Errorf("kind=nfs requires server and path")
+		}
+		if v.Claim != "" || v.SizeLimit != "" {
+			return fmt.Errorf("kind=nfs must not declare claim or sizeLimit")
+		}
+	case VolumeTmp:
+		if v.Claim != "" || v.Server != "" || v.Path != "" {
+			return fmt.Errorf("kind=tmp must not declare claim, server, or path")
+		}
+	default:
+		return fmt.Errorf("kind must be %q, %q, or %q, got %q", VolumePVC, VolumeNFS, VolumeTmp, v.Kind)
+	}
+	return nil
+}
+
+// validateSecret enforces name-only secret references: no credential
+// material may appear in routes (plan CRI-214 section 3.8).
+func validateSecret(s Secret) error {
+	if !labelRe.MatchString(s.Name) {
+		return fmt.Errorf("name %q is not a DNS-1123 label", s.Name)
+	}
+	if s.SecretProviderClass == "" {
+		return fmt.Errorf("secretProviderClass is required")
+	}
+	if !strings.HasPrefix(s.MountPath, "/") {
+		return fmt.Errorf("mountPath %q must be absolute", s.MountPath)
+	}
+	return validateSecretEnv(s.Env)
+}
+
+// validateEnvMap checks environment variable names and non-empty string
+// values.
+func validateEnvMap(env map[string]string, where string) error {
+	for name, value := range env {
+		if !envNameRe.MatchString(name) {
+			return fmt.Errorf("%s has invalid env var name %q", where, name)
+		}
+		if value == "" {
+			return fmt.Errorf("%s.%s must be a string value", where, name)
+		}
+	}
+	return nil
+}
+
+// validateSecretEnv checks the secret's env mapping: env var names to key
+// (rendered file) names within the SecretProviderClass mount. Values are
+// names only, never secret values.
+func validateSecretEnv(env map[string]string) error {
+	for name, key := range env {
+		if !envNameRe.MatchString(name) {
+			return fmt.Errorf("env has invalid env var name %q", name)
+		}
+		if !secretKeyRe.MatchString(key) {
+			return fmt.Errorf("env.%s value %q is not a valid key name", name, key)
+		}
+	}
+	return nil
+}
+
+// ErrNoRoute reports that no route matches the ticket's project and state:
+// the project is absent from the routes map, or no route covers the state.
+// The watcher skips the ticket (no run, no comment).
+var ErrNoRoute = errors.New("no route matches the ticket's project and state")
+
+// ErrUnknownWorkflow reports that the resolved workflow name (project
+// default or workflows-group label) is absent from workflowLibrary. Fail
+// closed: no run, watcher log, Linear comment.
+var ErrUnknownWorkflow = errors.New("workflow is not present in the routes workflowLibrary")
+
+// ErrAmbiguousWorkflow reports several workflows-group labels on one ticket.
+// Fail closed on the ambiguity: no run, watcher log, Linear comment.
+var ErrAmbiguousWorkflow = errors.New("multiple workflow labels in the workflows label group")
+
+// Selector carries the ticket-facing inputs to Resolve.
+type Selector struct {
+	// Project is the ticket's Linear project name.
+	Project string
+	// State is the ticket's Linear workflow state name.
+	State string
+	// Labels holds the ticket's Linear label names.
+	Labels []string
+	// LabelGroups maps a label name to its label group's name (Linear
+	// models label groups as parent labels; absent for ungrouped labels).
+	LabelGroups map[string]string
+	// WorkflowsLabelGroup is the label group whose labels name workflow
+	// overrides ("workflows" per CRI-217).
+	WorkflowsLabelGroup string
+}
+
+// Selection is the resolved route plus the workflow it assigns.
+type Selection struct {
+	// Route is the matched route entry.
+	Route Route
+	// Name is the resolved workflow-library name (override or default).
+	Name string
+	// Workflow is the resolved workflow-library object.
+	Workflow Workflow
+}
+
+// Resolve applies the CRI-217 lookup rules: find the route for the ticket's
+// project and state (tag-specific routes win over tag-less defaults), honor
+// the project's default workflow, let a workflows-label-group label override
+// it, and fail closed on missing or ambiguous workflows.
+func (p *Payload) Resolve(sel Selector) (*Selection, error) {
+	route, err := p.matchRoute(sel)
+	if err != nil {
+		return nil, err
+	}
+
+	name := route.Workflow
+	override, err := workflowOverride(sel)
+	if err != nil {
+		return nil, err
+	}
+	if override != "" {
+		name = override
+	}
+
+	wf, ok := p.WorkflowLibrary[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownWorkflow, name)
+	}
+	return &Selection{Route: *route, Name: name, Workflow: wf}, nil
+}
+
+// matchRoute returns the first route matching the ticket's project and
+// state; among matches, routes whose tag subset is satisfied take priority
+// over tag-less routes (most specific first), otherwise document order
+// decides.
+func (p *Payload) matchRoute(sel Selector) (*Route, error) {
+	specific, general := (*Route)(nil), (*Route)(nil)
+	for i := range p.Routes {
+		r := &p.Routes[i]
+		if r.Project != sel.Project || !containsString(r.States, sel.State) {
+			continue
+		}
+		if len(r.Tags) == 0 {
+			if general == nil {
+				general = r
+			}
+			continue
+		}
+		if tagsSatisfied(r, sel.Labels) && specific == nil {
+			specific = r
+		}
+	}
+	if specific != nil {
+		return specific, nil
+	}
+	if general != nil {
+		return general, nil
+	}
+	return nil, fmt.Errorf("%w (project %q, state %q)", ErrNoRoute, sel.Project, sel.State)
+}
+
+// workflowOverride returns the workflow name carried by the ticket's label
+// in the configured workflows label group, or "" when the ticket carries
+// none. More than one such label is ambiguous and fails closed.
+func workflowOverride(sel Selector) (string, error) {
+	var overrides []string
+	for _, label := range sel.Labels {
+		if sel.LabelGroups[label] == sel.WorkflowsLabelGroup {
+			overrides = append(overrides, label)
+		}
+	}
+	switch len(overrides) {
+	case 0:
+		return "", nil
+	case 1:
+		return overrides[0], nil
+	default:
+		return "", fmt.Errorf("%w: %s", ErrAmbiguousWorkflow, strings.Join(overrides, ", "))
+	}
+}
+
+// tagsSatisfied applies the route's tagMatch semantics: "all" (default)
+// requires every listed tag, "any" requires at least one.
+func tagsSatisfied(r *Route, labels []string) bool {
+	if r.TagMatch == TagMatchAny {
+		for _, tag := range r.Tags {
+			if containsString(labels, tag) {
+				return true
+			}
+		}
+		return false
+	}
+	// "all" (the schema default).
+	for _, tag := range r.Tags {
+		if !containsString(labels, tag) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}

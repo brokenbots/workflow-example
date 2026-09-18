@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,19 +25,21 @@ import (
 )
 
 var (
-	namespace       = flag.String("namespace", getenv("NAMESPACE", "criteria-jobs"), "Namespace to watch and create CriteriaRuns in")
-	linearAPIKey    = flag.String("linear-api-key", getenv("LINEAR_API_KEY", ""), "Linear API key (also read from /secrets/linear_api_key)")
-	projectName     = flag.String("linear-project-name", getenv("LINEAR_PROJECT_NAME", "Criteria K8s Workflow Runner"), "Linear project to watch")
-	triageState     = flag.String("linear-triage-state", getenv("LINEAR_TRIAGE_STATE", "Triage"), "Workflow state that triggers a run")
-	triggerLabel    = flag.String("linear-trigger-label", getenv("LINEAR_TRIGGER_LABEL", ""), "Require this label on the issue before triggering a run; empty means any issue in the triage state triggers")
-	pollInterval    = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s")), "How often to poll Linear")
-	image           = flag.String("image", getenv("CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
-	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
-	maxAgentVisits  = flag.Int("max-agent-visits", parseInt(getenv("MAX_AGENT_VISITS", "2"), 2), "Default max agent visits")
-	buildCmd        = flag.String("build-cmd", getenv("BUILD_CMD", ""), "Default build command")
-	testCmd         = flag.String("test-cmd", getenv("TEST_CMD", ""), "Default test command")
-	ciGateCmd       = flag.String("ci-gate-cmd", getenv("CI_GATE_CMD", ""), "Default CI gate command")
-	defaultRepoURL  = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when Linear issue does not contain one")
+	namespace           = flag.String("namespace", getenv("NAMESPACE", "criteria-jobs"), "Namespace to watch and create CriteriaRuns in")
+	linearAPIKey        = flag.String("linear-api-key", getenv("LINEAR_API_KEY", ""), "Linear API key (also read from /secrets/linear_api_key)")
+	projectName         = flag.String("linear-project-name", getenv("LINEAR_PROJECT_NAME", "Criteria K8s Workflow Runner"), "Linear project to watch")
+	triageState         = flag.String("linear-triage-state", getenv("LINEAR_TRIAGE_STATE", "Triage"), "Workflow state that triggers a run")
+	triggerLabel        = flag.String("linear-trigger-label", getenv("LINEAR_TRIGGER_LABEL", ""), "Require this label on the issue before triggering a run; empty means any issue in the triage state triggers")
+	pollInterval        = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s")), "How often to poll Linear")
+	image               = flag.String("image", getenv("CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
+	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
+	maxAgentVisits      = flag.Int("max-agent-visits", parseInt(getenv("MAX_AGENT_VISITS", "2"), 2), "Default max agent visits")
+	buildCmd            = flag.String("build-cmd", getenv("BUILD_CMD", ""), "Default build command")
+	testCmd             = flag.String("test-cmd", getenv("TEST_CMD", ""), "Default test command")
+	ciGateCmd           = flag.String("ci-gate-cmd", getenv("CI_GATE_CMD", ""), "Default CI gate command")
+	defaultRepoURL      = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when Linear issue does not contain one")
+	routesFile          = flag.String("routes-file", getenv("CRITERIA_ROUTES_FILE", routes.DefaultFile), "Routes payload file (mounted from the criteria-routes ConfigMap); re-read every poll")
+	workflowsLabelGroup = flag.String("linear-workflows-label-group", getenv("LINEAR_WORKFLOWS_LABEL_GROUP", "workflows"), "Linear label group whose labels name a workflow overriding the route's project default")
 )
 
 func main() {
@@ -81,22 +85,24 @@ func main() {
 		}
 	}
 	w := watcher{
-		client:          k8s,
-		linear:          linearClient,
-		namespace:       *namespace,
-		projectName:     *projectName,
-		triageState:     *triageState,
-		triggerLabel:    *triggerLabel,
-		pollInterval:    *pollInterval,
-		image:           *image,
-		providerBaseURL: *providerBaseURL,
-		maxAgentVisits:  *maxAgentVisits,
-		buildCmd:        *buildCmd,
-		testCmd:         *testCmd,
-		ciGateCmd:       *ciGateCmd,
-		defaultRepoURL:  *defaultRepoURL,
-		repoValidator:   linear.DefaultRepoValidator(nil, githubToken, ""),
-		log:             logger,
+		client:              k8s,
+		linear:              linearClient,
+		namespace:           *namespace,
+		projectName:         *projectName,
+		triageState:         *triageState,
+		triggerLabel:        *triggerLabel,
+		pollInterval:        *pollInterval,
+		image:               *image,
+		providerBaseURL:     *providerBaseURL,
+		maxAgentVisits:      *maxAgentVisits,
+		buildCmd:            *buildCmd,
+		testCmd:             *testCmd,
+		ciGateCmd:           *ciGateCmd,
+		defaultRepoURL:      *defaultRepoURL,
+		routesFile:          *routesFile,
+		workflowsLabelGroup: *workflowsLabelGroup,
+		repoValidator:       linear.DefaultRepoValidator(nil, githubToken, ""),
+		log:                 logger,
 	}
 
 	ctx := ctrl.SetupSignalHandler()
@@ -107,22 +113,24 @@ func main() {
 }
 
 type watcher struct {
-	client          client.Client
-	linear          *linear.Client
-	namespace       string
-	projectName     string
-	triageState     string
-	triggerLabel    string
-	pollInterval    time.Duration
-	image           string
-	providerBaseURL string
-	maxAgentVisits  int
-	buildCmd        string
-	testCmd         string
-	ciGateCmd       string
-	defaultRepoURL  string
-	repoValidator   linear.RepoValidator
-	log             logr.Logger
+	client              client.Client
+	linear              *linear.Client
+	namespace           string
+	projectName         string
+	triageState         string
+	triggerLabel        string
+	pollInterval        time.Duration
+	image               string
+	providerBaseURL     string
+	maxAgentVisits      int
+	buildCmd            string
+	testCmd             string
+	ciGateCmd           string
+	defaultRepoURL      string
+	routesFile          string
+	workflowsLabelGroup string
+	repoValidator       linear.RepoValidator
+	log                 logr.Logger
 }
 
 func (w *watcher) run(ctx context.Context) error {
@@ -148,6 +156,15 @@ func (w *watcher) run(ctx context.Context) error {
 }
 
 func (w *watcher) poll(ctx context.Context, projectID string) error {
+	// CRI-217: the routes payload is the configuration of record for which
+	// tickets run. It is re-read every poll from the mounted ConfigMap, so
+	// route changes never depend on a watcher restart. A broken or absent
+	// payload fails closed: skip the whole poll and retry next cycle.
+	routesPayload, err := routes.LoadFile(w.routesFile)
+	if err != nil {
+		w.log.Error(err, "loading routes payload; failing closed and skipping poll", "routesFile", w.routesFile)
+		return nil
+	}
 	issues, err := w.linear.IssuesInProjectState(ctx, projectID, w.triageState)
 	if err != nil {
 		return err
@@ -156,10 +173,35 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		// CRI-147 gating: when a trigger label is configured, only issues
 		// carrying it fire a k8s run. Other tickets in the triage state stay
 		// untouched so teams can exercise their workflows locally without
-		// consuming cluster compute.
+		// consuming cluster compute. This global gate is unchanged by CRI-217.
 		if w.triggerLabel != "" && !slices.Contains(issue.Labels, w.triggerLabel) {
 			w.log.V(1).Info("issue in triage state without trigger label; not firing a k8s run",
 				"ticket", issue.Identifier, "triggerLabel", w.triggerLabel)
+			continue
+		}
+		// CRI-217 route lookup: the ticket's project must exist in the
+		// routes map; the matched route supplies the project default
+		// workflow; a workflows-label-group label overrides it; a missing
+		// workflow fails closed with a Linear comment.
+		sel, err := routesPayload.Resolve(routes.Selector{
+			Project:             issue.ProjectName,
+			State:               issue.StateName,
+			Labels:              issue.Labels,
+			LabelGroups:         issue.LabelGroups,
+			WorkflowsLabelGroup: w.workflowsLabelGroup,
+		})
+		if err != nil {
+			if errors.Is(err, routes.ErrNoRoute) {
+				w.log.Info("skipping ticket: no route in the routes map matches this project and state",
+					"ticket", issue.Identifier, "project", issue.ProjectName, "state", issue.StateName)
+				continue
+			}
+			// Unknown or ambiguous workflow (or any future lookup
+			// failure): no run, watcher log, and a Linear comment on the
+			// ticket (deduped).
+			w.log.Error(err, "route lookup failed closed; not creating CriteriaRun",
+				"ticket", issue.Identifier, "project", issue.ProjectName)
+			w.postRoutingComment(ctx, issue, err)
 			continue
 		}
 		repoURL := linear.ExtractRepoURL(issue, w.defaultRepoURL, w.repoValidator)
@@ -176,12 +218,13 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 			w.log.V(1).Info("run already active", "ticket", issue.Identifier)
 			continue
 		}
-		run := w.buildCriteriaRun(issue, repoURL)
+		run := w.buildCriteriaRun(issue, repoURL, sel)
 		if err := w.client.Create(ctx, run); err != nil {
 			w.log.Error(err, "creating CriteriaRun", "ticket", issue.Identifier)
 			continue
 		}
-		w.log.Info("created CriteriaRun", "ticket", issue.Identifier, "name", run.Name, "repoUrl", repoURL)
+		w.log.Info("created CriteriaRun", "ticket", issue.Identifier, "name", run.Name, "repoUrl", repoURL,
+			"workflow", sel.Name, "route", sel.Route.Name)
 	}
 	return nil
 }
@@ -204,7 +247,7 @@ func (w *watcher) hasActiveRun(ctx context.Context, ticketID string) (bool, erro
 	return false, nil
 }
 
-func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string) *criteriav1.CriteriaRun {
+func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
 	ticket := issue.Identifier
 	name := fmt.Sprintf("%s-%d", strings.ToLower(ticket), time.Now().Unix())
 	return &criteriav1.CriteriaRun{
@@ -229,10 +272,17 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string) *criteria
 			// this is safe to enable again (CRI-136). Workflows can opt out by
 			// flipping this field on the created CriteriaRun.
 			PerScopeSessions: true,
+			// CRI-217: the workflow resolved from the routes ConfigMap
+			// (project default or workflows-label-group override) is stamped
+			// here for the jobbuilder to consume (CRI-222). Nil means the
+			// operator's defaults apply.
+			Workflow: convertWorkflow(sel.Name, sel.Workflow),
 			// Image is intentionally unset: the operator's --default-image
 			// (CRITERIA_IMAGE on the operator deployment) is the single
 			// source of truth for the workflow image, so bumping the image
-			// only requires one deployment update.
+			// only requires one deployment update. A stamped workflow's
+			// image/url/ref is consumed by the jobbuilder (CRI-222; CRI-231
+			// adds workflowSource for url modes).
 			BuildCmd:        w.buildCmd,
 			TestCmd:         w.testCmd,
 			CIGateCmd:       w.ciGateCmd,
@@ -240,6 +290,96 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string) *criteria
 			ProviderBaseURL: w.providerBaseURL,
 		},
 	}
+}
+
+// convertWorkflow deep-copies a resolved routes workflow object into the
+// stamped CriteriaRun spec type, carrying the resolved workflow-library name.
+func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
+	out := &criteriav1.RunWorkflow{
+		Name:      name,
+		Type:      wf.Type,
+		Namespace: wf.Namespace,
+		Image:     wf.Image,
+		URL:       wf.URL,
+		Ref:       wf.Ref,
+	}
+	if wf.Env != nil {
+		out.Env = make(map[string]string, len(wf.Env))
+		for k, v := range wf.Env {
+			out.Env[k] = v
+		}
+	}
+	if len(wf.Volumes) > 0 {
+		out.Volumes = make([]criteriav1.RunWorkflowVolume, 0, len(wf.Volumes))
+		for _, v := range wf.Volumes {
+			out.Volumes = append(out.Volumes, criteriav1.RunWorkflowVolume{
+				Name:      v.Name,
+				Kind:      v.Kind,
+				MountPath: v.MountPath,
+				SubPath:   v.SubPath,
+				ReadOnly:  v.ReadOnly,
+				Claim:     v.Claim,
+				Server:    v.Server,
+				Path:      v.Path,
+				SizeLimit: v.SizeLimit,
+				Env:       copyStringMap(v.Env),
+			})
+		}
+	}
+	if len(wf.Secrets) > 0 {
+		out.Secrets = make([]criteriav1.RunWorkflowSecret, 0, len(wf.Secrets))
+		for _, s := range wf.Secrets {
+			out.Secrets = append(out.Secrets, criteriav1.RunWorkflowSecret{
+				Name:                s.Name,
+				SecretProviderClass: s.SecretProviderClass,
+				MountPath:           s.MountPath,
+				Env:                 copyStringMap(s.Env),
+			})
+		}
+	}
+	return out
+}
+
+func copyStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+const (
+	// routingCommentPrefix marks Linear comments the watcher posts for
+	// CRI-217 routing failures; the exact body is the dedup key.
+	routingCommentPrefix = "criteria-linear-watcher: route lookup failed"
+	// commentDedupLimit bounds the comments fetched for dedup.
+	commentDedupLimit = 50
+)
+
+// postRoutingComment posts the routing failure on the ticket, deduping by
+// exact body so a stuck failure does not spam Linear across polls. When
+// reading existing comments fails, posting is skipped this poll and retried
+// next poll rather than risking duplicates.
+func (w *watcher) postRoutingComment(ctx context.Context, issue linear.Issue, lookupErr error) {
+	body := fmt.Sprintf("%s: %v", routingCommentPrefix, lookupErr)
+	comments, err := w.linear.IssueComments(ctx, issue.ID, commentDedupLimit)
+	if err != nil {
+		w.log.Error(err, "reading Linear comments for routing-failure dedup; retrying next poll",
+			"ticket", issue.Identifier)
+		return
+	}
+	if slices.Contains(comments, body) {
+		w.log.V(1).Info("routing failure already reported on ticket", "ticket", issue.Identifier)
+		return
+	}
+	if err := w.linear.PostComment(ctx, issue.ID, body); err != nil {
+		w.log.Error(err, "posting routing failure comment on ticket", "ticket", issue.Identifier)
+		return
+	}
+	w.log.Info("posted routing failure comment on ticket", "ticket", issue.Identifier)
 }
 
 func mustSelector(m map[string]string) client.MatchingLabelsSelector {

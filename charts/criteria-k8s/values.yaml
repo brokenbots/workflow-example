@@ -70,6 +70,11 @@ watcher:
   pollInterval: 60s
   maxAgentVisits: 2
   providerBaseUrl: http://192.168.17.116:11434/v1
+  # ConfigMap carrying the routes payload (key routes.json), mounted into the
+  # watcher at /etc/criteria/routes. It is operator config applied separately
+  # (k8s/examples/routes-configmap.yaml), not templated by this chart, and is
+  # re-read by the watcher every poll. Set to "" to drop the mount.
+  routesConfigMap: criteria-routes
   resources:
     requests:
       memory: 64Mi
