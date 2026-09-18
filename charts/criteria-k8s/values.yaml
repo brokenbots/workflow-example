@@ -61,12 +61,12 @@ operator:
       cpu: 500m
 
 # Linear watcher: polls Linear and creates a CriteriaRun for each ticket in
-# the watched project that reaches the triage state.
+# the watched project that is in a workflow state declared by the routes
+# payload (omitted states default to Triage; CRI-218).
 watcher:
   enabled: true
   replicaCount: 1
   linearProjectName: Criteria K8s Workflow Runner
-  linearTriageState: Triage
   pollInterval: 60s
   maxAgentVisits: 2
   providerBaseUrl: http://192.168.17.116:11434/v1

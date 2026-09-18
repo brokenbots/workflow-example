@@ -245,7 +245,7 @@ def validate_route(route, where, library, errs):
     if not isinstance(route, dict):
         errs.append(f"{where} must be an object")
         return
-    for key in ("name", "workflow", "project", "states"):
+    for key in ("name", "workflow", "project"):
         if key not in route:
             errs.append(f"{where} is missing required field {key}")
     for key in route:
@@ -339,6 +339,9 @@ positive = [
     ("route-with-tag-subset-any", mutate(lambda d: d["routes"][0].update(
         tags=["intake"], tagMatch="any"))),
     ("route-with-default-tagmatch", mutate(lambda d: d["routes"][0].update(tags=["intake"]))),
+    ("route-without-states-defaults-triage", mutate(lambda d: d["routes"][0].pop("states"))),
+    ("route-with-custom-states", mutate(lambda d: d["routes"][0].update(
+        states=["Triage", "In Progress"]))),
     ("pvc-volume-as-nfs", mutate(lambda d: (
         d[LIB][BAKED]["volumes"][0].pop("claim"),
         d[LIB][BAKED]["volumes"][0].update(kind="nfs", server="nfs.internal", path="/export/data")))),
@@ -363,8 +366,8 @@ negative = [
     ("volume-unknown-field", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(hostPath="/srv"))),
     ("unknown-top-level-field", True, mutate(lambda d: d.update(workflowLibraryTypo={}))),
     ("unknown-route-field", True, mutate(lambda d: d["routes"][0].update(workflowRef="x"))),
-    ("route-missing-states", True, mutate(lambda d: d["routes"][0].pop("states"))),
     ("route-empty-states", True, mutate(lambda d: d["routes"][0].update(states=[]))),
+    ("route-null-states", True, mutate(lambda d: d["routes"][0].update(states=None))),
     ("route-duplicate-states", True, mutate(lambda d: d["routes"][0].update(states=["Triage", "Triage"]))),
     ("route-bad-tagmatch", True, mutate(lambda d: d["routes"][0].update(tagMatch="some"))),
     ("route-dangling-workflow", False, mutate(lambda d: d["routes"][0].update(workflow="does-not-exist"))),

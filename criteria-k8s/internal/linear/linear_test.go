@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,12 +14,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFindTriageTickets(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// newLinearTestServer returns a server answering the project lookup and the
+// issues query, filtering issues by the queried `states` variable exactly
+// like Linear's `state: {name: {in: $states}}` filter would.
+func newLinearTestServer(t *testing.T, issues []map[string]interface{}, queries *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Query string `json:"query"`
+			Query     string `json:"query"`
+			Variables struct {
+				States []string `json:"states"`
+			} `json:"variables"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		if queries != nil {
+			*queries = append(*queries, req.Query)
+		}
 
 		resp := map[string]interface{}{}
 		if strings.Contains(req.Query, "projects") {
@@ -30,40 +41,114 @@ func TestFindTriageTickets(t *testing.T) {
 				},
 			}
 		} else if strings.Contains(req.Query, "issues") {
-			resp["data"] = map[string]interface{}{
-				"issues": map[string]interface{}{
-					"nodes": []interface{}{
-						map[string]interface{}{
-							"id":          "issue-1",
-							"identifier":  "CRI-99",
-							"title":       "Test ticket",
-							"description": "Repo: https://github.com/brokenbots/workflow-example/issues/1",
-							"state":       map[string]interface{}{"name": "Triage"},
-							"project":     map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
-						},
-						map[string]interface{}{
-							"id":          "issue-2",
-							"identifier":  "CRI-100",
-							"title":       "No repo ticket",
-							"description": "Just text",
-							"state":       map[string]interface{}{"name": "Triage"},
-							"project":     map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
-						},
-					},
-				},
+			matched := []interface{}{}
+			for _, issue := range issues {
+				stateObj, _ := issue["state"].(map[string]interface{})
+				state, _ := stateObj["name"].(string)
+				if slices.Contains(req.Variables.States, state) {
+					matched = append(matched, issue)
+				}
 			}
+			resp["data"] = map[string]interface{}{"issues": map[string]interface{}{"nodes": matched}}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
+}
+
+func TestFindTicketsInStates(t *testing.T) {
+	issues := []map[string]interface{}{
+		{
+			"id":          "issue-1",
+			"identifier":  "CRI-99",
+			"title":       "Test ticket",
+			"description": "Repo: https://github.com/brokenbots/workflow-example/issues/1",
+			"state":       map[string]interface{}{"name": "Triage"},
+			"project":     map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
+		},
+		{
+			"id":          "issue-2",
+			"identifier":  "CRI-100",
+			"title":       "In progress ticket",
+			"description": "Just text",
+			"state":       map[string]interface{}{"name": "In Progress"},
+			"project":     map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
+		},
+		// A ticket whose state Linear cannot resolve: the states filter can
+		// never match it (CRI-218 fail-closed).
+		{
+			"id":         "issue-3",
+			"identifier": "CRI-101",
+			"title":      "Stateless ticket",
+			"state":      nil,
+			"project":    map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
+		},
+	}
+	ts := newLinearTestServer(t, issues, nil)
 	defer ts.Close()
 
 	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
-	tickets, err := client.FindTriageTickets(context.Background(), "Criteria K8s Workflow Runner", "Triage")
+	tickets, err := client.FindTicketsInStates(context.Background(), "Criteria K8s Workflow Runner", []string{"Triage", "In Progress"})
 	require.NoError(t, err)
 	require.Len(t, tickets, 2)
 	assert.Equal(t, "CRI-99", tickets[0].Identifier)
 	assert.Equal(t, "CRI-100", tickets[1].Identifier)
+
+	// A narrower list must only surface the states it names.
+	tickets, err = client.FindTicketsInStates(context.Background(), "Criteria K8s Workflow Runner", []string{"In Progress"})
+	require.NoError(t, err)
+	require.Len(t, tickets, 1)
+	assert.Equal(t, "CRI-100", tickets[0].Identifier)
+}
+
+// The issues query must filter by the states list with the `in` comparator:
+// a regression to `eq` would make the watcher poll a single state and miss
+// every other declared state (CRI-218).
+func TestIssuesQueryUsesInComparator(t *testing.T) {
+	var queries []string
+	ts := newLinearTestServer(t, nil, &queries)
+	defer ts.Close()
+
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+	_, err := client.FindTicketsInStates(context.Background(), "Criteria K8s Workflow Runner", []string{"Triage", "In Progress"})
+	require.NoError(t, err)
+	require.NotEmpty(t, queries)
+
+	issuesQuery := ""
+	for _, q := range queries {
+		if strings.Contains(q, "issues(") {
+			issuesQuery = q
+			break
+		}
+	}
+	require.NotEmpty(t, issuesQuery, "an issues query was issued")
+
+	compact := strings.Join(strings.Fields(issuesQuery), "")
+	assert.Contains(t, compact, "state:{name:{in:$states}}",
+		"issues query must filter the state name with the in comparator, got: %s", issuesQuery)
+	assert.NotContains(t, compact, "state:{name:{eq:",
+		"issues query must not filter a single state name, got: %s", issuesQuery)
+}
+
+// Fail closed: with no states to query, the client must not send an issues
+// query at all and must report no tickets.
+func TestFindTicketsInStatesWithoutStatesQueriesNothing(t *testing.T) {
+	var queries []string
+	ts := newLinearTestServer(t, nil, &queries)
+	defer ts.Close()
+
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+	tickets, err := client.IssuesInProjectStates(context.Background(), "proj-1", nil)
+	require.NoError(t, err)
+	require.Empty(t, tickets)
+
+	tickets, err = client.FindTicketsInStates(context.Background(), "Criteria K8s Workflow Runner", []string{})
+	require.NoError(t, err)
+	require.Empty(t, tickets)
+
+	for _, q := range queries {
+		assert.NotContains(t, q, "issues", "issues query must not be sent without states")
+	}
 }
 
 func TestExtractRepoURL(t *testing.T) {
@@ -172,7 +257,7 @@ func TestExtractRepoURLRepro(t *testing.T) {
 	})
 }
 
-func TestIssuesInProjectStateParsesLabelGroups(t *testing.T) {
+func TestIssuesInProjectStatesParsesLabelGroups(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Query string `json:"query"`
@@ -221,7 +306,7 @@ func TestIssuesInProjectStateParsesLabelGroups(t *testing.T) {
 	defer ts.Close()
 
 	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
-	tickets, err := client.FindTriageTickets(context.Background(), "Runner", "Triage")
+	tickets, err := client.FindTicketsInStates(context.Background(), "Runner", []string{"Triage"})
 	require.NoError(t, err)
 	require.Len(t, tickets, 1)
 	// Grouped labels map to their group's name; ungrouped labels stay absent.

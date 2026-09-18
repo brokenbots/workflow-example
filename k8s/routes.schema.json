@@ -373,8 +373,7 @@
       "required": [
         "name",
         "workflow",
-        "project",
-        "states"
+        "project"
       ],
       "properties": {
         "name": {
@@ -409,9 +408,12 @@
         },
         "states": {
           "type": "array",
-          "description": "Linear workflow state names a ticket must currently be in for this route to match (e.g. Triage).",
+          "description": "Linear workflow state names a ticket must currently be in for this route to match (e.g. Triage). Omitted defaults to [\"Triage\"] (CRI-218, ADR-0005 §3.4); an explicit empty or null list is rejected, so author an explicit list to match any other state.",
           "minItems": 1,
           "uniqueItems": true,
+          "default": [
+            "Triage"
+          ],
           "items": {
             "type": "string",
             "minLength": 1
