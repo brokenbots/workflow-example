@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
@@ -375,4 +376,434 @@ func TestPostCommentAndIssueComments(t *testing.T) {
 	comments, err = client.IssueComments(ctx, "issue-1", 50)
 	require.NoError(t, err)
 	assert.Contains(t, comments, "routing failure body")
+}
+
+// CRI-219 label lifecycle primitives.
+
+// fakeLinearLabel is a team-scoped Linear issue label in labelFakeServer.
+type fakeLinearLabel struct {
+	ID     string
+	Name   string
+	Color  string
+	TeamID string
+}
+
+// labelFakeServer fakes the Linear GraphQL surface used by the CRI-219
+// label primitives: team resolution, team-scoped label ensure, and
+// read-modify-write label mutation on an issue. Label state is tracked by
+// name per issue; IDs are synthesized deterministically as "lbl-"+name.
+type labelFakeServer struct {
+	ts           *httptest.Server
+	mu           sync.Mutex
+	projectTeams []string
+	labels       []fakeLinearLabel
+	// issueLabels maps issue id to the label names it currently carries.
+	issueLabels     map[string][]string
+	updates         int      // issueUpdate mutation count (no-ops excluded)
+	lastIDs         []string // labelIds payload of the most recent issueUpdate
+	failEnsure      bool     // serve a GraphQL error on the label queries
+	failIssue       bool     // serve a GraphQL error on the issue(id:) query
+	issueIdentifier string
+	issueTitle      string
+	// identifierToID maps human identifiers to canonical node ids so the
+	// issue(id:) branch can resolve queries by identifier like Linear does.
+	identifierToID map[string]string
+}
+
+func newLabelFakeServer(t *testing.T) *labelFakeServer {
+	t.Helper()
+	s := &labelFakeServer{
+		projectTeams:   []string{"team-1"},
+		issueLabels:    map[string][]string{},
+		identifierToID: map[string]string{},
+	}
+	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string          `json:"query"`
+			Variables json.RawMessage `json:"variables"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		resp := map[string]interface{}{}
+		switch {
+		case strings.Contains(req.Query, "teams"):
+			s.mu.Lock()
+			nodes := make([]interface{}, 0, len(s.projectTeams))
+			for _, id := range s.projectTeams {
+				nodes = append(nodes, map[string]interface{}{"id": id})
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"project": map[string]interface{}{"teams": map[string]interface{}{"nodes": nodes}},
+			}
+		case strings.Contains(req.Query, "issueLabelCreate"):
+			s.mu.Lock()
+			fail := s.failEnsure
+			s.mu.Unlock()
+			if fail {
+				resp = graphqlErrorResponse("label create down")
+				break
+			}
+			var full struct {
+				Input struct {
+					Name   string `json:"name"`
+					Color  string `json:"color"`
+					TeamID string `json:"teamId"`
+				} `json:"input"`
+			}
+			require.NoError(t, json.Unmarshal(req.Variables, &full))
+			s.mu.Lock()
+			id := "lbl-" + full.Input.Name
+			for _, l := range s.labels {
+				if l.Name == full.Input.Name && l.TeamID == full.Input.TeamID {
+					id = l.ID
+					break
+				}
+			}
+			if id == "lbl-"+full.Input.Name {
+				s.labels = append(s.labels, fakeLinearLabel{
+					ID: id, Name: full.Input.Name, Color: full.Input.Color, TeamID: full.Input.TeamID,
+				})
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issueLabelCreate": map[string]interface{}{
+					"success":    true,
+					"issueLabel": map[string]interface{}{"id": id},
+				},
+			}
+		case strings.Contains(req.Query, "issueLabels"):
+			s.mu.Lock()
+			fail := s.failEnsure
+			s.mu.Unlock()
+			if fail {
+				resp = graphqlErrorResponse("label query down")
+				break
+			}
+			var variables struct {
+				Name string `json:"name"`
+			}
+			require.NoError(t, json.Unmarshal(req.Variables, &variables))
+			s.mu.Lock()
+			nodes := []interface{}{}
+			for _, l := range s.labels {
+				if l.Name == variables.Name {
+					nodes = append(nodes, map[string]interface{}{
+						"id":   l.ID,
+						"name": l.Name,
+						"team": map[string]interface{}{"id": l.TeamID},
+					})
+				}
+			}
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issueLabels": map[string]interface{}{"nodes": nodes},
+			}
+		case strings.Contains(req.Query, "issueUpdate"):
+			var full struct {
+				ID    string `json:"id"`
+				Input struct {
+					LabelIDs []string `json:"labelIds"`
+				} `json:"input"`
+			}
+			require.NoError(t, json.Unmarshal(req.Variables, &full))
+			s.mu.Lock()
+			names := make([]string, 0, len(full.Input.LabelIDs))
+			for _, id := range full.Input.LabelIDs {
+				names = append(names, s.labelNameLocked(id))
+			}
+			s.issueLabels[full.ID] = names
+			s.updates++
+			s.lastIDs = append([]string(nil), full.Input.LabelIDs...)
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issueUpdate": map[string]interface{}{"success": true},
+			}
+		case strings.Contains(req.Query, "issue(id:"):
+			var variables struct {
+				ID string `json:"id"`
+			}
+			require.NoError(t, json.Unmarshal(req.Variables, &variables))
+			s.mu.Lock()
+			if s.failIssue {
+				s.mu.Unlock()
+				resp = graphqlErrorResponse("issue not found")
+				break
+			}
+			// Linear resolves the query id (node id or human identifier) to
+			// the issue's canonical node id.
+			canonical := variables.ID
+			if mapped, ok := s.identifierToID[variables.ID]; ok {
+				canonical = mapped
+			}
+			names := append([]string(nil), s.issueLabels[canonical]...)
+			nodes := make([]interface{}, 0, len(names))
+			for _, name := range names {
+				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name), "name": name})
+			}
+			identifier, title := s.issueIdentifier, s.issueTitle
+			s.mu.Unlock()
+			resp["data"] = map[string]interface{}{
+				"issue": map[string]interface{}{
+					"id":         canonical,
+					"identifier": identifier,
+					"title":      title,
+					"labels":     map[string]interface{}{"nodes": nodes},
+				},
+			}
+		default:
+			t.Fatalf("unexpected query: %s", req.Query)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(s.ts.Close)
+	return s
+}
+
+// graphqlErrorResponse builds a Linear-style GraphQL error response.
+func graphqlErrorResponse(message string) map[string]interface{} {
+	return map[string]interface{}{
+		"errors": []interface{}{map[string]interface{}{"message": message}},
+	}
+}
+
+func (s *labelFakeServer) setProjectTeams(teams []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projectTeams = teams
+}
+
+// seedLabel installs a pre-existing label in the fake's registry.
+func (s *labelFakeServer) seedLabel(l fakeLinearLabel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.labels = append(s.labels, l)
+}
+
+func (s *labelFakeServer) setFailEnsure(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failEnsure = v
+}
+
+// seedIssueLabels installs the label names an issue currently carries.
+func (s *labelFakeServer) seedIssueLabels(issueID string, names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.issueLabels[issueID] = append([]string(nil), names...)
+}
+
+// labelNameLocked resolves a label ID to its name. Unknown IDs follow the
+// fake's deterministic "lbl-"+name synthesis.
+func (s *labelFakeServer) labelNameLocked(id string) string {
+	for _, l := range s.labels {
+		if l.ID == id {
+			return l.Name
+		}
+	}
+	return strings.TrimPrefix(id, "lbl-")
+}
+
+// labelIDLocked resolves a label name to its ID.
+func (s *labelFakeServer) labelIDLocked(name string) string {
+	for _, l := range s.labels {
+		if l.Name == name {
+			return l.ID
+		}
+	}
+	return "lbl-" + name
+}
+
+// labelsSnapshot returns a copy of the fake's label registry.
+func (s *labelFakeServer) labelsSnapshot() []fakeLinearLabel {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]fakeLinearLabel(nil), s.labels...)
+}
+
+// issueLabelNames returns a copy of the label names the issue carries.
+func (s *labelFakeServer) issueLabelNames(issueID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.issueLabels[issueID]...)
+}
+
+// updateCount returns the number of issueUpdate mutations served.
+func (s *labelFakeServer) updateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updates
+}
+
+// lastUpdateIDs returns the labelIds payload of the most recent issueUpdate.
+func (s *labelFakeServer) lastUpdateIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lastIDs...)
+}
+
+func TestFindProjectTeamID(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("returns the project's team", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+		teamID, err := c.FindProjectTeamID(ctx, "proj-1")
+		require.NoError(t, err)
+		assert.Equal(t, "team-1", teamID)
+	})
+
+	t.Run("fails when the project has no team", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		s.setProjectTeams(nil)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+		_, err := c.FindProjectTeamID(ctx, "proj-1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "has no team")
+	})
+}
+
+// EnsureTeamLabel must create the team-scoped label exactly once when it is
+// missing, adopt it when it exists, and never fail when it already exists.
+func TestEnsureTeamLabel(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("creates the label when missing and is idempotent", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+
+		id, err := c.EnsureTeamLabel(ctx, "team-1", "criteria-automation", "#0ea5e9")
+		require.NoError(t, err)
+		assert.Equal(t, "lbl-criteria-automation", id)
+
+		created := s.labelsSnapshot()
+		require.Len(t, created, 1)
+		assert.Equal(t, "criteria-automation", created[0].Name)
+		assert.Equal(t, "#0ea5e9", created[0].Color)
+		assert.Equal(t, "team-1", created[0].TeamID, "the label must be team-scoped")
+
+		// Ensuring again must not create a duplicate.
+		idAgain, err := c.EnsureTeamLabel(ctx, "team-1", "criteria-automation", "#0ea5e9")
+		require.NoError(t, err)
+		assert.Equal(t, id, idAgain)
+		assert.Len(t, s.labelsSnapshot(), 1, "no duplicate label")
+	})
+
+	t.Run("ignores a same-named label scoped to another team", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+		s.seedLabel(fakeLinearLabel{ID: "lbl-other", Name: "criteria-automation", Color: "#000000", TeamID: "team-2"})
+
+		id, err := c.EnsureTeamLabel(ctx, "team-1", "criteria-automation", "#0ea5e9")
+		require.NoError(t, err)
+		assert.Equal(t, "lbl-criteria-automation", id, "team-1 gets its own label")
+		created := s.labelsSnapshot()
+		require.Len(t, created, 2)
+		assert.Equal(t, "team-1", created[1].TeamID)
+	})
+
+	t.Run("surfaces ensure failures", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		s.setFailEnsure(true)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+
+		_, err := c.EnsureTeamLabel(ctx, "team-1", "criteria-automation", "#0ea5e9")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "label query down")
+		assert.Empty(t, s.labelsSnapshot(), "no label is created when the query fails")
+	})
+}
+
+// AddIssueLabel must merge: Linear labelIds have REPLACE semantics, so the
+// write must carry the full desired set. A regression writing only the new
+// label would silently drop every label the issue already had.
+func TestAddIssueLabelMergesExistingLabels(t *testing.T) {
+	ctx := context.Background()
+	s := newLabelFakeServer(t)
+	c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+	s.seedIssueLabels("issue-1", "k8s-run", "fast")
+
+	require.NoError(t, c.AddIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
+
+	assert.Equal(t, []string{"k8s-run", "fast", "criteria-automation"},
+		s.issueLabelNames("issue-1"), "existing labels are preserved and the new label is added")
+	// The REPLACE regression: the single write must carry the full merged set.
+	assert.Equal(t, []string{"lbl-k8s-run", "lbl-fast", "lbl-criteria-automation"}, s.lastUpdateIDs())
+	assert.Equal(t, 1, s.updateCount(), "exactly one issueUpdate")
+}
+
+func TestAddIssueLabelNoOpWhenPresent(t *testing.T) {
+	ctx := context.Background()
+	s := newLabelFakeServer(t)
+	c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+	s.seedIssueLabels("issue-1", "criteria-automation", "fast")
+
+	require.NoError(t, c.AddIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
+
+	assert.Equal(t, []string{"criteria-automation", "fast"}, s.issueLabelNames("issue-1"))
+	assert.Equal(t, 0, s.updateCount(), "no issueUpdate when the label is already present")
+}
+
+func TestRemoveIssueLabel(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("removes only the target label", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+		s.seedIssueLabels("issue-1", "criteria-automation", "fast")
+
+		require.NoError(t, c.RemoveIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
+
+		assert.Equal(t, []string{"fast"}, s.issueLabelNames("issue-1"), "other labels untouched")
+		assert.Equal(t, []string{"lbl-fast"}, s.lastUpdateIDs(),
+			"the write carries the remaining set, not a delta")
+		assert.Equal(t, 1, s.updateCount())
+	})
+
+	t.Run("no write when the label is absent", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+		s.seedIssueLabels("issue-1", "fast")
+
+		require.NoError(t, c.RemoveIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
+
+		assert.Equal(t, []string{"fast"}, s.issueLabelNames("issue-1"))
+		assert.Equal(t, 0, s.updateCount(), "no issueUpdate for an absent label")
+	})
+}
+
+// TestIssueByIdentifier covers the identifier-based issue lookup the
+// CriteriaRun-driven reconciliation uses: Linear's issue(id:) query accepts
+// the human identifier as well as the node id and returns the issue with
+// its current label names.
+func TestIssueByIdentifier(t *testing.T) {
+	t.Run("found by identifier", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		s.issueIdentifier = "CRI-9"
+		s.issueTitle = "Fix the flaky test"
+		s.identifierToID["CRI-9"] = "issue-9"
+		s.seedIssueLabels("issue-9", "fast", "criteria-automation")
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+
+		issue, err := c.IssueByIdentifier(context.Background(), "CRI-9")
+
+		require.NoError(t, err)
+		assert.Equal(t, "issue-9", issue.ID)
+		assert.Equal(t, "CRI-9", issue.Identifier)
+		assert.Equal(t, "Fix the flaky test", issue.Title)
+		assert.True(t, slices.Equal(issue.Labels, []string{"fast", "criteria-automation"}),
+			"labels carry names, not ids")
+	})
+
+	t.Run("missing issue surfaces the GraphQL error", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		s.failIssue = true
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+
+		_, err := c.IssueByIdentifier(context.Background(), "CRI-404")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "issue not found")
+	})
 }
