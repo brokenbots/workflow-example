@@ -1,0 +1,145 @@
+# Routes ConfigMap — the operator configuration of record for Criteria
+# workflow routing (CRI-216). Introduced by ADR-0005's D1/D2 workflow source
+# model; consumed by operator routing from CRI-223 onward.
+#
+# The single data key 'routes.json' holds the payload. Its schema of record is
+# k8s/routes.schema.json; k8s/tests/test_routes_config.sh validates this
+# example against that schema. The payload is JSON (a valid YAML scalar inside
+# the ConfigMap) so it can be validated without a YAML parser.
+#
+# ADR-0005 mode mapping (declared, never inferred):
+#   type=image            -> image-only: workflow baked into the image.
+#   type=url (no image)   -> url-only: fetched at admission, minimal runtime.
+#   type=url + image      -> url+image: URL is content, image is process.
+#
+# The 'linear-intake-v1' library object and the 'criteria-intake' route
+# reproduce current behavior: runs execute the baked linear_intake_v1 image
+# until a URL cutover happens. To cut over, point the route's 'workflow' at
+# the 'linear-intake-url' object (and set 'ref' there to a resolved commit
+# SHA first — ADR-0005 D7 enforces it fail-closed at admission).
+#
+# Secrets are name references only: every secret here points at a
+# SecretProviderClass (OpenBao via the Secrets Store CSI driver). No
+# credential material appears in this file (plan CRI-214 section 3.8).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: criteria-routes
+  namespace: criteria-jobs
+  labels:
+    app.kubernetes.io/name: criteria-routes
+    app.kubernetes.io/managed-by: criteria-k8s
+data:
+  routes.json: |
+    {
+      "apiVersion": "criteria.brokenbots.dev/v1",
+      "kind": "Routes",
+      "workflowLibrary": {
+        "linear-intake-v1": {
+          "type": "image",
+          "image": "localhost:5000/linear-intake-remote:dev",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "linear-api-key",
+              "secretProviderClass": "linear-spc",
+              "mountPath": "/secrets",
+              "env": {
+                "LINEAR_API_KEY": "linear_api_key"
+              }
+            },
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+              }
+            }
+          ]
+        },
+        "linear-intake-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "wf-cache",
+              "kind": "nfs",
+              "server": "nfs.internal",
+              "path": "/export/workflow-cache",
+              "mountPath": "/mnt/workflow-cache",
+              "readOnly": true
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "linear-api-key",
+              "secretProviderClass": "linear-spc",
+              "mountPath": "/secrets",
+              "env": {
+                "LINEAR_API_KEY": "linear_api_key"
+              }
+            },
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+              }
+            }
+          ]
+        }
+      },
+      "routes": [
+        {
+          "name": "criteria-intake",
+          "workflow": "linear-intake-v1",
+          "project": "Criteria K8s Workflow Runner",
+          "states": [
+            "Triage"
+          ]
+        }
+      ]
+    }

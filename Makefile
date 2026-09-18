@@ -82,6 +82,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_example_manifest.sh
 	@echo "Running criteria-k8s Helm chart regression test..."
 	./k8s/tests/test_criteria_k8s_chart.sh
+	@echo "Running routes ConfigMap schema regression test (CRI-216)..."
+	./k8s/tests/test_routes_config.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -103,7 +105,8 @@ lint: lint-criteria-k8s
 		k8s/tests/test_container_entrypoint_substitution.sh \
 		k8s/tests/test_secrets_store_csi.sh \
 		k8s/tests/test_example_manifest.sh \
-		k8s/tests/test_criteria_k8s_chart.sh
+		k8s/tests/test_criteria_k8s_chart.sh \
+		k8s/tests/test_routes_config.sh
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...

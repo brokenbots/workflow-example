@@ -1,0 +1,423 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/brokenbots/workflow-example/main/k8s/routes.schema.json",
+  "title": "Criteria routes ConfigMap payload",
+  "description": "Operator configuration of record for Criteria workflow routing (CRI-216). The payload lives in the 'routes.json' data key of the 'criteria-routes' ConfigMap and is validated against this schema by k8s/tests/test_routes_config.sh.\n\nWorkflow routing follows ADR-0005's D1/D2 source model; the mode is declared, never inferred:\n\n- type=image maps to D1 image-only: the workflow HCL is baked into 'image', nothing is fetched at run time, and declaring 'url' or 'ref' alongside it is rejected (D2 fail-closed: an image-only run must not carry a URL).\n- type=url with no 'image' maps to D1 url-only: content is fetched from 'url' at run admission and executed on the minimal criteria/runtime base image.\n- type=url plus 'image' maps to D1 url+image: the URL is the content, the image is the process (runtime + adapter set); the image never supplies workflow content.\n\n'ref' is the operator-declared expected pin for fetched content; ADR-0005 D7 enforces it fail-closed at admission (criteria-side, CRI-223). Secret values must never appear here (plan CRI-214 section 3.8): secrets are referenced by SecretProviderClass name (OpenBao via the Secrets Store CSI driver).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "workflowLibrary",
+    "routes"
+  ],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "criteria.brokenbots.dev/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "Routes"
+    },
+    "workflowLibrary": {
+      "type": "object",
+      "description": "Named workflow definitions routes may assign to tickets. Keys are the workflow names routes reference.",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/definitions/label"
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/workflow"
+      }
+    },
+    "routes": {
+      "type": "array",
+      "description": "Route entries assigning Linear tickets to workflow-library objects. Each ticket is matched by project, tag subset, and Linear workflow states.",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/route"
+      }
+    }
+  },
+  "definitions": {
+    "label": {
+      "type": "string",
+      "description": "DNS-1123 label (RFC 1123): lowercase alphanumeric or '-', max 63 characters.",
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "maxLength": 63
+    },
+    "envMap": {
+      "type": "object",
+      "description": "Environment mapping: environment variable name to literal string value. For volume-scoped maps, values conventionally reference paths under the volume's mountPath.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "description": "A workflow-library object: how a run obtains its workflow (ADR-0005 D1/D2) and where/how it executes.",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "namespace"
+      ],
+      "properties": {
+        "type": {
+          "description": "Workflow source type: 'image' (baked into the image, D1 image-only) or 'url' (fetched at admission, D1 url-only or url+image).",
+          "enum": [
+            "url",
+            "image"
+          ]
+        },
+        "namespace": {
+          "$ref": "#/definitions/label",
+          "description": "Kubernetes namespace this workflow's runs are admitted into. Must match the namespace of this ConfigMap, the SecretProviderClasses, and the volumes it references."
+        },
+        "image": {
+          "type": "string",
+          "description": "Container image reference. Required for type=image (the trust anchor is the image itself, ADR-0005 D1). Optional for type=url, where setting it selects url+image (image = process, URL = content) and omitting it selects url-only on the minimal criteria/runtime base image.",
+          "pattern": "^\\S+$"
+        },
+        "url": {
+          "type": "string",
+          "description": "Workflow source URL, fetched at run admission. Required for type=url (go-getter git/HTTP/archive/file forms, ADR-0005 D3 allowlist). Forbidden for type=image.",
+          "pattern": "^\\S+$"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Operator-declared expected immutable ref/digest pin for fetched (type=url) content, e.g. a git commit SHA or sha256:<hex> content digest. Enforced fail-closed at admission (ADR-0005 D7). Meaningless for type=image and rejected there.",
+          "pattern": "^\\S+$"
+        },
+        "volumes": {
+          "type": "array",
+          "description": "Storage volumes the workflow's runs need. Names must be unique within the workflow.",
+          "items": {
+            "$ref": "#/definitions/volume"
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "description": "Secrets the workflow's runs consume, referenced by SecretProviderClass name (OpenBao via the Secrets Store CSI driver). No credential material may appear here (plan CRI-214 section 3.8). Names must be unique within the workflow.",
+          "items": {
+            "$ref": "#/definitions/secret"
+          }
+        },
+        "env": {
+          "$ref": "#/definitions/envMap",
+          "description": "Static environment variables set on every run of this workflow."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "image"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "description": "D1 image-only: the image is the content and process trust anchor; a URL or a content pin must not be declared alongside it (D2 fail-closed).",
+            "required": [
+              "image"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "url"
+                  ]
+                },
+                {
+                  "required": [
+                    "ref"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "url"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "description": "D1 url-only (no image) or url+image (image set); the URL is required.",
+            "required": [
+              "url"
+            ]
+          }
+        }
+      ]
+    },
+    "volume": {
+      "type": "object",
+      "description": "A storage volume of kind pvc, nfs, or tmp, mounted into the workflow's runner at mountPath.",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "mountPath"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/label"
+        },
+        "kind": {
+          "description": "Volume backing kind: pvc (PersistentVolumeClaim), nfs (network share), or tmp (emptyDir scratch).",
+          "enum": [
+            "pvc",
+            "nfs",
+            "tmp"
+          ]
+        },
+        "mountPath": {
+          "type": "string",
+          "description": "Absolute in-container mount path.",
+          "pattern": "^/"
+        },
+        "subPath": {
+          "type": "string",
+          "description": "Optional subdirectory of the volume to mount instead of its root.",
+          "minLength": 1
+        },
+        "readOnly": {
+          "type": "boolean",
+          "description": "Mount the volume read-only. Defaults to false."
+        },
+        "claim": {
+          "type": "string",
+          "description": "pvc kind: name of the PersistentVolumeClaim (same namespace as the workflow).",
+          "minLength": 1
+        },
+        "server": {
+          "type": "string",
+          "description": "nfs kind: NFS server hostname or address.",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "description": "nfs kind: exported path on the NFS server.",
+          "minLength": 1
+        },
+        "sizeLimit": {
+          "type": "string",
+          "description": "tmp kind: Kubernetes quantity sizing the emptyDir (e.g. 8Gi).",
+          "minLength": 1
+        },
+        "env": {
+          "$ref": "#/definitions/envMap",
+          "description": "Environment mapping anchored on this volume: values conventionally reference paths under mountPath (e.g. CRITERIA_RUN_DIR_ROOT: /data/.criteria/runs)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pvc"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "claim"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "server"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "sizeLimit"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "nfs"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "server",
+              "path"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "claim"
+                  ]
+                },
+                {
+                  "required": [
+                    "sizeLimit"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "tmp"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "claim"
+                  ]
+                },
+                {
+                  "required": [
+                    "server"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "secret": {
+      "type": "object",
+      "description": "A secret the workflow's runs consume, mounted via the Secrets Store CSI driver from OpenBao and referenced by SecretProviderClass name. No credential material may appear here (plan CRI-214 section 3.8).",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "secretProviderClass",
+        "mountPath"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/label",
+          "description": "Logical name; unique within the workflow."
+        },
+        "secretProviderClass": {
+          "type": "string",
+          "description": "OpenBao/CSI name reference: name of the SecretProviderClass (secrets-store.csi.x-k8s.io, provider openbao) backing this secret.",
+          "minLength": 1
+        },
+        "mountPath": {
+          "type": "string",
+          "description": "Absolute path where the CSI volume renders the SecretProviderClass objects as files.",
+          "pattern": "^/"
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment mapping for this secret: environment variable name to the key (rendered file) name within the SecretProviderClass mount. Names only — never secret values.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "description": "Key (rendered file) name within the SecretProviderClass mount, e.g. linear_api_key.",
+            "pattern": "^[A-Za-z0-9._-]+$"
+          }
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "description": "A route entry assigning Linear tickets to a workflow-library object. Selection is by project, tag subset, and Linear workflow states.",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "workflow",
+        "project",
+        "states"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/label",
+          "description": "Route name; unique within this ConfigMap."
+        },
+        "workflow": {
+          "$ref": "#/definitions/label",
+          "description": "Name of the workflow-library object this route assigns to matched tickets. Must exist in workflowLibrary."
+        },
+        "project": {
+          "type": "string",
+          "description": "Linear project name tickets must belong to (resolved by name, like the watcher's project today).",
+          "minLength": 1
+        },
+        "tags": {
+          "type": "array",
+          "description": "Tag subset an issue's Linear labels must satisfy for this route to match. Empty or omitted matches any issue.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "tagMatch": {
+          "description": "Subset semantics for 'tags': all = the issue's labels include every listed tag (default); any = the issue's labels include at least one listed tag.",
+          "enum": [
+            "all",
+            "any"
+          ],
+          "default": "all"
+        },
+        "states": {
+          "type": "array",
+          "description": "Linear workflow state names a ticket must currently be in for this route to match (e.g. Triage).",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
