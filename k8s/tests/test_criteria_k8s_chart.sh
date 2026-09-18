@@ -71,7 +71,7 @@ grep -q 'providerBaseUrl:' "$CHART/values.yaml" || fail "values.yaml missing pro
 grep -q 'linearProjectName:' "$CHART/values.yaml" || fail "values.yaml missing Linear project"
 # CRI-218 removed watcher.linearTriageState: trigger states are per-route.
 grep -q 'linearTriageState:' "$CHART/values.yaml" && fail "values.yaml still declares removed watcher.linearTriageState"
-grep -q 'pollInterval: 60s' "$CHART/values.yaml" || fail "values.yaml missing poll interval"
+grep -q 'pollInterval: 5m' "$CHART/values.yaml" || fail "values.yaml missing poll interval"
 
 if ! command -v helm > /dev/null 2>&1; then
     echo "helm not found; chart structure checks passed, skipping template rendering"

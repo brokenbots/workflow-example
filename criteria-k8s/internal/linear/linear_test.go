@@ -3,12 +3,15 @@ package linear_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
 	"github.com/stretchr/testify/assert"
@@ -189,7 +192,7 @@ func TestIssuesWithLabel(t *testing.T) {
 			"identifier": "CRI-1",
 			"state":      map[string]interface{}{"name": "In Progress"},
 			"project":    map[string]interface{}{"id": "proj-1", "name": "Criteria K8s Workflow Runner"},
-			"labels":     map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"name": "criteria-automation"}}},
+			"labels":     map[string]interface{}{"nodes": []interface{}{map[string]interface{}{"id": "lbl-criteria-automation", "name": "criteria-automation"}}},
 		},
 		{
 			"id":         "issue-2",
@@ -218,6 +221,8 @@ func TestIssuesWithLabel(t *testing.T) {
 	require.Len(t, got, 2, "both labeled tickets match, regardless of state")
 	assert.Equal(t, "CRI-1", got[0].Identifier)
 	assert.Equal(t, []string{"criteria-automation"}, got[0].Labels)
+	assert.Equal(t, []string{"lbl-criteria-automation"}, got[0].LabelIDs,
+		"the sweep read supplies label ids so orphan writes need no extra read")
 	assert.Equal(t, "CRI-3", got[1].Identifier)
 	assert.Equal(t, []string{"criteria-automation"}, got[1].Labels)
 
@@ -490,24 +495,17 @@ type labelFakeServer struct {
 	projectTeams []string
 	labels       []fakeLinearLabel
 	// issueLabels maps issue id to the label names it currently carries.
-	issueLabels     map[string][]string
-	updates         int      // issueUpdate mutation count (no-ops excluded)
-	lastIDs         []string // labelIds payload of the most recent issueUpdate
-	failEnsure      bool     // serve a GraphQL error on the label queries
-	failIssue       bool     // serve a GraphQL error on the issue(id:) query
-	issueIdentifier string
-	issueTitle      string
-	// identifierToID maps human identifiers to canonical node ids so the
-	// issue(id:) branch can resolve queries by identifier like Linear does.
-	identifierToID map[string]string
+	issueLabels map[string][]string
+	updates     int      // issueUpdate mutation count (no-ops excluded)
+	lastIDs     []string // labelIds payload of the most recent issueUpdate
+	failEnsure  bool     // serve a GraphQL error on the label queries
 }
 
 func newLabelFakeServer(t *testing.T) *labelFakeServer {
 	t.Helper()
 	s := &labelFakeServer{
-		projectTeams:   []string{"team-1"},
-		issueLabels:    map[string][]string{},
-		identifierToID: map[string]string{},
+		projectTeams: []string{"team-1"},
+		issueLabels:  map[string][]string{},
 	}
 	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -610,38 +608,6 @@ func newLabelFakeServer(t *testing.T) *labelFakeServer {
 			s.mu.Unlock()
 			resp["data"] = map[string]interface{}{
 				"issueUpdate": map[string]interface{}{"success": true},
-			}
-		case strings.Contains(req.Query, "issue(id:"):
-			var variables struct {
-				ID string `json:"id"`
-			}
-			require.NoError(t, json.Unmarshal(req.Variables, &variables))
-			s.mu.Lock()
-			if s.failIssue {
-				s.mu.Unlock()
-				resp = graphqlErrorResponse("issue not found")
-				break
-			}
-			// Linear resolves the query id (node id or human identifier) to
-			// the issue's canonical node id.
-			canonical := variables.ID
-			if mapped, ok := s.identifierToID[variables.ID]; ok {
-				canonical = mapped
-			}
-			names := append([]string(nil), s.issueLabels[canonical]...)
-			nodes := make([]interface{}, 0, len(names))
-			for _, name := range names {
-				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name), "name": name})
-			}
-			identifier, title := s.issueIdentifier, s.issueTitle
-			s.mu.Unlock()
-			resp["data"] = map[string]interface{}{
-				"issue": map[string]interface{}{
-					"id":         canonical,
-					"identifier": identifier,
-					"title":      title,
-					"labels":     map[string]interface{}{"nodes": nodes},
-				},
 			}
 		default:
 			t.Fatalf("unexpected query: %s", req.Query)
@@ -807,95 +773,217 @@ func TestEnsureTeamLabel(t *testing.T) {
 	})
 }
 
-// AddIssueLabel must merge: Linear labelIds have REPLACE semantics, so the
-// write must carry the full desired set. A regression writing only the new
-// label would silently drop every label the issue already had.
-func TestAddIssueLabelMergesExistingLabels(t *testing.T) {
+// TestSetIssueLabelIDs pins the REPLACE-semantics write (CRI-219) the
+// watcher drives directly from its poll reads (CRI-252): the write carries
+// the full desired set, replacing whatever the issue carried before.
+func TestSetIssueLabelIDs(t *testing.T) {
 	ctx := context.Background()
 	s := newLabelFakeServer(t)
 	c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
 	s.seedIssueLabels("issue-1", "k8s-run", "fast")
 
-	require.NoError(t, c.AddIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
+	require.NoError(t, c.SetIssueLabelIDs(ctx, "issue-1", []string{"lbl-k8s-run", "lbl-criteria-automation"}))
 
-	assert.Equal(t, []string{"k8s-run", "fast", "criteria-automation"},
-		s.issueLabelNames("issue-1"), "existing labels are preserved and the new label is added")
-	// The REPLACE regression: the single write must carry the full merged set.
-	assert.Equal(t, []string{"lbl-k8s-run", "lbl-fast", "lbl-criteria-automation"}, s.lastUpdateIDs())
+	assert.Equal(t, []string{"k8s-run", "criteria-automation"}, s.issueLabelNames("issue-1"),
+		"the set is replaced, not merged")
+	assert.Equal(t, []string{"lbl-k8s-run", "lbl-criteria-automation"}, s.lastUpdateIDs(),
+		"the write carries the full desired set")
 	assert.Equal(t, 1, s.updateCount(), "exactly one issueUpdate")
 }
 
-func TestAddIssueLabelNoOpWhenPresent(t *testing.T) {
+// TestIssuesByIdentifiers covers the batched identifier lookup (CRI-252):
+// all runs-index tickets resolve with one query, carrying the same label
+// data — names, ids, and group membership — the per-ticket resolution used
+// to return. Unknown identifiers are simply absent.
+func TestIssuesByIdentifiers(t *testing.T) {
+	issues := []map[string]interface{}{
+		{
+			"id":         "issue-1",
+			"identifier": "CRI-1",
+			"title":      "First",
+			"state":      map[string]interface{}{"name": "In Progress"},
+			"project":    map[string]interface{}{"id": "proj-1", "name": "Runner"},
+			"labels": map[string]interface{}{
+				"nodes": []interface{}{
+					map[string]interface{}{"id": "lbl-k8s-run", "name": "k8s-run"},
+					map[string]interface{}{
+						"id":     "lbl-intake",
+						"name":   "linear-intake-v1",
+						"parent": map[string]interface{}{"name": "workflows", "isGroup": true},
+					},
+				},
+			},
+		},
+		{
+			"id":         "issue-2",
+			"identifier": "CRI-2",
+			"title":      "Second",
+			"state":      map[string]interface{}{"name": "Done"},
+			"project":    map[string]interface{}{"id": "proj-1", "name": "Runner"},
+			"labels":     map[string]interface{}{"nodes": []interface{}{}},
+		},
+	}
+	var queries []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string `json:"query"`
+			Variables struct {
+				IDs []string `json:"ids"`
+			} `json:"variables"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		queries = append(queries, req.Query)
+		matched := []interface{}{}
+		for _, issue := range issues {
+			identifier, _ := issue["identifier"].(string)
+			if slices.Contains(req.Variables.IDs, identifier) {
+				matched = append(matched, issue)
+			}
+		}
+		resp := map[string]interface{}{
+			"data": map[string]interface{}{
+				"issues": map[string]interface{}{"nodes": matched},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
 	ctx := context.Background()
-	s := newLabelFakeServer(t)
-	c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
-	s.seedIssueLabels("issue-1", "criteria-automation", "fast")
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+	got, err := client.IssuesByIdentifiers(ctx, []string{"CRI-2", "CRI-1", "CRI-404"})
+	require.NoError(t, err)
+	require.Len(t, got, 2, "unknown identifiers are absent, known ones resolve")
+	assert.Equal(t, "CRI-1", got[0].Identifier)
+	// Same label data as per-ticket resolution, plus the label ids the
+	// write path consumes.
+	assert.Equal(t, []string{"k8s-run", "linear-intake-v1"}, got[0].Labels)
+	assert.Equal(t, []string{"lbl-k8s-run", "lbl-intake"}, got[0].LabelIDs)
+	assert.Equal(t, map[string]string{"linear-intake-v1": "workflows"}, got[0].LabelGroups)
+	assert.Equal(t, "CRI-2", got[1].Identifier)
+	assert.Empty(t, got[1].Labels)
+	assert.Empty(t, got[1].LabelIDs)
 
-	require.NoError(t, c.AddIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
+	require.Len(t, queries, 1, "one batched query for all identifiers")
+	compact := strings.Join(strings.Fields(queries[0]), "")
+	assert.Contains(t, compact, "issues(filter:{id:{in:$ids}}",
+		"the batched query must filter by identifier set, got: %s", queries[0])
 
-	assert.Equal(t, []string{"criteria-automation", "fast"}, s.issueLabelNames("issue-1"))
-	assert.Equal(t, 0, s.updateCount(), "no issueUpdate when the label is already present")
+	// Empty input queries nothing.
+	before := len(queries)
+	got, err = client.IssuesByIdentifiers(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Len(t, queries, before, "no query is sent for an empty identifier list")
 }
 
-func TestRemoveIssueLabel(t *testing.T) {
-	ctx := context.Background()
+// TestRateLimitDetection pins Linear rate-limit detection (CRI-252): the
+// HTTP 429 path (with an optional Retry-After header) and the GraphQL
+// RATELIMITED error shape (whose rateLimitResult.duration is in
+// milliseconds) both surface as RateLimitError; other GraphQL errors do not.
+func TestRateLimitDetection(t *testing.T) {
+	t.Run("HTTP 429 without Retry-After", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("slow down"))
+		}))
+		defer ts.Close()
+		client := linear.NewClientWithBaseURL(ts.URL, "test-token")
 
-	t.Run("removes only the target label", func(t *testing.T) {
-		s := newLabelFakeServer(t)
-		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
-		s.seedIssueLabels("issue-1", "criteria-automation", "fast")
-
-		require.NoError(t, c.RemoveIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
-
-		assert.Equal(t, []string{"fast"}, s.issueLabelNames("issue-1"), "other labels untouched")
-		assert.Equal(t, []string{"lbl-fast"}, s.lastUpdateIDs(),
-			"the write carries the remaining set, not a delta")
-		assert.Equal(t, 1, s.updateCount())
-	})
-
-	t.Run("no write when the label is absent", func(t *testing.T) {
-		s := newLabelFakeServer(t)
-		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
-		s.seedIssueLabels("issue-1", "fast")
-
-		require.NoError(t, c.RemoveIssueLabel(ctx, "issue-1", "lbl-criteria-automation"))
-
-		assert.Equal(t, []string{"fast"}, s.issueLabelNames("issue-1"))
-		assert.Equal(t, 0, s.updateCount(), "no issueUpdate for an absent label")
-	})
-}
-
-// TestIssueByIdentifier covers the identifier-based issue lookup the
-// CriteriaRun-driven reconciliation uses: Linear's issue(id:) query accepts
-// the human identifier as well as the node id and returns the issue with
-// its current label names.
-func TestIssueByIdentifier(t *testing.T) {
-	t.Run("found by identifier", func(t *testing.T) {
-		s := newLabelFakeServer(t)
-		s.issueIdentifier = "CRI-9"
-		s.issueTitle = "Fix the flaky test"
-		s.identifierToID["CRI-9"] = "issue-9"
-		s.seedIssueLabels("issue-9", "fast", "criteria-automation")
-		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
-
-		issue, err := c.IssueByIdentifier(context.Background(), "CRI-9")
-
-		require.NoError(t, err)
-		assert.Equal(t, "issue-9", issue.ID)
-		assert.Equal(t, "CRI-9", issue.Identifier)
-		assert.Equal(t, "Fix the flaky test", issue.Title)
-		assert.True(t, slices.Equal(issue.Labels, []string{"fast", "criteria-automation"}),
-			"labels carry names, not ids")
-	})
-
-	t.Run("missing issue surfaces the GraphQL error", func(t *testing.T) {
-		s := newLabelFakeServer(t)
-		s.failIssue = true
-		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
-
-		_, err := c.IssueByIdentifier(context.Background(), "CRI-404")
+		err := client.PostComment(context.Background(), "issue-1", "body")
 
 		require.Error(t, err)
+		assert.True(t, linear.IsRateLimit(err), "HTTP 429 must be detected as a rate limit")
+		var rl *linear.RateLimitError
+		require.ErrorAs(t, err, &rl)
+		assert.Equal(t, 429, rl.Status)
+		assert.Zero(t, rl.Duration, "no Retry-After means no duration")
+		assert.Contains(t, err.Error(), "rate limited")
+	})
+
+	t.Run("HTTP 429 with Retry-After", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer ts.Close()
+		client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+
+		err := client.PostComment(context.Background(), "issue-1", "body")
+
+		require.Error(t, err)
+		var rl *linear.RateLimitError
+		require.ErrorAs(t, err, &rl)
+		assert.Equal(t, 7*time.Second, rl.Duration, "Retry-After (seconds) is honored")
+	})
+
+	t.Run("GraphQL RATELIMITED error carries rateLimitResult duration", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []interface{}{
+					map[string]interface{}{
+						"message": "Too many requests",
+						"extensions": map[string]interface{}{
+							"code": "RATELIMITED",
+							"meta": map[string]interface{}{
+								"rateLimitResult": map[string]interface{}{"duration": 40000},
+							},
+						},
+					},
+				},
+			})
+		}))
+		defer ts.Close()
+		client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+
+		_, err := client.FindProjectID(context.Background(), "Runner")
+
+		require.Error(t, err)
+		assert.True(t, linear.IsRateLimit(err), "the RATELIMITED extension code must be detected")
+		var rl *linear.RateLimitError
+		require.ErrorAs(t, err, &rl)
+		assert.Equal(t, 40*time.Second, rl.Duration, "rateLimitResult.duration is milliseconds")
+		assert.Contains(t, err.Error(), "retry after 40s")
+	})
+
+	t.Run("other GraphQL errors are not rate limits", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []interface{}{map[string]interface{}{"message": "issue not found"}},
+			})
+		}))
+		defer ts.Close()
+		client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+
+		_, err := client.FindProjectID(context.Background(), "Runner")
+
+		require.Error(t, err)
+		assert.False(t, linear.IsRateLimit(err))
 		assert.Contains(t, err.Error(), "issue not found")
+	})
+
+	t.Run("message-only rate limit text is detected", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"errors": []interface{}{map[string]interface{}{"message": "ratelimited: slow down"}},
+			})
+		}))
+		defer ts.Close()
+		client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+
+		_, err := client.FindProjectID(context.Background(), "Runner")
+
+		require.Error(t, err)
+		assert.True(t, linear.IsRateLimit(err))
+	})
+
+	t.Run("IsRateLimit unwraps wrapped errors", func(t *testing.T) {
+		wrapped := fmt.Errorf("poll: %w", &linear.RateLimitError{Status: 429})
+		assert.True(t, linear.IsRateLimit(wrapped))
+		assert.False(t, linear.IsRateLimit(io.EOF))
 	})
 }

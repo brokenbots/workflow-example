@@ -30,7 +30,7 @@ var (
 	linearAPIKey        = flag.String("linear-api-key", getenv("LINEAR_API_KEY", ""), "Linear API key (also read from /secrets/linear_api_key)")
 	projectName         = flag.String("linear-project-name", getenv("LINEAR_PROJECT_NAME", "Criteria K8s Workflow Runner"), "Linear project to watch")
 	triggerLabel        = flag.String("linear-trigger-label", getenv("LINEAR_TRIGGER_LABEL", ""), "Require this label on the issue before triggering a run; empty means any issue matching a route triggers")
-	pollInterval        = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s")), "How often to poll Linear")
+	pollInterval        = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "5m")), "How often to poll Linear")
 	image               = flag.String("image", getenv("CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
 	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	maxAgentVisits      = flag.Int("max-agent-visits", parseInt(getenv("MAX_AGENT_VISITS", "2"), 2), "Default max agent visits")
@@ -132,7 +132,18 @@ type watcher struct {
 	// automation labels are created in this team (CRI-219). Resolved once
 	// in run before the poll loop starts.
 	teamID string
-	log    logr.Logger
+	// CRI-252: the automation label IDs are resolved once at startup and
+	// cached; ensureAutomationLabels re-resolves them only on a cache miss
+	// (an empty cached ID, left behind when an earlier ensure failed).
+	automationLabelID string
+	dirtyLabelID      string
+	// lastPhases records, per ticket, the latest CriteriaRun phase seen at
+	// the previous poll, so a ticket reconciles only when that phase
+	// changed (CRI-252). k8s-side only: never written to Linear.
+	lastPhases map[string]criteriav1.CriteriaRunPhase
+	// backoffAttempt counts consecutive rate-limited polls (CRI-252).
+	backoffAttempt int
+	log            logr.Logger
 }
 
 func (w *watcher) run(ctx context.Context) error {
@@ -143,18 +154,55 @@ func (w *watcher) run(ctx context.Context) error {
 	}
 	// CRI-219: the automation labels are team-scoped, so the watcher needs
 	// the project's team before it can create or resolve them.
-	teamID, err := w.linear.FindProjectTeamID(ctx, projectID)
+	// CRI-252: resolved once here and cached; a later cache miss re-resolves
+	// on the next poll instead of every poll.
+	teamID, err := w.resolveTeamID(ctx, projectID)
 	if err != nil {
 		return fmt.Errorf("resolve project team: %w", err)
 	}
 	w.teamID = teamID
+	// CRI-252: warm the label-id cache once at startup so the first poll is
+	// already a good consumer. Linear being rate limited (or briefly down)
+	// must not kill the watcher: the first poll re-ensures on the cache
+	// miss.
+	if err := w.ensureAutomationLabels(ctx); err != nil {
+		w.log.Info("warming the Linear label cache failed; label lookups deferred to the first poll", "error", err)
+	}
 	w.log.Info("watching Linear project", "project", w.projectName, "projectID", projectID, "teamID", teamID, "interval", w.pollInterval)
 
-	ticker := time.NewTicker(w.pollInterval)
-	defer ticker.Stop()
+	// CRI-252: rate limits back off the poll interval (up to backoffCap,
+	// and at least Linear's rateLimitResult.duration) and a successful poll
+	// restores it. A skipped poll costs no requests, so a rate-limited
+	// watcher stops amplifying the exhaustion it is reacting to. The
+	// recomputed period is applied to the ticker BEFORE the wait that
+	// follows the poll, so the next Linear request honors the new interval
+	// — waiting out Linear's advertised duration, not one tick of the old
+	// cadence.
+	interval := w.pollInterval
+	tickerPeriod := interval
+	ticker := time.NewTicker(interval)
+	defer func() { ticker.Stop() }()
 	for {
 		if err := w.poll(ctx, projectID); err != nil {
-			w.log.Error(err, "poll failed")
+			var rl *linear.RateLimitError
+			if errors.As(err, &rl) {
+				interval = w.nextBackoffInterval(interval, rl)
+			} else {
+				w.log.Error(err, "poll failed")
+			}
+		} else {
+			if w.backoffAttempt > 0 {
+				w.backoffAttempt = 0
+				w.log.Info("linear rate limit cleared; poll interval restored", "interval", w.pollInterval)
+			}
+			interval = w.pollInterval
+		}
+		if interval != tickerPeriod {
+			// A fresh ticker drains any stale tick buffered during the
+			// poll, so the next wait is the full recomputed interval.
+			ticker.Stop()
+			ticker = time.NewTicker(interval)
+			tickerPeriod = interval
 		}
 		select {
 		case <-ctx.Done():
@@ -162,6 +210,40 @@ func (w *watcher) run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// resolveTeamID returns the cached project team id, re-resolving only on a
+// cache miss (CRI-252).
+func (w *watcher) resolveTeamID(ctx context.Context, projectID string) (string, error) {
+	if w.teamID != "" {
+		return w.teamID, nil
+	}
+	return w.linear.FindProjectTeamID(ctx, projectID)
+}
+
+// nextBackoffInterval doubles the current poll interval after a rate limit
+// (CRI-252), capped at backoffCap. Linear's own rateLimitResult.duration
+// (or Retry-After) wins over both, so the watcher waits exactly as long as
+// Linear demands. Each consecutive rate-limited poll records one back-off
+// attempt; the first attempt logs the single rate-limit event for the
+// back-off window.
+func (w *watcher) nextBackoffInterval(current time.Duration, rl *linear.RateLimitError) time.Duration {
+	w.backoffAttempt++
+	next := current * 2
+	if next > backoffCap {
+		next = backoffCap
+	}
+	if rl != nil && rl.Duration > next {
+		next = rl.Duration
+	}
+	if w.backoffAttempt == 1 {
+		w.log.Info("linear rate limited; skipping poll and backing off",
+			"retryAfter", rl.Duration, "nextInterval", next)
+	} else {
+		w.log.V(1).Info("linear rate limited; poll skipped, back-off continues",
+			"attempt", w.backoffAttempt, "retryAfter", rl.Duration, "nextInterval", next)
+	}
+	return next
 }
 
 func (w *watcher) poll(ctx context.Context, projectID string) error {
@@ -179,6 +261,14 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	// all routes' declared states; routes omitting states default to
 	// [Triage]. An empty union (no routes) queries nothing: fail closed.
 	states := routesPayload.TicketStates()
+	// CRI-252: resolve the automation label ids once (startup-cached); a
+	// cache miss (an ID an earlier ensure failed to resolve) re-ensures
+	// here, and a rate limit aborts the poll before any further Linear
+	// traffic.
+	if err := w.ensureAutomationLabels(ctx); err != nil {
+		return err
+	}
+	automationLabelID, dirtyLabelID := w.automationLabelID, w.dirtyLabelID
 	w.log.V(1).Info("polling Linear for ticket states declared by routes", "states", states)
 	issues, err := w.linear.IssuesInProjectStates(ctx, projectID, states)
 	if err != nil {
@@ -190,26 +280,85 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	if err != nil {
 		return err
 	}
-	automationLabelID, dirtyLabelID := w.ensureAutomationLabels(ctx)
 	// CRI-219: label reconciliation is driven by the CriteriaRun list — not
 	// by the route-declared state list — because the intake workflow moves
 	// tickets out of the watched states (In Progress / Done / In Review)
 	// while and after their runs execute, so a run often settles while its
-	// ticket is outside the run-firing scope. Every ticket with an observed
-	// run reconciles here, resolved from Linear by identifier. Iteration is
-	// ordered for deterministic logs and write order.
+	// ticket is outside the run-firing scope.
+	//
+	// CRI-252: reconciliation is change-driven and batched. The per-ticket
+	// last phase is recorded in the watcher's poll state (k8s-side only, no
+	// Linear-side state), so a ticket reconciles only when its latest CR
+	// phase differs from the phase recorded at the previous poll — a
+	// steady-state no-change poll resolves no tickets and writes no labels.
+	// Map presence (not the zero value) is the seen-check: a freshly created
+	// run's empty phase reconciles on first sight like any other phase
+	// change. All changed tickets resolve with one batched query per poll
+	// (N+1 → 1), and iteration is ordered for deterministic logs and write
+	// order.
+	// CRI-252: label writes earlier in this poll (change-driven
+	// reconciliation, the orphan sweep) replace the poll's listing read for
+	// the tickets they touch, and Linear labelIds have REPLACE semantics —
+	// so a later REPLACE write in this poll must build on the freshest
+	// per-ticket label set this poll produced, not on the stale listing
+	// read.
+	currentLabelIDs := make(map[string][]string)
 	tickets := make([]string, 0, len(runs))
-	for ticket := range runs {
+	for ticket, ph := range runs {
+		if prev, seen := w.lastPhases[ticket]; seen && prev == ph.latestPhase {
+			continue
+		}
 		tickets = append(tickets, ticket)
 	}
 	sort.Strings(tickets)
-	for _, ticket := range tickets {
-		issue, err := w.linear.IssueByIdentifier(ctx, ticket)
+	if len(tickets) > 0 {
+		resolved, err := w.linear.IssuesByIdentifiers(ctx, tickets)
 		if err != nil {
-			w.log.Error(err, "resolving ticket for label reconciliation", "ticket", ticket)
-			continue
+			if linear.IsRateLimit(err) {
+				return err
+			}
+			w.log.Error(err, "resolving tickets for label reconciliation; deferred to next poll")
+			resolved = nil
 		}
-		w.reconcileAutomationLabels(ctx, issue, runs[ticket], automationLabelID, dirtyLabelID)
+		byIdentifier := make(map[string]linear.Issue, len(resolved))
+		for _, issue := range resolved {
+			byIdentifier[issue.Identifier] = issue
+		}
+		for _, ticket := range tickets {
+			issue, ok := byIdentifier[ticket]
+			if !ok {
+				w.log.V(1).Info("ticket missing from batched resolution; label reconciliation deferred to next poll", "ticket", ticket)
+				continue
+			}
+			if err := w.reconcileAutomationLabels(ctx, issue, runs[ticket], automationLabelID, dirtyLabelID, currentLabelIDs); err != nil {
+				if linear.IsRateLimit(err) {
+					return err
+				}
+				if errors.Is(err, errLabelWriteDeferred) {
+					// CRI-252: a needed automation-label id was
+					// unresolved, so the transition was not written; the
+					// phase stays unrecorded, and the next poll re-ensures
+					// the id and retries the transition.
+					w.log.V(1).Info(err.Error(), "ticket", ticket)
+					continue
+				}
+				// Already logged; the phase stays unrecorded, so the next
+				// poll retries the transition.
+				continue
+			}
+			if w.lastPhases == nil {
+				w.lastPhases = make(map[string]criteriav1.CriteriaRunPhase)
+			}
+			w.lastPhases[ticket] = runs[ticket].latestPhase
+		}
+	}
+	// CRI-252: drop the recorded phase of tickets with no observed runs
+	// anymore (the run was deleted), so a future run for the same ticket
+	// reconciles from scratch.
+	for ticket := range w.lastPhases {
+		if _, ok := runs[ticket]; !ok {
+			delete(w.lastPhases, ticket)
+		}
 	}
 	// CRI-220: reconciliation above only reaches tickets with observed
 	// CriteriaRuns. The orphan sweep closes the remaining gap: a ticket can
@@ -218,8 +367,11 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	// a watcher restart), leaving it invisible to the runs-driven
 	// reconciliation. Like the operator's stale-adapter sweep, it runs
 	// deterministically on every poll.
-	if err := w.sweepOrphanedAutomationLabels(ctx, projectID, runs, automationLabelID, dirtyLabelID); err != nil {
-		w.log.Error(err, "listing automation-label tickets; orphan sweep deferred to next poll")
+	if err := w.sweepOrphanedAutomationLabels(ctx, projectID, runs, automationLabelID, dirtyLabelID, currentLabelIDs); err != nil {
+		if linear.IsRateLimit(err) {
+			return err
+		}
+		w.log.Error(err, "orphan sweep failed; deferred to next poll")
 	}
 	for _, issue := range issues {
 		// CRI-147 gating: when a trigger label is configured, only issues
@@ -261,7 +413,9 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 			// ticket (deduped).
 			w.log.Error(err, "route lookup failed closed; not creating CriteriaRun",
 				"ticket", issue.Identifier, "project", issue.ProjectName)
-			w.postRoutingComment(ctx, issue, err)
+			if cErr := w.postRoutingComment(ctx, issue, err); cErr != nil && linear.IsRateLimit(cErr) {
+				return cErr
+			}
 			continue
 		}
 		repoURL := linear.ExtractRepoURL(issue, w.defaultRepoURL, w.repoValidator)
@@ -293,12 +447,21 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		}
 		w.log.Info("created CriteriaRun", "ticket", issue.Identifier, "name", run.Name, "repoUrl", repoURL,
 			"workflow", sel.Name, "route", sel.Route.Name)
-		// CRI-219: mark the ticket as having an inflight CriteriaRun. The
-		// add merges with the issue's existing labels (the client does a
-		// read-modify-write, never a REPLACE), and reconciliation on later
-		// polls converges the label anyway, so a failed add here is not
-		// fatal.
-		w.addLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+		// CRI-219: mark the ticket as having an inflight CriteriaRun.
+		// CRI-252: the write still needs no pre-write label read, but its
+		// REPLACE payload must build on the ticket's current label ids —
+		// reconciliation or the orphan sweep may have written labels for
+		// this ticket earlier in this same poll, and a set computed from
+		// the poll's listing read would silently drop them.
+		if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "add") {
+			ids := issue.LabelIDs
+			if fresh, ok := currentLabelIDs[issue.Identifier]; ok {
+				ids = fresh
+			}
+			if err := w.setIssueLabels(ctx, issue, append(slices.Clone(ids), automationLabelID)); err != nil && linear.IsRateLimit(err) {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -380,25 +543,57 @@ func runNewer(run, cur *criteriav1.CriteriaRun) bool {
 }
 
 // ensureAutomationLabels resolves (or creates) the team-scoped automation
-// labels and returns their Linear IDs. Empty IDs mean ensure failed for that
-// label; label writes are then skipped (with a watcher log) until the next
-// poll re-ensures, so a transient Linear hiccup never blocks run creation.
-// Ensuring every poll self-heals a label deleted out-of-band and is
-// idempotent: issueLabelCreate only fires when the name is missing from the
-// team.
-func (w *watcher) ensureAutomationLabels(ctx context.Context) (automationLabelID, dirtyLabelID string) {
-	automationLabelID, err := w.linear.EnsureTeamLabel(ctx, w.teamID, automationLabelName, automationLabelColor)
-	if err != nil {
-		w.log.Error(err, "ensuring automation label; label lifecycle deferred to next poll", "label", automationLabelName, "teamID", w.teamID)
-		automationLabelID = ""
+// labels and caches their Linear IDs in the watcher (CRI-252): re-ensuring
+// on every poll re-issued two constant label lookups per poll, which the
+// shared rate budget cannot afford. The ensure only re-runs on a cache
+// miss, so the cache is the single source for the IDs; a label deleted
+// out-of-band is not detected until restart (an operator action, out of the
+// watcher's steady-state scope), and issueLabelCreate only fires when the
+// name is missing from the team.
+// Empty IDs mean ensure failed for that label; label writes needing it are
+// then skipped (with a watcher log), and retry is per caller: change-driven
+// reconciliation defers the whole transition (errLabelWriteDeferred) and
+// leaves the ticket's recorded phase unchanged, so the next poll re-ensures
+// and retries it, while the firing and orphan-sweep paths run on every poll
+// and retry naturally. Either way a transient Linear hiccup never blocks
+// run creation. A rate limit aborts the ensure and is returned so the poll
+// skips instead of pressing on.
+func (w *watcher) ensureAutomationLabels(ctx context.Context) error {
+	if w.automationLabelID == "" {
+		id, err := w.linear.EnsureTeamLabel(ctx, w.teamID, automationLabelName, automationLabelColor)
+		if err != nil {
+			if linear.IsRateLimit(err) {
+				return err
+			}
+			w.log.Error(err, "ensuring automation label; label writes needing it are skipped until it resolves", "label", automationLabelName, "teamID", w.teamID)
+		} else {
+			w.automationLabelID = id
+			w.log.V(1).Info("resolved automation label", "label", automationLabelName, "labelID", id)
+		}
 	}
-	dirtyLabelID, err = w.linear.EnsureTeamLabel(ctx, w.teamID, dirtyLabelName, dirtyLabelColor)
-	if err != nil {
-		w.log.Error(err, "ensuring dirty label; label lifecycle deferred to next poll", "label", dirtyLabelName, "teamID", w.teamID)
-		dirtyLabelID = ""
+	if w.dirtyLabelID == "" {
+		id, err := w.linear.EnsureTeamLabel(ctx, w.teamID, dirtyLabelName, dirtyLabelColor)
+		if err != nil {
+			if linear.IsRateLimit(err) {
+				return err
+			}
+			w.log.Error(err, "ensuring dirty label; label writes needing it are skipped until it resolves", "label", dirtyLabelName, "teamID", w.teamID)
+		} else {
+			w.dirtyLabelID = id
+			w.log.V(1).Info("resolved dirty label", "label", dirtyLabelName, "labelID", id)
+		}
 	}
-	return automationLabelID, dirtyLabelID
+	return nil
 }
+
+// errLabelWriteDeferred reports that a label transition was deferred
+// because a needed automation-label ID was unresolved (the ensure failed
+// this poll); the wrapped message names the blocked label. The poll-loop
+// caller must leave the ticket's recorded phase unchanged so the next poll
+// re-ensures the ID and retries the transition — recording a deferred
+// transition as reconciled would drop it forever under change-driven
+// reconciliation (CRI-252).
+var errLabelWriteDeferred = errors.New("label transition deferred")
 
 // reconcileAutomationLabels converges an issue's automation-label state with
 // the phase of the ticket's most recent CriteriaRun (the reconciliation
@@ -410,47 +605,131 @@ func (w *watcher) ensureAutomationLabels(ctx context.Context) (automationLabelID
 //     "criteria-dirty" present.
 //
 // "criteria-dirty" is sticky: the watcher never removes it, because a failed
-// run needs human attention. While the failed run stays the ticket's most
-// recent run the watcher re-adds the label every poll, so an operator
-// clearing it is transient until a newer run settles or the run is deleted;
-// a prior failure's dirty marker also survives a later Succeeded run —
-// Succeeded only clears the inflight marker. For the same reason
-// "criteria-automation" is absent after a Failed run only while no successor
-// run is in flight: a re-armed ticket gets a fresh run and the marker back.
+// run needs human attention. Reconciliation runs only when the ticket's
+// latest CR phase changed since the previous poll (CRI-252), so an operator
+// clearing the dirty marker on an unchanged phase is no longer re-added
+// every poll; the next phase change re-evaluates the label state from the
+// issue's current labels.
 //
-// The issue's current labels are the source of truth, so this is idempotent
-// and restart-safe. Tickets with no observed CriteriaRuns are left untouched
-// here — the orphan sweep owns that case (CRI-220): a ticket can carry the
-// inflight marker with no run behind it at all, and the sweep converges it
-// to the dirty marker.
-func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string) {
+// The issue's labels come from the poll's batched read (CRI-252), which
+// supplies both label names and label IDs, so the desired set is computed
+// without an extra read and applied with at most one REPLACE write; a
+// converged issue is left untouched. When a needed label ID is unresolved
+// (the ensure failed this poll), the whole transition is deferred without
+// a write and reported as errLabelWriteDeferred — the caller must leave
+// the ticket's recorded phase unchanged, so the next poll re-ensures the
+// ID and retries it; a partially applied transition recorded as reconciled
+// would never be retried under change-driven reconciliation. A successful
+// transition (write performed or already converged) records the resulting
+// label set in currentLabelIDs, so later REPLACE writes in the same poll
+// (run firing) build on the ticket's current label state. Tickets with no
+// observed CriteriaRuns are left untouched here — the orphan sweep owns
+// that case (CRI-220): a ticket can carry the inflight marker with no run
+// behind it at all, and the sweep converges it to the dirty marker.
+func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string, currentLabelIDs map[string][]string) error {
 	if !ph.anyRun {
-		return
+		return nil
 	}
 	hasAutomation := slices.Contains(issue.Labels, automationLabelName)
 	hasDirty := slices.Contains(issue.Labels, dirtyLabelName)
+	desired := slices.Clone(issue.LabelIDs)
+	var unresolved []string
 	switch ph.latestPhase {
 	case criteriav1.PhaseFailed:
 		// Latest run failed: no inflight marker, dirty raised.
 		if hasAutomation {
-			w.removeLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+			if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "remove") {
+				desired = deleteLabelID(desired, automationLabelID)
+			} else {
+				unresolved = append(unresolved, automationLabelName)
+			}
 		}
 		if !hasDirty {
-			w.addLinearLabel(ctx, issue, dirtyLabelName, dirtyLabelID)
+			if w.writeReady(dirtyLabelID, dirtyLabelName, issue.Identifier, "add") {
+				if !slices.Contains(desired, dirtyLabelID) {
+					desired = append(desired, dirtyLabelID)
+				}
+			} else {
+				unresolved = append(unresolved, dirtyLabelName)
+			}
 		}
 	case criteriav1.PhaseSucceeded:
 		// Latest run succeeded: the issue is clean; the dirty label is
 		// sticky and only an operator (or run deletion) clears it.
 		if hasAutomation {
-			w.removeLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+			if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "remove") {
+				desired = deleteLabelID(desired, automationLabelID)
+			} else {
+				unresolved = append(unresolved, automationLabelName)
+			}
 		}
 	default:
 		// Pending, Running, Unknown, or the empty phase a freshly created
 		// run carries until the controller sets status: in flight.
 		if !hasAutomation {
-			w.addLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+			if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "add") {
+				if !slices.Contains(desired, automationLabelID) {
+					desired = append(desired, automationLabelID)
+				}
+			} else {
+				unresolved = append(unresolved, automationLabelName)
+			}
 		}
 	}
+	// No write on a deferral: the transition stays atomic and unrecorded,
+	// so the next poll retries it as a unit.
+	if len(unresolved) > 0 {
+		return fmt.Errorf("%w: %s id unresolved", errLabelWriteDeferred, strings.Join(unresolved, ", "))
+	}
+	if err := w.setIssueLabels(ctx, issue, desired); err != nil {
+		return err
+	}
+	// CRI-252: the ticket's label state is now `desired`; later REPLACE
+	// writes in this poll (run firing) must build on it.
+	currentLabelIDs[issue.Identifier] = desired
+	return nil
+}
+
+// writeReady reports whether a label write can proceed: the label's ID must
+// be resolved (CRI-252 resolves IDs once and caches them). A false result
+// only skips the write for this poll; whether the skipped transition is
+// retried is the caller's contract — change-driven reconciliation defers
+// via errLabelWriteDeferred and leaves the recorded phase unchanged, so the
+// next poll re-ensures the ID and retries, while the firing and orphan-sweep
+// paths run on every poll and retry naturally.
+func (w *watcher) writeReady(labelID, name, ticket, action string) bool {
+	if labelID != "" {
+		return true
+	}
+	w.log.V(1).Info("skipping label write: label id unresolved (ensure failed this poll)",
+		"ticket", ticket, "label", name, "action", action)
+	return false
+}
+
+// setIssueLabels applies the desired label set to the issue when it differs
+// from the set read in the same poll (CRI-252): no read precedes the write,
+// and a converged issue is left untouched. Linear labelIds have REPLACE
+// semantics (CRI-219), so the caller passes the full desired set.
+func (w *watcher) setIssueLabels(ctx context.Context, issue linear.Issue, desired []string) error {
+	if slices.Equal(desired, issue.LabelIDs) {
+		return nil
+	}
+	if err := w.linear.SetIssueLabelIDs(ctx, issue.ID, desired); err != nil {
+		w.log.Error(err, "writing Linear labels; retrying next poll", "ticket", issue.Identifier, "labelIDs", desired)
+		return err
+	}
+	w.log.Info("wrote Linear labels", "ticket", issue.Identifier, "labelIDs", desired)
+	return nil
+}
+
+// deleteLabelID returns ids without the given label ID, leaving the input
+// slice untouched.
+func deleteLabelID(ids []string, id string) []string {
+	idx := slices.Index(ids, id)
+	if idx < 0 {
+		return ids
+	}
+	return slices.Delete(slices.Clone(ids), idx, idx+1)
 }
 
 // sweepOrphanedAutomationLabels implements the CRI-220 orphan rule: a
@@ -484,7 +763,7 @@ func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Is
 // dirty-marker first, and a failed dirty write defers the removal with it.
 // "criteria-dirty" itself is never removed here or anywhere in the watcher:
 // it is sticky until a cleanup workflow or a human clears it (CRI-220).
-func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID string, runs map[string]runPhases, automationLabelID, dirtyLabelID string) error {
+func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID string, runs map[string]runPhases, automationLabelID, dirtyLabelID string, currentLabelIDs map[string][]string) error {
 	if automationLabelID == "" || dirtyLabelID == "" {
 		w.log.V(1).Info("skipping orphan sweep: automation label ids unresolved (ensure failed this poll); deferred to next poll")
 		return nil
@@ -507,43 +786,33 @@ func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID s
 		}
 		w.log.Info("sweeping orphaned automation label: no live CriteriaRun and no recorded terminal event",
 			"ticket", issue.Identifier)
-		if !slices.Contains(issue.Labels, dirtyLabelName) {
-			if err := w.addLinearLabel(ctx, issue, dirtyLabelName, dirtyLabelID); err != nil {
-				w.log.V(1).Info("orphan sweep removal deferred with the failed dirty write",
-					"ticket", issue.Identifier)
-				continue
+		// CRI-252: the candidate read above supplies the issue's label IDs,
+		// so the swap is computed from that read and applied with a single
+		// REPLACE write — no per-orphan label read.
+		desired := deleteLabelID(issue.LabelIDs, automationLabelID)
+		if !slices.Contains(issue.Labels, dirtyLabelName) && w.writeReady(dirtyLabelID, dirtyLabelName, issue.Identifier, "add") {
+			if !slices.Contains(desired, dirtyLabelID) {
+				desired = append(desired, dirtyLabelID)
 			}
 		}
-		w.removeLinearLabel(ctx, issue, automationLabelName, automationLabelID)
+		if slices.Equal(desired, issue.LabelIDs) {
+			continue
+		}
+		if err := w.linear.SetIssueLabelIDs(ctx, issue.ID, desired); err != nil {
+			if linear.IsRateLimit(err) {
+				return err
+			}
+			w.log.Error(err, "swapping orphaned automation label for dirty; deferring to next poll",
+				"ticket", issue.Identifier, "labelIDs", desired)
+			continue
+		}
+		w.log.Info("swapped orphaned automation label for dirty", "ticket", issue.Identifier, "labelIDs", desired)
+		// CRI-252: the ticket's label state is now `desired`; later REPLACE
+		// writes in this poll (run firing) must build on it.
+		currentLabelIDs[issue.Identifier] = desired
 		swept++
 	}
 	w.log.Info("orphan sweep complete", "candidates", len(candidates), "swept", swept)
-	return nil
-}
-
-func (w *watcher) addLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) error {
-	if labelID == "" {
-		w.log.V(1).Info("skipping label add: label id unresolved (ensure failed this poll)", "ticket", issue.Identifier, "label", name)
-		return nil
-	}
-	if err := w.linear.AddIssueLabel(ctx, issue.ID, labelID); err != nil {
-		w.log.Error(err, "adding Linear label; retrying next poll", "ticket", issue.Identifier, "label", name)
-		return err
-	}
-	w.log.Info("added Linear label", "ticket", issue.Identifier, "label", name)
-	return nil
-}
-
-func (w *watcher) removeLinearLabel(ctx context.Context, issue linear.Issue, name, labelID string) error {
-	if labelID == "" {
-		w.log.V(1).Info("skipping label remove: label id unresolved (ensure failed this poll)", "ticket", issue.Identifier, "label", name)
-		return nil
-	}
-	if err := w.linear.RemoveIssueLabel(ctx, issue.ID, labelID); err != nil {
-		w.log.Error(err, "removing Linear label; retrying next poll", "ticket", issue.Identifier, "label", name)
-		return err
-	}
-	w.log.Info("removed Linear label", "ticket", issue.Identifier, "label", name)
 	return nil
 }
 
@@ -658,8 +927,16 @@ const (
 	// commentDedupLimit bounds the comments fetched for dedup.
 	commentDedupLimit = 50
 
+	// CRI-252 poll discipline: the default interval is 5 minutes (a good
+	// consumer of the shared 2500 req/hr budget; k8s-side reactions are
+	// watch-driven, so firing latency is unaffected) and rate limits back
+	// the interval off up to this cap.
+	defaultPollInterval = 5 * time.Minute
+	backoffCap          = 30 * time.Minute
+
 	// CRI-219 automation label lifecycle. Both labels are team-scoped and
-	// ensured every poll; the names and colors are fixed by the ticket so
+	// their IDs are resolved once and cached (re-ensured only on a cache
+	// miss since CRI-252); the names and colors are fixed by the ticket so
 	// every deployment observes the same marker vocabulary.
 	automationLabelName  = "criteria-automation"
 	dirtyLabelName       = "criteria-dirty"
@@ -670,24 +947,26 @@ const (
 // postRoutingComment posts the routing failure on the ticket, deduping by
 // exact body so a stuck failure does not spam Linear across polls. When
 // reading existing comments fails, posting is skipped this poll and retried
-// next poll rather than risking duplicates.
-func (w *watcher) postRoutingComment(ctx context.Context, issue linear.Issue, lookupErr error) {
+// next poll rather than risking duplicates. The comment read happens only
+// on actual routing failures (CRI-252 keeps this read on the failure path).
+func (w *watcher) postRoutingComment(ctx context.Context, issue linear.Issue, lookupErr error) error {
 	body := fmt.Sprintf("%s: %v", routingCommentPrefix, lookupErr)
 	comments, err := w.linear.IssueComments(ctx, issue.ID, commentDedupLimit)
 	if err != nil {
 		w.log.Error(err, "reading Linear comments for routing-failure dedup; retrying next poll",
 			"ticket", issue.Identifier)
-		return
+		return err
 	}
 	if slices.Contains(comments, body) {
 		w.log.V(1).Info("routing failure already reported on ticket", "ticket", issue.Identifier)
-		return
+		return nil
 	}
 	if err := w.linear.PostComment(ctx, issue.ID, body); err != nil {
 		w.log.Error(err, "posting routing failure comment on ticket", "ticket", issue.Identifier)
-		return
+		return err
 	}
 	w.log.Info("posted routing failure comment on ticket", "ticket", issue.Identifier)
+	return nil
 }
 
 func mustSelector(m map[string]string) client.MatchingLabelsSelector {
@@ -708,7 +987,7 @@ func getenv(key, fallback string) string {
 func parseDuration(s string) time.Duration {
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return 60 * time.Second
+		return defaultPollInterval
 	}
 	return d
 }
