@@ -29,8 +29,11 @@ func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) s
 }
 
 // BuildPerScopeAdapterPod constructs a Pod for one provision-wanted lifecycle
-// event. The pod has zero Kubernetes privileges, zero CSI mounts, and only
-// the shared data volume plus the pod-adapter scripts ConfigMap. The repo
+// event. The pod has zero Kubernetes privileges and, absent a stamped
+// workflow object, mounts only the shared data volume plus the pod-adapter
+// scripts ConfigMap; the workflow object's declared volumes and CSI secrets
+// are mounted as well, and declared secrets additionally run the pod under
+// the criteria-runner service account for the OpenBao provider. The repo
 // clone lives on the data PVC at /data/intake/<ticket>/repo.
 func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent) *corev1.Pod {
 	// Prefer the adapter implementation kind (shell/copilot/...) from the
@@ -42,6 +45,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 	}
 	name := PerScopeAdapterPodName(run, kind, scope.ScopeID)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
+	plan := newWorkflowPlan(run)
 
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
@@ -89,7 +93,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
-			Namespace:       run.Namespace,
+			Namespace:       targetNamespace(run),
 			Labels:          labels,
 			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
 		},
@@ -105,7 +109,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 				},
 			},
 			RestartPolicy:                corev1.RestartPolicyOnFailure,
-			AutomountServiceAccountToken: boolPtr(false),
+			AutomountServiceAccountToken: boolPtr(plan.hasSecrets()),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: boolPtr(true),
 				RunAsUser:    int64Ptr(10001),
@@ -122,19 +126,19 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 					ImagePullPolicy: corev1.PullIfNotPresent,
 					SecurityContext: restrictedContainerSecurityContext(),
 					Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
-					Env:             env,
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "data", MountPath: "/data"},
-						{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
-					},
-					Resources: adapterResources(kind),
+					Env:             appendEnvDistinct(env, plan.adapterEnvs()),
+					VolumeMounts:    plan.adapterMounts(),
+					Resources:       adapterResources(kind),
 				},
 			},
-			Volumes: []corev1.Volume{
-				dataVolume(dataPVC),
-				scriptsVolume(),
-			},
+			Volumes: plan.adapterVolumes(dataPVC),
 		},
+	}
+	if plan.hasSecrets() {
+		// The OpenBao CSI provider authenticates the pod through its
+		// service account token; adapter pods carrying declared secrets
+		// therefore run under the criteria-runner service account.
+		pod.Spec.ServiceAccountName = "criteria-runner"
 	}
 	return pod
 }

@@ -40,7 +40,7 @@ func TestBuildPerScopeAdapterPod(t *testing.T) {
 		TokenFile:   "/data/intake/CRI-116/tokens/root-shell",
 	}
 
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data", RepoPVC: "criteria-repo"}, scope)
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope)
 	require.NotNil(t, pod)
 
 	assert.Equal(t, run.Namespace, pod.Namespace)
