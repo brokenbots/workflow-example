@@ -72,7 +72,6 @@ func TestBuildRunnerJob(t *testing.T) {
 	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
 		Image:           "default-image:dev",
 		DataPVC:         "criteria-data",
-		RepoPVC:         "criteria-repo",
 		ProviderBaseURL: "http://default-provider/v1",
 	})
 
@@ -227,7 +226,7 @@ func TestRunnerUsesPerTicketRepoClone(t *testing.T) {
 		},
 	}
 
-	jobs := jobbuilder.BuildAll(run, jobbuilder.Defaults{DataPVC: "criteria-data", RepoPVC: "criteria-repo"})
+	jobs := jobbuilder.BuildAll(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
 	require.Len(t, jobs, 3)
 
 	// The runner's init container must clone into the per-ticket directory on

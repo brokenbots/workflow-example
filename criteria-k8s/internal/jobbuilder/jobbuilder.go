@@ -64,8 +64,6 @@ func safeLabelValue(s string) string {
 type Defaults struct {
 	Image           string
 	DataPVC         string
-	RepoPVC         string
-	Namespace       string
 	ProviderBaseURL string
 	// CastleAddr is the castle orchestrator address handed to runner Jobs.
 	// When set, runners execute criteria in server mode: lifecycle is
@@ -166,11 +164,11 @@ func ownerReference(run *criteriav1.CriteriaRun) metav1.OwnerReference {
 	return ref
 }
 
-func buildJobBase(run *criteriav1.CriteriaRun, name string, labels map[string]string) *batchv1.Job {
+func buildJobBase(run *criteriav1.CriteriaRun, namespace, name string, labels map[string]string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
-			Namespace:       run.Namespace,
+			Namespace:       namespace,
 			Labels:          labels,
 			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
 		},
@@ -208,6 +206,9 @@ func buildJobBase(run *criteriav1.CriteriaRun, name string, labels map[string]st
 }
 
 // BuildRunnerJob constructs the runner Job: repo-clone init container + workflow-runner.
+// The workflow object stamped on the run (CRI-222) supplies the target
+// namespace, the declared volumes, and the CSI secret delivery; the image
+// resolves from the run spec and the operator default.
 func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 	ticket := run.Spec.TicketID
 	jobName := JobName(run)
@@ -226,23 +227,20 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	intakeRoot := "/data/intake"
 	triageRoot := "/data/triage"
 
+	plan := newWorkflowPlan(run)
+
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleRunner
 
-	job := buildJobBase(run, jobName, labels)
+	job := buildJobBase(run, targetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
 	job.Spec.Template.Spec.InitContainers = []corev1.Container{
-		repoCloneContainer(image, repoURL, repoDir),
+		repoCloneContainer(image, repoURL, repoDir, plan),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, providerBaseURL, maxVisits, defaults),
+		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, providerBaseURL, maxVisits, defaults, plan),
 	}
-	job.Spec.Template.Spec.Volumes = []corev1.Volume{
-		dataVolume(dataPVC),
-		csiVolume("linear-secrets", "linear-spc"),
-		csiVolume("copilot-secrets", "copilot-spc"),
-		scriptsVolume(),
-	}
+	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
 	return job
 }
 
@@ -256,15 +254,21 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	labels[LabelRole] = RoleAdapter
 	labels["criteria.brokenbots.dev/adapter-kind"] = kind
 
-	job := buildJobBase(run, jobName, labels)
-	job.Spec.Template.Spec.AutomountServiceAccountToken = boolPtr(false)
+	plan := newWorkflowPlan(run)
+
+	hasSecrets := plan.hasSecrets()
+	job := buildJobBase(run, targetNamespace(run), jobName, labels)
+	job.Spec.Template.Spec.AutomountServiceAccountToken = boolPtr(hasSecrets)
+	if hasSecrets {
+		// The OpenBao CSI provider authenticates the pod through its
+		// service account token; adapter pods carrying declared secrets
+		// therefore run under the criteria-runner service account.
+		job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
+	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-		adapterContainer(kind, image, JobName(run)),
+		adapterContainer(kind, image, JobName(run), plan),
 	}
-	job.Spec.Template.Spec.Volumes = []corev1.Volume{
-		dataVolume(dataPVC),
-		scriptsVolume(),
-	}
+	job.Spec.Template.Spec.Volumes = plan.adapterVolumes(dataPVC)
 	return job
 }
 
@@ -277,7 +281,7 @@ func restrictedContainerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-func repoCloneContainer(image, repoURL, repoDir string) corev1.Container {
+func repoCloneContainer(image, repoURL, repoDir string, plan *workflowPlan) corev1.Container {
 	return corev1.Container{
 		Name:            "repo-clone",
 		Image:           image,
@@ -304,14 +308,11 @@ rm -rf "$REPO_DIR"
 git config --global credential.https://github.helper '!gh auth git-credential'
 GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 		},
-		Env: []corev1.EnvVar{
+		Env: appendEnvDistinct([]corev1.EnvVar{
 			{Name: "REPO_URL", Value: repoURL},
 			{Name: "REPO_DIR", Value: repoDir},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "data", MountPath: "/data"},
-			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
-		},
+		}, plan.volumeEnvs()),
+		VolumeMounts: plan.cloneMounts(),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("512Mi"),
@@ -325,7 +326,7 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 	}
 }
 
-func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults) corev1.Container {
+func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "TICKET_ID", Value: run.Spec.TicketID},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
@@ -374,6 +375,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	if defaults.CastleAddr != "" {
 		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CastleAddr})
 	}
+	env = appendEnvDistinct(env, plan.runnerEnvs())
 
 	return corev1.Container{
 		Name:            "workflow-runner",
@@ -382,12 +384,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/runner.sh"},
 		Env:             env,
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "data", MountPath: "/data"},
-			{Name: "linear-secrets", MountPath: "/secrets/linear_api_key", SubPath: "linear_api_key"},
-			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
-			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
-		},
+		VolumeMounts:    plan.runnerMounts(),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("2Gi"),
@@ -401,7 +398,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	}
 }
 
-func adapterContainer(kind, image, runnerJobName string) corev1.Container {
+func adapterContainer(kind, image, runnerJobName string, plan *workflowPlan) corev1.Container {
 	resources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceMemory: resourceQuantity("512Mi"),
@@ -431,30 +428,18 @@ func adapterContainer(kind, image, runnerJobName string) corev1.Container {
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
-		Env: []corev1.EnvVar{
+		Env: appendEnvDistinct([]corev1.EnvVar{
 			{Name: "ADAPTER_KIND", Value: kind},
 			{Name: "CRITERIA_RUN_JOB_NAME", Value: runnerJobName},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "data", MountPath: "/data"},
-			{Name: "scripts", MountPath: "/opt/criteria-pod-adapter"},
-		},
-		Resources: resources,
+		}, plan.adapterEnvs()),
+		VolumeMounts: plan.adapterMounts(),
+		Resources:    resources,
 	}
 }
 
 func dataVolume(pvc string) corev1.Volume {
 	return corev1.Volume{
-		Name: "data",
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc},
-		},
-	}
-}
-
-func repoVolume(pvc string) corev1.Volume {
-	return corev1.Volume{
-		Name: "repo",
+		Name: dataVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc},
 		},
@@ -478,7 +463,7 @@ func csiVolume(name, spc string) corev1.Volume {
 
 func scriptsVolume() corev1.Volume {
 	return corev1.Volume{
-		Name: "scripts",
+		Name: scriptsVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "pod-adapter-scripts"},
