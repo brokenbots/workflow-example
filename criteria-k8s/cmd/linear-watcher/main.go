@@ -296,6 +296,13 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	// change. All changed tickets resolve with one batched query per poll
 	// (N+1 → 1), and iteration is ordered for deterministic logs and write
 	// order.
+	// CRI-252: label writes earlier in this poll (change-driven
+	// reconciliation, the orphan sweep) replace the poll's listing read for
+	// the tickets they touch, and Linear labelIds have REPLACE semantics —
+	// so a later REPLACE write in this poll must build on the freshest
+	// per-ticket label set this poll produced, not on the stale listing
+	// read.
+	currentLabelIDs := make(map[string][]string)
 	tickets := make([]string, 0, len(runs))
 	for ticket, ph := range runs {
 		if prev, seen := w.lastPhases[ticket]; seen && prev == ph.latestPhase {
@@ -323,9 +330,17 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 				w.log.V(1).Info("ticket missing from batched resolution; label reconciliation deferred to next poll", "ticket", ticket)
 				continue
 			}
-			if err := w.reconcileAutomationLabels(ctx, issue, runs[ticket], automationLabelID, dirtyLabelID); err != nil {
+			if err := w.reconcileAutomationLabels(ctx, issue, runs[ticket], automationLabelID, dirtyLabelID, currentLabelIDs); err != nil {
 				if linear.IsRateLimit(err) {
 					return err
+				}
+				if errors.Is(err, errLabelWriteDeferred) {
+					// CRI-252: a needed automation-label id was
+					// unresolved, so the transition was not written; the
+					// phase stays unrecorded, and the next poll re-ensures
+					// the id and retries the transition.
+					w.log.V(1).Info(err.Error(), "ticket", ticket)
+					continue
 				}
 				// Already logged; the phase stays unrecorded, so the next
 				// poll retries the transition.
@@ -352,7 +367,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	// a watcher restart), leaving it invisible to the runs-driven
 	// reconciliation. Like the operator's stale-adapter sweep, it runs
 	// deterministically on every poll.
-	if err := w.sweepOrphanedAutomationLabels(ctx, projectID, runs, automationLabelID, dirtyLabelID); err != nil {
+	if err := w.sweepOrphanedAutomationLabels(ctx, projectID, runs, automationLabelID, dirtyLabelID, currentLabelIDs); err != nil {
 		if linear.IsRateLimit(err) {
 			return err
 		}
@@ -433,13 +448,17 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		w.log.Info("created CriteriaRun", "ticket", issue.Identifier, "name", run.Name, "repoUrl", repoURL,
 			"workflow", sel.Name, "route", sel.Route.Name)
 		// CRI-219: mark the ticket as having an inflight CriteriaRun.
-		// CRI-252: the desired label set is known from this poll's listing
-		// read (which selects label ids), so the write carries the full set
-		// directly — no pre-write label read — and reconciliation on later
-		// polls converges the label anyway, so a failed write here is not
-		// fatal.
+		// CRI-252: the write still needs no pre-write label read, but its
+		// REPLACE payload must build on the ticket's current label ids —
+		// reconciliation or the orphan sweep may have written labels for
+		// this ticket earlier in this same poll, and a set computed from
+		// the poll's listing read would silently drop them.
 		if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "add") {
-			if err := w.setIssueLabels(ctx, issue, append(slices.Clone(issue.LabelIDs), automationLabelID)); err != nil && linear.IsRateLimit(err) {
+			ids := issue.LabelIDs
+			if fresh, ok := currentLabelIDs[issue.Identifier]; ok {
+				ids = fresh
+			}
+			if err := w.setIssueLabels(ctx, issue, append(slices.Clone(ids), automationLabelID)); err != nil && linear.IsRateLimit(err) {
 				return err
 			}
 		}
@@ -531,10 +550,14 @@ func runNewer(run, cur *criteriav1.CriteriaRun) bool {
 // out-of-band is not detected until restart (an operator action, out of the
 // watcher's steady-state scope), and issueLabelCreate only fires when the
 // name is missing from the team.
-// Empty IDs mean ensure failed for that label; label writes are then
-// skipped (with a watcher log) until the next poll re-ensures, so a
-// transient Linear hiccup never blocks run creation. A rate limit aborts
-// the ensure and is returned so the poll skips instead of pressing on.
+// Empty IDs mean ensure failed for that label; label writes needing it are
+// then skipped (with a watcher log), and retry is per caller: change-driven
+// reconciliation defers the whole transition (errLabelWriteDeferred) and
+// leaves the ticket's recorded phase unchanged, so the next poll re-ensures
+// and retries it, while the firing and orphan-sweep paths run on every poll
+// and retry naturally. Either way a transient Linear hiccup never blocks
+// run creation. A rate limit aborts the ensure and is returned so the poll
+// skips instead of pressing on.
 func (w *watcher) ensureAutomationLabels(ctx context.Context) error {
 	if w.automationLabelID == "" {
 		id, err := w.linear.EnsureTeamLabel(ctx, w.teamID, automationLabelName, automationLabelColor)
@@ -542,7 +565,7 @@ func (w *watcher) ensureAutomationLabels(ctx context.Context) error {
 			if linear.IsRateLimit(err) {
 				return err
 			}
-			w.log.Error(err, "ensuring automation label; label lifecycle deferred to next poll", "label", automationLabelName, "teamID", w.teamID)
+			w.log.Error(err, "ensuring automation label; label writes needing it are skipped until it resolves", "label", automationLabelName, "teamID", w.teamID)
 		} else {
 			w.automationLabelID = id
 			w.log.V(1).Info("resolved automation label", "label", automationLabelName, "labelID", id)
@@ -554,7 +577,7 @@ func (w *watcher) ensureAutomationLabels(ctx context.Context) error {
 			if linear.IsRateLimit(err) {
 				return err
 			}
-			w.log.Error(err, "ensuring dirty label; label lifecycle deferred to next poll", "label", dirtyLabelName, "teamID", w.teamID)
+			w.log.Error(err, "ensuring dirty label; label writes needing it are skipped until it resolves", "label", dirtyLabelName, "teamID", w.teamID)
 		} else {
 			w.dirtyLabelID = id
 			w.log.V(1).Info("resolved dirty label", "label", dirtyLabelName, "labelID", id)
@@ -562,6 +585,15 @@ func (w *watcher) ensureAutomationLabels(ctx context.Context) error {
 	}
 	return nil
 }
+
+// errLabelWriteDeferred reports that a label transition was deferred
+// because a needed automation-label ID was unresolved (the ensure failed
+// this poll); the wrapped message names the blocked label. The poll-loop
+// caller must leave the ticket's recorded phase unchanged so the next poll
+// re-ensures the ID and retries the transition — recording a deferred
+// transition as reconciled would drop it forever under change-driven
+// reconciliation (CRI-252).
+var errLabelWriteDeferred = errors.New("label transition deferred")
 
 // reconcileAutomationLabels converges an issue's automation-label state with
 // the phase of the ticket's most recent CriteriaRun (the reconciliation
@@ -582,49 +614,89 @@ func (w *watcher) ensureAutomationLabels(ctx context.Context) error {
 // The issue's labels come from the poll's batched read (CRI-252), which
 // supplies both label names and label IDs, so the desired set is computed
 // without an extra read and applied with at most one REPLACE write; a
-// converged issue is left untouched. Tickets with no observed CriteriaRuns
-// are left untouched here — the orphan sweep owns that case (CRI-220): a
-// ticket can carry the inflight marker with no run behind it at all, and
-// the sweep converges it to the dirty marker.
-func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string) error {
+// converged issue is left untouched. When a needed label ID is unresolved
+// (the ensure failed this poll), the whole transition is deferred without
+// a write and reported as errLabelWriteDeferred — the caller must leave
+// the ticket's recorded phase unchanged, so the next poll re-ensures the
+// ID and retries it; a partially applied transition recorded as reconciled
+// would never be retried under change-driven reconciliation. A successful
+// transition (write performed or already converged) records the resulting
+// label set in currentLabelIDs, so later REPLACE writes in the same poll
+// (run firing) build on the ticket's current label state. Tickets with no
+// observed CriteriaRuns are left untouched here — the orphan sweep owns
+// that case (CRI-220): a ticket can carry the inflight marker with no run
+// behind it at all, and the sweep converges it to the dirty marker.
+func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string, currentLabelIDs map[string][]string) error {
 	if !ph.anyRun {
 		return nil
 	}
 	hasAutomation := slices.Contains(issue.Labels, automationLabelName)
 	hasDirty := slices.Contains(issue.Labels, dirtyLabelName)
 	desired := slices.Clone(issue.LabelIDs)
+	var unresolved []string
 	switch ph.latestPhase {
 	case criteriav1.PhaseFailed:
 		// Latest run failed: no inflight marker, dirty raised.
-		if hasAutomation && w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "remove") {
-			desired = deleteLabelID(desired, automationLabelID)
+		if hasAutomation {
+			if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "remove") {
+				desired = deleteLabelID(desired, automationLabelID)
+			} else {
+				unresolved = append(unresolved, automationLabelName)
+			}
 		}
-		if !hasDirty && w.writeReady(dirtyLabelID, dirtyLabelName, issue.Identifier, "add") {
-			if !slices.Contains(desired, dirtyLabelID) {
-				desired = append(desired, dirtyLabelID)
+		if !hasDirty {
+			if w.writeReady(dirtyLabelID, dirtyLabelName, issue.Identifier, "add") {
+				if !slices.Contains(desired, dirtyLabelID) {
+					desired = append(desired, dirtyLabelID)
+				}
+			} else {
+				unresolved = append(unresolved, dirtyLabelName)
 			}
 		}
 	case criteriav1.PhaseSucceeded:
 		// Latest run succeeded: the issue is clean; the dirty label is
 		// sticky and only an operator (or run deletion) clears it.
-		if hasAutomation && w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "remove") {
-			desired = deleteLabelID(desired, automationLabelID)
+		if hasAutomation {
+			if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "remove") {
+				desired = deleteLabelID(desired, automationLabelID)
+			} else {
+				unresolved = append(unresolved, automationLabelName)
+			}
 		}
 	default:
 		// Pending, Running, Unknown, or the empty phase a freshly created
 		// run carries until the controller sets status: in flight.
-		if !hasAutomation && w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "add") {
-			if !slices.Contains(desired, automationLabelID) {
-				desired = append(desired, automationLabelID)
+		if !hasAutomation {
+			if w.writeReady(automationLabelID, automationLabelName, issue.Identifier, "add") {
+				if !slices.Contains(desired, automationLabelID) {
+					desired = append(desired, automationLabelID)
+				}
+			} else {
+				unresolved = append(unresolved, automationLabelName)
 			}
 		}
 	}
-	return w.setIssueLabels(ctx, issue, desired)
+	// No write on a deferral: the transition stays atomic and unrecorded,
+	// so the next poll retries it as a unit.
+	if len(unresolved) > 0 {
+		return fmt.Errorf("%w: %s id unresolved", errLabelWriteDeferred, strings.Join(unresolved, ", "))
+	}
+	if err := w.setIssueLabels(ctx, issue, desired); err != nil {
+		return err
+	}
+	// CRI-252: the ticket's label state is now `desired`; later REPLACE
+	// writes in this poll (run firing) must build on it.
+	currentLabelIDs[issue.Identifier] = desired
+	return nil
 }
 
 // writeReady reports whether a label write can proceed: the label's ID must
-// be resolved (CRI-252 resolves IDs once and caches them; an unresolved ID
-// defers the write to the next poll).
+// be resolved (CRI-252 resolves IDs once and caches them). A false result
+// only skips the write for this poll; whether the skipped transition is
+// retried is the caller's contract — change-driven reconciliation defers
+// via errLabelWriteDeferred and leaves the recorded phase unchanged, so the
+// next poll re-ensures the ID and retries, while the firing and orphan-sweep
+// paths run on every poll and retry naturally.
 func (w *watcher) writeReady(labelID, name, ticket, action string) bool {
 	if labelID != "" {
 		return true
@@ -691,7 +763,7 @@ func deleteLabelID(ids []string, id string) []string {
 // dirty-marker first, and a failed dirty write defers the removal with it.
 // "criteria-dirty" itself is never removed here or anywhere in the watcher:
 // it is sticky until a cleanup workflow or a human clears it (CRI-220).
-func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID string, runs map[string]runPhases, automationLabelID, dirtyLabelID string) error {
+func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID string, runs map[string]runPhases, automationLabelID, dirtyLabelID string, currentLabelIDs map[string][]string) error {
 	if automationLabelID == "" || dirtyLabelID == "" {
 		w.log.V(1).Info("skipping orphan sweep: automation label ids unresolved (ensure failed this poll); deferred to next poll")
 		return nil
@@ -735,6 +807,9 @@ func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID s
 			continue
 		}
 		w.log.Info("swapped orphaned automation label for dirty", "ticket", issue.Identifier, "labelIDs", desired)
+		// CRI-252: the ticket's label state is now `desired`; later REPLACE
+		// writes in this poll (run firing) must build on it.
+		currentLabelIDs[issue.Identifier] = desired
 		swept++
 	}
 	w.log.Info("orphan sweep complete", "candidates", len(candidates), "swept", swept)

@@ -1410,6 +1410,76 @@ func TestPollEnsureFailureDoesNotBlockRunCreation(t *testing.T) {
 		tw.linearS.issueLabelsOf("i-1"), "the next poll converges the inflight marker")
 }
 
+// TestPollDeferredLabelTransitionRetriedNextPoll pins the CRI-252 deferral
+// contract for change-driven reconciliation: when a needed automation-label
+// ID is unresolved (the ensure failed this poll), the Failed transition is
+// deferred without a write and the ticket's phase stays unrecorded, so the
+// next poll — with the phase unchanged — retries it. Recording a deferred
+// transition as reconciled would drop it forever. The ticket sits outside
+// the route-declared states ("In Review") so only the reconciliation path
+// is exercised.
+func TestPollDeferredLabelTransitionRetriedNextPoll(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(withState(issue("i-1", "CRI-1", gateLabel()), "In Review"))
+	liveRun(t, tw, "CRI-1", criteriav1.PhaseFailed)
+	tw.linearS.setFailLabelServe(true)
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 0, tw.linearS.labelUpdateCount(), "the deferred transition is not written")
+	assert.NotContains(t, tw.linearS.queryKinds(), "labelWrite")
+	_, recorded := tw.w.lastPhases["CRI-1"]
+	assert.False(t, recorded, "the deferred transition is not recorded as reconciled")
+	assert.True(t, tw.logs.contains("label transition deferred: criteria-dirty id unresolved"))
+
+	// The ensure heals; the next poll retries the unchanged phase's
+	// transition and records it.
+	tw.linearS.setFailLabelServe(false)
+	tw.linearS.resetRequests()
+	tw.pollOnce(t)
+
+	assert.Contains(t, tw.linearS.queryKinds(), "ticketBatch",
+		"the unchanged phase is re-resolved for the retry")
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount())
+	assert.Equal(t, []string{"lbl-k8s-run", "lbl-criteria-dirty"}, tw.linearS.lastLabelUpdateIDs())
+	assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+	assert.Equal(t, criteriav1.PhaseFailed, tw.w.lastPhases["CRI-1"])
+
+	// Converged: the following poll neither retries nor re-writes.
+	tw.linearS.resetRequests()
+	tw.pollOnce(t)
+	assert.Equal(t, 1, tw.linearS.labelUpdateCount(), "the retried transition is not re-written")
+	assert.Equal(t, []string{"stateListing", "sweepCandidates"}, tw.linearS.queryKinds())
+}
+
+// TestPollFiringReplaceKeepsSamePollLabelWrites pins the CRI-252
+// REPLACE-safety rule for the firing path: Linear labelIds have REPLACE
+// semantics, so the firing write must build on the ticket's current label
+// state — reconciliation wrote criteria-dirty earlier in this same poll —
+// not on the poll's stale listing read, which would silently drop the dirty
+// marker (and with change-driven reconciliation no later poll converges
+// it: the phase is already recorded).
+func TestPollFiringReplaceKeepsSamePollLabelWrites(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.prewarmLabelIDs()
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+	liveRun(t, tw, "CRI-1", criteriav1.PhaseFailed)
+
+	tw.pollOnce(t)
+
+	// Reconciliation performs the Failed transition (dirty raised), and
+	// the firing path re-fires a successor run in the same poll; its
+	// REPLACE write must keep the dirty marker.
+	assert.Equal(t, []string{"k8s-run", "criteria-dirty", "criteria-automation"},
+		tw.linearS.issueLabelsOf("i-1"),
+		"the firing REPLACE write keeps the dirty marker written earlier in this poll")
+	assert.Equal(t, 2, tw.linearS.labelUpdateCount(),
+		"one write from reconciliation and one from the firing path")
+	assert.Equal(t, []string{"lbl-k8s-run", "lbl-criteria-dirty", "lbl-criteria-automation"},
+		tw.linearS.lastLabelUpdateIDs(),
+		"the firing write builds on the reconciled label set, not the listing read")
+}
+
 // CRI-220: orphaned automation-label sweep.
 
 // TestPollOrphanSweepDirtiesLabelWithoutRuns covers the orphan rule: a
