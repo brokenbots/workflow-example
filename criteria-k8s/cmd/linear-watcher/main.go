@@ -134,7 +134,7 @@ type watcher struct {
 	teamID string
 	// CRI-252: the automation label IDs are resolved once at startup and
 	// cached; ensureAutomationLabels re-resolves them only on a cache miss
-	// (a label deleted out-of-band heals on the next poll).
+	// (an empty cached ID, left behind when an earlier ensure failed).
 	automationLabelID string
 	dirtyLabelID      string
 	// lastPhases records, per ticket, the latest CriteriaRun phase seen at
@@ -173,7 +173,11 @@ func (w *watcher) run(ctx context.Context) error {
 	// CRI-252: rate limits back off the poll interval (up to backoffCap,
 	// and at least Linear's rateLimitResult.duration) and a successful poll
 	// restores it. A skipped poll costs no requests, so a rate-limited
-	// watcher stops amplifying the exhaustion it is reacting to.
+	// watcher stops amplifying the exhaustion it is reacting to. The
+	// recomputed period is applied to the ticker BEFORE the wait that
+	// follows the poll, so the next Linear request honors the new interval
+	// — waiting out Linear's advertised duration, not one tick of the old
+	// cadence.
 	interval := w.pollInterval
 	tickerPeriod := interval
 	ticker := time.NewTicker(interval)
@@ -193,15 +197,17 @@ func (w *watcher) run(ctx context.Context) error {
 			}
 			interval = w.pollInterval
 		}
+		if interval != tickerPeriod {
+			// A fresh ticker drains any stale tick buffered during the
+			// poll, so the next wait is the full recomputed interval.
+			ticker.Stop()
+			ticker = time.NewTicker(interval)
+			tickerPeriod = interval
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-		}
-		if interval != tickerPeriod {
-			ticker.Stop()
-			ticker = time.NewTicker(interval)
-			tickerPeriod = interval
 		}
 	}
 }
@@ -256,8 +262,9 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	// [Triage]. An empty union (no routes) queries nothing: fail closed.
 	states := routesPayload.TicketStates()
 	// CRI-252: resolve the automation label ids once (startup-cached); a
-	// cache miss (a label deleted out-of-band) re-ensures here, and a rate
-	// limit aborts the poll before any further Linear traffic.
+	// cache miss (an ID an earlier ensure failed to resolve) re-ensures
+	// here, and a rate limit aborts the poll before any further Linear
+	// traffic.
 	if err := w.ensureAutomationLabels(ctx); err != nil {
 		return err
 	}
@@ -519,9 +526,11 @@ func runNewer(run, cur *criteriav1.CriteriaRun) bool {
 // ensureAutomationLabels resolves (or creates) the team-scoped automation
 // labels and caches their Linear IDs in the watcher (CRI-252): re-ensuring
 // on every poll re-issued two constant label lookups per poll, which the
-// shared rate budget cannot afford. The cache self-heals a label deleted
-// out-of-band: the ensure only re-runs on a cache miss, and
-// issueLabelCreate only fires when the name is missing from the team.
+// shared rate budget cannot afford. The ensure only re-runs on a cache
+// miss, so the cache is the single source for the IDs; a label deleted
+// out-of-band is not detected until restart (an operator action, out of the
+// watcher's steady-state scope), and issueLabelCreate only fires when the
+// name is missing from the team.
 // Empty IDs mean ensure failed for that label; label writes are then
 // skipped (with a watcher log) until the next poll re-ensures, so a
 // transient Linear hiccup never blocks run creation. A rate limit aborts

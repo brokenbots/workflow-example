@@ -127,6 +127,12 @@ type linearServer struct {
 	// rateLimitResult duration in milliseconds.
 	requests            int
 	queriesServed       []string
+	// timestamps and rejected record, per request, when it was served and
+	// whether it got the rate-limit rejection — the back-off cadence test
+	// (CRI-252) asserts when the watcher actually re-issues Linear
+	// requests relative to the advertised duration.
+	timestamps          []time.Time
+	rejected            []time.Time
 	rateLimited         bool
 	rateLimitHTTP429    bool
 	retryAfterHeader    string
@@ -154,7 +160,12 @@ func newLinearServer(t *testing.T) *linearServer {
 		s.mu.Lock()
 		s.requests++
 		s.queriesServed = append(s.queriesServed, raw.Query)
+		now := time.Now()
+		s.timestamps = append(s.timestamps, now)
 		limited, four29, retryAfter, durationMS := s.rateLimited, s.rateLimitHTTP429, s.retryAfterHeader, s.rateLimitDurationMS
+		if limited {
+			s.rejected = append(s.rejected, now)
+		}
 		s.mu.Unlock()
 		if limited {
 			w.Header().Set("Content-Type", "application/json")
@@ -575,6 +586,23 @@ func (s *linearServer) requestCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.requests
+}
+
+// requestTimes returns the wall-clock time at which every request was
+// served, so the back-off cadence test can assert when the watcher
+// re-issues Linear requests relative to a rate-limit rejection (CRI-252).
+func (s *linearServer) requestTimes() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.timestamps...)
+}
+
+// rejectedTimes returns the serve times of the requests that got the
+// rate-limit rejection.
+func (s *linearServer) rejectedTimes() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.rejected...)
 }
 
 // resetRequests zeroes the request counter, so a subsequent poll can assert
@@ -1901,6 +1929,88 @@ func TestRunRateLimitBackoffLoop(t *testing.T) {
 	require.Len(t, tw.runs(t), 1, "the watcher resumed and fired the staged ticket")
 	assert.True(t, tw.logs.contains("poll interval restored"),
 		"a successful poll after back-off returns the interval to normal")
+}
+
+// TestRunBackoffCadenceHonorsAdvertisedDuration pins the loop cadence, not
+// just the logs (CRI-252): the wait that follows a rate-limited poll must
+// honor Linear's advertised rateLimitResult.duration — the next request
+// comes after the advertised window, not one tick of the pre-back-off
+// interval later — and the cadence after a successful poll must be back at
+// the normal interval rather than the backed-off one.
+func TestRunBackoffCadenceHonorsAdvertisedDuration(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+	tw.w.pollInterval = 20 * time.Millisecond
+	tw.w.teamID = "team-1"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- tw.w.run(ctx) }()
+
+	// Establish the healthy 20ms cadence, then advertise a 150ms rate-limit
+	// window (>= 3x the base interval) via the GraphQL RATELIMITED shape —
+	// the response shape that carries rateLimitResult.duration. With the
+	// interval applied before the wait, the first post-429 request lands
+	// ~150ms later; applying it after the wait (the defect this pins) would
+	// put it ~20ms later.
+	time.Sleep(80 * time.Millisecond)
+	tw.linearS.setRateLimited(false, "", 150)
+	time.Sleep(300 * time.Millisecond)
+	tw.linearS.clearRateLimited()
+	tClear := time.Now()
+	time.Sleep(320 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not exit after context cancel")
+	}
+
+	times := tw.linearS.requestTimes()
+	rejected := tw.linearS.rejectedTimes()
+	require.NotEmpty(t, rejected, "the injected rate limit was served at least once")
+
+	// The wait immediately after the first rate-limited poll: the next
+	// Linear request must come no earlier than the advertised 150ms window
+	// (with scheduling slack). Backed-off attempt 2 waits even longer, so a
+	// later first rejection still satisfies this.
+	first := rejected[0]
+	var next time.Time
+	for _, ts := range times {
+		if ts.After(first) {
+			next = ts
+			break
+		}
+	}
+	require.False(t, next.IsZero(), "a request follows the rate-limited poll before cancel")
+	assert.GreaterOrEqual(t, next.Sub(first), 120*time.Millisecond,
+		"the next Linear request waits out the advertised rateLimitResult.duration, not the pre-back-off interval")
+
+	// After the limit clears, the watcher must be back on the ~20ms
+	// cadence: several healthy requests are served post-clear, and the
+	// smallest trailing inter-request gap is the normal interval, not the
+	// backed-off 300ms. (The minimum is robust to a single scheduler stall.)
+	rejectedSet := make(map[time.Time]bool, len(rejected))
+	for _, ts := range rejected {
+		rejectedSet[ts] = true
+	}
+	var postClear []time.Time
+	for _, ts := range times {
+		if ts.After(tClear) && !rejectedSet[ts] {
+			postClear = append(postClear, ts)
+		}
+	}
+	require.GreaterOrEqual(t, len(postClear), 3,
+		"the restored cadence serves several healthy polls after the limit clears")
+	minGap := time.Duration(1 << 62)
+	for i := 1; i < len(postClear); i++ {
+		if g := postClear[i].Sub(postClear[i-1]); g < minGap {
+			minGap = g
+		}
+	}
+	assert.Less(t, minGap, 5*tw.w.pollInterval,
+		"the post-recovery cadence is the normal poll interval, not the backed-off interval")
 }
 
 // TestNextBackoffInterval pins the back-off math: the interval doubles per
