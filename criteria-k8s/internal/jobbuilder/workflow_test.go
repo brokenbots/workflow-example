@@ -274,6 +274,40 @@ func TestWorkflowWithoutVolumeDeclarationsMountsNone(t *testing.T) {
 	assert.Equal(t, "criteria-data", findVolume(t, runner.Spec.Template.Spec.Volumes, "data").PersistentVolumeClaim.ClaimName)
 }
 
+func TestWorkflowInvalidSizeLimitDoesNotPanic(t *testing.T) {
+	// A sizeLimit is a free-form string at every boundary (the routes
+	// schema only requires a non-empty string; the CRD carries no
+	// pattern), so a non-quantity value can reach the builder. The
+	// builder must neither panic — an unrecovered panic would crash-loop
+	// the operator and stall every run — nor set a size limit it could
+	// not parse: the tmp volume is built without a limit and still mounts
+	// at its declared path.
+	wf := &criteriav1.RunWorkflow{
+		Name:      "linear-intake-v1",
+		Type:      "image",
+		Namespace: "wf-jobs",
+		Volumes: []criteriav1.RunWorkflowVolume{
+			{Name: "scratch", Kind: "tmp", MountPath: "/tmp/scratch", SizeLimit: "banana"},
+		},
+	}
+	run := workflowRun("cri-222-bad-sizelimit", wf)
+	defaults := jobbuilder.Defaults{DataPVC: "criteria-data"}
+
+	require.NotPanics(t, func() {
+		runner := jobbuilder.BuildRunnerJob(run, defaults)
+		scratch := findVolume(t, runner.Spec.Template.Spec.Volumes, "scratch")
+		require.NotNil(t, scratch.EmptyDir, "tmp volume source")
+		assert.Nil(t, scratch.EmptyDir.SizeLimit, "an unparsable sizeLimit is omitted, not crashed on")
+		assert.Equal(t, "/tmp/scratch", findMount(t, runner.Spec.Template.Spec.Containers[0].VolumeMounts, "scratch").MountPath)
+
+		shell := jobbuilder.BuildAdapterJob(run, defaults, "shell")
+		require.NotNil(t, findVolume(t, shell.Spec.Template.Spec.Volumes, "scratch").EmptyDir)
+
+		pod := perScopePod(t, run)
+		require.NotNil(t, findVolume(t, pod.Spec.Volumes, "scratch").EmptyDir)
+	})
+}
+
 func TestWorkflowDataDeclarationIsNotDuplicated(t *testing.T) {
 	// A workflow volume named other than "data" but mounted at /data still
 	// re-sources the run-state volume; a workflow volume NAMED "data" but

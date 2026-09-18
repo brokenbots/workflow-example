@@ -16,6 +16,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -146,8 +147,20 @@ func workflowVolume(vol criteriav1.RunWorkflowVolume) corev1.Volume {
 	case routes.VolumeTmp:
 		src.EmptyDir = &corev1.EmptyDirVolumeSource{}
 		if vol.SizeLimit != "" {
-			q := resource.MustParse(vol.SizeLimit)
-			src.EmptyDir.SizeLimit = &q
+			// A sizeLimit is a free-form string at every boundary: the
+			// routes schema only requires a non-empty string and the
+			// CRD carries no pattern, so an unparsable declaration can
+			// reach the builder. Omit the limit — the tmp volume stays
+			// an unbounded emptyDir — and surface the misconfiguration,
+			// because a panic here would crash-loop the operator and
+			// stall every run (CRI-222 review B1).
+			q, err := resource.ParseQuantity(vol.SizeLimit)
+			if err != nil {
+				ctrllog.Log.Error(err, "workflow volume has an invalid sizeLimit; building the tmp volume without a size limit",
+					"volume", vol.Name, "sizeLimit", vol.SizeLimit)
+			} else {
+				src.EmptyDir.SizeLimit = &q
+			}
 		}
 	}
 	return corev1.Volume{Name: workflowPodVolumeName(vol), VolumeSource: src}
