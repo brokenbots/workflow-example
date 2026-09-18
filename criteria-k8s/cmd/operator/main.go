@@ -96,9 +96,10 @@ func main() {
 	castleClient := castle.New(castle.Config{Addr: *castleAddr, Token: castleToken}, nil)
 
 	reconciler := &controller.CriteriaRunReconciler{
-		Client: mgr.GetClient(),
-		Scheme: scheme,
-		Castle: castleClient,
+		Client:   mgr.GetClient(),
+		Scheme:   scheme,
+		Recorder: mgr.GetEventRecorderFor("criteria-k8s-operator"),
+		Castle:   castleClient,
 		Defaults: jobbuilder.Defaults{
 			Image:           *defaultImage,
 			DataPVC:         *dataPVC,

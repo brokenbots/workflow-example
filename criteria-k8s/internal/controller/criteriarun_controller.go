@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -31,12 +32,18 @@ const (
 	criteriaRunFinalizer    = "criteriarun.criteria.brokenbots.dev/finalizer"
 	perScopeRequeueInterval = 10 * time.Second
 	queueRequeueInterval    = 5 * time.Second
+	// eventReasonSingleActive is the Kubernetes event reason emitted when
+	// admission refuses a second live CriteriaRun for a ticket (CRI-221).
+	eventReasonSingleActive = "SecondActiveRunForTicket"
 )
 
 // CriteriaRunReconciler reconciles a CriteriaRun object into a batch/v1 Job.
 type CriteriaRunReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Kubernetes events for admission decisions (CRI-221
+	// single-active invariant). Nil disables event emission.
+	Recorder record.EventRecorder
 	// Castle observes run lifecycle from the castle control plane (CRI-133
 	// API). Nil or disabled means observation is off; the reconciler then
 	// relies purely on Job conditions for phase stamping.
@@ -50,6 +57,7 @@ type CriteriaRunReconciler struct {
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx).WithValues("criteriarun", req.NamespacedName)
@@ -164,6 +172,34 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: queueRequeueInterval}, nil
 	}
 
+	// CRI-221 single-active invariant (enforcement side): refuse to admit a
+	// second non-terminal CriteriaRun for the same ticket. The watcher's
+	// pre-create gate can be raced or bypassed (runs created outside its
+	// selector convention), so admission re-asserts the invariant: at most
+	// one live run per ticket. Runs the controller already actuated skip
+	// the assert — their Jobs exist and refusing their reconcile would
+	// strand them; between two un-actuated runs the older one wins the
+	// admission race deterministically.
+	if run.Status.JobName == "" {
+		blocker, err := r.singleActiveTicketRun(ctx, &run)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if blocker != "" {
+			msg := fmt.Sprintf("ticket %s already has a live CriteriaRun %s; at most one active workflow is allowed per ticket", run.Spec.TicketID, blocker)
+			if r.Recorder != nil {
+				r.Recorder.Event(&run, corev1.EventTypeWarning, eventReasonSingleActive, msg)
+			}
+			logger.Info("refusing to admit CriteriaRun: a live CriteriaRun already exists for the ticket",
+				"ticket", run.Spec.TicketID, "liveRun", blocker)
+			// Free the repo admission slot so other runs for the repo are
+			// not starved behind the refused run; the run's own retry comes
+			// from this reconcile error's backoff.
+			r.Queue.Release(req.NamespacedName, run.Spec.RepoURL)
+			return ctrl.Result{}, fmt.Errorf("refusing to admit CriteriaRun %s: %s", run.Name, msg)
+		}
+	}
+
 	desiredJobs := jobbuilder.BuildAll(&run, r.Defaults)
 
 	var runnerJob *batchv1.Job
@@ -269,6 +305,43 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
+}
+
+// singleActiveTicketRun returns the name of the live CriteriaRun blocking
+// run's admission under the single-active invariant (CRI-221: at most one
+// active workflow per ticket), or "" when the run may be admitted. A blocker
+// is another CriteriaRun in the same namespace with the same ticket id that
+// is neither being deleted nor terminal, and that either the controller
+// already actuated (its runner Job exists, so it holds the ticket regardless
+// of age) or that is older than run (between two un-actuated runs the older
+// one wins the admission race deterministically).
+func (r *CriteriaRunReconciler) singleActiveTicketRun(ctx context.Context, run *criteriav1.CriteriaRun) (string, error) {
+	var runs criteriav1.CriteriaRunList
+	if err := r.List(ctx, &runs, client.InNamespace(run.Namespace)); err != nil {
+		return "", fmt.Errorf("listing CriteriaRuns for the single-active invariant: %w", err)
+	}
+	for i := range runs.Items {
+		other := &runs.Items[i]
+		if other.Name == run.Name || other.Spec.TicketID != run.Spec.TicketID {
+			continue
+		}
+		if !other.DeletionTimestamp.IsZero() || isTerminalPhase(other.Status.Phase) {
+			continue
+		}
+		if other.Status.JobName != "" || runOlder(other, run) {
+			return other.Name, nil
+		}
+	}
+	return "", nil
+}
+
+// runOlder reports whether a was created before b, using the name as a
+// deterministic tiebreak for equal creation timestamps.
+func runOlder(a, b *criteriav1.CriteriaRun) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
 }
 
 // deleteRunAdapterPods deletes every per-scope adapter pod labeled for the

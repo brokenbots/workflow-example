@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -1507,4 +1508,53 @@ func TestPollOrphanSweepDeferredWhenCandidatesQueryFails(t *testing.T) {
 	tw.linearS.setFailCandidates(false)
 	tw.pollOnce(t)
 	assert.Equal(t, []string{"criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+}
+
+// TestPollSkipsWhenLiveRunMatchesSelector pins the watcher's existing
+// pre-create gate (CRI-221 exit criterion): a live CriteriaRun matching the
+// watcher's source selector blocks a second run for the ticket.
+func TestPollSkipsWhenLiveRunMatchesSelector(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel()))
+
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+
+	tw.pollOnce(t)
+
+	assert.Len(t, tw.runs(t), 1, "a live run blocks a second run for the ticket")
+	assert.True(t, tw.logs.contains("run already active"))
+}
+
+// TestPollSkipsWhenAutomationLabelPresentWithoutMatchingRun covers the
+// CRI-221 skip side: the automation label gates firing even when no
+// CriteriaRun matches the watcher's source selector. A live run created
+// outside the selector convention (a legacy run carrying a different label
+// key) is invisible to the runs index, and the label is the only other
+// witness the invariant has; the operator admission assert (CRI-221) is the
+// enforcement backstop for what this gate cannot see.
+func TestPollSkipsWhenAutomationLabelPresentWithoutMatchingRun(t *testing.T) {
+	tw := newTestWatcher(t, routesJSON)
+	tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(),
+		map[string]interface{}{"name": automationLabelName}))
+	// A legacy live run for the same ticket, created outside the selector
+	// convention: no criteria source label, so the runs index cannot see it.
+	legacy := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cri-1-legacy",
+			Namespace: "criteria-jobs",
+			Labels:    map[string]string{"ticket": "cri-1"},
+		},
+		Spec:   criteriav1.CriteriaRunSpec{TicketID: "CRI-1", RepoURL: "https://github.com/brokenbots/workflow-example"},
+		Status: criteriav1.CriteriaRunStatus{Phase: criteriav1.PhaseRunning},
+	}
+	require.NoError(t, tw.client.Create(context.Background(), legacy))
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1, "the automation label gates firing although no run matches the source selector")
+	assert.Equal(t, "cri-1-legacy", runs[0].Name, "only the legacy run exists; no watcher run was created")
+	assert.True(t, tw.logs.contains("single-active invariant"),
+		"the skip is logged with the invariant reason")
 }
