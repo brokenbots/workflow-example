@@ -56,8 +56,10 @@ if grep -rniE 'stringData|secretKeyRef|^kind: Secret$' "$CHART/values.yaml" "$CH
 fi
 
 # Values contract (CRI-129): image repo+tag, namespace, PVC names+sizes,
-# retention period/interval, provider base URL, Linear project/state, poll
-# interval must all be configurable without editing templates.
+# retention period/interval, provider base URL, Linear project, poll
+# interval must all be configurable without editing templates. (The
+# trigger states are per-route since CRI-218 and live in the routes
+# payload, not in values.)
 grep -q 'repository: localhost:5000/criteria-k8s' "$CHART/values.yaml" || fail "values.yaml missing operator image repository"
 grep -q 'tag: dev' "$CHART/values.yaml" || fail "values.yaml missing image tag"
 grep -q 'namespace: criteria-jobs' "$CHART/values.yaml" || fail "values.yaml missing namespace"
@@ -67,7 +69,8 @@ grep -q 'retentionPeriod: 168h' "$CHART/values.yaml" || fail "values.yaml missin
 grep -q 'retentionInterval: 1h' "$CHART/values.yaml" || fail "values.yaml missing retention interval"
 grep -q 'providerBaseUrl:' "$CHART/values.yaml" || fail "values.yaml missing provider base URL"
 grep -q 'linearProjectName:' "$CHART/values.yaml" || fail "values.yaml missing Linear project"
-grep -q 'linearTriageState:' "$CHART/values.yaml" || fail "values.yaml missing Linear triage state"
+# CRI-218 removed watcher.linearTriageState: trigger states are per-route.
+grep -q 'linearTriageState:' "$CHART/values.yaml" && fail "values.yaml still declares removed watcher.linearTriageState"
 grep -q 'pollInterval: 60s' "$CHART/values.yaml" || fail "values.yaml missing poll interval"
 
 if ! command -v helm > /dev/null 2>&1; then
@@ -141,7 +144,8 @@ grep -q 'mountPath: /data$' "$RENDERED" || fail "operator does not mount /data"
 grep -q 'name: criteria-linear-watcher' "$RENDERED" || fail "watcher deployment missing"
 grep -q 'command: \["/linear-watcher"\]' "$RENDERED" || fail "watcher container command missing"
 grep -q 'name: LINEAR_PROJECT_NAME' "$RENDERED" || fail "watcher missing LINEAR_PROJECT_NAME"
-grep -q 'name: LINEAR_TRIAGE_STATE' "$RENDERED" || fail "watcher missing LINEAR_TRIAGE_STATE"
+# CRI-218: LINEAR_TRIAGE_STATE was removed; trigger states are per-route.
+grep -q 'name: LINEAR_TRIAGE_STATE' "$RENDERED" && fail "watcher still sets removed LINEAR_TRIAGE_STATE"
 grep -q 'name: POLL_INTERVAL' "$RENDERED" || fail "watcher missing POLL_INTERVAL"
 grep -q 'secretProviderClass: linear-spc' "$RENDERED" || fail "watcher CSI volume does not reference linear-spc"
 grep -q 'mountPath: /secrets/linear_api_key' "$RENDERED" || fail "watcher does not mount the Linear API key file"
@@ -209,7 +213,6 @@ check_override "poll interval override" "watcher.pollInterval=30s" 'value: "30s"
 check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'
 check_override "Linear project override" "watcher.linearProjectName=Other Project" 'value: "Other Project"'
-check_override "Linear triage state override" "watcher.linearTriageState=Backlog" 'value: "Backlog"'
 check_override "routes ConfigMap override" "watcher.routesConfigMap=my-routes" 'name: my-routes'
 check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
 

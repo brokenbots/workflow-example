@@ -72,7 +72,6 @@ helm template criteria-k8s charts/criteria-k8s
 | `watcher.enabled` | `true` | Deploy the Linear watcher. |
 | `watcher.replicaCount` | `1` | Watcher replicas. |
 | `watcher.linearProjectName` | `Criteria K8s Workflow Runner` | Linear project the watcher polls. |
-| `watcher.linearTriageState` | `Triage` | Linear state that triggers a run. |
 | `watcher.pollInterval` | `60s` | How often the watcher polls Linear. Go duration. |
 | `watcher.maxAgentVisits` | `2` | Default max agent visits recorded in created `CriteriaRun`s. |
 | `watcher.providerBaseUrl` | `http://192.168.17.116:11434/v1` | Provider endpoint recorded in created `CriteriaRun`s. |

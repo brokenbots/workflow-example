@@ -1,5 +1,6 @@
-# criteria-linear-watcher: polls Linear for tickets in the configured project
-# and triage state, creating a CriteriaRun for each one.
+# criteria-linear-watcher: polls Linear for tickets in the configured
+# project and in the workflow states declared by the routes payload
+# (omitted states default to Triage), creating a CriteriaRun for each one.
 {{- if .Values.watcher.enabled }}
 ---
 apiVersion: apps/v1
@@ -36,8 +37,6 @@ spec:
               value: {{ include "criteria-k8s.namespace" . | quote }}
             - name: LINEAR_PROJECT_NAME
               value: {{ .Values.watcher.linearProjectName | quote }}
-            - name: LINEAR_TRIAGE_STATE
-              value: {{ .Values.watcher.linearTriageState | quote }}
             - name: POLL_INTERVAL
               value: {{ .Values.watcher.pollInterval | quote }}
             # The operator's DEFAULT_CRITERIA_IMAGE is the single source of

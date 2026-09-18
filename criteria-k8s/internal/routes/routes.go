@@ -4,9 +4,11 @@
 // k8s/routes.schema.json; k8s/examples/routes-configmap.yaml is the shipped
 // example. Lookup rules (CRI-217, per ADR-0005): the k8s-run gate stays
 // global (watcher-side, not here); the ticket's project must exist in the
-// routes map; the matching route's workflow is the project default; a ticket
-// label in the "workflows" label group names a workflow that overrides the
-// default; a missing workflow fails closed.
+// routes map; the ticket's workflow state must be in the matched route's
+// states list (CRI-218: omitted states default to [Triage]); the matching
+// route's workflow is the project default; a ticket label in the "workflows"
+// label group names a workflow that overrides the default; a missing
+// workflow fails closed.
 package routes
 
 import (
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -51,6 +54,10 @@ const (
 	TagMatchAll = "all"
 	TagMatchAny = "any"
 )
+
+// DefaultState is the Linear workflow state a route triggers on when it
+// omits its states list (CRI-218, ADR-0005 §3.4).
+const DefaultState = "Triage"
 
 // Payload is the routes ConfigMap payload (the 'routes.json' data key).
 type Payload struct {
@@ -104,7 +111,10 @@ type Route struct {
 	Project  string   `json:"project"`
 	Tags     []string `json:"tags,omitempty"`
 	TagMatch string   `json:"tagMatch,omitempty"`
-	States   []string `json:"states"`
+	// States holds the Linear workflow state names this route triggers on.
+	// Omitted (or empty) in the payload defaults to [DefaultState] (CRI-218);
+	// Parse applies the default, so a parsed Route always carries states.
+	States []string `json:"states"`
 }
 
 var (
@@ -127,10 +137,25 @@ func Parse(data []byte) (*Payload, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", DataKey, err)
 	}
+	p.applyDefaults()
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	return &p, nil
+}
+
+// applyDefaults applies the payload defaults of k8s/routes.schema.json:
+// a route omitting states (or declaring an empty list, which the schema
+// rejects but Go cannot distinguish from omission) triggers on
+// [DefaultState] (CRI-218). Validate still rejects a programmatically
+// built Route without states, so hand-assembled payloads fail loudly
+// instead of silently routing everything to Triage.
+func (p *Payload) applyDefaults() {
+	for i := range p.Routes {
+		if len(p.Routes[i].States) == 0 {
+			p.Routes[i].States = []string{DefaultState}
+		}
+	}
 }
 
 // LoadFile reads and validates the routes payload from its in-pod file.
@@ -352,6 +377,25 @@ var ErrUnknownWorkflow = errors.New("workflow is not present in the routes workf
 // Fail closed on the ambiguity: no run, watcher log, Linear comment.
 var ErrAmbiguousWorkflow = errors.New("multiple workflow labels in the workflows label group")
 
+// TicketStates returns the deduplicated, sorted union of all routes'
+// declared states: the Linear workflow state names any route can match
+// (CRI-218). The watcher queries Linear for tickets in these states; the
+// per-route selection itself happens in Resolve.
+func (p *Payload) TicketStates() []string {
+	seen := make(map[string]bool)
+	states := make([]string, 0, len(p.Routes))
+	for i := range p.Routes {
+		for _, s := range p.Routes[i].States {
+			if !seen[s] {
+				seen[s] = true
+				states = append(states, s)
+			}
+		}
+	}
+	slices.Sort(states)
+	return states
+}
+
 // Selector carries the ticket-facing inputs to Resolve.
 type Selector struct {
 	// Project is the ticket's Linear project name.
@@ -412,7 +456,7 @@ func (p *Payload) matchRoute(sel Selector) (*Route, error) {
 	specific, general := (*Route)(nil), (*Route)(nil)
 	for i := range p.Routes {
 		r := &p.Routes[i]
-		if r.Project != sel.Project || !containsString(r.States, sel.State) {
+		if r.Project != sel.Project || !slices.Contains(r.States, sel.State) {
 			continue
 		}
 		if len(r.Tags) == 0 {
@@ -458,27 +502,15 @@ func workflowOverride(sel Selector) (string, error) {
 // requires every listed tag, "any" requires at least one.
 func tagsSatisfied(r *Route, labels []string) bool {
 	if r.TagMatch == TagMatchAny {
-		for _, tag := range r.Tags {
-			if containsString(labels, tag) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(r.Tags, func(tag string) bool {
+			return slices.Contains(labels, tag)
+		})
 	}
 	// "all" (the schema default).
 	for _, tag := range r.Tags {
-		if !containsString(labels, tag) {
+		if !slices.Contains(labels, tag) {
 			return false
 		}
 	}
 	return true
-}
-
-func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }

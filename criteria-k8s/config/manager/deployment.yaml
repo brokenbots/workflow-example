@@ -107,8 +107,6 @@ spec:
               value: "criteria-jobs"
             - name: LINEAR_PROJECT_NAME
               value: "Criteria K8s Workflow Runner"
-            - name: LINEAR_TRIAGE_STATE
-              value: "Triage"
             - name: POLL_INTERVAL
               value: "60s"
             - name: CRITERIA_IMAGE

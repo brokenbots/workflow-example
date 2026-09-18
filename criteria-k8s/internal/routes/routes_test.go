@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -216,6 +217,98 @@ func TestMatchRouteTagPreference(t *testing.T) {
 	}
 }
 
+// CRI-218: a route omitting states defaults to [Triage] at parse time.
+func TestParseDefaultsOmittedStatesToTriage(t *testing.T) {
+	// Raw JSON without a states key — the schema accepts the omission and
+	// documents the [Triage] default.
+	data := []byte(`{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"wf-default":{"type":"image","image":"i","namespace":"criteria-jobs"}},"routes":[{"name":"intake","workflow":"wf-default","project":"Runner"}]}`)
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(payload without states): %v", err)
+	}
+	if len(got.Routes) != 1 || !slices.Equal(got.Routes[0].States, []string{DefaultState}) {
+		t.Fatalf("parsed states = %v, want [%s]", got.Routes[0].States, DefaultState)
+	}
+}
+
+func TestResolveOmittedStatesBehavesAsTriage(t *testing.T) {
+	// One route omits states; the other declares [Triage] explicitly. Both
+	// must behave identically.
+	raw := []byte(`{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"wf-default":{"type":"image","image":"i","namespace":"criteria-jobs"}},"routes":[
+		{"name":"implicit","workflow":"wf-default","project":"Runner"},
+		{"name":"explicit","workflow":"wf-default","project":"Other","states":["Triage"]}
+	]}`)
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve(implicit route, Triage): %v", err)
+	}
+	if sel.Route.Name != "implicit" {
+		t.Errorf("matched route = %q, want implicit", sel.Route.Name)
+	}
+	if sel, err := p.Resolve(selectorFor("Other", "Triage", nil, nil)); err != nil || sel.Route.Name != "explicit" {
+		t.Errorf("Resolve(explicit route, Triage) = %v, %v; want explicit match", sel, err)
+	}
+	// A state outside the effective [Triage] list never matches.
+	if _, err := p.Resolve(selectorFor("Runner", "In Progress", nil, nil)); !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("err = %v, want ErrNoRoute for unlisted state", err)
+	}
+}
+
+func TestResolveCustomStatesList(t *testing.T) {
+	p := validPayload()
+	p.Routes = []Route{{
+		Name:     "wide",
+		Workflow: "wf-default",
+		Project:  "Runner",
+		States:   []string{"Triage", "In Progress"},
+	}}
+	for _, state := range []string{"Triage", "In Progress"} {
+		sel, err := p.Resolve(selectorFor("Runner", state, nil, nil))
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", state, err)
+		}
+		if sel.Route.Name != "wide" {
+			t.Errorf("Resolve(%q) matched route %q; want wide", state, sel.Route.Name)
+		}
+	}
+	if _, err := p.Resolve(selectorFor("Runner", "Done", nil, nil)); !errors.Is(err, ErrNoRoute) {
+		t.Fatalf("err = %v, want ErrNoRoute for state outside the route's list", err)
+	}
+}
+
+// Fail closed: Linear tickets whose state is unresolvable (empty selector
+// state) never match any route.
+func TestResolveUnresolvableStateFailsClosed(t *testing.T) {
+	p := validPayload()
+	for _, state := range []string{"", "  "} {
+		if _, err := p.Resolve(selectorFor("Runner", state, nil, nil)); !errors.Is(err, ErrNoRoute) {
+			t.Fatalf("Resolve(state %q) err = %v, want ErrNoRoute", state, err)
+		}
+	}
+}
+
+func TestTicketStates(t *testing.T) {
+	var p Payload
+	p.Routes = []Route{
+		{States: []string{"In Progress", "Triage"}},
+		{States: []string{"Triage", "Done"}},
+		{States: nil},
+	}
+	got := p.TicketStates()
+	want := []string{"Done", "In Progress", "Triage"}
+	if !slices.Equal(got, want) {
+		t.Errorf("TicketStates() = %v, want sorted dedup %v", got, want)
+	}
+	if s := (&Payload{}).TicketStates(); len(s) != 0 {
+		t.Errorf("TicketStates() with no routes = %v, want empty", s)
+	}
+}
+
 func TestLoadFileAndPerPollReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), DataKey)
 	original := marshalPayload(t, validPayload())
@@ -263,7 +356,9 @@ func TestValidateNegative(t *testing.T) {
 		{"empty routes", func(p *Payload) { p.Routes = nil }, "routes"},
 		{
 			"image workflow with ref (D2 fail-closed)",
-			func(p *Payload) { p.WorkflowLibrary["wf-default"] = Workflow{Type: TypeImage, Image: "i", Namespace: "n", Ref: "abc"} },
+			func(p *Payload) {
+				p.WorkflowLibrary["wf-default"] = Workflow{Type: TypeImage, Image: "i", Namespace: "n", Ref: "abc"}
+			},
 			"url or ref",
 		},
 		{
@@ -273,7 +368,9 @@ func TestValidateNegative(t *testing.T) {
 		},
 		{
 			"bad workflow type",
-			func(p *Payload) { p.WorkflowLibrary["wf-default"] = Workflow{Type: "tarball", Image: "i", Namespace: "n"} },
+			func(p *Payload) {
+				p.WorkflowLibrary["wf-default"] = Workflow{Type: "tarball", Image: "i", Namespace: "n"}
+			},
 			"type must be",
 		},
 		{

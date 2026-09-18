@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -56,12 +57,16 @@ func (r *logRecorder) contains(substr string) bool {
 	return false
 }
 
-// linearServer fakes the Linear GraphQL surface the watcher uses.
+// linearServer fakes the Linear GraphQL surface the watcher uses. The
+// issues query filters returned issues by the requested `states` variable,
+// mirroring Linear's `state: {name: {in: $states}}` filter.
 type linearServer struct {
-	mu       sync.Mutex
-	issues   []map[string]interface{}
-	comments []string
-	ts       *httptest.Server
+	mu          sync.Mutex
+	issues      []map[string]interface{}
+	comments    []string
+	lastStates  []string
+	leakyFilter bool
+	ts          *httptest.Server
 }
 
 func newLinearServer(t *testing.T) *linearServer {
@@ -86,10 +91,28 @@ func newLinearServer(t *testing.T) *linearServer {
 				},
 			}
 		case strings.Contains(raw.Query, "issues"):
+			var variables struct {
+				States []string `json:"states"`
+			}
+			if err := json.Unmarshal(raw.Variables, &variables); err != nil {
+				t.Errorf("decoding issues variables: %v", err)
+				return
+			}
 			s.mu.Lock()
-			nodes := make([]interface{}, len(s.issues))
-			for i, n := range s.issues {
-				nodes[i] = n
+			s.lastStates = append([]string(nil), variables.States...)
+			nodes := make([]interface{}, 0, len(s.issues))
+			for _, n := range s.issues {
+				if s.leakyFilter {
+					nodes = append(nodes, n)
+					continue
+				}
+				stateObj, _ := n["state"].(map[string]interface{})
+				state, _ := stateObj["name"].(string)
+				// An issue with an unresolvable state (null or absent) can
+				// never match a non-empty states filter.
+				if state != "" && slices.Contains(variables.States, state) {
+					nodes = append(nodes, n)
+				}
 			}
 			s.mu.Unlock()
 			resp["data"] = map[string]interface{}{
@@ -141,6 +164,22 @@ func (s *linearServer) setIssues(issues ...map[string]interface{}) {
 	s.issues = issues
 }
 
+// setLeakyFilter makes the server ignore the states filter on the next
+// queries, returning every staged issue (used to prove the watcher's own
+// fail-closed handling of unresolvable state information).
+func (s *linearServer) setLeakyFilter() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leakyFilter = true
+}
+
+// queriedStates returns the states variable of the most recent issues query.
+func (s *linearServer) queriedStates() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lastStates...)
+}
+
 func (s *linearServer) postedComments() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,6 +206,18 @@ func issue(id, identifier string, labels ...map[string]interface{}) map[string]i
 
 func gateLabel() map[string]interface{} {
 	return map[string]interface{}{"name": "k8s-run"}
+}
+
+// withState returns the issue node with its Linear workflow state name set.
+func withState(m map[string]interface{}, state string) map[string]interface{} {
+	m["state"] = map[string]interface{}{"name": state}
+	return m
+}
+
+// withoutState returns the issue node with an unresolvable (null) state.
+func withoutState(m map[string]interface{}) map[string]interface{} {
+	m["state"] = nil
+	return m
 }
 
 func groupLabel(name, group string) map[string]interface{} {
@@ -201,6 +252,40 @@ const routesJSON = `{
   "routes": [
     {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner", "states": ["Triage"]},
     {"name": "intake-fast", "workflow": "linear-intake-url", "project": "Criteria K8s Workflow Runner", "tags": ["fast"], "tagMatch": "any", "states": ["Triage"]}
+  ]
+}`
+
+// routesJSONMultiState declares a route matching more than one state
+// (CRI-218) and a tag route with the same list.
+const routesJSONMultiState = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "routes": [
+    {"name": "wide-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner", "states": ["Triage", "In Progress"]}
+  ]
+}`
+
+// routesJSONOmittedStates declares a route with no states key: it must
+// behave exactly like states=[Triage] (CRI-218 default).
+const routesJSONOmittedStates = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "routes": [
+    {"name": "default-states-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner"}
   ]
 }`
 
@@ -241,7 +326,6 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 			linear:              linear.NewClientWithBaseURL(lin.ts.URL, "test-key"),
 			namespace:           "criteria-jobs",
 			projectName:         "Criteria K8s Workflow Runner",
-			triageState:         "Triage",
 			triggerLabel:        "k8s-run",
 			pollInterval:        time.Minute,
 			image:               "localhost:5000/criteria-k8s:dev",
@@ -419,5 +503,98 @@ func TestPollRoutesBehavior(t *testing.T) {
 		// spec.image stays unset: the operator's default image remains the
 		// source of truth for pre-workflow behavior.
 		assert.Empty(t, spec.Image)
+	})
+}
+
+// CRI-218: per-route trigger states with a [Triage] default.
+func TestPollPerRouteStates(t *testing.T) {
+	t.Run("watcher queries the union of the routes' declared states", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONMultiState)
+		tw.linearS.setIssues(issue("i-20", "CRI-20", gateLabel()))
+		tw.pollOnce(t)
+		states := tw.linearS.queriedStates()
+		if !slices.Equal(states, []string{"In Progress", "Triage"}) {
+			t.Errorf("watcher queried states %v; want sorted dedup union [In Progress Triage]", states)
+		}
+	})
+
+	t.Run("route with states=[Triage] fires only for Triage tickets", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(
+			issue("i-21", "CRI-21", gateLabel()),
+			withState(issue("i-22", "CRI-22", gateLabel()), "In Progress"),
+		)
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1, "only the Triage ticket fires")
+		assert.Equal(t, "CRI-21", runs[0].Spec.TicketID)
+	})
+
+	t.Run("route with a custom states list fires for any listed state", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONMultiState)
+		tw.linearS.setIssues(
+			issue("i-23", "CRI-23", gateLabel()),
+			withState(issue("i-24", "CRI-24", gateLabel()), "In Progress"),
+		)
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 2, "both a Triage and an In Progress ticket fire")
+		assert.Equal(t, "CRI-23", runs[0].Spec.TicketID)
+		assert.Equal(t, "CRI-24", runs[1].Spec.TicketID)
+	})
+
+	t.Run("ticket in a state outside the route's list never fires", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONMultiState)
+		// The states filter already hides unlisted-state tickets from the
+		// watcher; with a leaky server (e.g. the routes payload gained a
+		// state after the query was issued) the per-route check itself must
+		// still reject the ticket. k8s-run gate, matching project and tag:
+		// everything matches except the state.
+		tw.linearS.setLeakyFilter()
+		tw.linearS.setIssues(withState(issue("i-25", "CRI-25", gateLabel(), groupLabel("fast", "speed")), "Done"))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "no run for a state outside the route's states list")
+		assert.True(t, tw.logs.contains("no route in the routes map"))
+	})
+
+	t.Run("route omitting states behaves identically to states=[Triage]", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONOmittedStates)
+		tw.linearS.setIssues(
+			issue("i-26", "CRI-26", gateLabel()),
+			withState(issue("i-27", "CRI-27", gateLabel()), "In Progress"),
+		)
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1, "the omitted-states route defaults to [Triage]")
+		assert.Equal(t, "CRI-26", runs[0].Spec.TicketID)
+		assert.Equal(t, "linear-intake-v1", runs[0].Spec.Workflow.Name)
+
+		// The default must reach the Linear query: only [Triage] is polled.
+		assert.True(t, tw.logs.contains("polling Linear for ticket states declared by routes"))
+		states := tw.linearS.queriedStates()
+		if !slices.Equal(states, []string{"Triage"}) {
+			t.Errorf("watcher queried states %v; want [Triage]", states)
+		}
+	})
+
+	t.Run("empty routes union queries nothing and never fires", func(t *testing.T) {
+		// A payload the schema accepts but that declares no routes fails
+		// closed in Validate; assert the watcher still refuses to fire on
+		// any ticket when the union is empty.
+		tw := newTestWatcher(t, `{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"linear-intake-v1":{"type":"image","image":"i","namespace":"criteria-jobs"}},"routes":[]}`)
+		tw.linearS.setIssues(issue("i-28", "CRI-28", gateLabel()))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "no routes: the whole poll fails closed")
+		assert.True(t, tw.logs.contains("failing closed"))
+	})
+
+	t.Run("unresolvable ticket state does not trigger (fail closed)", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setLeakyFilter()
+		tw.linearS.setIssues(withoutState(issue("i-29", "CRI-29", gateLabel())))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "a ticket whose state Linear cannot resolve never fires")
+		assert.True(t, tw.logs.contains("no route in the routes map"),
+			"watcher logs the fail-closed skip for the empty state")
 	})
 }

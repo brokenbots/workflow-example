@@ -28,8 +28,7 @@ var (
 	namespace           = flag.String("namespace", getenv("NAMESPACE", "criteria-jobs"), "Namespace to watch and create CriteriaRuns in")
 	linearAPIKey        = flag.String("linear-api-key", getenv("LINEAR_API_KEY", ""), "Linear API key (also read from /secrets/linear_api_key)")
 	projectName         = flag.String("linear-project-name", getenv("LINEAR_PROJECT_NAME", "Criteria K8s Workflow Runner"), "Linear project to watch")
-	triageState         = flag.String("linear-triage-state", getenv("LINEAR_TRIAGE_STATE", "Triage"), "Workflow state that triggers a run")
-	triggerLabel        = flag.String("linear-trigger-label", getenv("LINEAR_TRIGGER_LABEL", ""), "Require this label on the issue before triggering a run; empty means any issue in the triage state triggers")
+	triggerLabel        = flag.String("linear-trigger-label", getenv("LINEAR_TRIGGER_LABEL", ""), "Require this label on the issue before triggering a run; empty means any issue matching a route triggers")
 	pollInterval        = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s")), "How often to poll Linear")
 	image               = flag.String("image", getenv("CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
 	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
@@ -89,7 +88,6 @@ func main() {
 		linear:              linearClient,
 		namespace:           *namespace,
 		projectName:         *projectName,
-		triageState:         *triageState,
 		triggerLabel:        *triggerLabel,
 		pollInterval:        *pollInterval,
 		image:               *image,
@@ -117,7 +115,6 @@ type watcher struct {
 	linear              *linear.Client
 	namespace           string
 	projectName         string
-	triageState         string
 	triggerLabel        string
 	pollInterval        time.Duration
 	image               string
@@ -139,7 +136,7 @@ func (w *watcher) run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve project: %w", err)
 	}
-	w.log.Info("watching Linear project", "project", w.projectName, "projectID", projectID, "state", w.triageState, "interval", w.pollInterval)
+	w.log.Info("watching Linear project", "project", w.projectName, "projectID", projectID, "interval", w.pollInterval)
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
@@ -165,24 +162,34 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		w.log.Error(err, "loading routes payload; failing closed and skipping poll", "routesFile", w.routesFile)
 		return nil
 	}
-	issues, err := w.linear.IssuesInProjectState(ctx, projectID, w.triageState)
+	// CRI-218: the routes payload is also the configuration of record for
+	// which workflow states trigger runs. The watcher queries the union of
+	// all routes' declared states; routes omitting states default to
+	// [Triage]. An empty union (no routes) queries nothing: fail closed.
+	states := routesPayload.TicketStates()
+	w.log.V(1).Info("polling Linear for ticket states declared by routes", "states", states)
+	issues, err := w.linear.IssuesInProjectStates(ctx, projectID, states)
 	if err != nil {
 		return err
 	}
 	for _, issue := range issues {
 		// CRI-147 gating: when a trigger label is configured, only issues
-		// carrying it fire a k8s run. Other tickets in the triage state stay
-		// untouched so teams can exercise their workflows locally without
-		// consuming cluster compute. This global gate is unchanged by CRI-217.
+		// carrying it fire a k8s run (this gate doubles as the k8s-run
+		// arming gate in deployments that configure it). Other tickets in a
+		// watched state stay untouched so teams can exercise their
+		// workflows locally without consuming cluster compute. This global
+		// gate is unchanged by CRI-217 and CRI-218.
 		if w.triggerLabel != "" && !slices.Contains(issue.Labels, w.triggerLabel) {
-			w.log.V(1).Info("issue in triage state without trigger label; not firing a k8s run",
+			w.log.V(1).Info("issue in a watched state without trigger label; not firing a k8s run",
 				"ticket", issue.Identifier, "triggerLabel", w.triggerLabel)
 			continue
 		}
-		// CRI-217 route lookup: the ticket's project must exist in the
-		// routes map; the matched route supplies the project default
-		// workflow; a workflows-label-group label overrides it; a missing
-		// workflow fails closed with a Linear comment.
+		// CRI-217/218 route lookup: the ticket's project must exist in the
+		// routes map, its state must be in the matched route's states list
+		// (omitted states default to [Triage]), and the route's tag subset
+		// must be satisfied; the matched route supplies the project
+		// default workflow; a workflows-label-group label overrides it; a
+		// missing workflow fails closed with a Linear comment.
 		sel, err := routesPayload.Resolve(routes.Selector{
 			Project:             issue.ProjectName,
 			State:               issue.StateName,

@@ -144,18 +144,24 @@ func (c *Client) FindProjectID(ctx context.Context, name string) (string, error)
 	return "", fmt.Errorf("linear project %q not found", name)
 }
 
-// IssuesInProjectState returns issues in the project that are in the named workflow state.
-func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName string) ([]Issue, error) {
+// IssuesInProjectStates returns issues in the project whose workflow state
+// name is any of states (CRI-218: the watcher polls the union of the
+// routes' declared states). With no states it queries nothing and returns
+// no issues: fail closed.
+func (c *Client) IssuesInProjectStates(ctx context.Context, projectID string, states []string) ([]Issue, error) {
+	if len(states) == 0 {
+		return nil, nil
+	}
 	req := graphqlRequest{
-		Query: `query($project: ID!, $state: String!) {
-            issues(filter: {project: {id: {eq: $project}}, state: {name: {eq: $state}}}) {
+		Query: `query($project: ID!, $states: [String!]!) {
+            issues(filter: {project: {id: {eq: $project}}, state: {name: {in: $states}}}) {
                 nodes { id identifier title description state { name } project { id name }
                         labels { nodes { name parent { name isGroup } } } }
             }
         }`,
 		Variables: map[string]interface{}{
 			"project": projectID,
-			"state":   stateName,
+			"states":  states,
 		},
 	}
 	var result struct {
@@ -212,13 +218,14 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 	return out, nil
 }
 
-// FindTriageTickets returns issues in the named project that are in the named state.
-func (c *Client) FindTriageTickets(ctx context.Context, projectName, stateName string) ([]Issue, error) {
+// FindTicketsInStates returns issues in the named project that are in any
+// of the given workflow states (CRI-218).
+func (c *Client) FindTicketsInStates(ctx context.Context, projectName string, states []string) ([]Issue, error) {
 	projectID, err := c.FindProjectID(ctx, projectName)
 	if err != nil {
 		return nil, err
 	}
-	return c.IssuesInProjectState(ctx, projectID, stateName)
+	return c.IssuesInProjectStates(ctx, projectID, states)
 }
 
 // PostComment creates a comment on the given issue (CRI-217 routing
