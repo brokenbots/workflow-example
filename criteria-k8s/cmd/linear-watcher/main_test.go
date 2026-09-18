@@ -283,15 +283,35 @@ func newLinearServer(t *testing.T) *linearServer {
 				return
 			}
 			s.mu.Lock()
-			names := append([]string(nil), s.issueLabelNames[variables.ID]...)
+			// Linear's issue(id:) query accepts either the node id or the
+			// human identifier and returns the node's canonical id, so the
+			// fake resolves the fixture the same way.
+			var found map[string]interface{}
+			for _, n := range s.issues {
+				id, _ := n["id"].(string)
+				ident, _ := n["identifier"].(string)
+				if id == variables.ID || ident == variables.ID {
+					found = n
+				}
+			}
+			if found == nil {
+				s.mu.Unlock()
+				resp["errors"] = []interface{}{map[string]interface{}{"message": "issue not found"}}
+				break
+			}
+			issueID, _ := found["id"].(string)
+			issueIdentifier, _ := found["identifier"].(string)
+			names := append([]string(nil), s.issueLabelNames[issueID]...)
 			nodes := make([]interface{}, 0, len(names))
 			for _, name := range names {
-				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name)})
+				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name), "name": name})
 			}
 			s.mu.Unlock()
 			resp["data"] = map[string]interface{}{
 				"issue": map[string]interface{}{
-					"labels": map[string]interface{}{"nodes": nodes},
+					"id":         issueID,
+					"identifier": issueIdentifier,
+					"labels":     map[string]interface{}{"nodes": nodes},
 				},
 			}
 		default:
@@ -1039,6 +1059,11 @@ func TestRestartConvergesLabelState(t *testing.T) {
 			"no lingering criteria-automation after Succeeded, no dirty label")
 		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
 			"the fresh watcher performs the removal itself")
+
+		// Converged state stays converged: the next poll is a no-op.
+		tw2.pollOnce(t)
+		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
+			"the next poll performs no further label writes")
 	})
 
 	t.Run("failed run: fresh watcher removes the marker and marks dirty", func(t *testing.T) {
@@ -1057,6 +1082,72 @@ func TestRestartConvergesLabelState(t *testing.T) {
 		assert.Equal(t, []string{"fast", "criteria-dirty"}, tw2.linearS.issueLabelsOf("i-1"),
 			"no lingering criteria-automation after Failed and criteria-dirty present")
 		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes)
+
+		// Converged state stays converged: the next poll is a no-op.
+		tw2.pollOnce(t)
+		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes,
+			"the next poll performs no further label writes")
+	})
+}
+
+// TestReconcileTicketOutsideRouteStates covers the production path the run
+// firing cannot see: the intake workflow moves the ticket out of the
+// route-declared states (to "Done" on success, "In Review" on handler
+// failure) before its CriteriaRun settles. Reconciliation is driven by the
+// CriteriaRun list, so the watcher still converges the ticket's labels; run
+// firing stays scoped to the route-declared states, so no successor run
+// fires for a settled ticket regardless of its trigger label.
+func TestReconcileTicketOutsideRouteStates(t *testing.T) {
+	t.Run("succeeded run while the ticket is in Done", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-9", "CRI-9", gateLabel(), groupLabel("fast", "speed")))
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+		assert.Contains(t, tw.linearS.issueLabelsOf("i-9"), automationLabelName)
+
+		// The run succeeds; the workflow moves the ticket to "Done" (a
+		// state no route declares) and the trigger label stays armed.
+		tw.terminalizeRun(t, "CRI-9", criteriav1.PhaseSucceeded)
+		tw.linearS.setIssues(withState(
+			issue("i-9", "CRI-9", gateLabel(), groupLabel("fast", "speed")), "Done"))
+		tw.linearS.setIssueLabels("i-9", "k8s-run", "fast", automationLabelName)
+
+		tw2 := tw.restarted()
+		writes := tw2.linearS.labelUpdateCount()
+		tw2.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "fast"}, tw2.linearS.issueLabelsOf("i-9"),
+			"criteria-automation removed outside the route-declared states, other labels intact")
+		assert.Equal(t, 1, tw2.linearS.labelUpdateCount()-writes,
+			"exactly one removal write")
+		assert.Len(t, tw2.runs(t), 1,
+			"run firing stays scoped to route-declared states; no successor run fires")
+	})
+
+	t.Run("failed run while the ticket is in In Review", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-9", "CRI-9", gateLabel(), groupLabel("fast", "speed")))
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+
+		// The run fails; the workflow moves the ticket to "In Review" for
+		// triage (also outside the route-declared states).
+		tw.terminalizeRun(t, "CRI-9", criteriav1.PhaseFailed)
+		tw.linearS.setIssues(withState(
+			issue("i-9", "CRI-9", gateLabel(), groupLabel("fast", "speed")), "In Review"))
+		tw.linearS.setIssueLabels("i-9", "k8s-run", "fast", automationLabelName)
+
+		tw2 := tw.restarted()
+		writes := tw2.linearS.labelUpdateCount()
+		tw2.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "fast", "criteria-dirty"},
+			tw2.linearS.issueLabelsOf("i-9"),
+			"criteria-automation removed and criteria-dirty added outside the route-declared states")
+		assert.Equal(t, 2, tw2.linearS.labelUpdateCount()-writes,
+			"one removal and one addition")
+		assert.Len(t, tw2.runs(t), 1,
+			"run firing stays scoped to route-declared states; no successor run fires")
 	})
 }
 

@@ -284,8 +284,51 @@ func (c *Client) IssueComments(ctx context.Context, issueID string, limit int) (
 	return bodies, nil
 }
 
+// IssueByIdentifier returns the Linear issue with the given human-readable
+// identifier (e.g. "CRI-1"; Linear's issue(id:) resolves identifiers as
+// well as UUIDs). It backs the watcher's CriteriaRun-driven label
+// reconciliation, which must reach tickets in any workflow state
+// (CRI-219). Unknown issues surface as GraphQL errors.
+func (c *Client) IssueByIdentifier(ctx context.Context, identifier string) (Issue, error) {
+	req := graphqlRequest{
+		Query:     `query($id: String!) { issue(id: $id) { id identifier title labels { nodes { name } } } }`,
+		Variables: map[string]interface{}{"id": identifier},
+	}
+	var result struct {
+		Issue struct {
+			ID         string `json:"id"`
+			Identifier string `json:"identifier"`
+			Title      string `json:"title"`
+			Labels     struct {
+				Nodes []struct {
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"labels"`
+		} `json:"issue"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return Issue{}, err
+	}
+	if result.Issue.ID == "" {
+		return Issue{}, fmt.Errorf("linear issue %s not found", identifier)
+	}
+	labels := make([]string, 0, len(result.Issue.Labels.Nodes))
+	for _, n := range result.Issue.Labels.Nodes {
+		labels = append(labels, n.Name)
+	}
+	return Issue{
+		ID:         result.Issue.ID,
+		Identifier: result.Issue.Identifier,
+		Title:      result.Issue.Title,
+		Labels:     labels,
+	}, nil
+}
+
 // FindProjectTeamID returns the ID of the first team the given project
 // belongs to. It backs the team-scoped automation label creation (CRI-219).
+// Projects spanning multiple teams are outside the CRI-219 scope: the first
+// team is assumed to own the project's issues (documented single-team
+// assumption).
 func (c *Client) FindProjectTeamID(ctx context.Context, projectID string) (string, error) {
 	req := graphqlRequest{
 		Query:     `query($id: String!) { project(id: $id) { teams { nodes { id } } } }`,

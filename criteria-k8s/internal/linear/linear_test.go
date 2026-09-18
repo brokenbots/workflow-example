@@ -398,17 +398,24 @@ type labelFakeServer struct {
 	projectTeams []string
 	labels       []fakeLinearLabel
 	// issueLabels maps issue id to the label names it currently carries.
-	issueLabels map[string][]string
-	updates     int      // issueUpdate mutation count (no-ops excluded)
-	lastIDs     []string // labelIds payload of the most recent issueUpdate
-	failEnsure  bool     // serve a GraphQL error on the label queries
+	issueLabels     map[string][]string
+	updates         int      // issueUpdate mutation count (no-ops excluded)
+	lastIDs         []string // labelIds payload of the most recent issueUpdate
+	failEnsure      bool     // serve a GraphQL error on the label queries
+	failIssue       bool     // serve a GraphQL error on the issue(id:) query
+	issueIdentifier string
+	issueTitle      string
+	// identifierToID maps human identifiers to canonical node ids so the
+	// issue(id:) branch can resolve queries by identifier like Linear does.
+	identifierToID map[string]string
 }
 
 func newLabelFakeServer(t *testing.T) *labelFakeServer {
 	t.Helper()
 	s := &labelFakeServer{
-		projectTeams: []string{"team-1"},
-		issueLabels:  map[string][]string{},
+		projectTeams:   []string{"team-1"},
+		issueLabels:    map[string][]string{},
+		identifierToID: map[string]string{},
 	}
 	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -518,15 +525,30 @@ func newLabelFakeServer(t *testing.T) *labelFakeServer {
 			}
 			require.NoError(t, json.Unmarshal(req.Variables, &variables))
 			s.mu.Lock()
-			names := append([]string(nil), s.issueLabels[variables.ID]...)
+			if s.failIssue {
+				s.mu.Unlock()
+				resp = graphqlErrorResponse("issue not found")
+				break
+			}
+			// Linear resolves the query id (node id or human identifier) to
+			// the issue's canonical node id.
+			canonical := variables.ID
+			if mapped, ok := s.identifierToID[variables.ID]; ok {
+				canonical = mapped
+			}
+			names := append([]string(nil), s.issueLabels[canonical]...)
 			nodes := make([]interface{}, 0, len(names))
 			for _, name := range names {
-				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name)})
+				nodes = append(nodes, map[string]interface{}{"id": s.labelIDLocked(name), "name": name})
 			}
+			identifier, title := s.issueIdentifier, s.issueTitle
 			s.mu.Unlock()
 			resp["data"] = map[string]interface{}{
 				"issue": map[string]interface{}{
-					"labels": map[string]interface{}{"nodes": nodes},
+					"id":         canonical,
+					"identifier": identifier,
+					"title":      title,
+					"labels":     map[string]interface{}{"nodes": nodes},
 				},
 			}
 		default:
@@ -748,5 +770,40 @@ func TestRemoveIssueLabel(t *testing.T) {
 
 		assert.Equal(t, []string{"fast"}, s.issueLabelNames("issue-1"))
 		assert.Equal(t, 0, s.updateCount(), "no issueUpdate for an absent label")
+	})
+}
+
+// TestIssueByIdentifier covers the identifier-based issue lookup the
+// CriteriaRun-driven reconciliation uses: Linear's issue(id:) query accepts
+// the human identifier as well as the node id and returns the issue with
+// its current label names.
+func TestIssueByIdentifier(t *testing.T) {
+	t.Run("found by identifier", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		s.issueIdentifier = "CRI-9"
+		s.issueTitle = "Fix the flaky test"
+		s.identifierToID["CRI-9"] = "issue-9"
+		s.seedIssueLabels("issue-9", "fast", "criteria-automation")
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+
+		issue, err := c.IssueByIdentifier(context.Background(), "CRI-9")
+
+		require.NoError(t, err)
+		assert.Equal(t, "issue-9", issue.ID)
+		assert.Equal(t, "CRI-9", issue.Identifier)
+		assert.Equal(t, "Fix the flaky test", issue.Title)
+		assert.True(t, slices.Equal(issue.Labels, []string{"fast", "criteria-automation"}),
+			"labels carry names, not ids")
+	})
+
+	t.Run("missing issue surfaces the GraphQL error", func(t *testing.T) {
+		s := newLabelFakeServer(t)
+		s.failIssue = true
+		c := linear.NewClientWithBaseURL(s.ts.URL, "test-token")
+
+		_, err := c.IssueByIdentifier(context.Background(), "CRI-404")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "issue not found")
 	})
 }
