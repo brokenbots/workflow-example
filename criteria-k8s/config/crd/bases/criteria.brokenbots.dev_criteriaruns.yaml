@@ -82,6 +82,104 @@ spec:
                   type: boolean
                   default: false
                   description: Opt into per-subworkflow adapter pods instead of run-duration adapter pods.
+                workflow:
+                  type: object
+                  description: >-
+                    Resolved workflow-library object stamped by the
+                    linear-watcher (CRI-217) from the criteria-routes
+                    ConfigMap. Consumed by the jobbuilder (CRI-222);
+                    workflowSource for url modes arrives with CRI-231.
+                    Empty means the operator defaults apply.
+                  required:
+                    - name
+                    - type
+                    - namespace
+                  properties:
+                    name:
+                      type: string
+                      description: Workflow-library name resolved for this run.
+                    type:
+                      type: string
+                      enum:
+                        - image
+                        - url
+                      description: Workflow source type (ADR-0005 D1).
+                    namespace:
+                      type: string
+                      description: Namespace the workflow's runs are admitted into.
+                    image:
+                      type: string
+                      description: Container image (type=image, or the process image for url+image).
+                    url:
+                      type: string
+                      description: Workflow source URL fetched at admission (type=url).
+                    ref:
+                      type: string
+                      description: Operator-declared expected pin for fetched content (ADR-0005 D7).
+                    volumes:
+                      type: array
+                      description: Storage volumes the workflow's runs mount.
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - kind
+                          - mountPath
+                        properties:
+                          name:
+                            type: string
+                          kind:
+                            type: string
+                            enum:
+                              - pvc
+                              - nfs
+                              - tmp
+                          mountPath:
+                            type: string
+                          subPath:
+                            type: string
+                          readOnly:
+                            type: boolean
+                          claim:
+                            type: string
+                          server:
+                            type: string
+                          path:
+                            type: string
+                          sizeLimit:
+                            type: string
+                          env:
+                            type: object
+                            additionalProperties:
+                              type: string
+                    secrets:
+                      type: array
+                      description: >-
+                        Secrets the workflow's runs consume, referenced by
+                        SecretProviderClass name (OpenBao via the Secrets
+                        Store CSI driver). No credential material is carried.
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - secretProviderClass
+                          - mountPath
+                        properties:
+                          name:
+                            type: string
+                          secretProviderClass:
+                            type: string
+                          mountPath:
+                            type: string
+                          env:
+                            type: object
+                            additionalProperties:
+                              type: string
+                    env:
+                      type: object
+                      description: Static environment variables set on every run of this workflow.
+                      additionalProperties:
+                        type: string
             status:
               type: object
               properties:

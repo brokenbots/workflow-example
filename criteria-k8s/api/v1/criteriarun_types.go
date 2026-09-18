@@ -47,6 +47,72 @@ type CriteriaRunSpec struct {
 	// at subworkflow scope entry and deletes them at scope exit based on the
 	// engine's provision-wanted / release lifecycle events.
 	PerScopeSessions bool `json:"perScopeSessions,omitempty"`
+
+	// Workflow is the resolved workflow-library object stamped onto the run
+	// by the linear-watcher (CRI-217) from the criteria-routes ConfigMap.
+	// Nil means no workflow was assigned and the operator defaults apply.
+	// Consumed by the jobbuilder (CRI-222); workflowSource for url modes
+	// arrives with CRI-231.
+	Workflow *RunWorkflow `json:"workflow,omitempty"`
+}
+
+// RunWorkflow is a workflow-library object resolved from the routes
+// ConfigMap (k8s/routes.schema.json) and stamped onto a CriteriaRun spec.
+type RunWorkflow struct {
+	// Name is the workflow-library name routes resolved for this run.
+	Name string `json:"name"`
+
+	// Type is the workflow source type (ADR-0005 D1): "image" (workflow
+	// baked into the image) or "url" (fetched at run admission).
+	Type string `json:"type"`
+
+	// Namespace is the namespace the workflow's runs are admitted into.
+	Namespace string `json:"namespace"`
+
+	// Image is the container image for type=image, or the process image for
+	// url+image. Empty for url-only runs (minimal criteria/runtime base).
+	Image string `json:"image,omitempty"`
+
+	// URL is the workflow source URL fetched at admission (type=url).
+	URL string `json:"url,omitempty"`
+
+	// Ref is the operator-declared expected pin for fetched content,
+	// enforced fail-closed at admission (ADR-0005 D7, criteria-side CRI-223).
+	Ref string `json:"ref,omitempty"`
+
+	// Volumes are storage volumes the workflow's runs mount.
+	Volumes []RunWorkflowVolume `json:"volumes,omitempty"`
+
+	// Secrets are secrets the workflow's runs consume, referenced by
+	// SecretProviderClass name (OpenBao via the Secrets Store CSI driver).
+	Secrets []RunWorkflowSecret `json:"secrets,omitempty"`
+
+	// Env is the workflow's static environment mapping.
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// RunWorkflowVolume is a storage volume stamped from the routes ConfigMap.
+type RunWorkflowVolume struct {
+	Name      string            `json:"name"`
+	Kind      string            `json:"kind"`
+	MountPath string            `json:"mountPath"`
+	SubPath   string            `json:"subPath,omitempty"`
+	ReadOnly  bool              `json:"readOnly,omitempty"`
+	Claim     string            `json:"claim,omitempty"`
+	Server    string            `json:"server,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	SizeLimit string            `json:"sizeLimit,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+}
+
+// RunWorkflowSecret is a secret reference stamped from the routes ConfigMap.
+// Only names are carried: credential material lives in OpenBao behind the
+// SecretProviderClass (plan CRI-214 section 3.8).
+type RunWorkflowSecret struct {
+	Name                string            `json:"name"`
+	SecretProviderClass string            `json:"secretProviderClass"`
+	MountPath           string            `json:"mountPath"`
+	Env                 map[string]string `json:"env,omitempty"`
 }
 
 // CriteriaRunQueueStatus exposes the repo-keyed admission queue state for this run.
@@ -158,6 +224,91 @@ func (in *CriteriaRun) DeepCopyObject() runtime.Object {
 // DeepCopyInto for CriteriaRunSpec.
 func (in *CriteriaRunSpec) DeepCopyInto(out *CriteriaRunSpec) {
 	*out = *in
+	if in.Workflow != nil {
+		in, out := &in.Workflow, &out.Workflow
+		*out = new(RunWorkflow)
+		(*in).DeepCopyInto(*out)
+	}
+}
+
+// DeepCopyInto for RunWorkflow.
+func (in *RunWorkflow) DeepCopyInto(out *RunWorkflow) {
+	*out = *in
+	if in.Volumes != nil {
+		in, out := &in.Volumes, &out.Volumes
+		*out = make([]RunWorkflowVolume, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.Secrets != nil {
+		in, out := &in.Secrets, &out.Secrets
+		*out = make([]RunWorkflowSecret, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.Env != nil {
+		in, out := &in.Env, &out.Env
+		*out = make(map[string]string, len(*in))
+		for k, v := range *in {
+			(*out)[k] = v
+		}
+	}
+}
+
+// DeepCopy creates a copy of RunWorkflow.
+func (in *RunWorkflow) DeepCopy() *RunWorkflow {
+	if in == nil {
+		return nil
+	}
+	out := new(RunWorkflow)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto for RunWorkflowVolume.
+func (in *RunWorkflowVolume) DeepCopyInto(out *RunWorkflowVolume) {
+	*out = *in
+	if in.Env != nil {
+		in, out := &in.Env, &out.Env
+		*out = make(map[string]string, len(*in))
+		for k, v := range *in {
+			(*out)[k] = v
+		}
+	}
+}
+
+// DeepCopy creates a copy of RunWorkflowVolume.
+func (in *RunWorkflowVolume) DeepCopy() *RunWorkflowVolume {
+	if in == nil {
+		return nil
+	}
+	out := new(RunWorkflowVolume)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto for RunWorkflowSecret.
+func (in *RunWorkflowSecret) DeepCopyInto(out *RunWorkflowSecret) {
+	*out = *in
+	if in.Env != nil {
+		in, out := &in.Env, &out.Env
+		*out = make(map[string]string, len(*in))
+		for k, v := range *in {
+			(*out)[k] = v
+		}
+	}
+}
+
+// DeepCopy creates a copy of RunWorkflowSecret.
+func (in *RunWorkflowSecret) DeepCopy() *RunWorkflowSecret {
+	if in == nil {
+		return nil
+	}
+	out := new(RunWorkflowSecret)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopy creates a copy of CriteriaRunSpec.

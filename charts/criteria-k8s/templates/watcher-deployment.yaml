@@ -57,6 +57,17 @@ spec:
               mountPath: /secrets/linear_api_key
               subPath: linear_api_key
               readOnly: true
+            {{- if .Values.watcher.routesConfigMap }}
+            # CRI-217: routes payload for ticket routing, re-read every poll.
+            # No subPath here, so ConfigMap updates reach the mounted file
+            # without a watcher restart. The ConfigMap is operator config
+            # applied separately (k8s/examples/routes-configmap.yaml), not
+            # templated by this chart; optional lets the pod start before it
+            # exists (the watcher fails closed per poll until it does).
+            - name: routes-config
+              mountPath: /etc/criteria/routes
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.watcher.resources | nindent 12 }}
       volumes:
@@ -66,4 +77,10 @@ spec:
             readOnly: true
             volumeAttributes:
               secretProviderClass: linear-spc
+        {{- if .Values.watcher.routesConfigMap }}
+        - name: routes-config
+          configMap:
+            name: {{ .Values.watcher.routesConfigMap }}
+            optional: true
+        {{- end }}
 {{- end }}

@@ -33,6 +33,10 @@ type Issue struct {
 	RepoLabel string `json:"repoLabel,omitempty"`
 	// Labels holds the issue's Linear label names.
 	Labels []string `json:"labels,omitempty"`
+	// LabelGroups maps a label name to the name of its Linear label
+	// group (Linear models label groups as parent labels marked
+	// isGroup). Labels without a group parent are absent from the map.
+	LabelGroups map[string]string `json:"labelGroups,omitempty"`
 }
 
 // NewClient returns a Linear client using the provided API key.
@@ -145,7 +149,8 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 	req := graphqlRequest{
 		Query: `query($project: ID!, $state: String!) {
             issues(filter: {project: {id: {eq: $project}}, state: {name: {eq: $state}}}) {
-                nodes { id identifier title description state { name } project { id name } labels { nodes { name } } }
+                nodes { id identifier title description state { name } project { id name }
+                        labels { nodes { name parent { name isGroup } } } }
             }
         }`,
 		Variables: map[string]interface{}{
@@ -169,7 +174,11 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 				} `json:"project"`
 				Labels struct {
 					Nodes []struct {
-						Name string `json:"name"`
+						Name   string `json:"name"`
+						Parent struct {
+							Name    string `json:"name"`
+							IsGroup bool   `json:"isGroup"`
+						} `json:"parent"`
 					} `json:"nodes"`
 				} `json:"labels"`
 			} `json:"nodes"`
@@ -191,6 +200,12 @@ func (c *Client) IssuesInProjectState(ctx context.Context, projectID, stateName 
 		}
 		for _, l := range n.Labels.Nodes {
 			issue.Labels = append(issue.Labels, l.Name)
+			if l.Parent.IsGroup && l.Parent.Name != "" {
+				if issue.LabelGroups == nil {
+					issue.LabelGroups = make(map[string]string, len(n.Labels.Nodes))
+				}
+				issue.LabelGroups[l.Name] = l.Parent.Name
+			}
 		}
 		out = append(out, issue)
 	}
@@ -204,6 +219,61 @@ func (c *Client) FindTriageTickets(ctx context.Context, projectName, stateName s
 		return nil, err
 	}
 	return c.IssuesInProjectState(ctx, projectID, stateName)
+}
+
+// PostComment creates a comment on the given issue (CRI-217 routing
+// failure notifications).
+func (c *Client) PostComment(ctx context.Context, issueID, body string) error {
+	req := graphqlRequest{
+		Query: `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`,
+		Variables: map[string]interface{}{
+			"input": map[string]interface{}{"issueId": issueID, "body": body},
+		},
+	}
+	var result struct {
+		CommentCreate struct {
+			Success bool `json:"success"`
+		} `json:"commentCreate"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return err
+	}
+	if !result.CommentCreate.Success {
+		return fmt.Errorf("linear commentCreate did not succeed for issue %s", issueID)
+	}
+	return nil
+}
+
+// IssueComments returns the bodies of the issue's most recent comments, up
+// to limit. It backs the watcher's routing-failure comment dedup.
+func (c *Client) IssueComments(ctx context.Context, issueID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	req := graphqlRequest{
+		Query: `query($id: String!, $first: Int!) { issue(id: $id) { comments(first: $first) { nodes { body } } } }`,
+		Variables: map[string]interface{}{
+			"id":    issueID,
+			"first": limit,
+		},
+	}
+	var result struct {
+		Issue struct {
+			Comments struct {
+				Nodes []struct {
+					Body string `json:"body"`
+				} `json:"nodes"`
+			} `json:"comments"`
+		} `json:"issue"`
+	}
+	if err := c.do(ctx, req, &result); err != nil {
+		return nil, err
+	}
+	bodies := make([]string, 0, len(result.Issue.Comments.Nodes))
+	for _, n := range result.Issue.Comments.Nodes {
+		bodies = append(bodies, n.Body)
+	}
+	return bodies, nil
 }
 
 // RepoValidator checks whether a short-form owner/repo reference names an existing

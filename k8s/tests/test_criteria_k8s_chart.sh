@@ -146,6 +146,15 @@ grep -q 'name: POLL_INTERVAL' "$RENDERED" || fail "watcher missing POLL_INTERVAL
 grep -q 'secretProviderClass: linear-spc' "$RENDERED" || fail "watcher CSI volume does not reference linear-spc"
 grep -q 'mountPath: /secrets/linear_api_key' "$RENDERED" || fail "watcher does not mount the Linear API key file"
 
+# Watcher routes mount (CRI-217): the criteria-routes ConfigMap is mounted at
+# /etc/criteria/routes without a subPath, so the watcher's per-poll re-read
+# observes ConfigMap updates without a restart.
+grep -q 'mountPath: /etc/criteria/routes$' "$RENDERED" || fail "watcher does not mount the routes payload"
+awk '/name: routes-config/{found=1} found && /configMap:/{cm=1} found && /name: criteria-routes/{routed=1} END{exit !(found && cm && routed)}' "$RENDERED" \
+    || fail "watcher routes volume does not reference the criteria-routes configMap"
+awk '/mountPath: \/etc\/criteria\/routes$/{found=1} found && /subPath/{exit 1} /^      volumes:/{if(found) exit 0} END{exit found?0:1}' "$RENDERED" \
+    || fail "watcher routes mount uses subPath (breaks per-poll ConfigMap refresh)"
+
 # Scripts ConfigMap contents must equal the canonical wrapper scripts.
 extract_configmap_file() { # key -> content on stdout
     local key="$1" stop
@@ -201,7 +210,14 @@ check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'
 check_override "Linear project override" "watcher.linearProjectName=Other Project" 'value: "Other Project"'
 check_override "Linear triage state override" "watcher.linearTriageState=Backlog" 'value: "Backlog"'
+check_override "routes ConfigMap override" "watcher.routesConfigMap=my-routes" 'name: my-routes'
 check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
+
+# Empty routesConfigMap drops the routes mount entirely.
+out="$(helm template criteria-k8s "$CHART" --set watcher.routesConfigMap="")" || \
+    fail "helm template failed with empty routesConfigMap"
+printf '%s' "$out" | grep -q 'mountPath: /etc/criteria/routes' && \
+    fail "routes mount rendered despite empty watcher.routesConfigMap"
 
 out="$(helm template criteria-k8s "$CHART" --set "images.workflow.repository=ghcr.io/acme/runner" --set "images.workflow.tag=v5")" \
     || fail "helm template failed for workflow image"

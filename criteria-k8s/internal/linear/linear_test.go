@@ -171,3 +171,123 @@ func TestExtractRepoURLRepro(t *testing.T) {
 		assert.Equal(t, "brokenbots/labelled-repo", linear.ExtractRepoURL(issue, defaultRepoURL, nil))
 	})
 }
+
+func TestIssuesInProjectStateParsesLabelGroups(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		resp := map[string]interface{}{}
+		if strings.Contains(req.Query, "projects") {
+			resp["data"] = map[string]interface{}{
+				"projects": map[string]interface{}{
+					"nodes": []interface{}{
+						map[string]interface{}{"id": "proj-1", "name": "Runner"},
+					},
+				},
+			}
+		} else {
+			resp["data"] = map[string]interface{}{
+				"issues": map[string]interface{}{
+					"nodes": []interface{}{
+						map[string]interface{}{
+							"id":         "issue-1",
+							"identifier": "CRI-1",
+							"state":      map[string]interface{}{"name": "Triage"},
+							"project":    map[string]interface{}{"id": "proj-1", "name": "Runner"},
+							"labels": map[string]interface{}{
+								"nodes": []interface{}{
+									map[string]interface{}{"name": "k8s-run"},
+									map[string]interface{}{
+										"name":   "linear-intake-v1",
+										"parent": map[string]interface{}{"name": "workflows", "isGroup": true},
+									},
+									map[string]interface{}{
+										"name":   "fastlane",
+										"parent": map[string]interface{}{"name": "speed", "isGroup": true},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+	tickets, err := client.FindTriageTickets(context.Background(), "Runner", "Triage")
+	require.NoError(t, err)
+	require.Len(t, tickets, 1)
+	// Grouped labels map to their group's name; ungrouped labels stay absent.
+	assert.Equal(t, map[string]string{
+		"linear-intake-v1": "workflows",
+		"fastlane":         "speed",
+	}, tickets[0].LabelGroups)
+	assert.Equal(t, []string{"k8s-run", "linear-intake-v1", "fastlane"}, tickets[0].Labels)
+}
+
+func TestPostCommentAndIssueComments(t *testing.T) {
+	var createdComment string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string `json:"query"`
+			Variables struct {
+				Input struct {
+					IssueID string `json:"issueId"`
+					Body    string `json:"body"`
+				} `json:"input"`
+				ID    string `json:"id"`
+				First int    `json:"first"`
+			} `json:"variables"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+
+		resp := map[string]interface{}{}
+		switch {
+		case strings.Contains(req.Query, "commentCreate"):
+			assert.Equal(t, "issue-1", req.Variables.Input.IssueID)
+			createdComment = req.Variables.Input.Body
+			resp["data"] = map[string]interface{}{
+				"commentCreate": map[string]interface{}{"success": true},
+			}
+		case strings.Contains(req.Query, "comments"):
+			resp["data"] = map[string]interface{}{
+				"issue": map[string]interface{}{
+					"comments": map[string]interface{}{
+						"nodes": []interface{}{
+							map[string]interface{}{"body": "earlier comment"},
+							map[string]interface{}{"body": createdComment},
+						},
+					},
+				},
+			}
+		default:
+			t.Fatalf("unexpected query: %s", req.Query)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	client := linear.NewClientWithBaseURL(ts.URL, "test-token")
+
+	// Fresh ticket: no comments yet.
+	comments, err := client.IssueComments(ctx, "issue-1", 50)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"earlier comment", ""}, comments)
+
+	require.NoError(t, client.PostComment(ctx, "issue-1", "routing failure body"))
+	assert.Equal(t, "routing failure body", createdComment)
+
+	// The posted body is now visible to the dedup read.
+	comments, err = client.IssueComments(ctx, "issue-1", 50)
+	require.NoError(t, err)
+	assert.Contains(t, comments, "routing failure body")
+}
