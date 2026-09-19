@@ -1240,6 +1240,106 @@ func TestPollPerRouteStates(t *testing.T) {
 	})
 }
 
+// shippedRoutesPayload extracts the routes.json scalar from the shipped
+// criteria-routes example ConfigMap (k8s/examples/routes-configmap.yaml),
+// the operator configuration of record, so the watcher is exercised against
+// the deployed payload rather than a test-local copy.
+func shippedRoutesPayload(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("reading shipped example: %v", err)
+	}
+	const marker = "routes.json: |"
+	cm := string(data)
+	idx := strings.Index(cm, marker)
+	if idx < 0 {
+		t.Fatalf("shipped example ConfigMap has no %q block", marker)
+	}
+	var lines []string
+	for _, line := range strings.Split(cm[idx+len(marker):], "\n")[1:] {
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		if !strings.HasPrefix(line, "    ") {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "    "))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// CRI-241: the shipped criteria-routes payload wires the dev route — the
+// watcher queries Linear for the "Ready for Development" state (the
+// routes' declared-states union grows) and a ticket moved to that state
+// fires the linear_develop_v1 workflow (linear-develop-url, url-only with
+// the D7 ref pin), while Triage tickets keep routing to the intake image
+// workflow.
+func TestPollDevRouteFromShippedConfig(t *testing.T) {
+	routes := shippedRoutesPayload(t)
+
+	t.Run("watcher queries the shipped routes' states union including Ready for Development", func(t *testing.T) {
+		tw := newTestWatcher(t, routes)
+		tw.linearS.setIssues(withState(issue("i-30", "CRI-30", gateLabel()), "Ready for Development"))
+		tw.pollOnce(t)
+		states := tw.linearS.queriedStates()
+		if !slices.Equal(states, []string{"Ready for Development", "Triage"}) {
+			t.Errorf("watcher queried states %v; want the shipped routes' union [Ready for Development Triage]", states)
+		}
+	})
+
+	t.Run("ticket in Ready for Development fires linear_develop_v1", func(t *testing.T) {
+		tw := newTestWatcher(t, routes)
+		tw.linearS.setIssues(withState(issue("i-30", "CRI-30", gateLabel()), "Ready for Development"))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		wf := runs[0].Spec.Workflow
+		require.NotNil(t, wf)
+		assert.Equal(t, "linear-develop-url", wf.Name,
+			"the dev route fires the linear-develop-url workflow object (linear_develop_v1)")
+		assert.Equal(t, "criteria-jobs", wf.Namespace)
+		require.Len(t, wf.Volumes, 4, "the develop object declares the same storage surface as intake-url")
+		require.Len(t, wf.Secrets, 2)
+	})
+
+	t.Run("dev run stamps the url+ref workflowSource with no process image", func(t *testing.T) {
+		tw := newTestWatcher(t, routes)
+		tw.linearS.setIssues(withState(issue("i-31", "CRI-31", gateLabel()), "Ready for Development"))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
+		assert.Equal(t, "url", spec.WorkflowSource.Type)
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1", spec.WorkflowSource.URL)
+		assert.Equal(t, "7645feb42e6f2c473696bd63997fca111d41453d", spec.WorkflowSource.Ref,
+			"the shipped object pins the merged develop tree commit (ADR-0005 D7)")
+		assert.Empty(t, spec.Image, "url-only develop runs execute on the criteria base image: no spec.image")
+	})
+
+	t.Run("Triage tickets keep routing to intake while the dev state routes to develop", func(t *testing.T) {
+		// Leaky server: both tickets reach the watcher despite the states
+		// filter, so the per-route state gate itself is exercised against
+		// the shipped payload.
+		tw := newTestWatcher(t, routes)
+		tw.linearS.setLeakyFilter()
+		tw.linearS.setIssues(
+			issue("i-32", "CRI-32", gateLabel()),
+			withState(issue("i-33", "CRI-33", gateLabel()), "Ready for Development"),
+		)
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 2, "both the Triage and the Ready for Development ticket fire")
+		byTicket := map[string]string{}
+		for _, run := range runs {
+			byTicket[run.Spec.TicketID] = run.Spec.Workflow.Name
+		}
+		assert.Equal(t, "linear-intake-v1", byTicket["CRI-32"], "Triage keeps the intake image workflow")
+		assert.Equal(t, "linear-develop-url", byTicket["CRI-33"], "Ready for Development routes to the develop workflow")
+	})
+}
+
 // CRI-219: automation label lifecycle.
 
 // TestPollEnsuresAutomationLabels proves the watcher creates both
