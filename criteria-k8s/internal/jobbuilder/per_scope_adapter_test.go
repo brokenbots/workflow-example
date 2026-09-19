@@ -40,7 +40,7 @@ func TestBuildPerScopeAdapterPod(t *testing.T) {
 		TokenFile:   "/data/intake/CRI-116/tokens/root-shell",
 	}
 
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope)
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope, "10.0.0.10")
 	require.NotNil(t, pod)
 
 	assert.Equal(t, run.Namespace, pod.Namespace)
@@ -69,10 +69,13 @@ func TestBuildPerScopeAdapterPod(t *testing.T) {
 	assert.Equal(t, "root-scope", envNames["CRITERIA_SCOPE_TAG"])
 	assert.Equal(t, "/data/intake/CRI-116/tokens/root-shell", envNames["CRITERIA_REMOTE_TOKEN_FILE"])
 
-	// CRITERIA_REMOTE_HOST must be absent: the event's ShimListenAddress is
+	// CRITERIA_REMOTE_HOST (and the wire token) must be absent: this event
+	// carries no accept_token, so it keeps the pre-eae0181 legacy shape even
+	// though a runner IP is resolvable. The event's shim listen address is
 	// the engine's own-loopback bind address, unreachable from a separate
-	// pod. adapter.sh discovers the routable address (POD_IP:7778) from the
-	// shared discovery file when this env is unset.
+	// pod; adapter.sh discovers the routable address (POD_IP:7778) from the
+	// shared discovery file and the token from the rotated token file when
+	// these envs are unset.
 	_, hasHost := envNames["CRITERIA_REMOTE_HOST"]
 	assert.False(t, hasHost, "CRITERIA_REMOTE_HOST must not be set from the event's loopback shim address")
 
@@ -102,7 +105,7 @@ func TestBuildPerScopeAdapterPodResolvesKindFromAdapterType(t *testing.T) {
 		AdapterType: "shell",
 	}
 
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope)
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope, "10.0.0.10")
 	require.NotNil(t, pod)
 
 	container := pod.Spec.Containers[0]
@@ -135,7 +138,7 @@ func TestBuildPerScopeAdapterPodFallsBackToAdapterNameWithoutType(t *testing.T) 
 		AdapterName: "intake",
 	}
 
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope)
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope, "10.0.0.10")
 	require.NotNil(t, pod)
 	assert.Equal(t, "intake", pod.Labels["criteria.brokenbots.dev/adapter-kind"])
 	envNames := make(map[string]string)
@@ -171,7 +174,7 @@ func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-140", Namespace: "criteria-jobs", UID: "run-uid"},
 		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-140"},
 	}
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, evs[0])
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, evs[0], "10.0.0.10")
 	require.NotNil(t, pod)
 
 	container := pod.Spec.Containers[0]
@@ -188,6 +191,163 @@ func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
 	assert.Equal(t, "shell", envNames["ADAPTER_KIND"])
 	assert.Equal(t, "shell", envNames["CRITERIA_ADAPTER_NAME"],
 		"the handshake presents the adapter TYPE for the type-keyed lockfile verifier")
+}
+
+func TestBuildPerScopeAdapterPodWireTokenDelivery(t *testing.T) {
+	// CRI-237: an event carrying accept_token (runner commit eae0181,
+	// CRI-236) gets its token on the wire. The pod sets CRITERIA_REMOTE_TOKEN
+	// and a routable CRITERIA_REMOTE_HOST built from the resolved runner pod
+	// IP plus the event's shim listen port, and mounts NO shared data
+	// volume: no rotated token file is read anywhere.
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-237", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-237"},
+	}
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-237",
+		ScopeID:     "root",
+		ScopeTag:    "root-scope",
+		AdapterName: "shell",
+		Digest:      "deadbeef",
+		ShimAddress: "[::]:7778",
+		TokenFile:   "/data/intake/CRI-237/tokens/root-shell",
+		AcceptToken: "accept-rotate-1",
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope, "10.0.0.10")
+	require.NotNil(t, pod)
+
+	container := pod.Spec.Containers[0]
+	envNames := make(map[string]string)
+	for _, e := range container.Env {
+		envNames[e.Name] = e.Value
+	}
+	assert.Equal(t, "accept-rotate-1", envNames["CRITERIA_REMOTE_TOKEN"])
+	assert.Equal(t, "10.0.0.10:7778", envNames["CRITERIA_REMOTE_HOST"],
+		"the dial address is the runner pod IP plus the shim listen port; the bind host never routes")
+	_, hasTokenFile := envNames["CRITERIA_REMOTE_TOKEN_FILE"]
+	assert.False(t, hasTokenFile, "wire delivery must not carry the token-file path")
+
+	assert.ElementsMatch(t, []string{"scripts"}, volumeMountNames(container.VolumeMounts))
+	assert.False(t, hasVolume(pod.Spec.Volumes, "data"),
+		"the adapter pod must not mount the shared /data PVC for wire delivery")
+}
+
+func TestBuildPerScopeAdapterPodWireDegradesToLegacyWithoutRunnerIP(t *testing.T) {
+	// Defensive: an accept_token event with an unresolved runner IP must not
+	// produce a half-wired pod that dials nothing and mounts nothing. The
+	// builder falls back to the legacy token-file shape (the reconcile never
+	// builds in this state — it requeues instead).
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-237", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-237"},
+	}
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-237",
+		ScopeID:     "root",
+		AdapterName: "shell",
+		Digest:      "deadbeef",
+		ShimAddress: "[::]:7778",
+		TokenFile:   "/data/intake/CRI-237/tokens/root-shell",
+		AcceptToken: "accept-rotate-1",
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope, "")
+	require.NotNil(t, pod)
+
+	envNames := make(map[string]string)
+	for _, e := range pod.Spec.Containers[0].Env {
+		envNames[e.Name] = e.Value
+	}
+	assert.Equal(t, "/data/intake/CRI-237/tokens/root-shell", envNames["CRITERIA_REMOTE_TOKEN_FILE"])
+	_, hasHost := envNames["CRITERIA_REMOTE_HOST"]
+	assert.False(t, hasHost)
+	_, hasToken := envNames["CRITERIA_REMOTE_TOKEN"]
+	assert.False(t, hasToken)
+	assert.ElementsMatch(t, []string{"data", "scripts"}, volumeMountNames(pod.Spec.Containers[0].VolumeMounts))
+}
+
+func TestBuildPerScopeAdapterPodWireKeepsDeclaredDataMount(t *testing.T) {
+	// The wire path drops the built-in data volume, but a workflow that
+	// explicitly re-sources /data keeps its declared mount (it is workload
+	// state, not token delivery).
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-237", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-237",
+			Workflow: &criteriav1.RunWorkflow{
+				Volumes: []criteriav1.RunWorkflowVolume{{
+					Name:      "run-state",
+					Kind:      "pvc",
+					MountPath: "/data",
+					Claim:     "criteria-data",
+				}},
+			},
+		},
+	}
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-237",
+		ScopeID:     "root",
+		AdapterName: "shell",
+		Digest:      "deadbeef",
+		ShimAddress: "[::]:7778",
+		AcceptToken: "accept-rotate-1",
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope, "10.0.0.10")
+	require.NotNil(t, pod)
+	container := pod.Spec.Containers[0]
+	assert.True(t, hasVolume(pod.Spec.Volumes, "data"),
+		"a declared /data volume is workload state and survives the wire path")
+	assert.Contains(t, volumeMountNames(container.VolumeMounts), "data")
+}
+
+func TestEngineProvisionWantedPayloadCarriesWireToken(t *testing.T) {
+	// End-to-end parser -> builder contract for the eae0181 engine (CRI-236):
+	// the nested provision_wanted envelope carries accept_token in
+	// payload.data; parsing yields the field and the builder renders the
+	// wire shape.
+	payload := `{"payload_type":"AdapterEvent","run_id":"CRI-237","payload":` +
+		`{"kind":"adapter.lifecycle.provision_wanted","data":` +
+		`{"adapter":"intake","adapter_type":"shell",` +
+		`"digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",` +
+		`"scope_instance_id":"root","shim_listen_address":"[::]:7778",` +
+		`"token_ref":"/data/.criteria/runs/cri-237/token",` +
+		`"accept_token":"accept-rotate-1"}}}`
+
+	evs, err := events.ParseLifecycleEventsBytes([]byte(payload))
+	require.NoError(t, err)
+	require.Len(t, evs, 1)
+	require.Equal(t, "accept-rotate-1", evs[0].AcceptToken)
+
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-237", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-237"},
+	}
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, evs[0], "10.0.0.10")
+	require.NotNil(t, pod)
+
+	envNames := make(map[string]string)
+	for _, e := range pod.Spec.Containers[0].Env {
+		envNames[e.Name] = e.Value
+	}
+	assert.Equal(t, "accept-rotate-1", envNames["CRITERIA_REMOTE_TOKEN"])
+	assert.Equal(t, "10.0.0.10:7778", envNames["CRITERIA_REMOTE_HOST"])
+	_, hasTokenFile := envNames["CRITERIA_REMOTE_TOKEN_FILE"]
+	assert.False(t, hasTokenFile, "token_ref is still populated by the engine but must not be consumed for wire delivery")
+	assert.ElementsMatch(t, []string{"scripts"}, volumeMountNames(pod.Spec.Containers[0].VolumeMounts))
+}
+
+func hasVolume(volumes []corev1.Volume, name string) bool {
+	for _, v := range volumes {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildAllPerScopeSessionsOmitsAdapterJobs(t *testing.T) {
@@ -225,7 +385,7 @@ func TestPerScopeDigestPrefixAdded(t *testing.T) {
 		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-116"},
 	}
 	scope := events.LifecycleEvent{Event: events.EventProvisionWanted, AdapterName: "shell", ScopeID: "root", Digest: "deadbeef"}
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope)
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope, "10.0.0.10")
 	env := findEnv(t, pod.Spec.Containers[0].Env, "CRITERIA_REMOTE_DIGEST")
 	assert.Equal(t, "sha256:deadbeef", env.Value)
 }
@@ -236,7 +396,7 @@ func TestPerScopeDigestPrefixPreserved(t *testing.T) {
 		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-116"},
 	}
 	scope := events.LifecycleEvent{Event: events.EventProvisionWanted, AdapterName: "shell", ScopeID: "root", Digest: "sha256:deadbeef"}
-	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope)
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope, "10.0.0.10")
 	env := findEnv(t, pod.Spec.Containers[0].Env, "CRITERIA_REMOTE_DIGEST")
 	assert.Equal(t, "sha256:deadbeef", env.Value)
 }

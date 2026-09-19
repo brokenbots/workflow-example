@@ -70,6 +70,11 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	ev.Digest = dataString(data, "digest")
 	ev.ShimAddress = dataString(data, "shim_listen_address", "shim_address")
 	ev.TokenFile = dataString(data, "token_ref", "token_file")
+	// The accept token rides provision payload.data from runner commit
+	// eae0181 (CRI-236): the operator delivers it to the adapter pod's shim
+	// channel directly instead of exposing the token_ref file to adapter
+	// pods. Empty on released events and pre-eae0181 engines.
+	ev.AcceptToken = dataString(data, "accept_token")
 	if ev.AdapterName == "" {
 		// Same skip rule as flat and nested events in the CRI-132 parser.
 		return events.LifecycleEvent{}, false

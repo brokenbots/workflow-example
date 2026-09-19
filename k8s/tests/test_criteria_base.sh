@@ -7,8 +7,9 @@ set -euo pipefail
 # (criteria-base/tests/smoke_test.sh) proves the same criteria on a host with
 # docker. Checks here guard the image contract so it cannot silently drift:
 #
-#   - criteria main pinned at the audited fc95449 commit (CRI-233: the
+#   - criteria main pinned at the audited eae0181 commit (the CRI-233
 #     environment_type / environment_name emission CRI-234's co-location
+#     reads, plus the CRI-236 accept_token emission CRI-237's wire delivery
 #     reads) with a build that fails closed on a checkout mismatch;
 #   - runtime ships only git + ca-certificates (no node/gh/jq, no baked
 #     /workflows tree);
@@ -34,8 +35,8 @@ have() {
 }
 
 # --- pinned criteria main commit (merged CRI-215..233 chain) ---------------
-have 'ARG CRITERIA_COMMIT=fc9544979ee698f111035368c654b415db943e66' "$DOCKERFILE" || \
-    fail "Dockerfile does not pin criteria main at fc95449 (CRI-234 environment-identity emission)"
+have 'ARG CRITERIA_COMMIT=eae01816c4a2da88449833a233d1b3f6a099bef1' "$DOCKERFILE" || \
+    fail "Dockerfile does not pin criteria main at eae0181 (CRI-236 accept_token emission)"
 have 'git clone' "$DOCKERFILE" || fail "Dockerfile does not clone criteria"
 grep -Eq 'test "\$\(git rev-parse HEAD\)" = "\$\{CRITERIA_COMMIT\}"' "$DOCKERFILE" || \
     fail "Dockerfile build does not fail closed if the checkout is not the pinned commit"

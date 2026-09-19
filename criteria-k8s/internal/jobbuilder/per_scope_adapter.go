@@ -3,6 +3,7 @@ package jobbuilder
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -35,13 +36,26 @@ func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) s
 // events keeps reconciling the same pods. Adapters sharing an environment are
 // co-located by BuildPerScopeAdapterPodGroup instead.
 //
+// Token delivery is version-keyed (CRI-237): events carrying accept_token
+// (runner commit eae0181, CRI-236) get the token on the wire through the
+// pod spec's CRITERIA_REMOTE_TOKEN, dialing the resolved runner pod IP, and
+// mount no shared data volume; events without it keep the legacy shape —
+// CRITERIA_REMOTE_TOKEN_FILE pointing at the engine-rotated token file on
+// the shared volume. The legacy branch is byte-identical to the pre-CRI-237
+// builder so image-mode runs (frozen pre-eae0181 engine) keep working
+// unchanged.
+//
 // The pod has zero Kubernetes privileges and, absent a stamped workflow
-// object, mounts only the shared data volume plus the pod-adapter scripts
-// ConfigMap; the workflow object's declared volumes and CSI secrets are
-// mounted as well, and declared secrets additionally run the pod under the
-// criteria-runner service account for the OpenBao provider. The repo clone
-// lives on the data PVC at /data/intake/<ticket>/repo.
-func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent) *corev1.Pod {
+// object, mounts only the shared data volume (legacy delivery only) plus
+// the pod-adapter scripts ConfigMap; the workflow object's declared volumes
+// and CSI secrets are mounted as well, and declared secrets additionally run
+// the pod under the criteria-runner service account for the OpenBao
+// provider. The repo clone lives on the data PVC at
+// /data/intake/<ticket>/repo. runnerIP is the resolved runner pod IP; wire
+// delivery requires it, and an empty IP with an accept_token event degrades
+// to the legacy shape (defensive — the reconcile never builds in that
+// state).
+func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent, runnerIP string) *corev1.Pod {
 	// Prefer the adapter implementation kind (shell/copilot/...) from the
 	// event's adapter_type; older engines only carry the workflow's adapter
 	// node name (AdapterName), which is not an image kind.
@@ -49,6 +63,8 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 	name := PerScopeAdapterPodName(run, kind, scope.ScopeID)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	plan := newWorkflowPlan(run)
+	wireDelivery := wireTokenDelivery(scope, runnerIP)
+	includeData := !wireDelivery || plan.declaresDataMount()
 
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
@@ -85,9 +101,9 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 				},
 			},
 			Containers: []corev1.Container{
-				perScopeAdapterContainer(run, scope, plan, fmt.Sprintf("adapter-%s", kind)),
+				perScopeAdapterContainer(run, scope, plan, fmt.Sprintf("adapter-%s", kind), runnerIP),
 			},
-			Volumes: plan.adapterVolumes(dataPVC),
+			Volumes: plan.adapterVolumes(dataPVC, includeData),
 		},
 	}
 	if plan.hasSecrets() {
@@ -105,8 +121,13 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 // workflow plan's declared volumes/secrets/env, and the kind's resources.
 // Both the per-adapter fallback pod and the (scope, environment) group pod
 // build their containers here, so the two pod shapes share the handshake
-// contract exactly.
-func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.LifecycleEvent, plan *workflowPlan, name string) corev1.Container {
+// contract exactly. Token delivery is version-keyed (CRI-237): accept_token
+// events (runner eae0181) carry the token on the wire — CRITERIA_REMOTE_TOKEN
+// plus a routable CRITERIA_REMOTE_HOST dial address built from the resolved
+// runner pod IP and the event's shim listen port — while pre-eae0181 events
+// keep the CRITERIA_REMOTE_TOKEN_FILE file surface and the discovery-file
+// host polling.
+func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.LifecycleEvent, plan *workflowPlan, name, runnerIP string) corev1.Container {
 	kind := adapterKind(scope)
 
 	digest := scope.Digest
@@ -124,13 +145,6 @@ func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.Lifecycl
 		// identity is already bound by the scope handshake.
 		{Name: "CRITERIA_ADAPTER_NAME", Value: kind},
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
-		// CRITERIA_REMOTE_HOST is deliberately NOT set here. The event's
-		// ShimListenAddress is the engine's bind address on its own loopback
-		// (e.g. "[::]:7778") - unreachable from a separate adapter pod. The
-		// runner publishes its routable address (POD_IP:7778) to the shared
-		// discovery file; adapter.sh falls back to polling it when this env
-		// is unset. An engine-side fix to emit a routable address in the
-		// event can reintroduce the env later.
 		{Name: "CRITERIA_REMOTE_DIGEST", Value: digest},
 		// The remote-runner binary presents CRITERIA_REMOTE_SCOPE in the
 		// identity handshake; the shim registers scope tokens under
@@ -143,8 +157,25 @@ func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.Lifecycl
 	if scope.ScopeTag != "" {
 		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_TAG", Value: scope.ScopeTag})
 	}
-	if scope.TokenFile != "" {
-		env = append(env, corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN_FILE", Value: scope.TokenFile})
+	if wireTokenDelivery(scope, runnerIP) {
+		// Wire token delivery (CRI-237): the token reaches the adapter pod
+		// on the wire through its existing authenticated shim channel, so
+		// the pod mounts no shared data volume and reads no rotated token
+		// file. CRITERIA_REMOTE_HOST is the runner pod's routable dial
+		// address (the event's shim_listen_address is the engine's bind
+		// address, e.g. "[::]:7778" — only its port is usable; the host
+		// would not route from a separate pod).
+		env = append(env,
+			corev1.EnvVar{Name: "CRITERIA_REMOTE_HOST", Value: runnerDialAddr(runnerIP, scope.ShimAddress)},
+			corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN", Value: scope.AcceptToken},
+		)
+	} else {
+		// Legacy delivery (pre-eae0181 engines): the adapter resolves the
+		// host from the runner's discovery file and the token from the
+		// engine-rotated token file on the shared data volume.
+		if scope.TokenFile != "" {
+			env = append(env, corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN_FILE", Value: scope.TokenFile})
+		}
 	}
 
 	return corev1.Container{
@@ -154,9 +185,37 @@ func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.Lifecycl
 		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
 		Env:             appendEnvDistinct(env, plan.adapterEnvs()),
-		VolumeMounts:    plan.adapterMounts(),
+		VolumeMounts:    plan.adapterMounts(!wireTokenDelivery(scope, runnerIP) || plan.declaresDataMount()),
 		Resources:       adapterResources(kind),
 	}
+}
+
+// wireTokenDelivery reports whether the member's token reaches the adapter
+// pod on the wire (CRI-237): the event carries the engine-minted accept
+// token (runner commit eae0181, CRI-236) and the reconcile resolved a
+// runner pod IP to dial. Without either input the legacy token-file
+// delivery applies.
+func wireTokenDelivery(scope events.LifecycleEvent, runnerIP string) bool {
+	return scope.AcceptToken != "" && runnerIP != ""
+}
+
+// runnerDialAddr renders the runner pod's routable shim dial address:
+// runnerIP plus the port of the engine's shim listen address (e.g.
+// "[::]:7778" -> ":7778"). The listen address is the engine's bind address,
+// whose host component never routes from a separate pod, so only the port
+// is consumed; an unparsable or empty address falls back to the shim's
+// conventional k8s port.
+func runnerDialAddr(runnerIP, shimListenAddress string) string {
+	port := shimPort(shimListenAddress)
+	return runnerIP + ":" + port
+}
+
+// shimPort extracts the TCP port from the engine's shim listen address.
+func shimPort(shimListenAddress string) string {
+	if _, port, err := net.SplitHostPort(shimListenAddress); err == nil && port != "" {
+		return port
+	}
+	return "7778"
 }
 
 // adapterKind resolves the adapter implementation kind for an event,

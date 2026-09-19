@@ -13,8 +13,21 @@ fi
 run_dir_root="${CRITERIA_RUN_DIR_ROOT:-/data/.criteria/runs}"
 run_dir="$run_dir_root/$CRITERIA_RUN_JOB_NAME"
 
+# Wire token delivery (CRI-237): when the operator supplies the accept token
+# directly, the pod mounts no data volume, so a missing host or digest cannot
+# be polled from the discovery directory — poll_file would spin forever on a
+# path that will never appear. Fail fast instead: the pod's RestartPolicy
+# turns the misconfiguration into a visible crash loop.
+if [ -n "${CRITERIA_SCOPE_ID:-}" ] && [ -n "${CRITERIA_REMOTE_TOKEN:-}" ]; then
+    if [ -z "${CRITERIA_REMOTE_HOST:-}" ] || [ -z "${CRITERIA_REMOTE_DIGEST:-}" ]; then
+        echo "wire token delivery requires CRITERIA_REMOTE_HOST and CRITERIA_REMOTE_DIGEST (run ${CRITERIA_RUN_JOB_NAME:-unknown}, scope ${CRITERIA_SCOPE_ID:-unknown})" >&2
+        exit 78
+    fi
+fi
+
 # In per-scope mode the operator passes the connection metadata directly via
-# the environment. When any value is missing we fall back to polling the
+# the environment — the full wire shape (CRI-237) or the token file path for
+# pre-eae0181 engines. When a value is missing we fall back to polling the
 # per-run discovery directory written by the runner.
 poll_file() {
     path="$1"

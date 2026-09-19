@@ -11,13 +11,15 @@
 # The baked workflow image (linear_intake_v1) is unchanged and stays in use for
 # image-only mode; wiring this image into the operator is CRI-231.
 #
-# Do NOT bump the pinned commit blindly: it must be criteria main at 28777aa
-# (merged CRI-215..229 chain: remote sources, origin metadata, pin
-# enforcement, cascade slugs, cache index) or later.
+# Do NOT bump the pinned commit blindly: it must be criteria main at
+# eae01816c4a2da88449833a233d1b3f6a099bef1 (the merged CRI-215..236 chain:
+# remote sources, origin metadata, pin enforcement, cascade slugs, cache
+# index, environment identity emission, and the accept_token provision
+# emission CRI-237's wire delivery reads) or later.
 
 ARG ALPINE_VERSION=3.20
 ARG GO_VERSION=1.26.6
-ARG CRITERIA_COMMIT=fc9544979ee698f111035368c654b415db943e66
+ARG CRITERIA_COMMIT=eae01816c4a2da88449833a233d1b3f6a099bef1
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 ARG CRITERIA_COMMIT

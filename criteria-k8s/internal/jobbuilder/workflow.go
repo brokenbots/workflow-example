@@ -223,7 +223,7 @@ func (p *workflowPlan) applyHostAffinity(labels map[string]string, spec *corev1.
 // keep the built-in secret volumes — a stamped workflow declares its own
 // secrets and replaces them.
 func (p *workflowPlan) runnerVolumes(dataPVC string) []corev1.Volume {
-	volumes := p.podVolumes(dataPVC)
+	volumes := p.podVolumes(dataPVC, true)
 	if p == nil {
 		volumes = append(volumes,
 			csiVolume("linear-secrets", "linear-spc"),
@@ -233,26 +233,60 @@ func (p *workflowPlan) runnerVolumes(dataPVC string) []corev1.Volume {
 	return append(volumes, scriptsVolume())
 }
 
-// adapterVolumes renders the adapter pods' volume list: the run-state data
-// volume, the declared volumes and CSI secret volumes, and the scripts
-// ConfigMap. Adapter pods carry no built-in secret volumes; secrets arrive
-// only through the workflow object's declarations.
-func (p *workflowPlan) adapterVolumes(dataPVC string) []corev1.Volume {
-	return append(p.podVolumes(dataPVC), scriptsVolume())
+// adapterVolumes renders the adapter pods' volume list: the declared volumes
+// and CSI secret volumes, the scripts ConfigMap, and — when includeData is
+// set — the run-state data volume (CRI-237). Wire-shaped adapter pods (the
+// accept token delivered over the shim channel) mount no shared data
+// volume: their token-file and discovery-file surfaces are gone. A declared
+// /data re-source keeps its volume regardless, because the workflow itself
+// asked for it; pass declaresDataMount through the includeData decision.
+// Adapter pods carry no built-in secret volumes; secrets arrive only
+// through the workflow object's declarations.
+func (p *workflowPlan) adapterVolumes(dataPVC string, includeData bool) []corev1.Volume {
+	volumes := p.podVolumes(dataPVC, includeData)
+	return append(volumes, scriptsVolume())
 }
 
-// podVolumes renders the shared pod volume prefix: the default data volume
-// (re-sourced by a /data declaration), the declared volumes, and a CSI
-// volume per declared secret. The default data PVC stays when no
-// declaration targets /data, because the run-state contract lives there.
-func (p *workflowPlan) podVolumes(dataPVC string) []corev1.Volume {
-	volumes := []corev1.Volume{dataVolume(dataPVC)}
+// declaresDataMount reports whether a declared volume re-sources the
+// built-in data volume at /data. Wire-shaped adapter pods keep the data
+// volume then: the declaration, not the token-file delivery, is what mounts
+// it (CRI-237).
+func (p *workflowPlan) declaresDataMount() bool {
+	if p == nil {
+		return false
+	}
+	for _, vol := range p.volumes {
+		if vol.MountPath == dataMountPath {
+			return true
+		}
+	}
+	return false
+}
+
+// podVolumes renders the shared pod volume prefix: the declared volumes, a
+// CSI volume per declared secret, and — when includeData is set — the
+// default data volume (re-sourced by a /data declaration), whose run-state
+// contract the legacy token-file delivery lives on.
+func (p *workflowPlan) podVolumes(dataPVC string, includeData bool) []corev1.Volume {
+	volumes := make([]corev1.Volume, 0, 8)
+	if includeData {
+		volumes = append(volumes, dataVolume(dataPVC))
+	}
 	if p == nil {
 		return volumes
 	}
 	for _, vol := range p.volumes {
-		if name := workflowPodVolumeName(vol); name == dataVolumeName {
-			volumes[0] = workflowVolume(vol)
+		if workflowPodVolumeName(vol) == dataVolumeName {
+			// A /data declaration re-sources the built-in data volume:
+			// it replaces the default volume when that is present, and
+			// appends its own volume under the same stable "data" name
+			// when the built-in volume is withheld (defensive — callers
+			// pass includeData whenever a /data declaration exists).
+			if includeData {
+				volumes[0] = workflowVolume(vol)
+			} else {
+				volumes = append(volumes, workflowVolume(vol))
+			}
 			continue
 		}
 		volumes = append(volumes, workflowVolume(vol))
@@ -296,7 +330,10 @@ func workflowVolume(vol criteriav1.RunWorkflowVolume) corev1.Volume {
 	return corev1.Volume{Name: workflowPodVolumeName(vol), VolumeSource: src}
 }
 
-// runnerMounts renders the workflow-runner container's mounts.
+// runnerMounts renders the workflow-runner container's mounts. The runner
+// always carries the run-state data mount: legacy (pre-eae0181) engines
+// still deliver adapter tokens through files on the shared volume, and the
+// runner's discovery publishing needs the workflow's declared /data (CRI-237).
 func (p *workflowPlan) runnerMounts() []corev1.VolumeMount {
 	if p == nil {
 		return []corev1.VolumeMount{
@@ -306,7 +343,7 @@ func (p *workflowPlan) runnerMounts() []corev1.VolumeMount {
 			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
 		}
 	}
-	return p.envMounts(dataMountPath)
+	return p.envMounts(dataMountPath, true)
 }
 
 // cloneMounts renders the repo-clone init container's mounts.
@@ -317,18 +354,27 @@ func (p *workflowPlan) cloneMounts() []corev1.VolumeMount {
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 		}
 	}
-	return p.envMounts(dataMountPath)
+	return p.envMounts(dataMountPath, true)
 }
 
-// adapterMounts renders an adapter container's mounts.
-func (p *workflowPlan) adapterMounts() []corev1.VolumeMount {
+// adapterMounts renders an adapter container's mounts. When includeData is
+// set the run-state data mount leads, as before (CRI-237); wire-shaped
+// adapter pods mount no data volume, so the mount is omitted and only the
+// declared volumes, secrets, and scripts ConfigMap remain. A declared /data
+// re-source is still mounted then: its mount IS the built-in data mount.
+func (p *workflowPlan) adapterMounts(includeData bool) []corev1.VolumeMount {
 	if p == nil {
+		if includeData {
+			return []corev1.VolumeMount{
+				{Name: dataVolumeName, MountPath: dataMountPath},
+				{Name: scriptsVolumeName, MountPath: scriptsMountPath},
+			}
+		}
 		return []corev1.VolumeMount{
-			{Name: dataVolumeName, MountPath: dataMountPath},
 			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
 		}
 	}
-	return p.envMounts(dataMountPath)
+	return p.envMounts(dataMountPath, includeData)
 }
 
 // envMounts renders the declared volumes and secrets into container mounts
@@ -336,9 +382,15 @@ func (p *workflowPlan) adapterMounts() []corev1.VolumeMount {
 // object mounts every declaration: the environments that declare them are
 // exactly the pods built from this workflow object. The /data declaration
 // is not re-mounted — it re-sources the default data volume, whose mount
-// every container already carries.
-func (p *workflowPlan) envMounts(dataMount string) []corev1.VolumeMount {
-	mounts := []corev1.VolumeMount{{Name: dataVolumeName, MountPath: dataMount}}
+// every data-carrying container already leads with. includeData=false
+// (wire-shaped adapter pods, CRI-237) omits that lead mount; a /data
+// declaration cannot co-occur with it, because callers force includeData
+// whenever the workflow declares /data.
+func (p *workflowPlan) envMounts(dataMount string, includeData bool) []corev1.VolumeMount {
+	mounts := make([]corev1.VolumeMount, 0, 8)
+	if includeData {
+		mounts = append(mounts, corev1.VolumeMount{Name: dataVolumeName, MountPath: dataMount})
+	}
 	for _, vol := range p.volumes {
 		if name := workflowPodVolumeName(vol); name == dataVolumeName {
 			continue

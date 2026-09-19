@@ -448,7 +448,7 @@ func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
 	}
 	// The live pod is the canonical desired pod for scope root: the outage
 	// must not delete it, and recovery must not churn it.
-	livePod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, provisionShell)
+	livePod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, provisionShell, "10.0.0.10")
 	livePod.Namespace = "default"
 
 	cl := fake.NewClientBuilder().
@@ -589,7 +589,7 @@ func TestReconcileCastleErrorStillStampsJobPhaseAndReleasesQueue(t *testing.T) {
 	}
 	// The live adapter pod is the canonical desired pod for scope root: the
 	// failed observation must not delete or churn it.
-	livePod := jobbuilder.BuildPerScopeAdapterPod(runA, jobbuilder.Defaults{DataPVC: "criteria-data"}, provisionShell)
+	livePod := jobbuilder.BuildPerScopeAdapterPod(runA, jobbuilder.Defaults{DataPVC: "criteria-data"}, provisionShell, "10.0.0.10")
 	livePod.Namespace = "default"
 
 	cl := fake.NewClientBuilder().

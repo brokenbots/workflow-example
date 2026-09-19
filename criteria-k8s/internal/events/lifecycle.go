@@ -45,7 +45,16 @@ type payloadEventData struct {
 	Digest      string `json:"digest"`
 	ScopeID     string `json:"scope_instance_id"`
 	ShimAddress string `json:"shim_listen_address"`
-	TokenFile   string `json:"token_ref"`
+	// TokenRef is the engine-rotated accept-token file path (legacy
+	// delivery channel). Runner commits from eae0181 (CRI-236) onward also
+	// carry the raw accept_token; older engines deliver only via files.
+	TokenFile string `json:"token_ref"`
+	// AcceptToken is the engine-minted per-scope accept token (CRI-236,
+	// runner commit eae0181), delivered in provision payload.data. The
+	// operator forwards it to the adapter pod's shim channel directly, so
+	// no token file has to be readable from the shared volume. Empty on
+	// events from older engines, which keep the token_ref file delivery.
+	AcceptToken string `json:"accept_token"`
 	// Environment identity (CRI-233, runner fc95449): the compiled
 	// environment declaration's type and name, carried verbatim by the
 	// engine's payload.data (internal/run/sink.go) in every wire shape.
@@ -85,9 +94,20 @@ type LifecycleEvent struct {
 	// ShimAddress is the runner dial address the adapter should phone home to.
 	ShimAddress string `json:"shim_address,omitempty"`
 
-	// TokenFile is an absolute path under /data to the per-scope bearer token.
-	// Only present on provision-wanted events.
+	// TokenFile is an absolute path under /data to the per-scope bearer
+	// token. Only present on provision-wanted events. Legacy delivery
+	// channel: engines before eae0181 deliver the token only through this
+	// file; from eae0181 (CRI-236) the token also rides the event in
+	// AcceptToken and the operator prefers the wire copy.
 	TokenFile string `json:"token_file,omitempty"`
+
+	// AcceptToken is the engine-minted per-scope accept token carried on
+	// provision-wanted events (CRI-236, runner commit eae0181). When set,
+	// the operator delivers it to the adapter pod over the shim channel
+	// (pod-spec env) instead of exposing a token file path. Empty on
+	// pre-eae0181 engine events, where TokenFile remains the delivery
+	// surface.
+	AcceptToken string `json:"accept_token,omitempty"`
 
 	// EnvironmentType is the compiled environment declaration's type (e.g.
 	// "remote"), and EnvironmentName its declaration name (e.g. "prod").
@@ -201,6 +221,7 @@ func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) 
 		Digest:          envelope.Payload.Data.Digest,
 		ShimAddress:     envelope.Payload.Data.ShimAddress,
 		TokenFile:       envelope.Payload.Data.TokenFile,
+		AcceptToken:     envelope.Payload.Data.AcceptToken,
 		EnvironmentType: envelope.Payload.Data.EnvironmentType,
 		EnvironmentName: envelope.Payload.Data.EnvironmentName,
 	}

@@ -142,3 +142,35 @@ func TestParseLifecycleEventsMixedShapes(t *testing.T) {
 	assert.Equal(t, "shell", events[1].AdapterName)
 	assert.Equal(t, "scope-flat", events[1].ScopeID)
 }
+
+// CRI-236 (runner eae0181): the eae0181-shaped provision_wanted emission
+// carries the engine-minted accept token in payload.data ("accept_token")
+// alongside the legacy token_ref file path. The parser must surface both:
+// the operator prefers the wire copy, and keeps token_ref parsed as the
+// pre-eae0181 fallback identity.
+func TestParseLifecycleEventsNestedAcceptToken(t *testing.T) {
+	payload := `{"payload_type":"AdapterEvent","run_id":"CRI-237","payload":` +
+		`{"kind":"adapter.lifecycle.provision_wanted","data":` +
+		`{"adapter":"intake","adapter_type":"shell","digest":"",` +
+		`"scope_instance_id":"root","scope_name":"","shim_listen_address":"[::]:7778",` +
+		`"token_ref":"/data/.criteria/runs/cri-237/remote-tokens/root/noop.token",` +
+		`"accept_token":"accept-rotate-1"}}}`
+
+	events, err := ParseLifecycleEventsBytes([]byte(payload))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "accept-rotate-1", events[0].AcceptToken)
+	assert.Equal(t, "/data/.criteria/runs/cri-237/remote-tokens/root/noop.token", events[0].TokenFile,
+		"token_ref stays parsed: it is the pre-eae0181 fallback identity")
+}
+
+// A provision_wanted emission without accept_token (pre-eae0181 engines,
+// e.g. the frozen image-mode release) must keep AcceptToken empty so the
+// operator falls back to the token-file delivery.
+func TestParseLifecycleEventsNestedWithoutAcceptTokenStaysEmpty(t *testing.T) {
+	events, err := ParseLifecycleEventsBytes([]byte(capturedNestedProvisionWanted))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Empty(t, events[0].AcceptToken,
+		"a pre-eae0181 emission must not synthesize a wire token")
+}

@@ -56,7 +56,7 @@ func TestBuildPerScopeAdapterPodGroupSameEnvironmentOnePod(t *testing.T) {
 		groupMember("review", "copilot", "scope-a", "ci"),
 	}
 
-	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members)
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
 	require.NotNil(t, pod)
 
 	// Exactly one pod per (scope, environment): every member is a separate
@@ -104,7 +104,7 @@ func TestBuildPerScopeAdapterPodGroupMetadataIsValidForAPIServer(t *testing.T) {
 		[]events.LifecycleEvent{
 			groupMember("intake", "shell", "scope-a", "ci"),
 			groupMember("review", "copilot", "scope-a", "ci"),
-		})
+		}, "10.0.0.10")
 	require.NotNil(t, pod)
 
 	assert.Empty(t,
@@ -125,9 +125,9 @@ func TestBuildPerScopeAdapterPodGroupSeparateEnvironmentsSeparatePods(t *testing
 	run := groupTestRun()
 
 	ciPod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")})
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}, "10.0.0.10")
 	prodPod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "prod",
-		[]events.LifecycleEvent{groupMember("review", "copilot", "scope-a", "prod")})
+		[]events.LifecycleEvent{groupMember("review", "copilot", "scope-a", "prod")}, "10.0.0.10")
 
 	require.NotNil(t, ciPod)
 	require.NotNil(t, prodPod)
@@ -150,8 +150,8 @@ func TestBuildPerScopeAdapterPodGroupDeterministic(t *testing.T) {
 	}
 	reversed := []events.LifecycleEvent{forward[2], forward[1], forward[0]}
 
-	first := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", forward)
-	second := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", reversed)
+	first := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", forward, "10.0.0.10")
+	second := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", reversed, "10.0.0.10")
 
 	assert.Equal(t, first.Name, second.Name)
 	require.Len(t, first.Spec.Containers, len(second.Spec.Containers))
@@ -180,7 +180,7 @@ func TestBuildPerScopeAdapterPodGroupCarriesEnvironmentDeclarations(t *testing.T
 	}
 
 	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")})
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}, "10.0.0.10")
 	require.NotNil(t, pod)
 
 	volumeNames := make(map[string]struct{}, len(pod.Spec.Volumes))
@@ -217,7 +217,7 @@ func TestBuildPerScopeAdapterPodGroupContainerNameCollision(t *testing.T) {
 	member := groupMember("intake", "shell", "scope-a", "ci")
 
 	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{member, member})
+		[]events.LifecycleEvent{member, member}, "10.0.0.10")
 	require.NotNil(t, pod)
 	require.Len(t, pod.Spec.Containers, 2)
 	assert.NotEqual(t, pod.Spec.Containers[0].Name, pod.Spec.Containers[1].Name,
@@ -234,9 +234,9 @@ func TestBuildPerScopeAdapterPodGroupNameSetTracksMembership(t *testing.T) {
 	run := groupTestRun()
 
 	before := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{groupMember("first", "shell", "scope-a", "ci")})
+		[]events.LifecycleEvent{groupMember("first", "shell", "scope-a", "ci")}, "10.0.0.10")
 	after := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{groupMember("second", "shell", "scope-a", "ci")})
+		[]events.LifecycleEvent{groupMember("second", "shell", "scope-a", "ci")}, "10.0.0.10")
 	require.Len(t, after.Spec.Containers, 1)
 	assert.NotEqual(t, before.Spec.Containers[0].Name, after.Spec.Containers[0].Name,
 		"a same-kind member swap must be detectable by the container name set")
@@ -247,7 +247,7 @@ func TestBuildPerScopeAdapterPodGroupNameSetTracksMembership(t *testing.T) {
 	reprovisioned := groupMember("first", "shell", "scope-a", "ci")
 	reprovisioned.Digest = "sha256:bbbbbbbb"
 	newer := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{reprovisioned})
+		[]events.LifecycleEvent{reprovisioned}, "10.0.0.10")
 	require.Len(t, newer.Spec.Containers, 1)
 	assert.NotEqual(t, before.Spec.Containers[0].Name, newer.Spec.Containers[0].Name,
 		"a digest change on re-provision must be detectable by the container name set")
@@ -260,7 +260,7 @@ func TestBuildPerScopeAdapterPodGroupPodShapeMatchesFallback(t *testing.T) {
 	// from provision events, are ever hosted here).
 	run := groupTestRun()
 	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
-		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")})
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}, "10.0.0.10")
 	require.NotNil(t, pod)
 
 	assert.Equal(t, "amd64", pod.Spec.NodeSelector["kubernetes.io/arch"])
@@ -307,5 +307,112 @@ func TestPerScopeAdapterGroupNameLongInputsStayDNSSafe(t *testing.T) {
 
 func TestBuildPerScopeAdapterPodGroupEmptyMembersNil(t *testing.T) {
 	run := groupTestRun()
-	assert.Nil(t, jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", nil))
+	assert.Nil(t, jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", nil, "10.0.0.10"))
+}
+
+// CRI-237: wire token delivery for group pods. When every member carries an
+// accept_token (runner commit eae0181, CRI-236) and the runner IP resolved,
+// the group pod is wire-shaped: a per-member CRITERIA_REMOTE_TOKEN env, a
+// routable CRITERIA_REMOTE_HOST, no CRITERIA_REMOTE_TOKEN_FILE anywhere,
+// and no shared data volume.
+func wireGroupMember(adapter, kind, scopeID, environment string) events.LifecycleEvent {
+	member := groupMember(adapter, kind, scopeID, environment)
+	member.ShimAddress = "[::]:7778"
+	member.AcceptToken = "accept-" + kind
+	return member
+}
+
+func TestBuildPerScopeAdapterPodGroupWireDelivery(t *testing.T) {
+	run := groupTestRun()
+	members := []events.LifecycleEvent{
+		wireGroupMember("intake", "shell", "scope-a", "ci"),
+		wireGroupMember("review", "copilot", "scope-a", "ci"),
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
+	require.NotNil(t, pod)
+
+	require.Len(t, pod.Spec.Containers, 2)
+	for _, c := range pod.Spec.Containers {
+		env := containerEnvMap(c)
+		assert.Equal(t, "accept-"+env["ADAPTER_KIND"], env["CRITERIA_REMOTE_TOKEN"],
+			"each member carries its own accept token on the wire")
+		assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
+		assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN_FILE")
+		for _, m := range c.VolumeMounts {
+			assert.NotEqual(t, "data", m.Name)
+		}
+	}
+	assert.False(t, hasVolume(pod.Spec.Volumes, "data"),
+		"the group pod must not mount the shared /data PVC for wire delivery")
+}
+
+func TestBuildPerScopeAdapterPodGroupMixedMembersKeepDataVolume(t *testing.T) {
+	// Defensive: a group holding one pre-eae0181 member (no accept_token —
+	// impossible in practice, since one engine emits one event shape) keeps
+	// the shared data volume for the legacy member's token file, while each
+	// container stays shaped by its own event.
+	run := groupTestRun()
+	members := []events.LifecycleEvent{
+		wireGroupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("review", "copilot", "scope-a", "ci"),
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
+	require.NotNil(t, pod)
+	assert.True(t, hasVolume(pod.Spec.Volumes, "data"))
+	byKind := map[string]corev1.Container{}
+	for _, c := range pod.Spec.Containers {
+		byKind[containerEnvMap(c)["ADAPTER_KIND"]] = c
+	}
+	wireEnv := containerEnvMap(byKind["shell"])
+	assert.Equal(t, "accept-shell", wireEnv["CRITERIA_REMOTE_TOKEN"])
+	assert.Equal(t, "10.0.0.10:7778", wireEnv["CRITERIA_REMOTE_HOST"])
+	assert.NotContains(t, wireEnv, "CRITERIA_REMOTE_TOKEN_FILE")
+	legacyEnv := containerEnvMap(byKind["copilot"])
+	assert.Equal(t, "/data/intake/CRI-234/tokens/review", legacyEnv["CRITERIA_REMOTE_TOKEN_FILE"])
+	assert.NotContains(t, legacyEnv, "CRITERIA_REMOTE_TOKEN")
+}
+
+func TestBuildPerScopeAdapterPodGroupWireWithoutRunnerIPLegacy(t *testing.T) {
+	// Defensive: accept_token members with an unresolved runner IP keep the
+	// legacy shape (the reconcile never builds in this state — it requeues).
+	run := groupTestRun()
+	members := []events.LifecycleEvent{
+		wireGroupMember("intake", "shell", "scope-a", "ci"),
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "")
+	require.NotNil(t, pod)
+	assert.True(t, hasVolume(pod.Spec.Volumes, "data"))
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.Contains(t, env, "CRITERIA_REMOTE_TOKEN_FILE")
+	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN")
+}
+
+func TestBuildPerScopeAdapterPodGroupNameStableAcrossTokenRotation(t *testing.T) {
+	// CRI-237: the accept token rotates per provision event; a wire member's
+	// re-provision must NOT churn the container name (and with it the group
+	// pod, whose container sets are immutable). The binding identity stays
+	// on the stable token-file path, which the engine keeps populating at
+	// eae0181.
+	run := groupTestRun()
+
+	before := wireGroupMember("intake", "shell", "scope-a", "ci")
+	rotated := wireGroupMember("intake", "shell", "scope-a", "ci")
+	rotated.AcceptToken = "accept-rotated-2"
+	// Token rotation comes with a fresh token_ref too; the PATH stays stable.
+	rotated.TokenFile = before.TokenFile
+
+	first := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{before}, "10.0.0.10")
+	second := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{rotated}, "10.0.0.10")
+	require.Len(t, first.Spec.Containers, 1)
+	assert.Equal(t, first.Spec.Containers[0].Name, second.Spec.Containers[0].Name,
+		"a wire token rotation must not churn the container name and recreate the group pod")
+
+	// The wire env still carries the rotated token so the handshake works.
+	assert.Equal(t, "accept-shell", containerEnvMap(first.Spec.Containers[0])["CRITERIA_REMOTE_TOKEN"])
+	assert.Equal(t, "accept-rotated-2", containerEnvMap(second.Spec.Containers[0])["CRITERIA_REMOTE_TOKEN"])
 }
