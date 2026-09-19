@@ -132,8 +132,13 @@ validate:
 #   3. Apply this ConfigMap so the watcher resolves criteria-develop
 #      (states=[Ready for Development] -> linear_develop_v1):
 #        make apply-routes
-# Steps 2 and 3 can be run in either order (the watcher loads routes at
-# startup), but both must follow step 1.
+# Steps 2 and 3 can be run in either order -- the watcher re-reads the
+# routes payload on every poll (routes.TicketStates() is derived per poll,
+# not cached at startup) -- but both must follow step 1. CAUTION: this
+# applies k8s/examples/routes-configmap.yaml WHOLESALE; the config source
+# only carries criteria-intake and criteria-develop, so diff the live
+# criteria-routes ConfigMap first -- any live-only routes added out of band
+# (e.g. triage wiring from CRI-238/240) would be dropped by this apply.
 apply-routes:
 	kubectl -n criteria-jobs apply -f k8s/examples/routes-configmap.yaml
 

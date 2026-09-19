@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
 # Regression test for k8s/create-ready-for-development-state.sh (CRI-241).
 #
 # The state creation is the deploy-time pairing half required before the
 # criteria-develop route and the watcher rollout can go live: the triage
 # workflow's re-arm step (CRI-240) moves tickets to "Ready for Development",
-# which only works once the state exists on the Linear team. The script is
-# exercised against a mock Linear API that records every request, covering:
+# which only works once the state exists on the Linear team.
 #
-#   1. probe-first ordering: WorkflowStateCreateInput introspection happens
-#      BEFORE the teams query and any mutation;
-#   2. the create mutation's input (name=Ready for Development, type=unstarted,
-#      teamId of the resolved CRI team);
-#   3. verify-after-create: a fresh states query must resolve the new state;
-#   4. idempotency: an existing state produces NO create mutation and exits 0;
-#   5. probe failure (mutation shape missing a required field) is a loud
-#      failure with zero mutations;
-#   6. create success=false is a loud failure;
-#   7. verify-after-create failure (state absent after a "successful" create)
-#      is a loud failure;
-#   8. missing LINEAR_API_KEY fails loudly with ZERO requests.
+# shellcheck disable=SC2016
+
+set -euo pipefail
+
+# The mock Linear API below emulates the LIVE schema (captured via
+# introspection against api.linear.app), not the script's assumptions:
+#   - WorkflowStateCreateInput exposes inputFields (an INPUT_OBJECT has no
+#     "fields"), with name/type/color/teamId NON_NULL; a probe answering in
+#     the fabricated "fields" shape must make the script fail loudly.
+#   - There is NO WorkflowStateType enum (WorkflowState.type is String!).
+#   - The Team type has NO workflowStates field -- a lookup written as
+#     team(id:) { workflowStates } must be rejected with the live GraphQL
+#     error, so only the ROOT workflowStates(filter:...) query can succeed.
+#   - The create mutation must supply color (required String!, no default);
+#     a mutation omitting it is rejected with the live required-field error.
+#   - workflowStateCreate returns WorkflowStatePayload {success,
+#     workflowState {id name type color}}.
+#
+# Cases: happy path (probe-first ordering, create input incl. color,
+# root-form lookups, live-shape create response, verify-after-create);
+# idempotency; terminal-state refusal; probe failure (required inputField
+# absent); probe answering in the fabricated "fields" shape; create
+# success=false; verify-after-create failure; HTTP 500; missing
+# LINEAR_API_KEY with zero requests; and cross-file consistency of the
+# "Ready for Development" state name (triage variable <-> script constant
+# <-> route states).
+
+# GraphQL query strings in the mock-contract probes below deliberately
+# contain $variables that must NOT be expanded by the shell.
+# shellcheck disable=SC2016
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/k8s/create-ready-for-development-state.sh"
@@ -38,18 +53,15 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 command -v jq >/dev/null 2>&1 || fail "jq is required"
 [ -f "$SCRIPT" ] || fail "k8s/create-ready-for-development-state.sh is missing"
 
-# ── mock Linear API ────────────────────────────────────────────────────────
-# Serves the four requests the script makes: the introspection probe
-# (__type), the teams lookup (teams(filter:), the workflowStates lookups
-# (team(id:) { workflowStates }), and the workflowStateCreate mutation.
-# Behavior is driven by MOCK_CFG (a JSON file rewritten between cases);
-# every request's kind is appended to SEQ_FILE and mutation inputs to
-# MUT_FILE so ordering and payloads can be asserted.
-
+# ── mock Linear API (live-schema emulation) ────────────────────────────────
+# Probe fixture mirrors the captured live introspection of
+# WorkflowStateCreateInput (inputFields with NON_NULL wrappers and
+# defaultValue) and the root query/mutation field lists.
 MOCK="$TMP/mock_linear.py"
 MOCK_CFG="$TMP/mock_config.json"
 SEQ_FILE="$TMP/requests.jsonl"
 MUT_FILE="$TMP/mutations.jsonl"
+STATES_Q_FILE="$TMP/states_queries.jsonl"
 MOCK_LOG="$TMP/mock.log"
 
 cat > "$MOCK" <<'PY'
@@ -57,21 +69,34 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-CFG_FILE, SEQ_FILE, MUT_FILE = sys.argv[1], sys.argv[2], sys.argv[3]
+CFG_FILE, SEQ_FILE, MUT_FILE, STATES_Q_FILE = sys.argv[1:5]
 
+NON_NULL_STRING = {"kind": "NON_NULL", "name": None,
+                   "ofType": {"kind": "SCALAR", "name": "String"}}
+# Captured live inputFields of WorkflowStateCreateInput.
 INPUT_FIELDS = [
-    {"name": "name", "type": {"kind": "NON_NULL", "name": None}},
-    {"name": "type", "type": {"kind": "NON_NULL", "name": None}},
-    {"name": "teamId", "type": {"kind": "NON_NULL", "name": None}},
-    {"name": "description", "type": {"kind": "SCALAR", "name": "String"}},
+    {"name": "id", "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+     "defaultValue": None},
+    {"name": "type", "type": NON_NULL_STRING, "defaultValue": None},
+    {"name": "name", "type": NON_NULL_STRING, "defaultValue": None},
+    {"name": "color", "type": NON_NULL_STRING, "defaultValue": None},
+    {"name": "description", "type": {"kind": "SCALAR", "name": "String", "ofType": None},
+     "defaultValue": None},
+    {"name": "position", "type": {"kind": "SCALAR", "name": "Float", "ofType": None},
+     "defaultValue": None},
+    {"name": "teamId", "type": NON_NULL_STRING, "defaultValue": None},
 ]
-ENUM_VALUES = [{"name": "backlog"}, {"name": "unstarted"},
-               {"name": "started"}, {"name": "completed"}, {"name": "canceled"}]
+# Required create input fields, per the live schema (all NON_NULL).
+REQUIRED_INPUT_FIELDS = ("name", "type", "color", "teamId")
 
 
 def record(path, payload):
     with open(path, "a") as f:
         f.write(payload + "\n")
+
+
+def graphqLError(message):
+    return {"errors": [{"message": message}]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -83,46 +108,75 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         query = body.get("query", "")
 
-        if "__type" in query:
+        if "workflowStateCreate" in query:
+            record(SEQ_FILE, "create")
+            inp = body.get("variables", {}).get("input", {})
+            missing = [f for f in REQUIRED_INPUT_FIELDS
+                       if not isinstance(inp.get(f), str) or not inp[f]]
+            if missing:
+                # The live API rejects a mutation omitting a required input
+                # field (reproduced: Field "color" of required type
+                # "String!" was not provided.).
+                resp = graphqLError(
+                    'Field "%s" of required type "String!" was not provided.' % missing[0])
+            else:
+                record(MUT_FILE, json.dumps(inp))
+                if cfg.get("create_status", 200) != 200:
+                    self.send_response(cfg["create_status"])
+                    self.end_headers()
+                    return
+                if cfg.get("create_success", True):
+                    created = {"id": "state-new", "name": inp["name"],
+                               "type": inp["type"], "color": inp["color"]}
+                    # Post-create verification uses a fresh workflowStates
+                    # query; the script must fail when the created state
+                    # cannot be resolved.
+                    cfg["existing_state"] = created if cfg.get("verify_resolvable", True) else None
+                    json.dump(cfg, open(CFG_FILE, "w"))
+                    resp = {"data": {"workflowStateCreate": {
+                        "success": True, "workflowState": created}}}
+                else:
+                    resp = {"data": {"workflowStateCreate": {
+                        "success": False, "workflowState": None}}}
+        elif "__type" in query or "__schema" in query:
             record(SEQ_FILE, "probe")
-            skip = cfg.get("probe_missing_fields", [])
             resp = {"data": {
-                "input": {"name": "WorkflowStateCreateInput",
-                          "fields": [f for f in INPUT_FIELDS if f["name"] not in skip]},
-                "enum": {"name": "WorkflowStateType", "enumValues": ENUM_VALUES},
+                "input": {"name": "WorkflowStateCreateInput"},
+                # __schema results nest under queryType/mutationType in the
+                # live introspection response.
+                "rootQuery": {"queryType": {"fields": [{"name": "issues"},
+                                                       {"name": "teams"},
+                                                       {"name": "workflowStates"}]}},
+                "rootMutation": {"mutationType": {"fields": [{"name": "issueUpdate"},
+                                                             {"name": "workflowStateCreate"}]}},
             }}
+            if cfg.get("probe_shape", "inputFields") == "inputFields":
+                skip = cfg.get("probe_missing_fields", [])
+                resp["data"]["input"]["inputFields"] = [
+                    f for f in INPUT_FIELDS if f["name"] not in skip]
+            else:
+                # The fabricated shape the first draft assumed: INPUT_OBJECT
+                # introspection answered via "fields" (always null live).
+                resp["data"]["input"]["fields"] = None
         elif "teams(filter" in query:
             record(SEQ_FILE, "teams")
             resp = {"data": {"teams": {"nodes": [
                 {"id": "team-1", "key": "CRI", "name": "Criteria"}]}}}
-        elif "workflowStates" in query:
+        elif "team(id:" in query:
+            # The live Team type has no workflowStates field; this is the
+            # exact error the live API returns for that query shape.
+            resp = graphqLError('Cannot query field "workflowStates" on type "Team". '
+                                'Did you mean "draftWorkflowState", "mergeWorkflowState", '
+                                'or "startWorkflowState"?')
+        elif "workflowStates(filter" in query:
             record(SEQ_FILE, "states")
+            record(STATES_Q_FILE, query)
             state = cfg.get("existing_state")
             nodes = ([{"id": state["id"], "name": state["name"], "type": state["type"]}]
                      if state else [])
-            resp = {"data": {"team": {"workflowStates": {"nodes": nodes}}}}
-        elif "workflowStateCreate" in query:
-            record(SEQ_FILE, "create")
-            record(MUT_FILE, json.dumps(body["variables"]["input"]))
-            if cfg.get("create_status", 200) != 200:
-                self.send_response(cfg["create_status"])
-                self.end_headers()
-                return
-            if cfg.get("create_success", True):
-                created = {"id": "state-new", "name": body["variables"]["input"]["name"],
-                           "type": body["variables"]["input"]["type"]}
-                # Post-create verification uses a fresh states query; the
-                # script must fail when the created state cannot be resolved.
-                resolvable = cfg.get("verify_resolvable", True)
-                cfg["existing_state"] = created if resolvable else None
-                json.dump(cfg, open(CFG_FILE, "w"))
-                resp = {"data": {"workflowStateCreate": {"success": True,
-                                                         "workflowState": created}}}
-            else:
-                resp = {"data": {"workflowStateCreate": {"success": False,
-                                                         "workflowState": None}}}
+            resp = {"data": {"workflowStates": {"nodes": nodes}}}
         else:
-            resp = {"errors": [{"message": "unexpected query"}]}
+            resp = graphqLError("unexpected query")
 
         data = json.dumps(resp).encode()
         self.send_response(200)
@@ -137,7 +191,7 @@ print(server.server_address[1], flush=True)
 server.serve_forever()
 PY
 
-python3 "$MOCK" "$MOCK_CFG" "$SEQ_FILE" "$MUT_FILE" >"$MOCK_LOG" 2>&1 &
+python3 "$MOCK" "$MOCK_CFG" "$SEQ_FILE" "$MUT_FILE" "$STATES_Q_FILE" >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 trap 'kill "$MOCK_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
 
@@ -159,6 +213,7 @@ reset() {
     echo '{}' > "$MOCK_CFG"
     : > "$SEQ_FILE"
     : > "$MUT_FILE"
+    : > "$STATES_Q_FILE"
 }
 
 seq_kinds() {
@@ -180,14 +235,13 @@ run_case() {
     fi
 }
 
-# ── 1. happy path: probe first, create type=unstarted, verify resolves ────
+# ── 1. happy path: probe first, create with color, verify resolves ────────
 reset
-echo '{"existing_state": null}' > "$MOCK_CFG"
 run_case 0 "happy path"
 run_out="$(cat "$OUT_FILE")"
 printf '%s' "$run_out" | grep -q "probe ok" || fail "happy path: probe message missing"
-printf '%s' "$run_out" | grep -q "created state 'Ready for Development' (state-new, type=unstarted)" || \
-    fail "happy path: creation message missing or wrong type/id: $run_out"
+printf '%s' "$run_out" | grep -q "created state 'Ready for Development' (state-new, type=unstarted, color=#5e6ad2)" || \
+    fail "happy path: creation message missing or wrong type/color/id: $run_out"
 printf '%s' "$run_out" | grep -q "verified" || fail "happy path: verification message missing"
 
 # probe must precede the teams lookup and every mutation
@@ -198,10 +252,49 @@ ok "happy path: probe-first ordering enforced"
 
 create_input="$(head -n1 "$MUT_FILE")"
 if ! jq -e --arg name "Ready for Development" --arg ty "unstarted" --arg team "team-1" \
-    '.name == $name and .type == $ty and .teamId == $team' >/dev/null <<<"$create_input"; then
-    fail "happy path: create input wrong: $create_input"
+    --arg color "#5e6ad2" \
+    '.name == $name and .type == $ty and .teamId == $team and .color == $color' \
+    >/dev/null <<<"$create_input"; then
+    fail "happy path: create input wrong (must supply name/type/color/teamId): $create_input"
 fi
-ok "happy path: create input is {name: Ready for Development, type: unstarted, teamId: team-1}"
+ok "happy path: create input is {name, type: unstarted, color: #5e6ad2, teamId} -- every required inputField supplied"
+
+# The state lookup must use the ROOT workflowStates(filter:) query; a
+# team(id:) { workflowStates } lookup is invalid against the live schema.
+n_states_queries="$(wc -l <"$STATES_Q_FILE")"
+[ "$n_states_queries" -eq 2 ] || fail "happy path: expected 2 states lookups, got $n_states_queries"
+grep -q 'workflowStates(filter:' "$STATES_Q_FILE" || \
+    fail "happy path: states lookup does not use the root workflowStates(filter:) query"
+if grep -q 'team(id:' "$STATES_Q_FILE"; then
+    fail "happy path: states lookup uses the invalid team(id:) form"
+fi
+ok "happy path: state lookups use the root workflowStates(filter:) form (live-schema valid)"
+
+# The mock itself must reject the invalid team(id:) lookup shape, mirroring
+# the live API (proves the mock emulates the live contract, not the script).
+mock_reject="$(curl -sS -H "Authorization: test-key" -H "Content-Type: application/json" \
+    -d '{"query":"query($team: ID!, $name: String!) { team(id: $team) { workflowStates(filter: {name: {eq: $name}}) { nodes { id } } } }","variables":{"team":"team-1","name":"Ready for Development"}}' \
+    "http://127.0.0.1:$PORT/graphql")"
+printf '%s' "$mock_reject" | jq -e '.errors[0].message | contains("Cannot query field \"workflowStates\" on type \"Team\"")' >/dev/null || \
+    fail "mock contract: team(id:) lookup was not rejected like the live API: $mock_reject"
+ok "mock contract: team(id:) workflowStates lookup rejected like the live API"
+
+# The mock must reject a create mutation omitting color with the live
+# required-field error (proves a script regression on color fails here).
+mock_no_color="$(curl -sS -H "Authorization: test-key" -H "Content-Type: application/json" \
+    -d '{"query":"mutation($input: WorkflowStateCreateInput!) { workflowStateCreate(input: $input) { success workflowState { id name type color } } }","variables":{"input":{"teamId":"team-1","name":"Ready for Development","type":"unstarted"}}}' \
+    "http://127.0.0.1:$PORT/graphql")"
+printf '%s' "$mock_no_color" | jq -e '.errors[0].message | contains("Field \"color\" of required type \"String!\" was not provided.")' >/dev/null || \
+    fail "mock contract: color-less create input was not rejected like the live API: $mock_no_color"
+ok "mock contract: create input without color rejected with the live required-field error"
+
+# The probe fixture must expose inputFields, not the fabricated "fields".
+mock_probe="$(curl -sS -H "Authorization: test-key" -H "Content-Type: application/json" \
+    -d '{"query":"query { __type(name: \"WorkflowStateCreateInput\") { name inputFields { name type { kind } } } }"}' \
+    "http://127.0.0.1:$PORT/graphql")"
+printf '%s' "$mock_probe" | jq -e '[(.data.input.inputFields // [])[].name] | (index("name") != null and index("type") != null and index("color") != null and index("teamId") != null)' >/dev/null || \
+    fail "mock contract: probe fixture does not expose inputFields like the live schema: $mock_probe"
+ok "mock contract: probe fixture exposes inputFields (live shape), not a fabricated fields shape"
 
 # ── 2. idempotency: existing state -> no create mutation, exit 0 ──────────
 reset
@@ -223,17 +316,30 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "terminal type 'completed'" || \
     fail "terminal state: refusal message missing"
 ok "terminal state refused with a loud failure"
 
-# ── 4. probe failure: missing required input field -> no mutation ─────────
+# ── 4. probe failure: missing required inputField -> no mutation ──────────
 reset
 echo '{"probe_missing_fields": ["teamId"]}' > "$MOCK_CFG"
 run_case 1 "probe failure"
-printf '%s' "$(cat "$OUT_FILE")" | grep -q "does not expose a 'teamId' field" || \
+printf '%s' "$(cat "$OUT_FILE")" | grep -q "does not expose a required 'teamId' inputField" || \
     fail "probe failure: missing-field message missing"
 [ -z "$(seq_kinds | grep '^create$' || true)" ] || fail "probe failure sent a create mutation"
 [ -z "$(seq_kinds | grep '^teams$' || true)" ] || fail "probe failure continued past the probe to team resolution"
 ok "probe failure: loud failure before any team lookup or mutation"
 
-# ── 5. create success=false is a loud failure ─────────────────────────────
+# ── 5. probe answering in the fabricated "fields" shape fails loudly ──────
+# The live schema answers INPUT_OBJECT introspection via inputFields; a
+# response carrying only "fields" (the first-draft assumption) must not be
+# mistaken for a passing probe.
+reset
+echo '{"probe_shape": "fields"}' > "$MOCK_CFG"
+run_case 1 "probe fabricated shape"
+printf '%s' "$(cat "$OUT_FILE")" | grep -q "does not expose a required 'name' inputField" || \
+    fail "probe fabricated shape: loud failure message missing"
+[ -z "$(seq_kinds | grep '^create$' || true)" ] || fail "probe fabricated shape sent a create mutation"
+[ -z "$(seq_kinds | grep '^teams$' || true)" ] || fail "probe fabricated shape continued past the probe"
+ok "probe 'fields'-shaped response (no inputFields) rejected with a loud failure"
+
+# ── 6. create success=false is a loud failure ─────────────────────────────
 reset
 echo '{"create_success": false}' > "$MOCK_CFG"
 run_case 1 "create failure"
@@ -241,7 +347,7 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "workflowStateCreate did not succeed"
     fail "create failure: loud failure message missing"
 ok "create success=false rejected with a loud failure"
 
-# ── 6. verify-after-create failure is a loud failure ──────────────────────
+# ── 7. verify-after-create failure is a loud failure ──────────────────────
 reset
 echo '{"verify_resolvable": false}' > "$MOCK_CFG"
 run_case 1 "verify failure"
@@ -249,7 +355,7 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "does not resolve by name after creat
     fail "verify failure: loud failure message missing"
 ok "verify-after-create failure rejected with a loud failure"
 
-# ── 7. transport error (HTTP 500) is a loud failure ───────────────────────
+# ── 8. transport error (HTTP 500) is a loud failure ───────────────────────
 reset
 echo '{"create_status": 500}' > "$MOCK_CFG"
 run_case 1 "transport failure"
@@ -257,7 +363,7 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "Linear request failed" || \
     fail "transport failure: loud failure message missing"
 ok "HTTP 500 from Linear rejected with a loud failure"
 
-# ── 8. missing LINEAR_API_KEY fails loudly with zero requests ─────────────
+# ── 9. missing LINEAR_API_KEY fails loudly with zero requests ─────────────
 reset
 OUT_FILE="$TMP/out.txt"
 set +e
@@ -269,5 +375,31 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "LINEAR_API_KEY is not set" || \
     fail "missing key: loud failure message missing"
 [ -z "$(seq_kinds)" ] || fail "missing key: script made requests without credentials"
 ok "missing LINEAR_API_KEY: loud failure, zero requests"
+
+# ── 10. cross-file consistency of the state name (CRI-241) ────────────────
+# The state name is written in three places that must never drift apart:
+# the triage workflow's linear_ready_state default (set_ready_state moves
+# tickets there), the script's STATE_NAME constant (creates it), and the
+# criteria-develop route's states list (fires on it).
+STATE_NAME_EXPECTED="Ready for Development"
+
+routes_json="$(awk '/^  routes.json: \|$/ {flag=1; next} flag && !/^    / {exit} flag {print substr($0, 5)}' \
+    "$REPO_ROOT/k8s/examples/routes-configmap.yaml")"
+[ -n "$routes_json" ] || fail "consistency: could not extract routes.json from the shipped example"
+if ! jq -e --arg s "$STATE_NAME_EXPECTED" \
+    '.routes[] | select(.name == "criteria-develop") | .states == [$s]' \
+    >/dev/null <<<"$routes_json"; then
+    fail "consistency: criteria-develop route states do not match '$STATE_NAME_EXPECTED'"
+fi
+
+if ! grep -Fq 'readonly STATE_NAME="Ready for Development"' "$SCRIPT"; then
+    fail "consistency: script STATE_NAME constant drifted from '$STATE_NAME_EXPECTED'"
+fi
+
+if ! grep -A5 'variable "linear_ready_state"' "$REPO_ROOT/linear_triage_v1/variables.chcl" \
+    | grep -Fq "default     = \"$STATE_NAME_EXPECTED\""; then
+    fail "consistency: linear_triage_v1 linear_ready_state default drifted from '$STATE_NAME_EXPECTED'"
+fi
+ok "consistency: state name identical across triage variable, script constant, and route states"
 
 echo "PASS: create-ready-for-development-state regression tests"
