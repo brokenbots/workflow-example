@@ -1,0 +1,1 @@
+This file was created by validation run B (plan CRI-214, M10.3): the run that produced it fired linear_develop_v1 through the criteria-develop dev route from a ticket at Ready for Development, with no manual kickoff of the develop workflow. This file exists only as the trivial change carried by that run. Cross-ref: CRI-245.
