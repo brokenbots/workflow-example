@@ -1,0 +1,33 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+set -euo pipefail
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+
+notes="$run_dir/review-notes.md"
+[ -s "$notes" ] || printf '(no review notes recorded)\n' > "$notes"
+
+# Reached only when the ready-for-development re-arm failed: the finding is
+# confirmed and the workstream is on disk, but the arming label could not be
+# re-attached. The comment must be accurate about that — this is not a triage
+# failure, and the ready-state move has not happened yet.
+curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'mutation($id: String!, $body: String!) { commentCreate(input: {issueId: $id, body: $body}) { success } }' \
+        --arg id "$issue_id" \
+        --arg header "**Automated QA triage completed** (verdict: $criteria_value_3, workstream: $criteria_value_4) but re-attaching the \"$criteria_value_5\" label failed, so the development route would not fire. Moving to review for a human decision.
+
+Reviewer notes:
+" \
+        --rawfile notes "$notes" \
+        '{query: $q, variables: {id: $id, body: ($header + $notes)}}')" \
+    https://api.linear.app/graphql \
+    | jq -e '.data.commentCreate.success == true' >/dev/null
+
+echo "comment posted"

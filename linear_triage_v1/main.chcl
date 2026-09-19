@@ -8,10 +8,17 @@
 //
 //   awaiting_human        — the ticket is moved In Review with a Linear comment
 //                           carrying the evidence a human needs to decide.
+//                           No re-arm happens on this path: humans promote In
+//                           Review tickets by label + state — the human IS the
+//                           signal (CRI-240).
 //   ready_for_development — the finding is confirmed (internal-reproduced
 //                           label, or a QA verdict the reviewer routed as
-//                           valid with a published workstream) and the ticket
-//                           is moved to the ready state.
+//                           valid with a published workstream) and the run
+//                           re-arms the development route before the terminal:
+//                           the k8s-run arming label is re-attached as a merged
+//                           label write and the ticket is moved to the ready
+//                           state, so the development route fires
+//                           automatically without human intervention (CRI-240).
 //
 // There is no develop coupling: no handler subworkflow, no work/done states,
 // no PR steps. The develop path remains in linear_intake_v1 (CRI-239 extracts
@@ -197,7 +204,7 @@ step "set_confirmed_bug_label" {
             criteria_value_4 = var.linear_feature_label
         })
     }
-    outcome "success" { next = step.set_ready_state }
+    outcome "success" { next = step.rearm_k8s_run }
     outcome "failure" { next = step.comment_triage_failed }
 }
 
@@ -300,7 +307,7 @@ step "review_qa_output" {
 switch "route_ready" {
     match {
         condition = data.internal.workstream_file.value != ""
-        next      = step.set_ready_state
+        next      = step.rearm_k8s_run
     }
     default { next = step.comment_needs_human }
 }
@@ -395,8 +402,52 @@ step "set_review_state" {
     outcome "failure" { next = state.awaiting_human }
 }
 
+// ── Ready-for-development re-arm (CRI-240) ───────────────────────────────────
+// The terminal path's arming step: a confirmed finding must leave the ticket
+// carrying the run label AND in the ready state, or the watcher's dev route
+// never fires. Reached only from the two confirmed-finding gates
+// (set_confirmed_bug_label, route_ready) — the In Review path never passes
+// through here, so human promotion remains the only mechanism for those
+// tickets.
+
+// Re-attach the run label as a merged write: the ticket's current labels are
+// preserved, none are removed. The label is armed BEFORE the state move so
+// there is never a window where the ticket sits in the ready state without
+// its arming label.
+step "rearm_k8s_run" {
+    target = adapter.shell.triage
+    input {
+        command = templatefile("./scripts/rearm_k8s_run.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_run_label
+        })
+    }
+    outcome "success" { next = step.set_ready_state }
+    // The label write is load-bearing for the automation; without it the dev
+    // route cannot fire. Comment accurately (the finding is confirmed; only
+    // the re-arm failed), then park In Review for a human decision.
+    outcome "failure" { next = step.comment_rearm_failed }
+}
+
+step "comment_rearm_failed" {
+    target = adapter.shell.triage
+    input {
+        command = templatefile("./scripts/comment_rearm_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.verdict.value
+            criteria_value_4 = data.internal.workstream_file.value
+            criteria_value_5 = var.linear_run_label
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = step.set_review_state }
+}
+
 // Confirmed finding: move the ticket to the ready-for-development state. Same
-// script as the review move, parameterized by linear_ready_state.
+// script as the review move, parameterized by linear_ready_state. The re-arm
+// step precedes this move, so the state never lands without the arming label.
 step "set_ready_state" {
     target = adapter.shell.triage
     input {

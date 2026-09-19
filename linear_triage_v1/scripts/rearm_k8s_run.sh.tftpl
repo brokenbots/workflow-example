@@ -1,0 +1,56 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+team_id=$(jq -r '.data.issue.team.id' "$run_dir/ticket.json")
+
+# Ready-for-development re-arm (CRI-240): re-attach the run-arming label so
+# the development route fires automatically once the ticket lands in the
+# ready state. The write is a MERGE with REPLACE semantics: the desired set
+# is the ticket's current label ids plus the arming label, and issueUpdate's
+# labelIds field replaces the whole set in one write. The current ids are
+# read fresh from the API, not from ticket.json — set_confirmed_bug_label
+# may have rewritten labels earlier in this run (its write is also a
+# REPLACE), and a set built from the fetch-time snapshot would silently drop
+# those.
+arm=$(curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'query($id: String!, $team: ID!, $name: String!) { issue(id: $id) { labels { nodes { id } } } issueLabels(filter: {team: {id: {eq: $team}}, name: {eq: $name}}) { nodes { id } } }' \
+        --arg id "$issue_id" \
+        --arg team "$team_id" \
+        --arg name "$criteria_value_3" \
+        '{query: $q, variables: {id: $id, team: $team, name: $name}}')" \
+    https://api.linear.app/graphql)
+
+label_id=$(printf '%s' "$arm" | jq -r '.data.issueLabels.nodes[0].id // empty')
+if [ -z "$label_id" ]; then
+    echo "Linear label '$criteria_value_3' not found on the ticket's team; without it the development route would never fire" >&2
+    exit 1
+fi
+
+current_ids=$(printf '%s' "$arm" | jq -c '[.data.issue.labels.nodes[].id] | unique')
+
+if printf '%s' "$current_ids" | jq -e --arg label_id "$label_id" 'index($label_id)' >/dev/null; then
+    echo "ticket already carries $criteria_value_3; no re-arm write needed"
+    exit 0
+fi
+
+label_ids=$(printf '%s' "$current_ids" | jq -c --arg label_id "$label_id" '. + [$label_id]')
+
+curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'mutation($id: String!, $labelIds: [String!]!) { issueUpdate(id: $id, input: {labelIds: $labelIds}) { success } }' \
+        --arg id "$issue_id" \
+        --argjson labelIds "$label_ids" \
+        '{query: $q, variables: {id: $id, labelIds: $labelIds}}')" \
+    https://api.linear.app/graphql \
+    | jq -e '.data.issueUpdate.success == true' >/dev/null
+
+echo "ticket re-armed with $criteria_value_3"

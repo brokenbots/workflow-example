@@ -14,7 +14,12 @@ set -euo pipefail
 #      input always yields the same routing token;
 #   4. the mechanical report/workstream assembly scripts produce non-empty
 #      artifacts from a fetched ticket and fail loudly without one;
-#   5. linear_intake_v1 itself is untouched and keeps its develop path.
+#   5. linear_intake_v1 itself is untouched and keeps its develop path;
+#   6. the ready_for_development terminal path re-arms the development route
+#      (CRI-240): the re-arm step is reached only from the confirmed-finding
+#      gates (no awaiting_human path reaches it), its merged label write
+#      preserves every existing label against a mock Linear API, and a
+#      missing arming label or failed write fails loudly.
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$TREE_ROOT/.." && pwd)"
@@ -236,7 +241,245 @@ else
     fail "workstream is missing ticket content"
 fi
 
-# ── 5. linear_intake_v1 untouched, develop path intact ───────────────────────
+# ── 5. Ready-for-development re-arm wiring (CRI-240) ─────────────────────────
+
+# The re-arm steps exist in the compiled graph.
+for step_name in rearm_k8s_run comment_rearm_failed; do
+    jq -e --arg s "$step_name" '.steps[] | select(.name == $s)' "$GRAPH" >/dev/null \
+        || fail "re-arm step missing from the compiled graph: $step_name"
+done
+ok "re-arm steps present in the compiled graph"
+
+assert_edge() {
+    local from="$1" outcome="$2" to="$3"
+    local got
+    got="$(jq -r --arg from "$from" --arg outcome "$outcome" \
+        '.steps[] | select(.name == $from) | .outcomes[] | select(.name == $outcome) | .next' "$GRAPH")"
+    require_equal "$got" "$to" "edge $from.$outcome -> $to"
+}
+
+assert_edge "set_confirmed_bug_label" "success" "rearm_k8s_run"
+assert_edge "rearm_k8s_run" "success" "set_ready_state"
+assert_edge "rearm_k8s_run" "failure" "comment_rearm_failed"
+assert_edge "comment_rearm_failed" "success" "set_review_state"
+assert_edge "comment_rearm_failed" "failure" "set_review_state"
+assert_edge "set_ready_state" "success" "ready_for_development"
+
+route_ready_next="$(jq -r '.switches[] | select(.name == "route_ready") | .conditions[0].next' "$GRAPH")"
+require_equal "$route_ready_next" "rearm_k8s_run" "route_ready match routes to the re-arm step"
+
+# Every edge into a node, for reachability-style assertions below.
+predecessors() {
+    jq -r --arg to "$1" '
+        [ (.steps[] | .name as $s | [.outcomes[]? | {from: $s, to: .next}])
+        , (.switches[] | .name as $s
+            | [.conditions[]? | {from: $s, to: .next}]
+            + [(.default_next // empty) as $d | {from: $s, to: $d}])
+        ]
+        | flatten[]
+        | select(.to == $to) | .from
+    ' "$GRAPH" | sort
+}
+
+# The re-arm fires on the ready_for_development outcome only:
+#   - set_ready_state's ONLY predecessor is the re-arm, so every run that
+#     terminates ready_for_development re-arms first;
+#   - the re-arm's ONLY predecessors are the two confirmed-finding gates —
+#     no awaiting_human path (comment steps, set_review_state) can reach it,
+#     so In Review tickets are never re-armed: the human IS the signal.
+require_equal "$(predecessors set_ready_state)" "rearm_k8s_run" \
+    "every ready_for_development run passes through the re-arm step"
+require_equal "$(predecessors rearm_k8s_run)" "$(printf 'route_ready\nset_confirmed_bug_label')" \
+    "re-arm is reached only from the confirmed-finding gates (never from the In Review path)"
+
+# ── 6. rearm_k8s_run: merged label write against a mock Linear API (CRI-240) ─
+
+# The re-arm must leave the ticket carrying k8s-run IN ADDITION to every
+# label it already has, so the arming write is a merge over the ticket's
+# CURRENT label ids (read fresh from the API, not from the fetch-time
+# ticket.json snapshot — set_confirmed_bug_label may rewrite labels during
+# the run) applied with REPLACE semantics via issueUpdate(labelIds). The
+# mock Linear server records every issueUpdate payload for assertion.
+
+export LINEAR_API_KEY="mock-key"
+
+MOCK="$TMP/mock_linear.py"
+cat > "$MOCK" <<'PY'
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CFG_FILE, MUT_FILE = sys.argv[1], sys.argv[2]
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        cfg = json.load(open(CFG_FILE))
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        query = body.get("query", "")
+        if "issueUpdate" in query:
+            with open(MUT_FILE, "a") as f:
+                f.write(json.dumps(body["variables"]["labelIds"]) + "\n")
+            if cfg.get("mutation_status", 200) != 200:
+                self.send_response(cfg["mutation_status"])
+                self.end_headers()
+                return
+            resp = {"data": {"issueUpdate": {"success": cfg.get("mutation_success", True)}}}
+        elif "issueLabels" in query:
+            issue = cfg["issue"]
+            resp = {"data": {
+                "issue": {"labels": {"nodes": [{"id": i} for i in issue["label_ids"]]}},
+                "issueLabels": {"nodes": ([{"id": cfg["run_label_id"]}]
+                                          if cfg.get("run_label_present", True) else [])},
+            }}
+        else:
+            resp = {"errors": [{"message": "unexpected query"}]}
+        data = json.dumps(resp).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+PY
+
+MOCK_CFG="$TMP/mock_config.json"
+MUT_FILE="$TMP/mutations.jsonl"
+MOCK_LOG="$TMP/mock.log"
+
+python3 "$MOCK" "$MOCK_CFG" "$MUT_FILE" >"$MOCK_LOG" 2>&1 &
+MOCK_PID=$!
+trap 'kill "$MOCK_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
+
+PORT=""
+tries=0
+until [ -n "$PORT" ] || [ "$tries" -ge 50 ]; do
+    PORT="$(head -n1 "$MOCK_LOG" 2>/dev/null || true)"
+    tries=$((tries + 1))
+    [ -n "$PORT" ] || sleep 0.1
+done
+if [ -z "$PORT" ]; then
+    echo "FAIL: mock Linear server did not start: $(cat "$MOCK_LOG")" >&2
+    exit 1
+fi
+
+# Render mimics templatefile for the shellquoted criteria_value_N variables
+# and points the script's Linear endpoint at the mock server.
+shquote() {
+    printf "'%s'" "${1//\'/\'\\\'\'}"
+}
+RUN_LABEL="k8s-run"
+rearm_script="$TMP/rearm_k8s_run.sh"
+sed -e "s@{{ .criteria_value_1 | shellquote }}@$(shquote "$TMP/intake")@g" \
+    -e "s@{{ .criteria_value_2 | shellquote }}@$(shquote "$SLUG")@g" \
+    -e "s@{{ .criteria_value_3 | shellquote }}@$(shquote "$RUN_LABEL")@g" \
+    -e "s@https://api.linear.app/graphql@http://127.0.0.1:$PORT/graphql@g" \
+    "$TREE_ROOT/scripts/rearm_k8s_run.sh.tftpl" > "$rearm_script"
+chmod +x "$rearm_script"
+
+cp "$TREE_ROOT/tests/fixtures/ticket_labeled.json" "$run_dir/ticket.json"
+
+cfg() {
+    jq -n \
+        --argjson ids "$1" \
+        --arg run_id "$2" \
+        --argjson ok "${3:-true}" \
+        --argjson status "${4:-200}" \
+        --argjson present "${5:-true}" \
+        '{issue: {label_ids: $ids}, run_label_id: $run_id,
+          mutation_success: $ok, mutation_status: $status, run_label_present: $present}' \
+        > "$MOCK_CFG"
+}
+
+mutations() {
+    cat "$MUT_FILE" 2>/dev/null || true
+}
+
+# The written label set must be exactly the union: every pre-existing label
+# preserved, the arming label added, nothing else.
+assert_merge() {
+    local existing="$1" written="$2" desc="$3" run_label_id="$4"
+    # The jq variable is deliberately not named $label: "label" is a jq >= 1.6
+    # keyword (the same pitfall check_internal_label.sh.tftpl documents).
+    # -n: inputs arrive only via --argjson/--arg; without it jq would read the
+    # ambient stdin, which is EOF under CI runners, and jq >= 1.7 then exits 4
+    # ("no valid result") without ever evaluating the comparison.
+    if jq -en --argjson existing "$existing" --argjson written "$written" --arg lid "$run_label_id" '
+        ($existing + [$lid] | unique) as $want
+        | ($written | unique) == $want
+          and ($written | length) == ($written | unique | length)
+    ' >/dev/null; then
+        ok "$desc"
+    else
+        fail "$desc: existing=$existing written=$written"
+    fi
+}
+
+# Merge semantics: the mock's current label ids include l3, which is NOT in
+# the fixture ticket.json snapshot — the write including l3 proves the merge
+# builds on the fresh API read, not the fetch-time snapshot.
+cfg '["l1", "l2", "l3"]' "l-k8s"
+rm -f "$MUT_FILE"
+if out="$("$rearm_script")" && [ "$out" = "ticket re-armed with $RUN_LABEL" ]; then
+    ok "re-arm writes the merged label set"
+else
+    fail "re-arm: got '${out:-<no output>}', want 'ticket re-armed with $RUN_LABEL'"
+fi
+written="$(mutations)"
+if [ -z "$written" ]; then
+    fail "re-arm performed no label write"
+else
+    assert_merge '["l1", "l2", "l3"]' "$written" \
+        "merged write preserves every existing label and adds $RUN_LABEL" "l-k8s"
+fi
+require_equal "$(mutations | grep -c .)" "1" "re-arm performs exactly one issueUpdate write"
+
+# Idempotency: a ticket already carrying the arming label is not rewritten.
+cfg '["l1", "l-k8s"]' "l-k8s"
+rm -f "$MUT_FILE"
+if out="$("$rearm_script")" \
+    && [ "$out" = "ticket already carries $RUN_LABEL; no re-arm write needed" ]; then
+    ok "already-armed ticket is a no-op"
+else
+    fail "already-armed ticket: got '${out:-<no output>}'"
+fi
+[ -z "$(mutations)" ] || fail "already-armed ticket must not be rewritten"
+
+# The arming label missing from the team means the dev route could never
+# fire: fail loudly (the workflow routes this to a human), never silently.
+cfg '["l1", "l2"]' "l-k8s" true 200 false
+rm -f "$MUT_FILE"
+if "$rearm_script" >/dev/null 2>&1; then
+    fail "missing $RUN_LABEL label on the team must fail loudly"
+else
+    ok "missing $RUN_LABEL label on the team fails loudly"
+fi
+[ -z "$(mutations)" ] || fail "missing $RUN_LABEL label must not write"
+
+# A rejected mutation (success=false) fails the re-arm loudly.
+cfg '["l1", "l2"]' "l-k8s" false
+if "$rearm_script" >/dev/null 2>&1; then
+    fail "issueUpdate success=false must fail the re-arm"
+else
+    ok "issueUpdate success=false fails the re-arm"
+fi
+
+# An HTTP error from the mutation fails the re-arm loudly.
+cfg '["l1", "l2"]' "l-k8s" true 500
+if "$rearm_script" >/dev/null 2>&1; then
+    fail "issueUpdate HTTP error must fail the re-arm"
+else
+    ok "issueUpdate HTTP error fails the re-arm"
+fi
+
+# ── 7. linear_intake_v1 untouched, develop path intact ───────────────────────
 
 untouched="$(git -C "$REPO_ROOT" status --porcelain -- linear_intake_v1 qa_triage_v1)"
 if [ -z "$untouched" ]; then

@@ -58,6 +58,19 @@ variable "linear_bug_label" {
     default     = "Bug"
 }
 
+// The development route's arming label (CRI-240): the watcher's trigger label
+// (k8s-run) gates every k8s run, so a confirmed finding must carry it when the
+// ticket lands in the ready state or the development workflow never fires.
+// Re-attached on the ready_for_development terminal path only — the In Review
+// path stays manual, the human is the signal. Written as a merge over the
+// ticket's current labels; resolved by name against the ticket's team, an
+// unknown name fails the step loudly and routes the run to the review state.
+variable "linear_run_label" {
+    description = "Linear label re-attached when the triage finding is confirmed, arming the development route (the watcher's trigger label). Written as a merge — the ticket's existing labels are preserved. Resolved by name against the ticket's team; an unknown name fails the step loudly and routes the run to the review state."
+    type        = string
+    default     = "k8s-run"
+}
+
 variable "linear_feature_label" {
     description = "Linear label removed when the bug label is applied, so the ticket never carries a conflicting classification."
     type        = string
