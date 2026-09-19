@@ -64,9 +64,14 @@ const (
 // handshake env is built from each member's own event, exactly as the
 // per-adapter fallback builder does. The member order is normalized
 // (sorted by scope key) so repeated reconciles produce byte-identical pod
-// specs. Returns nil for an empty member set (defensive; the reconcile
-// never calls with one).
-func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults, scopeID, environment string, members []events.LifecycleEvent) *corev1.Pod {
+// specs. runnerIP is the resolved runner pod IP (CRI-237): token delivery
+// is version-keyed per member — a member carrying accept_token (runner
+// eae0181) gets its token on the wire, a member without it keeps the
+// legacy token-file env. The shared data volume is withheld only when EVERY
+// member is wire-shaped and the plan declares no /data re-source (mixed
+// groups and legacy members keep it for their token files). Returns nil for
+// an empty member set (defensive; the reconcile never calls with one).
+func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults, scopeID, environment string, members []events.LifecycleEvent, runnerIP string) *corev1.Pod {
 	if len(members) == 0 {
 		return nil
 	}
@@ -78,6 +83,8 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	plan := newWorkflowPlan(run)
+	wireDelivery := groupWireDelivery(members, runnerIP)
+	includeData := !wireDelivery || plan.declaresDataMount()
 
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
@@ -94,7 +101,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 	for _, member := range members {
 		name := uniqueAdapterContainerName(member, usedNames)
 		usedNames[name]++
-		containers = append(containers, perScopeAdapterContainer(run, member, plan, name))
+		containers = append(containers, perScopeAdapterContainer(run, member, plan, name, runnerIP))
 	}
 
 	pod := &corev1.Pod{
@@ -128,7 +135,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 				},
 			},
 			Containers: containers,
-			Volumes:    plan.adapterVolumes(dataPVC),
+			Volumes:    plan.adapterVolumes(dataPVC, includeData),
 		},
 	}
 	if plan.hasSecrets() {
@@ -188,10 +195,13 @@ func uniqueAdapterContainerName(member events.LifecycleEvent, used map[string]in
 }
 
 // memberBindingKey renders the member identity a group container must
-// reflect: the adapter/scope key plus every handshake env input the
-// container is built from (CRITERIA_REMOTE_SCOPE, CRITERIA_REMOTE_DIGEST,
-// CRITERIA_REMOTE_TOKEN_FILE). A binding change on re-provision therefore
-// also alters the container name.
+// reflect: the adapter/scope key plus every stable handshake binding input
+// the container is built from (CRITERIA_REMOTE_SCOPE,
+// CRITERIA_REMOTE_DIGEST, CRITERIA_REMOTE_TOKEN_FILE). The token-file path
+// is the stable identity, not the rotating accept token: a token rotation
+// swaps the file's content (or the wire env value) without changing the
+// binding, so the container name — and with it the group pod — stays
+// stable across rotations (CRI-237).
 func memberBindingKey(member events.LifecycleEvent) string {
 	return strings.Join([]string{
 		member.ScopeKey(),
@@ -199,4 +209,20 @@ func memberBindingKey(member events.LifecycleEvent) string {
 		member.Digest,
 		member.TokenFile,
 	}, "\x00")
+}
+
+// groupWireDelivery reports whether every member of the group delivers its
+// token on the wire (CRI-237). A mixed group — impossible in practice,
+// since one engine emits one event shape — degrades to the legacy
+// token-file shape so no member loses its delivery channel.
+func groupWireDelivery(members []events.LifecycleEvent, runnerIP string) bool {
+	if runnerIP == "" {
+		return false
+	}
+	for _, member := range members {
+		if member.AcceptToken == "" {
+			return false
+		}
+	}
+	return len(members) > 0
 }

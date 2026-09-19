@@ -54,7 +54,7 @@ func affinityGroupPod(t *testing.T, run *criteriav1.CriteriaRun) *corev1.Pod {
 			Environment: "ci",
 		},
 	}
-	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members)
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
 	require.NotNil(t, pod)
 	return pod
 }

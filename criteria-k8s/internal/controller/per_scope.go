@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -29,12 +30,37 @@ import (
 // (a member was released or a new one provisioned): pod container sets are
 // immutable in Kubernetes, so a stale container would keep dialing a
 // deregistered shim otherwise.
+//
+// Wire token delivery (CRI-237): provisions carrying an accept_token
+// (runner eae0181) receive the token over the shim channel, which needs the
+// runner pod's routable IP. When any active provision carries a token, the
+// runner pod is resolved first; until it resolves (no running pod, no pod
+// IP yet) no adapter mutation happens at all — existing pods stay untouched
+// and the reconcile requeues on the next poll, so a wire-shaped pod is never
+// built with a dangling dial address.
 func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
 	if !run.Spec.PerScopeSessions {
 		return 0, nil
 	}
 
 	active := events.ActiveProvisions(lifecycleEvents)
+
+	runnerIP := ""
+	for _, scope := range active {
+		if scope.AcceptToken != "" {
+			var err error
+			runnerIP, err = r.resolveRunnerIP(ctx, run)
+			if err != nil {
+				return 0, fmt.Errorf("resolving runner pod for wire token delivery: %w", err)
+			}
+			if runnerIP == "" {
+				logger.Info("wire token delivery deferred: no runner pod with a routable IP yet; leaving adapter pods untouched",
+					"run", run.Name)
+				return len(active), nil
+			}
+			break
+		}
+	}
 
 	type envGroup struct {
 		scopeID     string
@@ -64,7 +90,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		if scope.Environment == "" {
 			// No environment identity (pre-fc95449 engine): keep the
 			// per-adapter fallback pod, name and shape unchanged.
-			pod := jobbuilder.BuildPerScopeAdapterPod(run, r.Defaults, scope)
+			pod := jobbuilder.BuildPerScopeAdapterPod(run, r.Defaults, scope, runnerIP)
 			desired[pod.Name] = pod
 			continue
 		}
@@ -77,7 +103,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		group.members = append(group.members, scope)
 	}
 	for _, group := range groups {
-		pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, r.Defaults, group.scopeID, group.environment, group.members)
+		pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
 		if pod == nil {
 			continue
 		}
@@ -196,4 +222,50 @@ func adapterContainerNamesEqual(existing, desired *corev1.Pod) bool {
 		}
 	}
 	return true
+}
+
+// resolveRunnerIP resolves the run's runner pod IP for wire token delivery
+// (CRI-237): the runner pod is the one child carrying the runner role label,
+// and its status.podIP is the routable address the shim's listen port dials
+// to. Preference is deterministic — Running pods with an IP first, then any
+// pod with an IP, each group ordered by name — so repeated reconciles pick
+// the same pod while the runner restarts. Empty when no pod carries an IP
+// yet (the caller defers adapter mutations and requeues).
+func (r *CriteriaRunReconciler) resolveRunnerIP(ctx context.Context, run *criteriav1.CriteriaRun) (string, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(run.Namespace),
+		client.MatchingLabels(map[string]string{
+			jobbuilder.LabelRun:  run.Name,
+			jobbuilder.LabelRole: jobbuilder.RoleRunner,
+		}),
+	); err != nil {
+		return "", fmt.Errorf("listing runner pods: %w", err)
+	}
+	running := make([]corev1.Pod, 0, len(pods.Items))
+	others := make([]corev1.Pod, 0, len(pods.Items))
+	for _, pod := range pods.Items {
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodRunning {
+			running = append(running, pod)
+			continue
+		}
+		others = append(others, pod)
+	}
+	sortPodsByName(running)
+	sortPodsByName(others)
+	for _, pod := range append(running, others...) {
+		if ip := pod.Status.PodIP; ip != "" {
+			return ip, nil
+		}
+	}
+	return "", nil
+}
+
+// sortPodsByName orders pods by name in place so the runner-IP preference is
+// deterministic across reconciles.
+func sortPodsByName(pods []corev1.Pod) {
+	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
 }

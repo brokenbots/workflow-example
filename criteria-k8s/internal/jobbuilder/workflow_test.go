@@ -92,7 +92,7 @@ func perScopePod(t *testing.T, run *criteriav1.CriteriaRun) *corev1.Pod {
 		AdapterType: "shell",
 		Digest:      "deadbeef",
 	}
-	return jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope)
+	return jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope, "10.0.0.10")
 }
 
 func TestWorkflowNamespaceTargetsEveryEnvironment(t *testing.T) {
@@ -229,6 +229,9 @@ func TestWorkflowVolumeEnvsReachContainersThatMountThem(t *testing.T) {
 	assert.Equal(t, "/repo", envValue(runnerEnv, "WORKFLOW_REPO_ROOT"))
 	assert.Equal(t, "/tmp/scratch", envValue(runnerEnv, "SCRATCH_DIR"))
 	// The builder's own env contract is never displaced by a declaration.
+	// CRITERIA_HOME stays on the shared /data PVC for the image-mode runner:
+	// its frozen pre-eae0181 engine still publishes token files the per-scope
+	// adapters read through the legacy delivery (CRI-237 mode-keyed scoping).
 	assert.Equal(t, "/data/criteria", envValue(runnerEnv, "CRITERIA_HOME"))
 }
 

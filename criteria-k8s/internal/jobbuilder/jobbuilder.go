@@ -308,7 +308,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	job.Spec.Template.Spec.Containers = []corev1.Container{
 		adapterContainer(kind, image, JobName(run), plan),
 	}
-	job.Spec.Template.Spec.Volumes = plan.adapterVolumes(dataPVC)
+	job.Spec.Template.Spec.Volumes = plan.adapterVolumes(dataPVC, true)
 	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
 	return job
 }
@@ -396,6 +396,13 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		// view into the runner's container filesystem. The default
 		// (~/.local/criteria) is container-local and the token_ref paths in
 		// the lifecycle events would dangle for every adapter pod.
+		//
+		// Image-mode runners stay on the PVC (CRI-237): their engine is the
+		// frozen pre-eae0181 workflow image, which emits token_ref without
+		// accept_token, so the legacy file delivery — and a PVC-visible
+		// CRITERIA_HOME — must survive until image mode is re-audited and
+		// rolled. Source-mode runners (criteria-base >= eae0181) deliver
+		// tokens on the wire and keep their engine state container-local.
 		{Name: "CRITERIA_HOME", Value: "/data/criteria"},
 		{Name: "JOB_NAME", Value: JobName(run)},
 		{
@@ -473,7 +480,7 @@ func adapterContainer(kind, image, runnerJobName string, plan *workflowPlan) cor
 			{Name: "ADAPTER_KIND", Value: kind},
 			{Name: "CRITERIA_RUN_JOB_NAME", Value: runnerJobName},
 		}, plan.adapterEnvs()),
-		VolumeMounts: plan.adapterMounts(),
+		VolumeMounts: plan.adapterMounts(true),
 		Resources:    resources,
 	}
 }

@@ -60,7 +60,8 @@ func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 	assert.Equal(t, "CRI-231", envValue(runner.Env, "TICKET_ID"))
 	assert.Equal(t, "https://github.com/brokenbots/workflow-example.git", envValue(runner.Env, "REPO_URL"))
 	assert.Equal(t, job.Name, envValue(runner.Env, "JOB_NAME"))
-	assert.Equal(t, "/data/criteria", envValue(runner.Env, "CRITERIA_HOME"))
+	assert.Equal(t, "/tmp/criteria-home", envValue(runner.Env, "CRITERIA_HOME"),
+		"source-mode engine state is container-local (CRI-237): the adapter pods take the token on the wire, so the shared /data PVC is no longer mounted into the source runner")
 	for _, e := range runner.Env {
 		if e.Name == "POD_IP" {
 			require.NotNil(t, e.ValueFrom)

@@ -84,13 +84,14 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
-	@echo "Deploy pairing (CRI-234): the per-(scope,environment) co-location reads the"
-	@echo "  environment_type / environment_name keys only from criteria >= fc95449, so"
-	@echo "  the operator image and the runner image must roll out together:"
-	@echo "  - source-mode runners (criteria-base) build the audited fc95449 commit;"
+	@echo "Deploy pairing (CRI-234/CRI-237): the per-(scope,environment) co-location reads"
+	@echo "  the environment_type / environment_name keys only from criteria >= fc95449,"
+	@echo "  and the wire token delivery reads the accept_token key only from criteria"
+	@echo "  >= eae0181, so the operator image and the runner image must roll out together:"
+	@echo "  - source-mode runners (criteria-base) build the audited eae0181 commit;"
 	@echo "    k8s/tests/test_criteria_base_pin.sh fails the gate on any other pin."
 	@echo "  - image-mode runners keep the baked workflow image, built from a released"
-	@echo "    criteria tarball; no release contains fc95449 yet, so image-mode must"
+	@echo "    criteria tarball; no release contains eae0181 yet, so image-mode must"
 	@echo "    NOT roll until its CRITERIA_VERSION pin is re-audited (coordinator)."
 
 deploy-images: images-push
@@ -98,16 +99,18 @@ ifneq ($(CONTAINER_TOOL),)
 	kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)
-	# Deploy pairing (CRI-234): the per-(scope,environment) co-location needs
-	# provision events carrying environment identity, which only exist from
-	# criteria runner fc95449 onward. The operator image and the runner image
-	# (the operator's --default-image default, used by type=image routes that
-	# get no spec.image stamp from the watcher) must be pinned to the same
-	# freshly built tag and rolled together. Source-mode runs satisfy the
-	# pairing through the criteria-base pin enforced by
-	# k8s/tests/test_criteria_base_pin.sh; image-mode runs keep the baked
-	# workflow image, whose release-based CRITERIA_VERSION does not contain
-	# fc95449 and must not roll until re-audited (coordinator decision).
+	# Deploy pairing (CRI-234/CRI-237): the per-(scope,environment)
+	# co-location needs provision events carrying environment identity, and
+	# the wire token delivery needs provision events carrying accept_token;
+	# these only exist from criteria runner fc95449 / eae0181 onward. The
+	# operator image and the runner image (the operator's --default-image
+	# default, used by type=image routes that get no spec.image stamp from
+	# the watcher) must be pinned to the same freshly built tag and rolled
+	# together. Source-mode runs satisfy the pairing through the
+	# criteria-base pin enforced by k8s/tests/test_criteria_base_pin.sh;
+	# image-mode runs keep the baked workflow image, whose release-based
+	# CRITERIA_VERSION does not contain eae0181 and must not roll until
+	# re-audited (coordinator decision).
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs rollout status deploy/criteria-linear-watcher --timeout=120s
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
@@ -127,6 +130,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_launch_template.sh
 	@echo "Running per-scope digest discovery regression test (CRI-140)..."
 	./k8s/tests/test_per_scope_digest_files.sh
+	@echo "Running per-scope adapter wire token delivery regression test (CRI-237)..."
+	./k8s/tests/test_per_scope_wire_token.sh
 	@echo "Running engine pin regression test (CRI-140)..."
 	./linear_intake_v1/tests/test_engine_pin.sh
 	@echo "Running container-entrypoint token substitution regression test..."
@@ -143,7 +148,7 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_criteria_base.sh
 	@echo "Running criteria-base entrypoint behavior regression test (CRI-230)..."
 	./k8s/tests/test_criteria_base_entrypoint.sh
-	@echo "Running criteria-base pin deploy-pairing guard (CRI-234)..."
+	@echo "Running criteria-base pin deploy-pairing guard (CRI-234/CRI-237)..."
 	./k8s/tests/test_criteria_base_pin.sh
 
 test-criteria-k8s:
@@ -162,6 +167,7 @@ lint: lint-criteria-k8s
 		k8s/tests/test_job_cri_27.sh \
 		linear_intake_v1/tests/test_engine_pin.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
+		k8s/tests/test_per_scope_wire_token.sh \
 		k8s/tests/test_runner_server_tls.sh \
 		k8s/tests/test_container_entrypoint_substitution.sh \
 		k8s/tests/test_secrets_store_csi.sh \

@@ -48,10 +48,12 @@ const CriteriaBaseImageDefault = "localhost:5000/criteria-base:dev"
 //
 // Discovery publishing is host-only: per-scope adapter pods learn the
 // runner's dial address from the shared host file (CRITERIA_REMOTE_HOST is
-// deliberately never set by the operator), while digest and accept-token
-// material arrives through the operator's env (event digest) and the
-// engine-rotated token files under CRITERIA_HOME. Source mode never
-// substitutes image-mode token placeholders into a fetched tree.
+// never set by the operator for legacy engines), while the digest and the
+// accept token arrive through the operator's env (event digest; and the
+// accept token itself once the runner emits it, CRI-237 — engine-rotated
+// token files under CRITERIA_HOME remain the delivery channel only for
+// pre-eae0181 engines). Source mode never substitutes image-mode token
+// placeholders into a fetched tree.
 const sourceRunnerScript = `set -eu
 
 criteria_bin="${CRITERIA_BIN:-/usr/local/bin/criteria}"
@@ -66,14 +68,17 @@ if [ "$(printf '%s' "$workflow_url" | tr -d '[:space:]')" = "" ]; then
     exit 64
 fi
 
-criteria_home="${CRITERIA_HOME:-/data/criteria}"
+criteria_home="${CRITERIA_HOME:-${HOME:-/tmp}/.local/criteria}"
 if ! mkdir -p "$criteria_home" 2>/dev/null || [ ! -w "$criteria_home" ]; then
     echo "CRITERIA_HOME $criteria_home is not a directory writable by the runner uid" >&2
     exit 70
 fi
-# The engine keeps run state (rotated accept-token files) under
-# CRITERIA_HOME: export the verified path so criteria uses the same home
-# even when the container env did not declare one.
+# The engine keeps run state (rotated accept-token files, run metadata, the
+# workflow cache) under CRITERIA_HOME. Source-mode runs keep it
+# container-local (CRI-237): the operator delivers adapter tokens on the
+# wire, so no state has to be shared through the data volume. Export the
+# verified path so criteria uses the same home even when the container env
+# did not declare one.
 export CRITERIA_HOME
 
 # CRI-232: record the run's workflow origin into run metadata at admission,
@@ -248,11 +253,15 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		{Name: "JOB_NAME", Value: JobName(run)},
 		{Name: "PROVIDER_BASE_URL", Value: providerBaseURL},
 		{Name: "MAX_AGENT_VISITS", Value: fmt.Sprintf("%d", maxVisits)},
-		// CRITERIA_HOME on the shared data PVC: the engine's run state
-		// (including rotated per-scope accept-token files) must be readable
-		// by the per-scope adapter pods, which mount /data but have no other
-		// view into the runner's container filesystem.
-		{Name: "CRITERIA_HOME", Value: "/data/criteria"},
+		// CRITERIA_HOME container-local (CRI-237): source-mode runners build
+		// the eae0181 engine, which carries the accept token on provision
+		// events, so the operator delivers it to adapter pods on the wire
+		// and no token file has to be readable from the shared volume. The
+		// engine's run state (rotated token files, run metadata, the
+		// workflow cache) lives inside the runner container and is cleaned
+		// up with it. The path is fixed so the runner script's writability
+		// check and the engine agree regardless of the image's own HOME.
+		{Name: "CRITERIA_HOME", Value: "/tmp/criteria-home"},
 		{Name: "WORKFLOW_URL", Value: source.URL},
 	}
 	if source.Ref != "" {

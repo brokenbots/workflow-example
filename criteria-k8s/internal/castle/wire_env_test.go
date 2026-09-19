@@ -133,3 +133,45 @@ func TestLifecycleFromEnvelopeWithoutEnvironmentStaysEmpty(t *testing.T) {
 	require.Len(t, parsed, 1)
 	assert.Equal(t, parsed[0].Environment, got.Environment)
 }
+
+// CRI-237: the castle wire must carry the provision event's accept token
+// (CRI-236, runner eae0181) so the operator can deliver it to the adapter
+// pod's shim channel directly. token_ref stays parsed as the legacy
+// fallback identity.
+func TestLifecycleFromEnvelopeCarriesAcceptToken(t *testing.T) {
+	data := mustStruct(t, map[string]any{
+		"adapter":             "intake",
+		"adapter_type":        "shell",
+		"digest":              "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		"run_id":              "",
+		"scope_instance_id":   "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
+		"scope_name":          "",
+		"shim_listen_address": "[::]:7778",
+		"token_ref":           "/data/.criteria/runs/cri-237/token",
+		"accept_token":        "accept-rotate-1",
+	})
+	env := &v1.Envelope{
+		SchemaVersion: 1,
+		RunId:         "CRI-237",
+		Seq:           1,
+		Payload: &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{
+			Adapter: "intake",
+			Kind:    "adapter.lifecycle.provision_wanted",
+			Data:    data,
+		}},
+	}
+
+	got, ok := lifecycleFromEnvelope(env)
+	require.True(t, ok)
+	assert.Equal(t, "accept-rotate-1", got.AcceptToken,
+		"the real eae0181 emission key must not be lost on the wire")
+	assert.Equal(t, "/data/.criteria/runs/cri-237/token", got.TokenFile,
+		"token_ref stays the parsed legacy fallback identity")
+
+	// Parity with the file parser: both parsers must derive the identical
+	// event from an accept_token-bearing emission.
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(`{"payload_type":"AdapterEvent","run_id":"CRI-237","payload":{"kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","run_id":"","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","scope_name":"","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-237/token","accept_token":"accept-rotate-1"}}}`))
+	require.NoError(t, err)
+	require.Len(t, parsed, 1)
+	assert.Equal(t, parsed[0], got, "castle wire conversion must match the file parser on the eae0181 emission")
+}
