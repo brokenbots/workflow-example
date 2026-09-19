@@ -82,11 +82,14 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 2 {
-		t.Errorf("workflowLibrary size = %d, want 2", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 3 {
+		t.Errorf("workflowLibrary size = %d, want 3", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 1 || p.Routes[0].Project != "Criteria K8s Workflow Runner" {
-		t.Errorf("routes = %+v, want one route for project %q", p.Routes, "Criteria K8s Workflow Runner")
+	if len(p.Routes) != 2 {
+		t.Errorf("routes size = %d, want 2", len(p.Routes))
+	}
+	if p.Routes[0].Project != "Criteria K8s Workflow Runner" || p.Routes[1].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("routes = %+v, want both routed for project %q", p.Routes, "Criteria K8s Workflow Runner")
 	}
 	wf, ok := p.WorkflowLibrary["linear-intake-v1"]
 	if !ok {
@@ -94,6 +97,66 @@ func TestParseAndValidate(t *testing.T) {
 	}
 	if wf.Type != TypeImage || wf.Image == "" || len(wf.Volumes) != 2 || len(wf.Secrets) != 2 {
 		t.Errorf("linear-intake-v1 = %+v, want image workflow with 2 volumes and 2 secrets", wf)
+	}
+}
+
+// CRI-241: the shipped example carries the dev route — a ticket in the
+// "Ready for Development" workflow state resolves to the linear-develop-url
+// library object (linear_develop_v1, url-only with the ADR-0005 D7 commit
+// pin), and the watcher-facing TicketStates union grows to include the new
+// state alongside the intake route's [Triage].
+func TestShippedExampleResolvesDevRoute(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("reading shipped example: %v", err)
+	}
+	p, err := Parse([]byte(extractRoutesJSON(t, string(data))))
+	if err != nil {
+		t.Fatalf("Parse(shipped example) failed: %v", err)
+	}
+
+	sel, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve(Ready for Development): %v", err)
+	}
+	if sel.Route.Name != "criteria-develop" {
+		t.Errorf("matched route = %q, want %q", sel.Route.Name, "criteria-develop")
+	}
+	if sel.Name != "linear-develop-url" {
+		t.Errorf("resolved workflow = %q, want %q", sel.Name, "linear-develop-url")
+	}
+	wf := sel.Workflow
+	if wf.Type != TypeURL {
+		t.Errorf("workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
+	}
+	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1" {
+		t.Errorf("workflow url = %q, want the linear_develop_v1 subtree", wf.URL)
+	}
+	if wf.Ref != "7645feb42e6f2c473696bd63997fca111d41453d" {
+		t.Errorf("workflow ref = %q, want the merged develop tree commit (ADR-0005 D7 pin)", wf.Ref)
+	}
+	if wf.Image != "" {
+		t.Errorf("workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
+	}
+	if len(wf.Volumes) != 4 || len(wf.Secrets) != 2 {
+		t.Errorf("linear-develop-url = %+v, want 4 volumes and 2 secrets like linear-intake-url", wf)
+	}
+
+	// The union of declared states is what the watcher queries Linear for;
+	// the dev route must grow it beyond [Triage].
+	want := []string{"Ready for Development", "Triage"}
+	if got := p.TicketStates(); !slices.Equal(got, want) {
+		t.Errorf("TicketStates() = %v, want %v", got, want)
+	}
+
+	// The intake behavior is unchanged: Triage still resolves to the baked
+	// intake image workflow.
+	intake, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve(Triage): %v", err)
+	}
+	if intake.Route.Name != "criteria-intake" || intake.Name != "linear-intake-v1" {
+		t.Errorf("Triage resolves to %q/%q, want criteria-intake/linear-intake-v1", intake.Route.Name, intake.Name)
 	}
 }
 

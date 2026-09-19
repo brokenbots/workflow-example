@@ -1,4 +1,4 @@
-.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint
+.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint apply-routes
 
 # Workflow (linear_intake_v1) image. Unique tags are mandatory for the k3s
 # local registry: the kubelet never re-resolves a reused tag with
@@ -121,6 +121,22 @@ validate:
 	/usr/local/bin/criteria validate linear_triage_v1
 	/usr/local/bin/criteria validate linear_develop_v1
 
+# CRI-241: apply the criteria-routes ConfigMap live. Deploy ordering for the
+# CRI-241 changes (runner image rebuild + route + new Linear state):
+#   1. Create the Linear state FIRST, so the triage workflow's re-arm step
+#      (CRI-240) finds the state name when it fires:
+#        LINEAR_API_KEY=... ./k8s/create-ready-for-development-state.sh
+#   2. Rebuild + push all images with a NEW timestamped tag (BUILD_TAG is
+#      date+sha, never reused) and roll the operator/watcher together:
+#        make deploy-images
+#   3. Apply this ConfigMap so the watcher resolves criteria-develop
+#      (states=[Ready for Development] -> linear_develop_v1):
+#        make apply-routes
+# Steps 2 and 3 can be run in either order (the watcher loads routes at
+# startup), but both must follow step 1.
+apply-routes:
+	kubectl -n criteria-jobs apply -f k8s/examples/routes-configmap.yaml
+
 test: validate test-criteria-k8s
 	@echo "Rendering pod-adapter manifest..."
 	./k8s/generate-pod-adapter-manifest.sh
@@ -150,6 +166,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_criteria_k8s_chart.sh
 	@echo "Running routes ConfigMap schema regression test (CRI-216)..."
 	./k8s/tests/test_routes_config.sh
+	@echo "Running Ready for Development Linear state script regression test (CRI-241)..."
+	./k8s/tests/test_create_ready_state.sh
 	@echo "Running criteria-base image structure regression test (CRI-230)..."
 	./k8s/tests/test_criteria_base.sh
 	@echo "Running criteria-base entrypoint behavior regression test (CRI-230)..."
@@ -182,6 +200,8 @@ lint: lint-criteria-k8s
 		k8s/tests/test_example_manifest.sh \
 		k8s/tests/test_criteria_k8s_chart.sh \
 		k8s/tests/test_routes_config.sh \
+		k8s/create-ready-for-development-state.sh \
+		k8s/tests/test_create_ready_state.sh \
 		criteria-base/entrypoint.sh \
 		criteria-base/tests/smoke_test.sh \
 		k8s/tests/test_criteria_base.sh \
