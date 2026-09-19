@@ -38,8 +38,8 @@ variable "linear_api_key" {
 // REMOTE subworkflow source (cascade). The ref pin names the child commit the
 // root's lockfile records; a drifted child fails closed at compile.
 subworkflow "child" {
-    source = "git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/child?ref=bbd54e2462fa149c8cb42259de6c4571469c8135"
-    ref    = "bbd54e2462fa149c8cb42259de6c4571469c8135"
+    source = "git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/child?ref=4e0fd3dca73148b3d9fa438c983d84ea46514f1b"
+    ref    = "4e0fd3dca73148b3d9fa438c983d84ea46514f1b"
     input = {
         ticket_id      = var.ticket_id
         linear_api_key = var.linear_api_key

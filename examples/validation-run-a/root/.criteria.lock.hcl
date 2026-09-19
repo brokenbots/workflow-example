@@ -14,7 +14,7 @@ adapter "shell" "ack" {
   }
 }
 workflow_ref "child" {
-  source       = "git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/child?ref=bbd54e2462fa149c8cb42259de6c4571469c8135"
-  resolved_ref = "bbd54e2462fa149c8cb42259de6c4571469c8135"
+  source       = "git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/child?ref=4e0fd3dca73148b3d9fa438c983d84ea46514f1b"
+  resolved_ref = "4e0fd3dca73148b3d9fa438c983d84ea46514f1b"
   kind         = "git"
 }
