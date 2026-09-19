@@ -10,7 +10,7 @@ environment "remote" "intake" {
     process = {
         exec = ["*"]
     }
-    listen_address = "127.0.0.1:7778"
+    listen_address = "0.0.0.0:7778"
     accept_token = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
     accept_digest_from = "lockfile"
 }
