@@ -134,6 +134,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 	if plan.hasSecrets() {
 		pod.Spec.ServiceAccountName = "criteria-runner"
 	}
+	plan.applyHostAffinity(pod.Labels, &pod.Spec)
 	return pod
 }
 

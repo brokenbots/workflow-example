@@ -160,6 +160,7 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 		sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
 	}
 	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
+	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
 	return job
 }
 
