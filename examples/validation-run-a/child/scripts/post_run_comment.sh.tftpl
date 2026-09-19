@@ -51,7 +51,7 @@ if [ -z "$uuid" ]; then
     exit 1
 fi
 
-mresp=$(post "$(printf '{"query":"mutation($i: String!, $b: String!) { issueAddComment(input: { issueId: $i, body: $b }) { issueComment { id } } }","variables":{"i":"%s","b":"%s"}}' "$uuid" "$body")")
+mresp=$(post "$(printf '{"query":"mutation($i: String!, $b: String!) { commentCreate(input: { issueId: $i, body: $b }) { success comment { id } } }","variables":{"i":"%s","b":"%s"}}' "$uuid" "$body")")
 case "$mresp" in
     *'"errors"'*)
         echo 'Linear comment mutation returned errors' >&2
@@ -59,7 +59,7 @@ case "$mresp" in
         echo >&2
         exit 1
         ;;
-    *'"issueComment"'*)
+    *'"success":true'*'"comment"'*)
         echo "evidence comment posted on $ticket_id"
         ;;
     *)
