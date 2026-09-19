@@ -12,26 +12,32 @@
 #   type=url (no image)   -> url-only: fetched at admission, minimal runtime.
 #   type=url + image      -> url+image: URL is content, image is process.
 #
-# The 'linear-intake-v1' library object and the 'criteria-intake' route
-# reproduce current behavior: runs execute the baked linear_intake_v1 image
-# until a URL cutover happens. To cut over, point the route's 'workflow' at
-# the 'linear-intake-url' object (and set 'ref' there to a resolved commit
-# SHA first — ADR-0005 D7 enforces it fail-closed at admission).
+# The 'linear-intake-v1' library object and the 'linear-intake-url' object
+# keep the legacy intake behavior reachable: runs execute the baked
+# linear_intake_v1 image, or its url-only fetch, via a ticket's
+# workflows-label-group override — no route assigns them by default anymore.
 #
-# The 'linear-develop-url' library object and the 'criteria-develop' route
-# (CRI-241) fire linear_develop_v1 when a confirmed triage finding moves the
-# ticket to the 'Ready for Development' workflow state — the state
-# linear_triage_v1 sets on its ready_for_development terminal (CRI-238),
-# after re-arming the k8s-run label (CRI-240). The state must exist on the
-# CRI team before any triage run reaches that terminal:
+# CRI-243 (plan CRI-214 M10.1, exit condition 3): the criteria project's
+# routes are the split pattern — its actual workflow. The 'criteria-triage'
+# route fires linear_triage_v1 on [Triage] and the 'criteria-develop' route
+# fires linear_develop_v1 on [Ready for Development], both url-only via git
+# URL with ADR-0005 D7 commit pins:
+#   - linear-triage-url is pinned to 9db68c3 (CRI-240), the commit that last
+#     touched the linear_triage_v1 tree — the merged triage tree carrying the
+#     k8s-run re-arm machinery the dev route's auto-firing depends on. Its
+#     class is 'triage' (CRI-242/M9.5): triage work is read-only against the
+#     repo, so triage runs admit concurrently with any run on the same
+#     repoURL while dev runs serialize per repoURL.
+#   - linear-develop-url is pinned to 7645feb (CRI-239), the commit that
+#     merged the develop tree; class stays omitted (defaults to dev).
+# Any change to either subtree must re-pin its object's 'ref' to the new
+# resolved commit SHA — ADR-0005 D7 enforces the pin fail-closed at
+# admission. The 'Ready for Development' state must exist on the CRI team
+# before any triage run reaches that terminal:
 # k8s/create-ready-for-development-state.sh creates it idempotently via the
 # Linear API (type=unstarted — the work is refined but not begun), and the
 # Makefile 'apply-routes' target documents the deploy ordering that pairs
-# the operator/watcher rollout with the state creation. The object is
-# url-only (minimal criteria base runtime) and 'ref' is pinned to the commit
-# that merged the develop tree (CRI-239, 7645feb); ADR-0005 D7 enforces the
-# pin fail-closed at admission, so any change to the linear_develop_v1 tree
-# must re-pin 'ref' to the new resolved commit SHA.
+# the operator/watcher rollout with the state creation and this cutover.
 #
 # Secrets are name references only: every secret here points at a
 # SecretProviderClass (OpenBao via the Secrets Store CSI driver). No
@@ -201,12 +207,69 @@ data:
               }
             }
           ]
+        },
+        "linear-triage-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1",
+          "ref": "9db68c35daf92d2200092176cf1b4ef6741f1bd3",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "wf-cache",
+              "kind": "nfs",
+              "server": "nfs.internal",
+              "path": "/export/workflow-cache",
+              "mountPath": "/mnt/workflow-cache",
+              "readOnly": true
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "linear-api-key",
+              "secretProviderClass": "linear-spc",
+              "mountPath": "/secrets",
+              "env": {
+                "LINEAR_API_KEY": "linear_api_key"
+              }
+            },
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+              }
+            }
+          ]
         }
       },
       "routes": [
         {
-          "name": "criteria-intake",
-          "workflow": "linear-intake-v1",
+          "name": "criteria-triage",
+          "workflow": "linear-triage-url",
           "project": "Criteria K8s Workflow Runner",
           "states": [
             "Triage"
