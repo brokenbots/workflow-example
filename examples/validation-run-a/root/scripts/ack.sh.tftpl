@@ -1,0 +1,5 @@
+// Rendered by the root fixture after the remote child completes: echoes the
+// child's exported evidence output so the run transcript records the root
+// observing the child's completion across the remote fetch boundary.
+evidence={{ .child_evidence | shellquote }}
+echo "validation_run_a: remote child reported: $evidence"
