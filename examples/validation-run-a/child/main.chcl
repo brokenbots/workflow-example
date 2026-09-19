@@ -1,0 +1,72 @@
+// validation_run_a_child — the remote subworkflow half of the CRI-244
+// validation run A fixture (M10.2, plan CRI-214 exit condition 1).
+//
+// This module is fetched REMOTELY by the root fixture (../root) through
+// git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/child?ref=<commit>,
+// so a live run exercises the cascade fetch path (CRI-227) with the nested
+// cache layout cache/workflows/<root-slug>/subworkflows/<child-slug>/<version>.
+// The child's only job is to execute a deterministic shell step on the pinned
+// shell adapter and post the run's own evidence comment on the ticket under
+// test — the run itself records on the ticket that it executed and completed.
+//
+// The root pins this module per ADR-0005 D7 twice: `ref` on the subworkflow
+// block (compile-time, fail closed) and the workflow_ref entry
+// `criteria adapter lock` records in the root's .criteria.lock.hcl.
+
+workflow {
+    name             = "validation_run_a_child"
+    version          = "1"
+    criteria_version = ">=0.5.24-10, <0.6.0"
+    initial_state    = "report"
+    target_state     = "complete"
+}
+
+// Ticket context handed in by the root fixture. Empty defaults keep this
+// module runnable standalone: with no key the comment step skips the Linear
+// write and the run still completes.
+variable "ticket_id" {
+    type    = string
+    default = ""
+}
+
+variable "linear_api_key" {
+    type        = string
+    secret      = true
+    description = "Linear API key; bound to the adapter over the secret channel, never interpolated into step input."
+}
+
+adapter "shell" "report" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.3"
+    secrets {
+        LINEAR_API_KEY = var.linear_api_key
+    }
+}
+
+output "evidence" {
+    type    = string
+    value   = "validation_run_a_child v1 executed remotely (cascade) and posted its run evidence"
+}
+
+step "report" {
+    target = adapter.shell.report
+    input {
+        command = templatefile("./scripts/post_run_comment.sh.tftpl", {
+            ticket_id = var.ticket_id
+        })
+    }
+    // A failed Linear write must not let the run lie about its evidence: the
+    // child fails, and the root's failure terminal records it.
+    outcome "success" { next = state.complete }
+    outcome "failure" { next = state.failed }
+}
+
+state "complete" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

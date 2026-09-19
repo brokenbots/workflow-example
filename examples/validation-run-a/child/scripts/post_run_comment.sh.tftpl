@@ -1,0 +1,71 @@
+// Rendered by the child fixture to post the run's own evidence comment on the
+// validation ticket (M10.2: evidence recorded by the run itself). Only the
+// ticket identifier is interpolated and it is strictly validated; the comment
+// body is fixed text with no quotes or backslashes, so nothing untrusted
+// reaches the GraphQL payload. LINEAR_API_KEY arrives over the secret
+// channel. The transport is curl when present and busybox wget otherwise —
+// the minimal criteria-base image ships no curl.
+ticket_id={{ .ticket_id | shellquote }}
+
+set -eu
+
+case "$ticket_id" in
+    ''|*[!A-Za-z0-9-]*)
+        echo "ticket_id fails identifier validation: '$ticket_id'" >&2
+        exit 1
+        ;;
+esac
+
+body='CRI-244 validation run A (M10.2): the remote subworkflow fixture reached its success terminal state. Root workflow validation_run_a was loaded from a git URL (D7 pin) via the criteria-base entrypoint contract; subworkflow validation_run_a_child v1 was also loaded remotely (cascade) and executed this report step on the pinned shell adapter.'
+
+if [ "${LINEAR_API_KEY:-}" = "" ]; then
+    echo 'linear_api_key not provided; skipping the ticket comment (standalone fixture run)'
+    exit 0
+fi
+
+# The GraphQL request body is assembled with printf %s interpolation of two
+# strictly validated values (ticket_id shape-checked above, fixed-text body),
+# never with arbitrary content.
+post() {
+    # $1 = JSON request body; prints the Linear response body on stdout.
+    if command -v curl >/dev/null 2>&1; then
+        curl -sS --max-time 30 \
+            -H "Authorization: $LINEAR_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$1" https://api.linear.app/graphql
+    else
+        wget -q -O- \
+            --header="Authorization: $LINEAR_API_KEY" \
+            --header="Content-Type: application/json" \
+            --post-data="$1" https://api.linear.app/graphql
+    fi
+}
+
+# Linear mutations need the issue UUID; resolve it from the human identifier.
+resp=$(post "$(printf '{"query":"query($id: String!) { issue(id: $id) { id } }","variables":{"id":"%s"}}' "$ticket_id")")
+uuid=$(printf '%s' "$resp" | sed -n 's/.*"data":{"issue":{"id":"\([0-9a-f-]*\)".*/\1/p')
+if [ -z "$uuid" ]; then
+    echo "could not resolve issue UUID for $ticket_id" >&2
+    printf '%s' "$resp" | head -c 400 >&2
+    echo >&2
+    exit 1
+fi
+
+mresp=$(post "$(printf '{"query":"mutation($i: String!, $b: String!) { issueAddComment(input: { issueId: $i, body: $b }) { issueComment { id } } }","variables":{"i":"%s","b":"%s"}}' "$uuid" "$body")")
+case "$mresp" in
+    *'"errors"'*)
+        echo 'Linear comment mutation returned errors' >&2
+        printf '%s' "$mresp" | head -c 400 >&2
+        echo >&2
+        exit 1
+        ;;
+    *'"issueComment"'*)
+        echo "evidence comment posted on $ticket_id"
+        ;;
+    *)
+        echo 'unexpected Linear response shape' >&2
+        printf '%s' "$mresp" | head -c 400 >&2
+        echo >&2
+        exit 1
+        ;;
+esac
