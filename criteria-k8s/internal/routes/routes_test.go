@@ -82,8 +82,8 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 3 {
-		t.Errorf("workflowLibrary size = %d, want 3", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 4 {
+		t.Errorf("workflowLibrary size = %d, want 4", len(p.WorkflowLibrary))
 	}
 	if len(p.Routes) != 2 {
 		t.Errorf("routes size = %d, want 2", len(p.Routes))
@@ -100,11 +100,14 @@ func TestParseAndValidate(t *testing.T) {
 	}
 }
 
-// CRI-241: the shipped example carries the dev route — a ticket in the
-// "Ready for Development" workflow state resolves to the linear-develop-url
-// library object (linear_develop_v1, url-only with the ADR-0005 D7 commit
-// pin), and the watcher-facing TicketStates union grows to include the new
-// state alongside the intake route's [Triage].
+// CRI-241 + CRI-243: the shipped example carries the split pattern as the
+// criteria project's actual workflow (plan CRI-214 exit condition 3). A
+// ticket in the "Ready for Development" workflow state resolves to the
+// linear-develop-url library object (linear_develop_v1, url-only with the
+// ADR-0005 D7 commit pin), a ticket in "Triage" resolves to the new
+// linear-triage-url object (linear_triage_v1, pinned likewise, triage
+// class), and the watcher-facing TicketStates union stays
+// [Ready for Development, Triage].
 func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
@@ -149,14 +152,32 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 		t.Errorf("TicketStates() = %v, want %v", got, want)
 	}
 
-	// The intake behavior is unchanged: Triage still resolves to the baked
-	// intake image workflow.
-	intake, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", nil, nil))
+	// The split pattern is the criteria project's actual workflow (CRI-243,
+	// plan CRI-214 exit condition 3): Triage resolves to the split triage
+	// tree — linear_triage_v1 fetched url-only with the ADR-0005 D7 commit
+	// pin, admitted on the concurrent read-only triage queue class.
+	triage, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", nil, nil))
 	if err != nil {
 		t.Fatalf("Resolve(Triage): %v", err)
 	}
-	if intake.Route.Name != "criteria-intake" || intake.Name != "linear-intake-v1" {
-		t.Errorf("Triage resolves to %q/%q, want criteria-intake/linear-intake-v1", intake.Route.Name, intake.Name)
+	if triage.Route.Name != "criteria-triage" || triage.Name != "linear-triage-url" {
+		t.Errorf("Triage resolves to %q/%q, want criteria-triage/linear-triage-url", triage.Route.Name, triage.Name)
+	}
+	triageWf := triage.Workflow
+	if triageWf.Type != TypeURL {
+		t.Errorf("triage workflow type = %q, want %q (url-only, minimal criteria base runtime)", triageWf.Type, TypeURL)
+	}
+	if triageWf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1" {
+		t.Errorf("triage workflow url = %q, want the linear_triage_v1 subtree", triageWf.URL)
+	}
+	if triageWf.Ref != "9db68c35daf92d2200092176cf1b4ef6741f1bd3" {
+		t.Errorf("triage workflow ref = %q, want the commit that last touched linear_triage_v1 (ADR-0005 D7 pin, CRI-240)", triageWf.Ref)
+	}
+	if triageWf.Image != "" {
+		t.Errorf("triage workflow image = %q, want empty (url-only must not declare a process image)", triageWf.Image)
+	}
+	if len(triageWf.Volumes) != 4 || len(triageWf.Secrets) != 2 {
+		t.Errorf("linear-triage-url = %+v, want 4 volumes and 2 secrets like linear-intake-url", triageWf)
 	}
 }
 

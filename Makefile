@@ -121,24 +121,37 @@ validate:
 	/usr/local/bin/criteria validate linear_triage_v1
 	/usr/local/bin/criteria validate linear_develop_v1
 
-# CRI-241: apply the criteria-routes ConfigMap live. Deploy ordering for the
-# CRI-241 changes (runner image rebuild + route + new Linear state):
-#   1. Create the Linear state FIRST, so the triage workflow's re-arm step
+# CRI-241 + CRI-243: apply the criteria-routes ConfigMap live. Deploy
+# ordering for the CRI-243 cutover (the criteria project's routes become
+# the split pattern — plan CRI-214 exit condition 3):
+#   1. Ensure the Linear state exists, so the triage workflow's re-arm step
 #      (CRI-240) finds the state name when it fires:
 #        LINEAR_API_KEY=... ./k8s/create-ready-for-development-state.sh
 #   2. Rebuild + push all images with a NEW timestamped tag (BUILD_TAG is
 #      date+sha, never reused) and roll the operator/watcher together:
 #        make deploy-images
-#   3. Apply this ConfigMap so the watcher resolves criteria-develop
-#      (states=[Ready for Development] -> linear_develop_v1):
+#      Builds happen on the HOST (no DinD in pods). The operator/watcher
+#      tags must be built from current main: they carry the CRI-242
+#      queue-class machinery (operator admission keyed on (repoURL, class),
+#      watcher class stamping), and the class=triage object below only
+#      behaves as designed on those tags. If a criteria-base build is
+#      required, it is built and pushed on the host too and its
+#      $(CRITERIA_BASE_IMAGE):$(BUILD_TAG) tag is set on the operator
+#      deployment by deploy-images.
+#   3. Apply this ConfigMap so the watcher resolves the split routes
+#      (criteria-triage: [Triage] -> linear_triage_v1;
+#      criteria-develop: [Ready for Development] -> linear_develop_v1):
 #        make apply-routes
-# Steps 2 and 3 can be run in either order -- the watcher re-reads the
-# routes payload on every poll (routes.TicketStates() is derived per poll,
-# not cached at startup) -- but both must follow step 1. CAUTION: this
-# applies k8s/examples/routes-configmap.yaml WHOLESALE; the config source
-# only carries criteria-intake and criteria-develop, so diff the live
-# criteria-routes ConfigMap first -- any live-only routes added out of band
-# (e.g. triage wiring from CRI-238/240) would be dropped by this apply.
+# Steps 2 and 3 can be run in either order for older payloads, but step 2
+# MUST precede this apply for the CRI-243 payload: a pre-CRI-242 watcher
+# parses with plain json.Unmarshal and silently drops the class field, so
+# triage runs would fall back to the dev queue and serialize per repoURL
+# instead of admitting concurrently -- degraded concurrency, not a failure.
+# CAUTION: this applies k8s/examples/routes-configmap.yaml WHOLESALE; the
+# config source only carries criteria-triage and criteria-develop, so diff
+# the live criteria-routes ConfigMap first -- any live-only routes added
+# out of band (e.g. the pre-CRI-243 criteria-intake triage wiring) would
+# be dropped by this apply.
 apply-routes:
 	kubectl -n criteria-jobs apply -f k8s/examples/routes-configmap.yaml
 

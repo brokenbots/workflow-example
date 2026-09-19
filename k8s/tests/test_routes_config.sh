@@ -6,7 +6,10 @@ set -euo pipefail
 # exercises the schema's fail-closed constraints with negative variants, and
 # proves the ADR-0005 D1/D2 modes (image-only, url-only, url+image + expected
 # pin) and the pvc/nfs/tmp volumes with env mapping and OpenBao/CSI secret
-# name references are representable. Also asserts the example is secret-free.
+# name references are representable. Also asserts the example is secret-free
+# and carries the CRI-243 split-pattern cutover: the criteria project's
+# routes fire the pinned linear_triage_v1 / linear_develop_v1 trees (plan
+# CRI-214 exit condition 3).
 #
 # Validation always runs a dependency-free structural validator mirroring the
 # schema. When python's jsonschema module is available, the payload and every
@@ -436,6 +439,71 @@ cred_hits = []
 walk_strings(base, "payload", cred_hits)
 if cred_hits:
     failures.append(f"example payload is not secret-free: {'; '.join(cred_hits)}")
+
+# -------------------------------------------------- CRI-243: shipped example
+# shape — the criteria project's routes are the split pattern (plan CRI-214
+# exit condition 3): Triage fires the pinned linear_triage_v1 tree, Ready
+# for Development fires the pinned linear_develop_v1 tree, both url-only via
+# the git URL with full ADR-0005 D7 commit pins.
+FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def shipped_err(cond, message):
+    if not cond:
+        failures.append(message)
+
+
+shipped_err(len(base["routes"]) == 2,
+            f"shipped example routes = {len(base['routes'])}, want the two criteria project split routes")
+triage_route = next((r for r in base["routes"] if r.get("name") == "criteria-triage"), None)
+develop_route = next((r for r in base["routes"] if r.get("name") == "criteria-develop"), None)
+shipped_err(triage_route is not None, "shipped example: routes missing the criteria-triage route")
+shipped_err(develop_route is not None, "shipped example: routes missing the criteria-develop route")
+shipped_err(all(r.get("project") == "Criteria K8s Workflow Runner" for r in base["routes"]),
+            "shipped example: every route must target the criteria project")
+
+if triage_route is not None:
+    if triage_route.get("workflow") != "linear-triage-url":
+        failures.append("shipped example: criteria-triage must fire linear-triage-url")
+    if triage_route.get("states") != ["Triage"]:
+        failures.append(f"shipped example: criteria-triage states = {triage_route.get('states')}, want [Triage]")
+if develop_route is not None:
+    if develop_route.get("workflow") != "linear-develop-url":
+        failures.append("shipped example: criteria-develop must fire linear-develop-url")
+    if develop_route.get("states") != ["Ready for Development"]:
+        failures.append(
+            f"shipped example: criteria-develop states = {develop_route.get('states')}, want [Ready for Development]"
+        )
+
+triage_wf = base[LIB].get("linear-triage-url")
+if not isinstance(triage_wf, dict):
+    failures.append("shipped example: workflowLibrary missing the linear-triage-url object")
+else:
+    if triage_wf.get("type") != "url" or "url" not in triage_wf:
+        failures.append("shipped example: linear-triage-url must be a url workflow")
+    if triage_wf.get("url") != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1":
+        failures.append("shipped example: linear-triage-url must point at the linear_triage_v1 subtree")
+    if not FULL_SHA.match(triage_wf.get("ref") or ""):
+        failures.append("shipped example: linear-triage-url ref must be a pinned 40-hex commit SHA (D7)")
+    if triage_wf.get("ref") != "9db68c35daf92d2200092176cf1b4ef6741f1bd3":
+        failures.append("shipped example: linear-triage-url ref must pin the CRI-240 commit 9db68c3")
+    if triage_wf.get("class") != "triage":
+        failures.append("shipped example: linear-triage-url must declare class=triage (CRI-242 read-only admission)")
+    if "image" in triage_wf:
+        failures.append("shipped example: linear-triage-url must be url-only (no process image)")
+
+develop_wf = base[LIB].get("linear-develop-url")
+if not isinstance(develop_wf, dict):
+    failures.append("shipped example: workflowLibrary missing the linear-develop-url object")
+else:
+    if develop_wf.get("url") != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1":
+        failures.append("shipped example: linear-develop-url must point at the linear_develop_v1 subtree")
+    if not FULL_SHA.match(develop_wf.get("ref") or ""):
+        failures.append("shipped example: linear-develop-url ref must be a pinned 40-hex commit SHA (D7)")
+    if develop_wf.get("ref") != "7645feb42e6f2c473696bd63997fca111d41453d":
+        failures.append("shipped example: linear-develop-url ref must pin the CRI-239 commit 7645feb")
+    if "image" in develop_wf:
+        failures.append("shipped example: linear-develop-url must be url-only (no process image)")
 
 # ------------------------------------------------------------ schema checks
 schema = json.load(open(schema_path, encoding="utf-8"))

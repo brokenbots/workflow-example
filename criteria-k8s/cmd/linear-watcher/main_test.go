@@ -1335,12 +1335,13 @@ func shippedRoutesPayload(t *testing.T) string {
 	return strings.Join(lines, "\n")
 }
 
-// CRI-241: the shipped criteria-routes payload wires the dev route — the
-// watcher queries Linear for the "Ready for Development" state (the
-// routes' declared-states union grows) and a ticket moved to that state
+// CRI-241 + CRI-243: the shipped criteria-routes payload wires the split
+// pattern as the criteria project's actual workflow (plan CRI-214 exit
+// condition 3). The watcher queries Linear for the "Ready for Development"
+// state (the routes' declared-states union), a ticket moved to that state
 // fires the linear_develop_v1 workflow (linear-develop-url, url-only with
-// the D7 ref pin), while Triage tickets keep routing to the intake image
-// workflow.
+// the D7 ref pin), and a Triage ticket fires the split linear_triage_v1
+// workflow (linear-triage-url, pinned likewise) on the triage queue class.
 func TestPollDevRouteFromShippedConfig(t *testing.T) {
 	routes := shippedRoutesPayload(t)
 
@@ -1367,6 +1368,8 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		assert.Equal(t, "criteria-jobs", wf.Namespace)
 		require.Len(t, wf.Volumes, 4, "the develop object declares the same storage surface as intake-url")
 		require.Len(t, wf.Secrets, 2)
+		assert.Equal(t, "dev", wf.Class,
+			"the develop object omits class, so the run stamps the dev default (per-repo serialization)")
 	})
 
 	t.Run("dev run stamps the url+ref workflowSource with no process image", func(t *testing.T) {
@@ -1384,7 +1387,7 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		assert.Empty(t, spec.Image, "url-only develop runs execute on the criteria base image: no spec.image")
 	})
 
-	t.Run("Triage tickets keep routing to intake while the dev state routes to develop", func(t *testing.T) {
+	t.Run("Triage tickets route to the split triage workflow alongside the dev route", func(t *testing.T) {
 		// Leaky server: both tickets reach the watcher despite the states
 		// filter, so the per-route state gate itself is exercised against
 		// the shipped payload.
@@ -1401,8 +1404,26 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		for _, run := range runs {
 			byTicket[run.Spec.TicketID] = run.Spec.Workflow.Name
 		}
-		assert.Equal(t, "linear-intake-v1", byTicket["CRI-32"], "Triage keeps the intake image workflow")
+		assert.Equal(t, "linear-triage-url", byTicket["CRI-32"],
+			"Triage fires the split linear_triage_v1 workflow (the criteria project's actual workflow)")
 		assert.Equal(t, "linear-develop-url", byTicket["CRI-33"], "Ready for Development routes to the develop workflow")
+	})
+
+	t.Run("triage run stamps the triage class and the url+ref workflowSource", func(t *testing.T) {
+		tw := newTestWatcher(t, routes)
+		tw.linearS.setIssues(issue("i-34", "CRI-34", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		assert.Equal(t, "triage", spec.Workflow.Class,
+			"the triage object declares class=triage: the run admits concurrently (read-only against the repo)")
+		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
+		assert.Equal(t, "url", spec.WorkflowSource.Type)
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1", spec.WorkflowSource.URL)
+		assert.Equal(t, "9db68c35daf92d2200092176cf1b4ef6741f1bd3", spec.WorkflowSource.Ref,
+			"the shipped object pins the commit that last touched linear_triage_v1 (ADR-0005 D7)")
+		assert.Empty(t, spec.Image, "url-only triage runs execute on the criteria base image: no spec.image")
 	})
 }
 
