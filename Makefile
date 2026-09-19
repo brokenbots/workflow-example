@@ -83,12 +83,23 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
+	@echo "Deploy pairing (CRI-234): the operator's runner-image default must pin the"
+	@echo "  SAME workflow image tag as the watcher - provision events only carry the"
+	@echo "  environment identity from criteria >= fc95449, so the operator image and"
+	@echo "  the runner image must roll out together."
 
 deploy-images: images-push
 ifneq ($(CONTAINER_TOOL),)
 	kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)
+	# Deploy pairing (CRI-234): the per-(scope,environment) co-location needs
+	# provision events carrying environment identity, which only exist from
+	# criteria runner fc95449 onward. The operator image and the runner image
+	# (the operator's --default-image default, used by type=image routes that
+	# get no spec.image stamp from the watcher) must be pinned to the same
+	# freshly built tag and rolled together.
+	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs rollout status deploy/criteria-linear-watcher --timeout=120s
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif

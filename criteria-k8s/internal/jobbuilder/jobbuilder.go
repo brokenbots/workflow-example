@@ -23,6 +23,20 @@ const (
 	LabelRun = "criteria.brokenbots.dev/run"
 	// LabelRole distinguishes the runner from the adapter children.
 	LabelRole = "criteria.brokenbots.dev/role"
+	// LabelAdapterKind is the adapter implementation kind of a per-adapter
+	// (environment-less) fallback pod. Group pods carry LabelAdapterKinds
+	// instead: they can host several adapters.
+	LabelAdapterKind = "criteria.brokenbots.dev/adapter-kind"
+	// LabelAdapterKinds is the deduplicated, sorted set of adapter kinds
+	// hosted by a (scope, environment) group pod, comma-joined.
+	LabelAdapterKinds = "criteria.brokenbots.dev/adapter-kinds"
+	// LabelScopeID is the scope instance id a per-scope adapter pod serves.
+	// Group pods serve exactly one scope, so the label stays single-valued
+	// under the (scope, environment) grouping.
+	LabelScopeID = "criteria.brokenbots.dev/scope-id"
+	// LabelEnvironment is the environment identity a group pod was built
+	// from (CRI-234). Absent on the per-adapter fallback pods.
+	LabelEnvironment = "criteria.brokenbots.dev/environment"
 	// RoleRunner / RoleAdapter are the LabelRole values in use.
 	RoleRunner  = "runner"
 	RoleAdapter = "adapter"

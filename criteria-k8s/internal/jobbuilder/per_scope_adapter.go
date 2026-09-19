@@ -29,28 +29,84 @@ func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) s
 }
 
 // BuildPerScopeAdapterPod constructs a Pod for one provision-wanted lifecycle
-// event. The pod has zero Kubernetes privileges and, absent a stamped
-// workflow object, mounts only the shared data volume plus the pod-adapter
-// scripts ConfigMap; the workflow object's declared volumes and CSI secrets
-// are mounted as well, and declared secrets additionally run the pod under
-// the criteria-runner service account for the OpenBao provider. The repo
-// clone lives on the data PVC at /data/intake/<ticket>/repo.
+// event. It is the per-adapter fallback pod for events without environment
+// identity (engines older than CRI-233's fc95449): its name and shape match
+// the pre-CRI-234 builder verbatim, so an operator rollout against older
+// events keeps reconciling the same pods. Adapters sharing an environment are
+// co-located by BuildPerScopeAdapterPodGroup instead.
+//
+// The pod has zero Kubernetes privileges and, absent a stamped workflow
+// object, mounts only the shared data volume plus the pod-adapter scripts
+// ConfigMap; the workflow object's declared volumes and CSI secrets are
+// mounted as well, and declared secrets additionally run the pod under the
+// criteria-runner service account for the OpenBao provider. The repo clone
+// lives on the data PVC at /data/intake/<ticket>/repo.
 func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent) *corev1.Pod {
 	// Prefer the adapter implementation kind (shell/copilot/...) from the
 	// event's adapter_type; older engines only carry the workflow's adapter
 	// node name (AdapterName), which is not an image kind.
-	kind := scope.AdapterName
-	if scope.AdapterType != "" {
-		kind = scope.AdapterType
-	}
+	kind := adapterKind(scope)
 	name := PerScopeAdapterPodName(run, kind, scope.ScopeID)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	plan := newWorkflowPlan(run)
 
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
-	labels["criteria.brokenbots.dev/adapter-kind"] = kind
-	labels["criteria.brokenbots.dev/scope-id"] = safeLabelValue(scope.ScopeID)
+	labels[LabelAdapterKind] = kind
+	labels[LabelScopeID] = safeLabelValue(scope.ScopeID)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       targetNamespace(run),
+			Labels:          labels,
+			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
+		},
+		Spec: corev1.PodSpec{
+			NodeSelector: map[string]string{
+				"kubernetes.io/arch": "amd64",
+			},
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      "catch",
+					Operator: corev1.TolerationOpExists,
+					Effect:   corev1.TaintEffectNoSchedule,
+				},
+			},
+			RestartPolicy:                corev1.RestartPolicyOnFailure,
+			AutomountServiceAccountToken: boolPtr(plan.hasSecrets()),
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: boolPtr(true),
+				RunAsUser:    int64Ptr(10001),
+				RunAsGroup:   int64Ptr(10001),
+				FSGroup:      int64Ptr(10001),
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
+			Containers: []corev1.Container{
+				perScopeAdapterContainer(run, scope, plan, fmt.Sprintf("adapter-%s", kind)),
+			},
+			Volumes: plan.adapterVolumes(dataPVC),
+		},
+	}
+	if plan.hasSecrets() {
+		// The OpenBao CSI provider authenticates the pod through its
+		// service account token; adapter pods carrying declared secrets
+		// therefore run under the criteria-runner service account.
+		pod.Spec.ServiceAccountName = "criteria-runner"
+	}
+	return pod
+}
+
+// perScopeAdapterContainer builds one adapter container for a per-scope
+// adapter: the handshake env from the member's own provision event, the
+// workflow plan's declared volumes/secrets/env, and the kind's resources.
+// Both the per-adapter fallback pod and the (scope, environment) group pod
+// build their containers here, so the two pod shapes share the handshake
+// contract exactly.
+func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.LifecycleEvent, plan *workflowPlan, name string) corev1.Container {
+	kind := adapterKind(scope)
 
 	digest := scope.Digest
 	if digest != "" && !hasDigestPrefix(digest) {
@@ -90,57 +146,26 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 		env = append(env, corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN_FILE", Value: scope.TokenFile})
 	}
 
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       targetNamespace(run),
-			Labels:          labels,
-			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
-		},
-		Spec: corev1.PodSpec{
-			NodeSelector: map[string]string{
-				"kubernetes.io/arch": "amd64",
-			},
-			Tolerations: []corev1.Toleration{
-				{
-					Key:      "catch",
-					Operator: corev1.TolerationOpExists,
-					Effect:   corev1.TaintEffectNoSchedule,
-				},
-			},
-			RestartPolicy:                corev1.RestartPolicyOnFailure,
-			AutomountServiceAccountToken: boolPtr(plan.hasSecrets()),
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: boolPtr(true),
-				RunAsUser:    int64Ptr(10001),
-				RunAsGroup:   int64Ptr(10001),
-				FSGroup:      int64Ptr(10001),
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
-			Containers: []corev1.Container{
-				{
-					Name:            fmt.Sprintf("adapter-%s", kind),
-					Image:           adapterImage(kind),
-					ImagePullPolicy: corev1.PullIfNotPresent,
-					SecurityContext: restrictedContainerSecurityContext(),
-					Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
-					Env:             appendEnvDistinct(env, plan.adapterEnvs()),
-					VolumeMounts:    plan.adapterMounts(),
-					Resources:       adapterResources(kind),
-				},
-			},
-			Volumes: plan.adapterVolumes(dataPVC),
-		},
+	return corev1.Container{
+		Name:            name,
+		Image:           adapterImage(kind),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: restrictedContainerSecurityContext(),
+		Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
+		Env:             appendEnvDistinct(env, plan.adapterEnvs()),
+		VolumeMounts:    plan.adapterMounts(),
+		Resources:       adapterResources(kind),
 	}
-	if plan.hasSecrets() {
-		// The OpenBao CSI provider authenticates the pod through its
-		// service account token; adapter pods carrying declared secrets
-		// therefore run under the criteria-runner service account.
-		pod.Spec.ServiceAccountName = "criteria-runner"
+}
+
+// adapterKind resolves the adapter implementation kind for an event,
+// preferring adapter_type and falling back to the adapter node name for
+// engines that predate its emission (CRI-140 semantics).
+func adapterKind(scope events.LifecycleEvent) string {
+	if scope.AdapterType != "" {
+		return scope.AdapterType
 	}
-	return pod
+	return scope.AdapterName
 }
 
 func hasDigestPrefix(s string) bool {

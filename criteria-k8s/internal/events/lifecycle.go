@@ -46,6 +46,11 @@ type payloadEventData struct {
 	ScopeID     string `json:"scope_instance_id"`
 	ShimAddress string `json:"shim_listen_address"`
 	TokenFile   string `json:"token_ref"`
+	// Environment identity (CRI-233, runner fc95449): the config-declared
+	// environment the adapter runs in. The canonical key is "environment";
+	// "environment_id" is the engine's alternate spelling.
+	Environment   string `json:"environment"`
+	EnvironmentID string `json:"environment_id"`
 }
 
 // LifecycleEvent describes a provision-wanted or release event in the run
@@ -82,6 +87,14 @@ type LifecycleEvent struct {
 	// TokenFile is an absolute path under /data to the per-scope bearer token.
 	// Only present on provision-wanted events.
 	TokenFile string `json:"token_file,omitempty"`
+
+	// Environment is the config-declared environment identity the adapter
+	// runs in (CRI-233, runner commit fc95449). It is the co-location
+	// grouping key: adapters sharing one environment run as separate
+	// containers in one (scope, environment) pod (CRI-234). Empty on events
+	// from older engines, where the reconcile falls back to per-adapter
+	// pods.
+	Environment string `json:"environment,omitempty"`
 
 	// Timestamp is an optional RFC3339 event timestamp.
 	Timestamp string `json:"timestamp,omitempty"`
@@ -135,12 +148,27 @@ func ParseLifecycleEvents(r io.Reader) ([]LifecycleEvent, error) {
 		if ev.AdapterName == "" {
 			continue
 		}
+		if ev.Environment == "" {
+			// The flat shape spells the identity "environment_id" on some
+			// engine versions; coalesce it into the canonical field.
+			var probe flatEnvIdentity
+			if err := json.Unmarshal(line, &probe); err == nil {
+				ev.Environment = probe.EnvironmentID
+			}
+		}
 		events = append(events, ev)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanning lifecycle events: %w", err)
 	}
 	return events, nil
+}
+
+// flatEnvIdentity probes the flat event shape's alternate environment
+// identity key ("environment_id"); the canonical "environment" key is
+// carried by LifecycleEvent's own tag.
+type flatEnvIdentity struct {
+	EnvironmentID string `json:"environment_id"`
 }
 
 // lifecycleEventFromPayload maps a nested AdapterEvent envelope to a
@@ -161,6 +189,7 @@ func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) 
 		Digest:      envelope.Payload.Data.Digest,
 		ShimAddress: envelope.Payload.Data.ShimAddress,
 		TokenFile:   envelope.Payload.Data.TokenFile,
+		Environment: firstNonEmpty(envelope.Payload.Data.Environment, envelope.Payload.Data.EnvironmentID),
 	}
 	if ev.AdapterName == "" {
 		return LifecycleEvent{}, false

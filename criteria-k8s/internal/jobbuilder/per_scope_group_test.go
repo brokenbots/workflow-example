@@ -1,0 +1,247 @@
+package jobbuilder_test
+
+import (
+	"testing"
+
+	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// CRI-234 M7.2: adapters sharing one (scope, environment) pair are
+// co-located as separate containers in ONE pod; the environment carries its
+// volume/secret declarations; the runner is never a co-tenant; env-less
+// events keep the per-adapter fallback shape.
+
+func groupTestRun() *criteriav1.CriteriaRun {
+	return &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-234", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-234"},
+	}
+}
+
+func groupMember(adapter, kind, scopeID, environment string) events.LifecycleEvent {
+	return events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-234",
+		ScopeID:     scopeID,
+		ScopeTag:    "root-scope",
+		AdapterName: adapter,
+		AdapterType: kind,
+		Digest:      "sha256:deadbeef",
+		TokenFile:   "/data/intake/CRI-234/tokens/" + adapter,
+		Environment: environment,
+	}
+}
+
+func containerEnvMap(c corev1.Container) map[string]string {
+	env := make(map[string]string, len(c.Env))
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	return env
+}
+
+func TestBuildPerScopeAdapterPodGroupSameEnvironmentOnePod(t *testing.T) {
+	run := groupTestRun()
+	members := []events.LifecycleEvent{
+		groupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("review", "copilot", "scope-a", "ci"),
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members)
+	require.NotNil(t, pod)
+
+	// Exactly one pod per (scope, environment): every member is a separate
+	// container of the single pod.
+	require.Len(t, pod.Spec.Containers, 2)
+	names := []string{pod.Spec.Containers[0].Name, pod.Spec.Containers[1].Name}
+	assert.ElementsMatch(t, []string{"adapter-shell", "adapter-copilot"}, names,
+		"each adapter runs as its own container, named by implementation kind")
+
+	assert.Equal(t, "adapter", pod.Labels["criteria.brokenbots.dev/role"])
+	assert.Equal(t, "scope-a", pod.Labels["criteria.brokenbots.dev/scope-id"])
+	assert.Equal(t, "ci", pod.Labels["criteria.brokenbots.dev/environment"])
+	assert.Equal(t, "copilot,shell", pod.Labels["criteria.brokenbots.dev/adapter-kinds"],
+		"the kinds label is the deduplicated, sorted set of hosted adapters")
+	assert.Empty(t, pod.Labels["criteria.brokenbots.dev/adapter-kind"],
+		"group pods carry the kinds-set label, not the single-kind label")
+
+	// Per-member handshake env is built from each member's own event.
+	byName := map[string]corev1.Container{}
+	for _, c := range pod.Spec.Containers {
+		byName[c.Name] = c
+	}
+	shellEnv := containerEnvMap(byName["adapter-shell"])
+	assert.Equal(t, "shell", shellEnv["ADAPTER_KIND"])
+	assert.Equal(t, "shell", shellEnv["CRITERIA_ADAPTER_NAME"])
+	assert.Equal(t, "scope-a", shellEnv["CRITERIA_SCOPE_ID"])
+	assert.Equal(t, "/data/intake/CRI-234/tokens/intake", shellEnv["CRITERIA_REMOTE_TOKEN_FILE"])
+	copilotEnv := containerEnvMap(byName["adapter-copilot"])
+	assert.Equal(t, "copilot", copilotEnv["ADAPTER_KIND"])
+	assert.Equal(t, "/data/intake/CRI-234/tokens/review", copilotEnv["CRITERIA_REMOTE_TOKEN_FILE"])
+}
+
+func TestBuildPerScopeAdapterPodGroupSeparateEnvironmentsSeparatePods(t *testing.T) {
+	run := groupTestRun()
+
+	ciPod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")})
+	prodPod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "prod",
+		[]events.LifecycleEvent{groupMember("review", "copilot", "scope-a", "prod")})
+
+	require.NotNil(t, ciPod)
+	require.NotNil(t, prodPod)
+	assert.NotEqual(t, ciPod.Name, prodPod.Name,
+		"adapters NOT sharing an environment must land in separate pods")
+	assert.Len(t, ciPod.Spec.Containers, 1)
+	assert.Len(t, prodPod.Spec.Containers, 1)
+	// No pod ever mixes adapters from different environments: each builder
+	// call hosts exactly the members of one (scope, environment) pair.
+	assert.Equal(t, "ci", ciPod.Labels["criteria.brokenbots.dev/environment"])
+	assert.Equal(t, "prod", prodPod.Labels["criteria.brokenbots.dev/environment"])
+}
+
+func TestBuildPerScopeAdapterPodGroupDeterministic(t *testing.T) {
+	run := groupTestRun()
+	forward := []events.LifecycleEvent{
+		groupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("review", "copilot", "scope-a", "ci"),
+		groupMember("audit", "copilot", "scope-a", "ci"),
+	}
+	reversed := []events.LifecycleEvent{forward[2], forward[1], forward[0]}
+
+	first := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", forward)
+	second := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", reversed)
+
+	assert.Equal(t, first.Name, second.Name)
+	require.Len(t, first.Spec.Containers, len(second.Spec.Containers))
+	for i := range first.Spec.Containers {
+		assert.Equal(t, first.Spec.Containers[i].Name, second.Spec.Containers[i].Name,
+			"member order must be normalized so repeated reconciles produce identical pod specs")
+		assert.Equal(t, first.Spec.Containers[i].Env, second.Spec.Containers[i].Env)
+	}
+}
+
+func TestBuildPerScopeAdapterPodGroupCarriesEnvironmentDeclarations(t *testing.T) {
+	// The environment carries its volume/secret declarations via the run's
+	// stamped workflow plan: declared volumes mount pod-wide, declared
+	// secrets add the CSI volume and run the pod under the criteria-runner
+	// service account for the OpenBao provider.
+	run := groupTestRun()
+	run.Spec.Workflow = &criteriav1.RunWorkflow{
+		Name: "wf",
+		Type: "url",
+		Volumes: []criteriav1.RunWorkflowVolume{
+			{Name: "declared", Kind: "pvc", Claim: "shared-claim", MountPath: "/mnt/declared"},
+		},
+		Secrets: []criteriav1.RunWorkflowSecret{
+			{Name: "api-key", SecretProviderClass: "api-spc", MountPath: "/secrets/api-key", Env: map[string]string{"API_KEY_PATH": "token"}},
+		},
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")})
+	require.NotNil(t, pod)
+
+	volumeNames := make(map[string]struct{}, len(pod.Spec.Volumes))
+	for _, v := range pod.Spec.Volumes {
+		volumeNames[v.Name] = struct{}{}
+	}
+	for _, want := range []string{"data", "scripts", "declared", "secret-api-key"} {
+		assert.Contains(t, volumeNames, want, "the environment's declared volumes/secrets must be applied pod-wide")
+	}
+
+	// Every container mounts the declared volumes (pod-wide application).
+	for _, c := range pod.Spec.Containers {
+		mountNames := make(map[string]struct{}, len(c.VolumeMounts))
+		for _, m := range c.VolumeMounts {
+			mountNames[m.Name] = struct{}{}
+		}
+		assert.Contains(t, mountNames, "declared")
+		assert.Contains(t, mountNames, "secret-api-key")
+		envMap := containerEnvMap(c)
+		assert.Equal(t, "/secrets/api-key/token", envMap["API_KEY_PATH"],
+			"the declared secret's env mapping anchors the rendered key path (never secret material)")
+	}
+
+	assert.True(t, *pod.Spec.AutomountServiceAccountToken)
+	assert.Equal(t, "criteria-runner", pod.Spec.ServiceAccountName)
+}
+
+func TestBuildPerScopeAdapterPodGroupContainerNameCollision(t *testing.T) {
+	// Retried provision_wanted events can duplicate a member name
+	// (ActiveProvisions collapses them; a duplicate here is defensive).
+	run := groupTestRun()
+	members := []events.LifecycleEvent{
+		groupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("intake-2", "shell", "scope-a", "ci"),
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", members)
+	require.NotNil(t, pod)
+	require.Len(t, pod.Spec.Containers, 2)
+	assert.NotEqual(t, pod.Spec.Containers[0].Name, pod.Spec.Containers[1].Name,
+		"container names must stay unique even when both members resolve the same kind")
+}
+
+func TestBuildPerScopeAdapterPodGroupPodShapeMatchesFallback(t *testing.T) {
+	// Group pods share the fallback pod's zero-privilege shape: the same
+	// node selector, toleration, restart policy, security context, and the
+	// runner-never-a-co-tenant guarantee (only adapter containers, built
+	// from provision events, are ever hosted here).
+	run := groupTestRun()
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")})
+	require.NotNil(t, pod)
+
+	assert.Equal(t, "amd64", pod.Spec.NodeSelector["kubernetes.io/arch"])
+	require.Len(t, pod.Spec.Tolerations, 1)
+	assert.Equal(t, "catch", pod.Spec.Tolerations[0].Key)
+	assert.Equal(t, corev1.RestartPolicyOnFailure, pod.Spec.RestartPolicy)
+	require.NotNil(t, pod.Spec.SecurityContext)
+	assert.True(t, *pod.Spec.SecurityContext.RunAsNonRoot)
+	assert.Equal(t, int64(10001), *pod.Spec.SecurityContext.RunAsUser)
+
+	require.Len(t, pod.OwnerReferences, 1)
+	assert.Equal(t, "CriteriaRun", pod.OwnerReferences[0].Kind)
+
+	// The runner is never a co-tenant: every container is an adapter
+	// container running the pod-adapter entrypoint.
+	for _, c := range pod.Spec.Containers {
+		assert.Equal(t, []string{"/opt/criteria-pod-adapter/adapter.sh"}, c.Command)
+	}
+	assert.Equal(t, "adapter", pod.Labels["criteria.brokenbots.dev/role"])
+}
+
+func TestPerScopeAdapterGroupName(t *testing.T) {
+	run := groupTestRun()
+
+	name := jobbuilder.PerScopeAdapterGroupName(run, "scope-a", "ci")
+	assert.LessOrEqual(t, len(name), 63)
+	assert.Regexp(t, `^[a-z0-9-]+$`, name)
+	assert.Contains(t, name, "-adp-", "the group name pins the job, scope hash, and environment hash")
+
+	// Deterministic and unique per (scope, environment).
+	assert.Equal(t, name, jobbuilder.PerScopeAdapterGroupName(run, "scope-a", "ci"))
+	assert.NotEqual(t, name, jobbuilder.PerScopeAdapterGroupName(run, "scope-a", "prod"))
+	assert.NotEqual(t, name, jobbuilder.PerScopeAdapterGroupName(run, "scope-b", "ci"))
+}
+
+func TestPerScopeAdapterGroupNameLongInputsStayDNSSafe(t *testing.T) {
+	run := groupTestRun()
+	name := jobbuilder.PerScopeAdapterGroupName(run,
+		"very-long-scope-instance-id-with-uuid-9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
+		"production-environment-with-a-rather-long-descriptive-identity")
+	assert.LessOrEqual(t, len(name), 63)
+	assert.Regexp(t, `^[a-z0-9-]+$`, name)
+}
+
+func TestBuildPerScopeAdapterPodGroupEmptyMembersNil(t *testing.T) {
+	run := groupTestRun()
+	assert.Nil(t, jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", nil))
+}
