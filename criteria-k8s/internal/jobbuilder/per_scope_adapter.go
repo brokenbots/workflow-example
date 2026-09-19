@@ -96,6 +96,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 		// therefore run under the criteria-runner service account.
 		pod.Spec.ServiceAccountName = "criteria-runner"
 	}
+	plan.applyHostAffinity(pod.Labels, &pod.Spec)
 	return pod
 }
 

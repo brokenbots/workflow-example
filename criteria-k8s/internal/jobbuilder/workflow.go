@@ -17,6 +17,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -48,6 +49,8 @@ type workflowPlan struct {
 	volumes []criteriav1.RunWorkflowVolume
 	secrets []criteriav1.RunWorkflowSecret
 	env     map[string]string
+	// runName scopes the same-host affinity labels to this run (CRI-235).
+	runName string
 }
 
 // newWorkflowPlan renders the stamped workflow object.
@@ -56,7 +59,7 @@ func newWorkflowPlan(run *criteriav1.CriteriaRun) *workflowPlan {
 	if wf == nil {
 		return nil
 	}
-	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env}
+	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env, runName: run.Name}
 }
 
 // targetNamespace resolves the namespace the run's children are created in:
@@ -86,6 +89,132 @@ func workflowPodVolumeName(vol criteriav1.RunWorkflowVolume) string {
 		return workflowVolumePrefix + vol.Name
 	}
 	return vol.Name
+}
+
+// Same-host affinity (CRI-235): every pod built from a workflow plan mounts
+// all of the plan's declared volumes, so a host-affinity declaration must
+// co-locate those pods onto one host. Each pod stamps one label per
+// host-affinity volume — key namespacing the volume, value scoping the run
+// — and carries one required pod-affinity term per volume selecting that
+// label on the node hostname. The first pod to schedule anchors the host;
+// required self-affinity is safe for it, because the scheduler passes a pod
+// whose terms match its own labels when no other pod in the namespace
+// matches yet.
+const (
+	// LabelHostAffinityPrefix namespaces the per-volume same-host affinity
+	// keys on the pod labels the affinity terms select.
+	hostAffinityLabelPrefix = "affinity-"
+)
+
+// hostAffinityVolumeKeys returns the pod volume names of the plan's
+// host-affinity declarations, deduplicated in declaration order. Only PVC
+// declarations are host-affinity: a claim is the volume kind whose
+// underlying PV can be node-local, so its pods must share the PV's host.
+// NFS is shared across hosts and tmp is pod-local — both are exempt
+// (CRI-235). Undeclared volumes — including the built-in default data
+// volume of a workflow that does not re-source /data — carry no affinity:
+// only a declaration opts a volume in.
+func (p *workflowPlan) hostAffinityVolumeKeys() []string {
+	if p == nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(p.volumes))
+	keys := make([]string, 0, len(p.volumes))
+	for _, vol := range p.volumes {
+		if vol.Kind != routes.VolumePVC {
+			continue
+		}
+		key := workflowPodVolumeName(vol)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
+// hostAffinityLabelKey returns the pod label key carrying the same-host
+// affinity group of one host-affinity volume. The name part is capped at
+// the 63-character label-key limit; any prefix of a pod volume name is
+// still a valid label-key name segment.
+func hostAffinityLabelKey(volumeKey string) string {
+	name := hostAffinityLabelPrefix + volumeKey
+	if len(name) > maxLabelValueLength {
+		name = trimHyphens(name[:maxLabelValueLength])
+	}
+	return LabelHostAffinityPrefix + name
+}
+
+// hostAffinityLabels returns one label per host-affinity volume key, valued
+// by the run name so distinct runs never group together. Nil when the plan
+// declares no host-affinity volumes.
+func (p *workflowPlan) hostAffinityLabels() map[string]string {
+	keys := p.hostAffinityVolumeKeys()
+	if keys == nil {
+		return nil
+	}
+	value := safeLabelValue(p.runName)
+	labels := make(map[string]string, len(keys))
+	for _, key := range keys {
+		labels[hostAffinityLabelKey(key)] = value
+	}
+	return labels
+}
+
+// podAffinity renders the plan's same-host affinity: one required term per
+// host-affinity volume, selecting that volume's affinity label on the node
+// hostname. All pods built from the plan carry all of the labels, so every
+// term resolves to the same anchor pod. Terms select within the pod's own
+// namespace (nil Namespaces): all children of a run are created in
+// targetNamespace. Nil when the plan declares no host-affinity volumes.
+func (p *workflowPlan) podAffinity() *corev1.Affinity {
+	labels := p.hostAffinityLabels()
+	if labels == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	terms := make([]corev1.PodAffinityTerm, 0, len(labels))
+	for _, key := range keys {
+		terms = append(terms, corev1.PodAffinityTerm{
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{key: labels[key]},
+			},
+			TopologyKey: corev1.LabelHostname,
+		})
+	}
+	return &corev1.Affinity{
+		PodAffinity: &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: terms,
+		},
+	}
+}
+
+// applyHostAffinity stamps the plan's same-host affinity onto a pod built
+// from it: the affinity labels merge into the pod labels (which the job
+// builders share with the job object) and the affinity onto the pod spec.
+// Explicit host constraints win: a pod already carrying an affinity or a
+// nodeName keeps its scheduling intent untouched — co-location applies only
+// where the scheduler is free to place the pod (CRI-235).
+func (p *workflowPlan) applyHostAffinity(labels map[string]string, spec *corev1.PodSpec) {
+	if spec == nil || spec.NodeName != "" || spec.Affinity != nil {
+		return
+	}
+	affinityLabels := p.hostAffinityLabels()
+	if affinityLabels == nil {
+		return
+	}
+	for key, value := range affinityLabels {
+		labels[key] = value
+	}
+	spec.Affinity = p.podAffinity()
 }
 
 // runnerVolumes renders the runner job's pod volume list: the run-state

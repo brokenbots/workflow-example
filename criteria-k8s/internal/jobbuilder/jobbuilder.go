@@ -41,6 +41,10 @@ const (
 	// LabelEnvironment is the environment identity a group pod was built
 	// from (CRI-234). Absent on the per-adapter fallback pods.
 	LabelEnvironment = "criteria.brokenbots.dev/environment"
+	// LabelHostAffinityPrefix namespaces the per-volume same-host affinity
+	// keys on the pod labels the affinity terms select (CRI-235): one
+	// label per host-affinity volume declaration, valued by the run name.
+	LabelHostAffinityPrefix = "criteria.brokenbots.dev/affinity-"
 	// RoleRunner / RoleAdapter are the LabelRole values in use.
 	RoleRunner  = "runner"
 	RoleAdapter = "adapter"
@@ -276,6 +280,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, providerBaseURL, maxVisits, defaults, plan),
 	}
 	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
+	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
 	return job
 }
 
@@ -304,6 +309,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 		adapterContainer(kind, image, JobName(run), plan),
 	}
 	job.Spec.Template.Spec.Volumes = plan.adapterVolumes(dataPVC)
+	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
 	return job
 }
 
