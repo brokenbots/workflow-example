@@ -7,8 +7,9 @@ set -euo pipefail
 # (criteria-base/tests/smoke_test.sh) proves the same criteria on a host with
 # docker. Checks here guard the image contract so it cannot silently drift:
 #
-#   - criteria main pinned at 28777aa+ with a build that fails closed on a
-#     checkout mismatch;
+#   - criteria main pinned at the audited fc95449 commit (CRI-233: the
+#     environment_type / environment_name emission CRI-234's co-location
+#     reads) with a build that fails closed on a checkout mismatch;
 #   - runtime ships only git + ca-certificates (no node/gh/jq, no baked
 #     /workflows tree);
 #   - uid 10001, CRITERIA_HOME=/data/criteria, restricted entrypoint;
@@ -32,9 +33,9 @@ have() {
     grep -qF -- "$1" "$2"
 }
 
-# --- pinned criteria main commit (merged CRI-215..229 chain) ---------------
-have 'ARG CRITERIA_COMMIT=28777aacc3cfbe85005ddb27f548116e692c0eb4' "$DOCKERFILE" || \
-    fail "Dockerfile does not pin criteria main at 28777aa"
+# --- pinned criteria main commit (merged CRI-215..233 chain) ---------------
+have 'ARG CRITERIA_COMMIT=fc9544979ee698f111035368c654b415db943e66' "$DOCKERFILE" || \
+    fail "Dockerfile does not pin criteria main at fc95449 (CRI-234 environment-identity emission)"
 have 'git clone' "$DOCKERFILE" || fail "Dockerfile does not clone criteria"
 grep -Eq 'test "\$\(git rev-parse HEAD\)" = "\$\{CRITERIA_COMMIT\}"' "$DOCKERFILE" || \
     fail "Dockerfile build does not fail closed if the checkout is not the pinned commit"
@@ -94,7 +95,7 @@ have 'build-criteria-base-push:' "$MAKEFILE" || \
 grep -q 'criteria-base/Dockerfile' "$MAKEFILE" || \
     fail "Makefile build-criteria-base must build criteria-base/Dockerfile"
 # Both regression tests must be wired into `make test` and shellchecked in lint.
-for t in test_criteria_base.sh test_criteria_base_entrypoint.sh; do
+for t in test_criteria_base.sh test_criteria_base_entrypoint.sh test_criteria_base_pin.sh; do
     grep -Eq "\./k8s/tests/$t$" "$MAKEFILE" || \
         fail "Makefile test target must run k8s/tests/$t"
     grep -Eq "^\s+k8s/tests/$t( \\\\)?$" "$MAKEFILE" || \
