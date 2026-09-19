@@ -31,8 +31,8 @@ variable "ticket_id" {
 
 variable "linear_api_key" {
     type        = string
-    default     = ""
-    description = "Linear API key; handed to the child for its evidence comment, bound to the child's adapter over the secret channel."
+    secret      = true
+    description = "Linear API key; handed to the child for its evidence comment, bound to the child's adapter over the secret channel. Secret variables are masked ((sensitive)) in run transcripts, step inputs, and the variable.set event stream."
 }
 
 // REMOTE subworkflow source (cascade). The ref pin names the child commit the

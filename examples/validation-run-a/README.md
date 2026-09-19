@@ -34,12 +34,18 @@ docker/podman push localhost:5000/criteria-base:<build-tag>
 kubectl -n criteria-jobs set env deploy/criteria-k8s-operator \
     CRITERIA_BASE_IMAGE=localhost:5000/criteria-base:<build-tag>
 
-docker/podman run --rm -e WORKFLOW_URL \
-    "git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/root?ref=<root-commit>" \
+docker/podman run --rm \
+    -e WORKFLOW_URL="git::https://github.com/brokenbots/workflow-example.git//examples/validation-run-a/root?ref=<root-commit>" \
     -e WORKFLOW_REF=<root-commit> \
     localhost:5000/criteria-base:<build-tag> \
-    --var ticket_id=CRI-244 --var linear_api_key=$LINEAR_API_KEY --output concise
+    --var ticket_id=CRI-244 --var linear_api_key="$LINEAR_API_KEY" --output concise
 ```
+
+`linear_api_key` is declared `secret = true` in BOTH modules: the engine masks
+the value as `(sensitive)` in run transcripts, step inputs, and the durable
+`variable.set` event stream, and the value reaches the child's adapter only
+over the secret channel. Supply the key per run via `--var`; never bake it
+into the module tree or the image.
 
 Engine compatibility: the fixture requires the CRI-227 cascade machinery, so
 both modules declare `criteria_version = ">=0.5.24-10, <0.6.0"` — the
