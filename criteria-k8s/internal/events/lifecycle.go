@@ -46,11 +46,12 @@ type payloadEventData struct {
 	ScopeID     string `json:"scope_instance_id"`
 	ShimAddress string `json:"shim_listen_address"`
 	TokenFile   string `json:"token_ref"`
-	// Environment identity (CRI-233, runner fc95449): the config-declared
-	// environment the adapter runs in. The canonical key is "environment";
-	// "environment_id" is the engine's alternate spelling.
-	Environment   string `json:"environment"`
-	EnvironmentID string `json:"environment_id"`
+	// Environment identity (CRI-233, runner fc95449): the compiled
+	// environment declaration's type and name, carried verbatim by the
+	// engine's payload.data (internal/run/sink.go) in every wire shape.
+	// Engines older than fc95449 carry neither key.
+	EnvironmentType string `json:"environment_type"`
+	EnvironmentName string `json:"environment_name"`
 }
 
 // LifecycleEvent describes a provision-wanted or release event in the run
@@ -88,13 +89,21 @@ type LifecycleEvent struct {
 	// Only present on provision-wanted events.
 	TokenFile string `json:"token_file,omitempty"`
 
-	// Environment is the config-declared environment identity the adapter
-	// runs in (CRI-233, runner commit fc95449). It is the co-location
-	// grouping key: adapters sharing one environment run as separate
-	// containers in one (scope, environment) pod (CRI-234). Empty on events
-	// from older engines, where the reconcile falls back to per-adapter
-	// pods.
-	Environment string `json:"environment,omitempty"`
+	// EnvironmentType is the compiled environment declaration's type (e.g.
+	// "remote"), and EnvironmentName its declaration name (e.g. "prod").
+	// The runner's adapter lifecycle events carry both verbatim (CRI-233,
+	// runner commit fc95449); events from older engines carry neither.
+	EnvironmentType string `json:"environment_type,omitempty"`
+	EnvironmentName string `json:"environment_name,omitempty"`
+
+	// Environment is the co-location grouping identity (CRI-234): the
+	// "type/name" pair derived from EnvironmentType and EnvironmentName,
+	// so remote/prod and remote/worktree stay distinct groups. Adapters
+	// sharing one environment run as separate containers in one (scope,
+	// environment) pod (CRI-234). Empty when the event carries neither
+	// field (pre-fc95449 engines), where the reconcile falls back to
+	// per-adapter pods. Derived by the parsers; not a wire key.
+	Environment string `json:"-"`
 
 	// Timestamp is an optional RFC3339 event timestamp.
 	Timestamp string `json:"timestamp,omitempty"`
@@ -113,6 +122,19 @@ func (e LifecycleEvent) IsRelease() bool {
 // ScopeKey returns a stable key combining the adapter kind and scope id.
 func (e LifecycleEvent) ScopeKey() string {
 	return e.AdapterName + "/" + e.ScopeID
+}
+
+// EnvironmentIdentity joins the compiled environment declaration's type and
+// name (CRI-233, runner fc95449) into the per-scope co-location grouping key
+// (CRI-234): remote/prod and remote/worktree are distinct groups. The
+// identity is empty only when the event carries neither field — engines
+// older than fc95449 — which the reconcile maps to the per-adapter pod
+// fallback.
+func EnvironmentIdentity(envType, envName string) string {
+	if envType == "" && envName == "" {
+		return ""
+	}
+	return envType + "/" + envName
 }
 
 // ParseLifecycleEvents scans an ndjson event stream and returns all lifecycle
@@ -148,27 +170,17 @@ func ParseLifecycleEvents(r io.Reader) ([]LifecycleEvent, error) {
 		if ev.AdapterName == "" {
 			continue
 		}
-		if ev.Environment == "" {
-			// The flat shape spells the identity "environment_id" on some
-			// engine versions; coalesce it into the canonical field.
-			var probe flatEnvIdentity
-			if err := json.Unmarshal(line, &probe); err == nil {
-				ev.Environment = probe.EnvironmentID
-			}
-		}
+		// The identity is derived from the environment declaration's
+		// type/name pair (CRI-233, runner fc95449) — never from a
+		// hand-provided key. Both keys empty (pre-fc95449 engines) keeps
+		// the per-adapter pod fallback.
+		ev.Environment = EnvironmentIdentity(ev.EnvironmentType, ev.EnvironmentName)
 		events = append(events, ev)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanning lifecycle events: %w", err)
 	}
 	return events, nil
-}
-
-// flatEnvIdentity probes the flat event shape's alternate environment
-// identity key ("environment_id"); the canonical "environment" key is
-// carried by LifecycleEvent's own tag.
-type flatEnvIdentity struct {
-	EnvironmentID string `json:"environment_id"`
 }
 
 // lifecycleEventFromPayload maps a nested AdapterEvent envelope to a
@@ -181,16 +193,18 @@ func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) 
 		return LifecycleEvent{}, false
 	}
 	ev := LifecycleEvent{
-		Event:       EventProvisionWanted,
-		RunID:       envelope.RunID,
-		ScopeID:     envelope.Payload.Data.ScopeID,
-		AdapterName: envelope.Payload.Data.Adapter,
-		AdapterType: envelope.Payload.Data.AdapterType,
-		Digest:      envelope.Payload.Data.Digest,
-		ShimAddress: envelope.Payload.Data.ShimAddress,
-		TokenFile:   envelope.Payload.Data.TokenFile,
-		Environment: firstNonEmpty(envelope.Payload.Data.Environment, envelope.Payload.Data.EnvironmentID),
+		Event:           EventProvisionWanted,
+		RunID:           envelope.RunID,
+		ScopeID:         envelope.Payload.Data.ScopeID,
+		AdapterName:     envelope.Payload.Data.Adapter,
+		AdapterType:     envelope.Payload.Data.AdapterType,
+		Digest:          envelope.Payload.Data.Digest,
+		ShimAddress:     envelope.Payload.Data.ShimAddress,
+		TokenFile:       envelope.Payload.Data.TokenFile,
+		EnvironmentType: envelope.Payload.Data.EnvironmentType,
+		EnvironmentName: envelope.Payload.Data.EnvironmentName,
 	}
+	ev.Environment = EnvironmentIdentity(ev.EnvironmentType, ev.EnvironmentName)
 	if ev.AdapterName == "" {
 		return LifecycleEvent{}, false
 	}

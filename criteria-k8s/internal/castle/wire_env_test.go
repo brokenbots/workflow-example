@@ -9,17 +9,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// CRI-234: the castle wire must carry the provision event's config-declared
-// environment identity (CRI-233, runner fc95449) — the per-scope reconcile's
-// co-location grouping key — and keep it empty for pre-fc95449 events so the
-// reconcile falls back to per-adapter pods.
+// CRI-234: the castle wire must carry the provision event's environment
+// identity (CRI-233, runner fc95449) — the environment_type /
+// environment_name pair the pinned engine actually emits, from which the
+// per-scope reconcile derives its co-location grouping key — and keep it
+// empty for pre-fc95449 events so the reconcile falls back to per-adapter
+// pods.
 
-func TestLifecycleFromEnvelopeCarriesEnvironment(t *testing.T) {
+// Verbatim fc95449-shaped provision_wanted emission (CRI-233): the pinned
+// engine publishes the compiled environment declaration's type and name in
+// payload.data (internal/run/sink.go) — the pair the per-(scope,environment)
+// co-location groups on. Key order follows the engine's structpb encoding,
+// mirroring the v0522ProvisionWantedJSON convention.
+const fc95449ProvisionWantedJSON = `{"schema_version":1,"seq":1,"run_id":"CRI-234","payload_type":"AdapterEvent","payload":{"adapter":"intake","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","environment_name":"worktree","environment_type":"remote","run_id":"","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","scope_name":"","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-234/token"}}}`
+
+// A fc95449-shaped provision_wanted envelope must carry the environment
+// pair: the per-scope reconciler groups on the derived "type/name"
+// identity, and a conversion that drops it silently disables the
+// co-location feature end to end.
+func TestLifecycleFromEnvelopeCarriesEnvironmentPair(t *testing.T) {
 	data := mustStruct(t, map[string]any{
-		"adapter":           "intake",
-		"adapter_type":      "shell",
-		"scope_instance_id": "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
-		"environment":       "ci",
+		"adapter":             "intake",
+		"adapter_type":        "shell",
+		"digest":              "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		"environment_name":    "worktree",
+		"environment_type":    "remote",
+		"run_id":              "",
+		"scope_instance_id":   "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
+		"scope_name":          "",
+		"shim_listen_address": "[::]:7778",
+		"token_ref":           "/data/.criteria/runs/cri-234/token",
 	})
 	env := &v1.Envelope{
 		SchemaVersion: 1,
@@ -34,30 +53,51 @@ func TestLifecycleFromEnvelopeCarriesEnvironment(t *testing.T) {
 
 	got, ok := lifecycleFromEnvelope(env)
 	require.True(t, ok)
-	assert.Equal(t, "ci", got.Environment, "the canonical environment key is carried on the wire")
+	assert.Equal(t, "remote", got.EnvironmentType, "the real emission key must not be lost on the wire")
+	assert.Equal(t, "worktree", got.EnvironmentName, "the real emission key must not be lost on the wire")
+	assert.Equal(t, "remote/worktree", got.Environment, "the (type,name) pair forms the co-location identity")
+
+	// Parity with the file parser over the verbatim fc95449 emission; both
+	// parsers must derive the identical event so the fixture-shaped
+	// payloads stay honest.
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(fc95449ProvisionWantedJSON))
+	require.NoError(t, err)
+	require.Len(t, parsed, 1)
+	assert.Equal(t, parsed[0], got, "castle wire conversion must match the file parser on the fc95449 emission")
 }
 
-func TestLifecycleFromEnvelopeCarriesEnvironmentIDAlias(t *testing.T) {
-	data := mustStruct(t, map[string]any{
-		"adapter":           "intake",
-		"adapter_type":      "shell",
-		"scope_instance_id": "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
-		"environment_id":    "prod",
-	})
-	env := &v1.Envelope{
-		SchemaVersion: 1,
-		RunId:         "CRI-234",
-		Seq:           1,
-		Payload: &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{
-			Adapter: "intake",
-			Kind:    "adapter.lifecycle.provision_wanted",
-			Data:    data,
-		}},
+// A second (type, name) pair on the same wire must map to a distinct
+// grouping identity: remote/prod never co-locates with remote/worktree.
+func TestLifecycleFromEnvelopeDistinctEnvironmentPairs(t *testing.T) {
+	build := func(envName string) *v1.Envelope {
+		return &v1.Envelope{
+			SchemaVersion: 1,
+			RunId:         "CRI-234",
+			Seq:           1,
+			Payload: &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{
+				Adapter: "intake",
+				Kind:    "adapter.lifecycle.provision_wanted",
+				Data: mustStruct(t, map[string]any{
+					"adapter":             "intake",
+					"adapter_type":        "shell",
+					"environment_name":    envName,
+					"environment_type":    "remote",
+					"scope_instance_id":   "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
+					"shim_listen_address": "[::]:7778",
+					"token_ref":           "/data/.criteria/runs/cri-234/token",
+				}),
+			}},
+		}
 	}
 
-	got, ok := lifecycleFromEnvelope(env)
+	worktree, ok := lifecycleFromEnvelope(build("worktree"))
 	require.True(t, ok)
-	assert.Equal(t, "prod", got.Environment, "the environment_id spelling is coalesced into Environment")
+	prod, ok := lifecycleFromEnvelope(build("prod"))
+	require.True(t, ok)
+	assert.Equal(t, "remote/worktree", worktree.Environment)
+	assert.Equal(t, "remote/prod", prod.Environment)
+	assert.NotEqual(t, worktree.Environment, prod.Environment,
+		"different (type,name) pairs must never collapse into one co-location group")
 }
 
 func TestLifecycleFromEnvelopeWithoutEnvironmentStaysEmpty(t *testing.T) {
@@ -82,7 +122,9 @@ func TestLifecycleFromEnvelopeWithoutEnvironmentStaysEmpty(t *testing.T) {
 
 	got, ok := lifecycleFromEnvelope(env)
 	require.True(t, ok)
-	assert.Empty(t, got.Environment, "pre-fc95449 events keep the empty fallback key")
+	assert.Empty(t, got.Environment, "pre-fc95449 events keep the empty fallback identity")
+	assert.Empty(t, got.EnvironmentType)
+	assert.Empty(t, got.EnvironmentName)
 
 	// Parity with the file parser on the env-less shape: both must agree
 	// that Environment is empty so the reconcile picks the same fallback.

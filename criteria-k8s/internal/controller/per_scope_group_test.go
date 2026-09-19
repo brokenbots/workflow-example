@@ -10,6 +10,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -354,4 +355,105 @@ func TestReconcilePerScopeAdaptersRecreatesGroupAfterSameKindMemberSwap(t *testi
 		"no container carrying the released member's handshake env may survive")
 	assert.ElementsMatch(t, []string{"shell"}, podContainerKinds(pods[0]),
 		"the same-kind swap preserves the container count and kind set")
+}
+
+// Verbatim fc95449-shaped provision_wanted emissions (CRI-233): the pinned
+// engine carries the environment identity as the environment_type /
+// environment_name pair in payload.data — never as an "environment" key
+// (internal/run/sink.go). Mirrors the v0522ProvisionWantedJSON convention.
+const (
+	fc95449WorktreeShellIntake = `{"schema_version":1,"seq":1,"run_id":"CRI-234","payload_type":"AdapterEvent","payload":{"adapter":"intake","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","environment_name":"worktree","environment_type":"remote","run_id":"","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","scope_name":"","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-234/tokens/intake.token"}}}`
+
+	fc95449WorktreeCopilotReview = `{"schema_version":1,"seq":2,"run_id":"CRI-234","payload_type":"AdapterEvent","payload":{"adapter":"review","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"review","adapter_type":"copilot","digest":"sha256:8f2b0ba4c2c3d0e5b0b0a6e2b3f0e2a1b0a2a6e2b3f0e2a1b0a2a6e2b3f0e2a1","environment_name":"worktree","environment_type":"remote","run_id":"","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","scope_name":"","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-234/tokens/review.token"}}}`
+
+	fc95449ProdCopilotReview = `{"schema_version":1,"seq":3,"run_id":"CRI-234","payload_type":"AdapterEvent","payload":{"adapter":"review","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"review","adapter_type":"copilot","digest":"sha256:8f2b0ba4c2c3d0e5b0b0a6e2b3f0e2a1b0a2a6e2b3f0e2a1b0a2a6e2b3f0e2a1","environment_name":"prod","environment_type":"remote","run_id":"","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","scope_name":"","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-234/tokens/review.token"}}}`
+)
+
+// Review B1 regression: the pinned engine's verbatim emission shape
+// (criteria fc95449, CRI-233) carries the environment identity as the
+// environment_type / environment_name pair in payload.data. The reconcile
+// must group the parsed stream by the derived "type/name" identity: two
+// adapters sharing one environment co-locate in exactly one group pod.
+func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	stream := strings.Join([]string{fc95449WorktreeShellIntake, fc95449WorktreeCopilotReview}, "\n")
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(stream))
+	require.NoError(t, err)
+	require.Len(t, parsed, 2)
+	for _, ev := range parsed {
+		assert.Equal(t, "remote/worktree", ev.Environment,
+			"the fc95449 emission keys must form the co-location identity")
+	}
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, events.ActiveProvisions(parsed), logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 2, active)
+
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1, "one (scope, environment) -> exactly one group pod")
+	assert.Equal(t, jobbuilder.PerScopeAdapterGroupName(run, "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46", "remote/worktree"), pods[0].Name)
+	assert.ElementsMatch(t, []string{"shell", "copilot"}, podContainerKinds(pods[0]),
+		"each adapter sharing the environment runs as a separate container")
+	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
+	assert.Equal(t, "remote-worktree", pods[0].Labels[jobbuilder.LabelEnvironment])
+}
+
+// Review B1 regression: two different (type, name) pairs from the pinned
+// engine's verbatim emission shape produce two distinct group pods; no pod
+// mixes adapters of different environments.
+func TestReconcilePerScopeAdaptersSeparatesVerbatimFC95449EnvironmentPairs(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	stream := strings.Join([]string{fc95449WorktreeShellIntake, fc95449ProdCopilotReview}, "\n")
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(stream))
+	require.NoError(t, err)
+	require.Len(t, parsed, 2)
+	require.NotEqual(t, parsed[0].Environment, parsed[1].Environment,
+		"different (type,name) pairs parse to distinct identities")
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, events.ActiveProvisions(parsed), logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 2, active)
+
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 2, "one group pod per (scope, environment) pair")
+
+	byEnv := make(map[string]corev1.Pod, len(pods))
+	for _, pod := range pods {
+		byEnv[pod.Labels[jobbuilder.LabelEnvironment]] = pod
+	}
+	require.Contains(t, byEnv, "remote-worktree")
+	require.Contains(t, byEnv, "remote-prod")
+	assert.ElementsMatch(t, []string{"shell"}, podContainerKinds(byEnv["remote-worktree"]),
+		"the worktree pod hosts only its own member")
+	assert.ElementsMatch(t, []string{"copilot"}, podContainerKinds(byEnv["remote-prod"]),
+		"the prod pod hosts only its own member — adapters of different environments never mix")
+	assert.NotEqual(t, byEnv["remote-worktree"].Name, byEnv["remote-prod"].Name)
+}
+
+// Review B1 regression: the pre-fc95449 verbatim emission shape (CRI-132
+// capture) carries no environment pair, so the reconcile keeps the
+// per-adapter fallback pod instead of the group shape.
+func TestReconcilePerScopeAdaptersVerbatimPreFC95449StreamFallsBack(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(cri132CapturedNestedProvision))
+	require.NoError(t, err)
+	require.Len(t, parsed, 1)
+	assert.Empty(t, parsed[0].Environment, "the pre-fc95449 emission carries no environment pair")
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, events.ActiveProvisions(parsed), logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, active)
+
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1)
+	assert.Empty(t, pods[0].Labels[jobbuilder.LabelEnvironment],
+		"env-less events keep the per-adapter fallback shape")
+	assert.Empty(t, pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
+	assert.Regexp(t, `-adp-default-[0-9a-f]{12}$`, pods[0].Name)
 }
