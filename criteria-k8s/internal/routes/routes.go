@@ -59,6 +59,19 @@ const (
 // omits its states list (CRI-218, ADR-0005 §3.4).
 const DefaultState = "Triage"
 
+// Admission queue classes (CRI-242). The class partitions the operator's
+// admission queue: dev-class runs serialize per repoURL (concurrency 1),
+// while triage-class runs are read-only against the repo and may run
+// concurrently with any run on the same repoURL (per-ticket PVC clones
+// isolate state). ClassDefault is what an omitted class resolves to, so
+// routes without an explicit class keep the per-repo serialization they
+// had before classes existed.
+const (
+	ClassDefault = "dev"
+	ClassDev     = "dev"
+	ClassTriage  = "triage"
+)
+
 // Payload is the routes ConfigMap payload (the 'routes.json' data key).
 type Payload struct {
 	APIVersion      string              `json:"apiVersion"`
@@ -70,14 +83,19 @@ type Payload struct {
 // Workflow is a workflow-library object: how a run obtains its workflow and
 // where/how it executes.
 type Workflow struct {
-	Type      string            `json:"type"`
-	Namespace string            `json:"namespace"`
-	Image     string            `json:"image,omitempty"`
-	URL       string            `json:"url,omitempty"`
-	Ref       string            `json:"ref,omitempty"`
-	Volumes   []Volume          `json:"volumes,omitempty"`
-	Secrets   []Secret          `json:"secrets,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Type      string `json:"type"`
+	Namespace string `json:"namespace"`
+	// Class is the admission queue class (CRI-242): "dev" serializes per
+	// repoURL, "triage" (read-only against the repo) admits concurrently.
+	// Empty defaults to ClassDefault at stamping; Validate rejects any
+	// other value.
+	Class   string            `json:"class,omitempty"`
+	Image   string            `json:"image,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Ref     string            `json:"ref,omitempty"`
+	Volumes []Volume          `json:"volumes,omitempty"`
+	Secrets []Secret          `json:"secrets,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 // Volume is a storage volume of kind pvc, nfs, or tmp.
@@ -266,6 +284,14 @@ func validateWorkflow(name string, wf Workflow) error {
 		}
 	default:
 		return fmt.Errorf("type must be %q or %q, got %q", TypeImage, TypeURL, wf.Type)
+	}
+	// Admission queue class (CRI-242): empty defaults to dev, so routes
+	// without an explicit class keep the per-repo serialization they had
+	// before classes existed. Anything else fails closed like tagMatch.
+	switch wf.Class {
+	case "", ClassDev, ClassTriage:
+	default:
+		return fmt.Errorf("class must be %q or %q, got %q", ClassDev, ClassTriage, wf.Class)
 	}
 	if !labelRe.MatchString(wf.Namespace) {
 		return fmt.Errorf("namespace %q is not a DNS-1123 label", wf.Namespace)

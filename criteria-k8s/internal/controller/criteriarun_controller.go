@@ -89,7 +89,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// If the run is already terminal, do not re-enter the queue on a resync.
 	// Release any stale admission slot and prompt the next queued run.
 	if isTerminalPhase(run.Status.Phase) {
-		if next := r.Queue.Release(req.NamespacedName, run.Spec.RepoURL); next != nil {
+		if next := r.Queue.Release(&run); next != nil {
 			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
 				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
 			}
@@ -141,8 +141,8 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 
-	// Enqueue the run for repo-keyed admission control. Only admitted runs
-	// are allowed to create child Jobs.
+	// Enqueue the run for (repoURL, class)-keyed admission control
+	// (CRI-242). Only admitted runs are allowed to create child Jobs.
 	admitted, qstatus, prevRunning := r.Queue.Enqueue(&run)
 
 	update := run.DeepCopy()
@@ -192,10 +192,10 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 			logger.Info("refusing to admit CriteriaRun: a live CriteriaRun already exists for the ticket",
 				"ticket", run.Spec.TicketID, "liveRun", blocker)
-			// Free the repo admission slot so other runs for the repo are
+			// Free the admission slot so other runs for the repo are
 			// not starved behind the refused run; the run's own retry comes
 			// from this reconcile error's backoff.
-			r.Queue.Release(req.NamespacedName, run.Spec.RepoURL)
+			r.Queue.Release(&run)
 			return ctrl.Result{}, fmt.Errorf("refusing to admit CriteriaRun %s: %s", run.Name, msg)
 		}
 	}
@@ -276,7 +276,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Release the queue slot when the run has finished. If another run is
 	// queued for the same repo, reconcile it so it can start promptly.
 	if isTerminalPhase(phase) {
-		if next := r.Queue.Release(client.ObjectKeyFromObject(&run), run.Spec.RepoURL); next != nil {
+		if next := r.Queue.Release(&run); next != nil {
 			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
 				logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)
 			}
@@ -464,7 +464,7 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 
 	// Release the queue slot before deleting the run so the next queued run
 	// can be admitted.
-	if next := r.Queue.Release(client.ObjectKeyFromObject(run), run.Spec.RepoURL); next != nil {
+	if next := r.Queue.Release(run); next != nil {
 		defer func() {
 			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
 				logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)

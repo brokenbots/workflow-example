@@ -808,6 +808,40 @@ const routesJSONOmittedStates = `{
   ]
 }`
 
+// CRI-242: the workflow's class is stamped onto the run; omitted defaults
+// to dev and an unknown value is rejected fail-closed by routes validation.
+const routesJSONClassTriage = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs",
+      "class": "triage"
+    }
+  },
+  "routes": [
+    {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner"}
+  ]
+}`
+
+const routesJSONClassUnknown = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs",
+      "class": "concurrent"
+    }
+  },
+  "routes": [
+    {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner"}
+  ]
+}`
+
 // testWatcher wires a watcher against a fake k8s client, fake Linear API and
 // a temp routes file, mirroring the deployed wiring.
 type testWatcher struct {
@@ -1139,6 +1173,38 @@ func TestPollStampsWorkflowSource(t *testing.T) {
 		tw.linearS.setIssues(issue("i-16", "CRI-16", gateLabel()))
 		tw.pollOnce(t)
 		assert.Empty(t, tw.runs(t), "the routes loader must reject a url workflow with a blank url")
+	})
+}
+
+// CRI-242: the workflow object's admission queue class is stamped onto the
+// run, defaulted to dev when the routes payload omits it.
+func TestPollStampsWorkflowClass(t *testing.T) {
+	t.Run("routes without a class stamp dev", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.linearS.setIssues(issue("i-17", "CRI-17", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.Workflow)
+		assert.Equal(t, "dev", runs[0].Spec.Workflow.Class, "baked routes default to dev")
+	})
+
+	t.Run("explicit triage class stamps triage", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONClassTriage)
+		tw.linearS.setIssues(issue("i-18", "CRI-18", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.Workflow)
+		assert.Equal(t, "triage", runs[0].Spec.Workflow.Class)
+	})
+
+	t.Run("unknown class on a payload the loader rejects never creates a run", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONClassUnknown)
+		tw.linearS.setIssues(issue("i-19", "CRI-19", gateLabel()))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "routes validation must reject an unknown class")
+		assert.True(t, tw.logs.contains("class must be"), "the routes loader logs the rejected class")
 	})
 }
 

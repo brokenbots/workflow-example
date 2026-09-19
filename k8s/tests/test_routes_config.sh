@@ -69,13 +69,14 @@ SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 NOSPACE_RE = re.compile(r"^\S+$")
 MOUNT_RE = re.compile(r"^/")
 
-WORKFLOW_KEYS = {"type", "namespace", "image", "url", "ref", "volumes", "secrets", "env"}
+WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env"}
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states"}
 TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "routes"}
 VOLUME_KINDS = ("pvc", "nfs", "tmp")
 WORKFLOW_TYPES = ("url", "image")
+WORKFLOW_CLASSES = ("dev", "triage")
 
 
 def load_example(path):
@@ -202,6 +203,9 @@ def validate_workflow(name, workflow, where, errs):
     namespace = workflow.get("namespace")
     if "namespace" in workflow and not is_label(namespace):
         errs.append(f"{where}.namespace {namespace!r} is not a DNS-1123 label")
+    wclass = workflow.get("class")
+    if "class" in workflow and wclass not in WORKFLOW_CLASSES:
+        errs.append(f"{where}.class {wclass!r} must be one of dev, triage")
     for key in ("image", "url", "ref"):
         if key in workflow and (not isinstance(workflow[key], str) or NOSPACE_RE.match(workflow[key]) is None):
             errs.append(f"{where}.{key} must be a non-blank string")
@@ -339,6 +343,8 @@ positive = [
     ("route-with-tag-subset-any", mutate(lambda d: d["routes"][0].update(
         tags=["intake"], tagMatch="any"))),
     ("route-with-default-tagmatch", mutate(lambda d: d["routes"][0].update(tags=["intake"]))),
+    ("workflow-class-dev", mutate(lambda d: d[LIB][BAKED].update(**{"class": "dev"}))),
+    ("workflow-class-triage", mutate(lambda d: d[LIB][URLWF].update(**{"class": "triage"}))),
     ("route-without-states-defaults-triage", mutate(lambda d: d["routes"][0].pop("states"))),
     ("route-with-custom-states", mutate(lambda d: d["routes"][0].update(
         states=["Triage", "In Progress"]))),
@@ -357,6 +363,7 @@ negative = [
     ("image-workflow-without-image", True, mutate(lambda d: d[LIB][BAKED].pop("image"))),
     ("url-workflow-without-url", True, mutate(lambda d: d[LIB][URLWF].pop("url"))),
     ("workflow-unknown-type", True, mutate(lambda d: d[LIB][BAKED].update(type="baked"))),
+    ("workflow-unknown-class", True, mutate(lambda d: d[LIB][BAKED].update(**{"class": "concurrent"}))),
     ("pvc-volume-without-claim", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].pop("claim"))),
     ("nfs-volume-without-server", True, mutate(lambda d: d[LIB][URLWF]["volumes"][2].pop("server"))),
     ("nfs-volume-without-path", True, mutate(lambda d: d[LIB][URLWF]["volumes"][2].pop("path"))),

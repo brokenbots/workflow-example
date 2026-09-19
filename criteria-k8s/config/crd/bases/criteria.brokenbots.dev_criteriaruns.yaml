@@ -106,6 +106,12 @@ spec:
                     namespace:
                       type: string
                       description: Namespace the workflow's runs are admitted into.
+                    class:
+                      type: string
+                      enum:
+                        - dev
+                        - triage
+                      description: Admission queue class (CRI-242). dev runs serialize per repoURL; triage runs are read-only against the repo and may run concurrently with any run on the same repoURL. Omitted defaults to dev.
                     image:
                       type: string
                       description: Container image (type=image, or the process image for url+image).
@@ -256,6 +262,9 @@ spec:
                     repoUrl:
                       type: string
                       description: Repository the queue is keyed on.
+                    class:
+                      type: string
+                      description: Admission queue class the queue is keyed on (CRI-242). dev serializes per repoURL; triage admits concurrently. Always populated; runs without an explicit class resolve to dev.
                     position:
                       type: integer
                       description: Pending queue position. Zero means the run is admitted and running.
