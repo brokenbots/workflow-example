@@ -1,0 +1,26 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+            set -euo pipefail
+            : "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+            run_dir="$criteria_value_1/$criteria_value_2"
+            issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+
+            notes="$run_dir/review-notes.md"
+            [ -s "$notes" ] || printf '(no review notes recorded)\n' > "$notes"
+
+            curl -sS -f \
+                -H "Authorization: $LINEAR_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d "$(jq -n \
+                    --arg q 'mutation($id: String!, $body: String!) { commentCreate(input: {issueId: $id, body: $body}) { success } }' \
+                    --arg id "$issue_id" \
+                    --arg header '**Automated QA triage failed to reach a verdict.** The triage workflow ended without recording a finding — an infrastructure failure, not a result. Do not read this as the bug being absent.
+
+Reviewer notes:
+' \
+                    --rawfile notes "$notes" \
+                    '{query: $q, variables: {id: $id, body: ($header + $notes)}}')" \
+                https://api.linear.app/graphql \
+                | jq -e '.data.commentCreate.success == true' >/dev/null
+
+            echo "comment posted"
