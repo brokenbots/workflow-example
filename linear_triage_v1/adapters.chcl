@@ -1,0 +1,51 @@
+// All of this workflow's own work — Linear API calls, file guards — happens
+// under intake_root. Nothing here touches the repository directly;
+// qa_triage_v1 manages its own environment and adapter set as a subworkflow.
+environment "remote" "triage" {
+    // Per-scope sessions: each scope gets its own adapter pod, torn down at
+    // scope exit. Requires the run data dir wiring (CRI-128).
+    per_scope_sessions = true
+    working_directory = var.intake_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address = "127.0.0.1:7778"
+    accept_token = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
+    accept_digest_from = "lockfile"
+}
+
+// Deterministic steps. Also carries the Linear credential: every Linear step
+// runs curl against https://api.linear.app/graphql with this key.
+//
+// LINEAR_API_KEY is resolved from the host environment and injected into this
+// adapter's command environment through the secret channel. It is never
+// interpolated into step input.
+adapter "shell" "triage" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.3"
+    environment = remote.triage
+    secrets {
+        LINEAR_API_KEY = var.linear_api_key
+    }
+}
+
+// The routing gate at the end of triage. Reads artifacts from disk — the
+// triage report and the workstream file — never another agent's transcript.
+adapter "copilot" "triage_reviewer" {
+    environment = remote.triage
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.6"
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
+    }
+    config {
+        model             = var.triage_reviewer.model
+        max_turns         = "${var.triage_reviewer.max_turns}"
+        reasoning_effort  = var.triage_reviewer.reasoning_effort
+        system_prompt     = file("./agents/triage_reviewer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.triage_reviewer.provider.base_url
+        provider_wire_api = var.triage_reviewer.provider.wire_api
+        working_directory = var.intake_root
+    }
+}

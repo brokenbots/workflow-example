@@ -1,0 +1,55 @@
+#!/bin/sh
+# Mechanical bug report for the standalone triage workflow. linear_triage_v1
+# has no intake classifier agent (intake classifies before its triage phase;
+# here the spec's flow is fetch -> gate -> QA triage), so the report QA triage
+# requires is assembled mechanically from the fetched ticket: title,
+# description, comment history. No model call re-derives the analysis.
+#
+# fetch_ticket stores Linear's GraphQL response with its data/issue envelope,
+# so every field is read through .data.issue. The report basename is
+# load-bearing: qa_triage_v1 derives its run slug from it, so its evidence
+# lands at <triage_root>/<ticket_id>/ and its published workstream at
+# <workstream_out_dir>/<ticket_id>.md.
+set -eu
+
+TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
+REPORT="{{ .intake_root }}/{{ .ticket_id }}/{{ .ticket_id }}.md"
+
+if [ ! -s "$TICKET_JSON" ]; then
+    echo "ticket.json missing or empty; cannot assemble a bug report" >&2
+    exit 1
+fi
+
+TITLE=$(jq -r '.data.issue.title // empty' "$TICKET_JSON")
+DESC=$(jq -r '.data.issue.description // empty' "$TICKET_JSON")
+URL=$(jq -r '.data.issue.url // empty' "$TICKET_JSON")
+STATE=$(jq -r '.data.issue.state.name // empty' "$TICKET_JSON")
+
+if [ -z "$TITLE" ]; then
+    echo "ticket.json carries no issue title; cannot assemble a bug report" >&2
+    exit 1
+fi
+
+{
+    echo "# Bug report: $TITLE"
+    echo
+    echo "Source: $URL"
+    echo
+    echo "Linear state at intake: $STATE"
+    echo
+    echo "## Reported problem"
+    echo
+    echo "$DESC"
+    echo
+    echo "## Ticket comments (reported behavior and evidence)"
+    echo
+    jq -r '.data.issue.comments.nodes[]? | "### " + .createdAt + " — " + (.user.name // .user.displayName // "unknown") + "\n\n" + .body + "\n"' "$TICKET_JSON"
+} > "$REPORT"
+
+# Guard: non-empty report or report assembly failed
+if [ ! -s "$REPORT" ]; then
+    echo "bug report is empty" >&2
+    exit 1
+fi
+
+echo "bug report written: $REPORT"

@@ -1,0 +1,12 @@
+Review a completed QA triage run and decide the routing for Linear ticket {{ .ticket_id }}.
+
+Triage report: {{ .triage_root }}/{{ .ticket_id }}/evidence/triage-report.md
+Evidence directory: {{ .triage_root }}/{{ .ticket_id }}/evidence/
+Verdict recorded by triage: {{ .verdict }}
+Workstream file (empty means none was produced): {{ .workstream_file }}
+
+Follow your system prompt. Before submitting, write your reasoning
+to: {{ .intake_root }}/{{ .ticket_id }}/review-notes.md
+
+Call submit_outcome with `valid_run_handler`, `invalid_close`, or
+`needs_human`.

@@ -1,0 +1,28 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-uuid-1",
+      "identifier": "CRI-99",
+      "title": "Broken gate on empty payload",
+      "description": "Steps to reproduce:\n1. Start the runner with an empty payload\n2. Send SIGTERM during startup\n\nObserved: the gate crashes with a nil map read. Expected: the gate rejects the payload with a typed error.",
+      "url": "https://linear.app/brokenbots/issue/CRI-99",
+      "state": { "name": "Triage", "type": "unstarted" },
+      "team": { "id": "team-uuid-1" },
+      "labels": {
+        "nodes": [
+          { "id": "l2", "name": "Bug" }
+        ]
+      },
+      "comments": {
+        "nodes": [
+          {
+            "id": "c1",
+            "body": "Reproduced on build 2024.1: runner log shows `panic: assignment to entry in nil map` right after the payload handshake.",
+            "createdAt": "2026-02-10T09:15:00.000Z",
+            "user": { "name": "Dana Ops", "displayName": "dana" }
+          }
+        ]
+      }
+    }
+  }
+}

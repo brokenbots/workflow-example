@@ -1,0 +1,15 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-uuid-2",
+      "identifier": "CRI-100",
+      "title": "",
+      "description": "Report with no usable title.",
+      "url": "https://linear.app/brokenbots/issue/CRI-100",
+      "state": { "name": "Triage", "type": "unstarted" },
+      "team": { "id": "team-uuid-1" },
+      "labels": { "nodes": [] },
+      "comments": { "nodes": [] }
+    }
+  }
+}
