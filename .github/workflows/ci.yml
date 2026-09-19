@@ -66,6 +66,17 @@ jobs:
           sudo install -m 0755 /tmp/criteria-install/criteria /usr/local/bin/criteria
           rm -rf "/tmp/${archive}" /tmp/criteria-checksums.txt /tmp/criteria-install
 
+      # Mirrors linear_intake_v1/Dockerfile: pre-pull the two adapter binaries
+      # that linear_triage_v1/.criteria.lock.hcl pins, so `criteria validate`
+      # can resolve and verify their schemas from the runner's local cache.
+      - name: Pre-pull triage adapter binaries into the criteria cache
+        env:
+          CRITERIA_HOME: /home/runner/.local/criteria
+        run: |
+          mkdir -p "$CRITERIA_HOME/adapters"
+          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.3
+          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.6
+
       - name: Run linear_triage_v1 standalone extraction regression test (CRI-238)
         run: |
           bash linear_triage_v1/tests/test_triage_standalone.sh
