@@ -1,10 +1,10 @@
-// Rendered by the child fixture to post the run's own evidence comment on the
-// validation ticket (M10.2: evidence recorded by the run itself). Only the
-// ticket identifier is interpolated and it is strictly validated; the comment
-// body is fixed text with no quotes or backslashes, so nothing untrusted
-// reaches the GraphQL payload. LINEAR_API_KEY arrives over the secret
-// channel. The transport is curl when present and busybox wget otherwise —
-// the minimal criteria-base image ships no curl.
+# Rendered by the child fixture to post the run's own evidence comment on the
+# validation ticket (M10.2: evidence recorded by the run itself). Only the
+# ticket identifier is interpolated and it is strictly validated; the comment
+# body is fixed text with no quotes or backslashes, so nothing untrusted
+# reaches the GraphQL payload. LINEAR_API_KEY arrives over the secret
+# channel. The transport is curl when present and busybox wget otherwise --
+# the minimal criteria-base image ships no curl.
 ticket_id={{ .ticket_id | shellquote }}
 
 set -eu
