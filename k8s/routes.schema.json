@@ -77,6 +77,14 @@
           "$ref": "#/definitions/label",
           "description": "Kubernetes namespace this workflow's runs are admitted into. Must match the namespace of this ConfigMap, the SecretProviderClasses, and the volumes it references."
         },
+        "class": {
+          "description": "Admission queue class (CRI-242): 'dev' runs serialize per repoURL (at most one dev run at a time per repoURL), while 'triage' runs are read-only against the repo and may run concurrently with any run on the same repoURL (per-ticket PVC clones isolate state). Omitted defaults to 'dev', so routes without an explicit class keep the per-repo serialization they had before classes existed. The class is stamped onto the CriteriaRun the watcher creates; the operator keys its admission queue on (repoURL, class).",
+          "enum": [
+            "dev",
+            "triage"
+          ],
+          "default": "dev"
+        },
         "image": {
           "type": "string",
           "description": "Container image reference. Required for type=image (the trust anchor is the image itself, ADR-0005 D1). Optional for type=url, where setting it selects url+image (image = process, URL = content) and omitting it selects url-only on the minimal criteria/runtime base image.",

@@ -16,6 +16,18 @@ const (
 	PhaseUnknown   CriteriaRunPhase = "Unknown"
 )
 
+// Admission queue classes (CRI-242). The class partitions the admission
+// queue: dev-class runs serialize per repoURL (concurrency 1), while
+// triage-class runs are read-only against the repo and may run
+// concurrently with any run on the same repoURL (per-ticket PVC clones
+// isolate state). The class is declared on the routes workflow-library
+// object and stamped onto the run by the linear-watcher; runs without a
+// stamped workflow behave as dev.
+const (
+	RunClassDev    = "dev"
+	RunClassTriage = "triage"
+)
+
 // CriteriaRunSpec defines the desired state of a CriteriaRun.
 type CriteriaRunSpec struct {
 	// TicketID is the Linear ticket identifier (e.g. CRI-104).
@@ -98,6 +110,13 @@ type RunWorkflow struct {
 	// Namespace is the namespace the workflow's runs are admitted into.
 	Namespace string `json:"namespace"`
 
+	// Class is the admission queue class (CRI-242): "dev" runs serialize
+	// per repoURL, "triage" runs (read-only against the repo) may run
+	// concurrently with any run on the same repoURL. Defaults to "dev",
+	// so routes without an explicit class keep the per-repo serialization
+	// they had before classes existed.
+	Class string `json:"class,omitempty"`
+
 	// Image is the container image for type=image, or the process image for
 	// url+image. Empty for url-only runs (minimal criteria/runtime base).
 	Image string `json:"image,omitempty"`
@@ -144,22 +163,32 @@ type RunWorkflowSecret struct {
 	Env                 map[string]string `json:"env,omitempty"`
 }
 
-// CriteriaRunQueueStatus exposes the repo-keyed admission queue state for this run.
+// CriteriaRunQueueStatus exposes the admission queue state for this run,
+// keyed on (repoURL, class).
 type CriteriaRunQueueStatus struct {
 	// RepoURL is the repository this queue is keyed on.
 	RepoURL string `json:"repoUrl,omitempty"`
 
-	// Position is this run's position in the pending queue. Zero means admitted
-	// and currently running for the repo.
+	// Class is the admission queue class this queue is keyed on (CRI-242):
+	// "dev" serializes per repoURL, "triage" admits concurrently. The
+	// resolved class is always populated; runs without an explicit class
+	// resolve to "dev".
+	Class string `json:"class,omitempty"`
+
+	// Position is this run's position in the pending queue. Zero means
+	// admitted and currently running for the repo within this class.
 	Position int `json:"position,omitempty"`
 
-	// Length is the total number of runs currently queued for this repoURL.
+	// Length is the total number of runs currently queued for this
+	// (repoURL, class) pair.
 	Length int `json:"length,omitempty"`
 
-	// Running is the name of the CriteriaRun currently admitted for this repoURL.
+	// Running is the name of the CriteriaRun currently admitted for this
+	// (repoURL, class) pair.
 	Running string `json:"running,omitempty"`
 
-	// Pending lists the names of queued CriteriaRuns for this repoURL, in FIFO order.
+	// Pending lists the names of queued CriteriaRuns for this (repoURL,
+	// class) pair, in FIFO order.
 	Pending []string `json:"pending,omitempty"`
 }
 
@@ -206,7 +235,7 @@ type CriteriaRunStatus struct {
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Queue exposes this run's position and repo-keyed queue state.
+	// Queue exposes this run's position and (repoURL, class)-keyed queue state.
 	Queue *CriteriaRunQueueStatus `json:"queue,omitempty"`
 
 	// Conditions are optional status conditions for the run.

@@ -1057,6 +1057,7 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 	var updatedB criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &updatedB))
 	require.NotNil(t, updatedB.Status.Queue)
+	assert.Equal(t, "dev", updatedB.Status.Queue.Class, "runs without an explicit class queue as dev")
 	assert.Equal(t, 1, updatedB.Status.Queue.Position)
 	assert.Equal(t, 2, updatedB.Status.Queue.Length)
 	assert.Equal(t, "cri-117-a", updatedB.Status.Queue.Running)
@@ -1091,6 +1092,91 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 	assert.Equal(t, 0, admittedB.Status.Queue.Position)
 	assert.Equal(t, "cri-117-b", admittedB.Status.Queue.Running)
 	assert.Empty(t, admittedB.Status.Queue.Pending)
+}
+
+// CRI-242: a triage run is read-only against the repo and per-ticket PVC
+// clones isolate state, so it admits concurrently with a dev run on the
+// same repo; a further dev run still queues behind the running dev run.
+func TestQueueTriageAdmitsAlongsideDev(t *testing.T) {
+	scheme := newScheme(t)
+	repo := "https://github.com/brokenbots/workflow-example.git"
+
+	runDev := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-242-dev", Namespace: "default", UID: types.UID("uid-dev")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-242-D", RepoURL: repo, Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+	runTriage := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-242-triage", Namespace: "default", UID: types.UID("uid-triage")},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-242-T",
+			RepoURL:  repo,
+			Image:    "localhost:5000/linear-intake-remote:dev",
+			Workflow: &criteriav1.RunWorkflow{
+				Name:      "linear-intake-v1",
+				Type:      "image",
+				Namespace: "default",
+				Class:     criteriav1.RunClassTriage,
+			},
+		},
+	}
+	runDev2 := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-242-dev2", Namespace: "default", UID: types.UID("uid-dev2")},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-242-D2", RepoURL: repo, Image: "localhost:5000/linear-intake-remote:dev"},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(runDev, runTriage, runDev2).
+		WithObjects(runDev, runTriage, runDev2).
+		Build()
+
+	r := &controller.CriteriaRunReconciler{
+		Client:   cl,
+		Scheme:   scheme,
+		Castle:   &fakeCastle{},
+		Defaults: jobbuilder.Defaults{DataPVC: "criteria-data"},
+		Queue:    controller.NewRunQueue(),
+	}
+
+	// Admit the dev run and create its jobs.
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runDev)})
+	require.NoError(t, err)
+
+	// The triage run on the same repo is admitted alongside the dev run.
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runTriage)})
+	require.NoError(t, err)
+
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, 6, "both the dev and triage runs are admitted on the same repo")
+
+	for _, tc := range []struct {
+		run   *criteriav1.CriteriaRun
+		class string
+	}{{runDev, "dev"}, {runTriage, "triage"}} {
+		var updated criteriav1.CriteriaRun
+		require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tc.run), &updated))
+		require.NotNil(t, updated.Status.Queue)
+		assert.Equal(t, tc.class, updated.Status.Queue.Class)
+		assert.Equal(t, 0, updated.Status.Queue.Position)
+		assert.Equal(t, tc.run.Name, updated.Status.Queue.Running)
+	}
+
+	// A second dev run still serializes with the running dev run even while
+	// the triage run holds its own slot.
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runDev2)})
+	require.NoError(t, err)
+
+	var jobsAfter batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobsAfter, client.InNamespace("default")))
+	assert.Len(t, jobsAfter.Items, 6, "the queued dev run does not create jobs")
+
+	var queuedDev2 criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runDev2), &queuedDev2))
+	require.NotNil(t, queuedDev2.Status.Queue)
+	assert.Equal(t, "dev", queuedDev2.Status.Queue.Class)
+	assert.Equal(t, 1, queuedDev2.Status.Queue.Position)
+	assert.Equal(t, "cri-242-dev", queuedDev2.Status.Queue.Running)
 }
 
 func TestQueueDoesNotBlockDifferentRepoRuns(t *testing.T) {

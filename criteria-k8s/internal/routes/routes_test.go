@@ -546,3 +546,52 @@ func TestValidateNegative(t *testing.T) {
 		})
 	}
 }
+
+// CRI-242: the workflow-library object carries the admission queue class.
+// Empty defaults (dev at stamping) and both declared values validate; any
+// other value fails closed like tagMatch.
+func TestValidateWorkflowClass(t *testing.T) {
+	for _, class := range []string{"", ClassDev, ClassTriage} {
+		p := validPayload()
+		wf := p.WorkflowLibrary["wf-default"]
+		wf.Class = class
+		p.WorkflowLibrary["wf-default"] = wf
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate(class=%q) failed: %v", class, err)
+		}
+	}
+
+	p := validPayload()
+	wf := p.WorkflowLibrary["wf-default"]
+	wf.Class = "concurrent"
+	p.WorkflowLibrary["wf-default"] = wf
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("Validate succeeded for an unknown class, want error")
+	}
+	if !strings.Contains(err.Error(), "class must be") {
+		t.Fatalf("err = %v, want substring %q", err, "class must be")
+	}
+}
+
+// CRI-242: Parse preserves the class declared on a workflow-library object
+// and Resolve carries it through, so the watcher stamps what the routes
+// payload declared (the empty class stays empty here; the dev default is
+// applied at stamping, not at parse).
+func TestParseAndResolveCarryWorkflowClass(t *testing.T) {
+	raw := []byte(`{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"wf-triage":{"type":"image","image":"i","namespace":"criteria-jobs","class":"triage"}},"routes":[{"name":"intake","workflow":"wf-triage","project":"Runner"}]}`)
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if got := p.WorkflowLibrary["wf-triage"].Class; got != ClassTriage {
+		t.Fatalf("parsed class = %q, want %q", got, ClassTriage)
+	}
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if sel.Workflow.Class != ClassTriage {
+		t.Fatalf("resolved class = %q, want %q", sel.Workflow.Class, ClassTriage)
+	}
+}

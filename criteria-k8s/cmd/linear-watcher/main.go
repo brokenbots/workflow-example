@@ -894,9 +894,14 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		Name:      name,
 		Type:      wf.Type,
 		Namespace: wf.Namespace,
-		Image:     wf.Image,
-		URL:       wf.URL,
-		Ref:       wf.Ref,
+		// CRI-242: the admission queue class comes off the routes
+		// workflow-library object; an omitted class resolves to dev so
+		// routes without an explicit class keep the per-repo
+		// serialization they had before classes existed.
+		Class: workflowClass(wf),
+		Image: wf.Image,
+		URL:   wf.URL,
+		Ref:   wf.Ref,
 	}
 	if wf.Env != nil {
 		out.Env = make(map[string]string, len(wf.Env))
@@ -933,6 +938,19 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		}
 	}
 	return out
+}
+
+// workflowClass resolves the admission queue class stamped onto the run
+// (CRI-242): the routes workflow's declared class, defaulted to dev so
+// routes without an explicit class keep the per-repo serialization they
+// had before classes existed. Routes validation rejects any other value;
+// an unrecognized value on an unvalidated payload degrades to dev (fail
+// safe: the run keeps serializing).
+func workflowClass(wf routes.Workflow) string {
+	if wf.Class == routes.ClassTriage {
+		return routes.ClassTriage
+	}
+	return routes.ClassDefault
 }
 
 func copyStringMap(m map[string]string) map[string]string {
