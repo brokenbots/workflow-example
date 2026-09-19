@@ -324,7 +324,7 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 			"[--workflow-ref] [28777aacc3cfbe85005ddb27f548116e692c0eb4] "+
 			"[--server] [http://castle:9443] [--events-file] [/tmp/events.ndjson]",
 			"apply must receive the URL, the bridged runtime vars, the pin, and the forwarded flags in order: %s", log)
-		assert.Contains(t, log, "[--var] [linear_api_key=file:/secrets/linear_api_key]",
+		assert.Contains(t, log, "[--var] [linear_api_key=file:/home/criteria/linear-secrets/linear_api_key]",
 			"secret variables must ride as file: OriginRefs (D69), never as raw values: %s", log)
 		assert.Contains(t, log, "host=10.42.0.5:7778",
 			"the runner must publish its routable dial address for per-scope pods")

@@ -160,7 +160,7 @@ fi
 # container exit code. Secret variables ride as file: OriginRefs per D69 —
 # only mount paths appear in argv, values reach adapters over OpenSession.
 "$criteria_bin" "$@" \
-    --var "linear_api_key=file:/secrets/linear_api_key" \
+    --var "linear_api_key=file:/home/criteria/linear-secrets/linear_api_key" \
     --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
     --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
     --output concise
