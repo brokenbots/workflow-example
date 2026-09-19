@@ -13,6 +13,15 @@ ARG TARGETARCH
 # workflow image must be built from a release >= v0.5.22 or per-scope pods
 # would be built from the adapter node name and reference images that do not
 # exist in the registry (guarded by linear_intake_v1/tests/test_engine_pin.sh).
+# CRI-234 deploy pairing: the per-(scope,environment) co-location also reads
+# the environment_type / environment_name keys published from criteria commit
+# fc95449 onward, but no criteria release contains fc95449 yet (the latest,
+# v0.5.24, predates it). Image-mode runs therefore do not yet pair with a
+# runner that emits the identity keys and keep taking the env-less
+# per-adapter fallback; rolling image-mode requires a re-audited
+# CRITERIA_VERSION bump once a release contains fc95449 (coordinator
+# decision - see the Makefile deploy targets and
+# k8s/tests/test_criteria_base_pin.sh for the source-mode pairing).
 ARG CRITERIA_VERSION=v0.5.22
 ARG COPILOT_VERSION=1.0.82
 ARG GH_VERSION=2.98.0

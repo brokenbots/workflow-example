@@ -46,6 +46,12 @@ type payloadEventData struct {
 	ScopeID     string `json:"scope_instance_id"`
 	ShimAddress string `json:"shim_listen_address"`
 	TokenFile   string `json:"token_ref"`
+	// Environment identity (CRI-233, runner fc95449): the compiled
+	// environment declaration's type and name, carried verbatim by the
+	// engine's payload.data (internal/run/sink.go) in every wire shape.
+	// Engines older than fc95449 carry neither key.
+	EnvironmentType string `json:"environment_type"`
+	EnvironmentName string `json:"environment_name"`
 }
 
 // LifecycleEvent describes a provision-wanted or release event in the run
@@ -83,6 +89,22 @@ type LifecycleEvent struct {
 	// Only present on provision-wanted events.
 	TokenFile string `json:"token_file,omitempty"`
 
+	// EnvironmentType is the compiled environment declaration's type (e.g.
+	// "remote"), and EnvironmentName its declaration name (e.g. "prod").
+	// The runner's adapter lifecycle events carry both verbatim (CRI-233,
+	// runner commit fc95449); events from older engines carry neither.
+	EnvironmentType string `json:"environment_type,omitempty"`
+	EnvironmentName string `json:"environment_name,omitempty"`
+
+	// Environment is the co-location grouping identity (CRI-234): the
+	// "type/name" pair derived from EnvironmentType and EnvironmentName,
+	// so remote/prod and remote/worktree stay distinct groups. Adapters
+	// sharing one environment run as separate containers in one (scope,
+	// environment) pod (CRI-234). Empty when the event carries neither
+	// field (pre-fc95449 engines), where the reconcile falls back to
+	// per-adapter pods. Derived by the parsers; not a wire key.
+	Environment string `json:"-"`
+
 	// Timestamp is an optional RFC3339 event timestamp.
 	Timestamp string `json:"timestamp,omitempty"`
 }
@@ -100,6 +122,19 @@ func (e LifecycleEvent) IsRelease() bool {
 // ScopeKey returns a stable key combining the adapter kind and scope id.
 func (e LifecycleEvent) ScopeKey() string {
 	return e.AdapterName + "/" + e.ScopeID
+}
+
+// EnvironmentIdentity joins the compiled environment declaration's type and
+// name (CRI-233, runner fc95449) into the per-scope co-location grouping key
+// (CRI-234): remote/prod and remote/worktree are distinct groups. The
+// identity is empty only when the event carries neither field — engines
+// older than fc95449 — which the reconcile maps to the per-adapter pod
+// fallback.
+func EnvironmentIdentity(envType, envName string) string {
+	if envType == "" && envName == "" {
+		return ""
+	}
+	return envType + "/" + envName
 }
 
 // ParseLifecycleEvents scans an ndjson event stream and returns all lifecycle
@@ -135,6 +170,11 @@ func ParseLifecycleEvents(r io.Reader) ([]LifecycleEvent, error) {
 		if ev.AdapterName == "" {
 			continue
 		}
+		// The identity is derived from the environment declaration's
+		// type/name pair (CRI-233, runner fc95449) — never from a
+		// hand-provided key. Both keys empty (pre-fc95449 engines) keeps
+		// the per-adapter pod fallback.
+		ev.Environment = EnvironmentIdentity(ev.EnvironmentType, ev.EnvironmentName)
 		events = append(events, ev)
 	}
 	if err := scanner.Err(); err != nil {
@@ -153,15 +193,18 @@ func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) 
 		return LifecycleEvent{}, false
 	}
 	ev := LifecycleEvent{
-		Event:       EventProvisionWanted,
-		RunID:       envelope.RunID,
-		ScopeID:     envelope.Payload.Data.ScopeID,
-		AdapterName: envelope.Payload.Data.Adapter,
-		AdapterType: envelope.Payload.Data.AdapterType,
-		Digest:      envelope.Payload.Data.Digest,
-		ShimAddress: envelope.Payload.Data.ShimAddress,
-		TokenFile:   envelope.Payload.Data.TokenFile,
+		Event:           EventProvisionWanted,
+		RunID:           envelope.RunID,
+		ScopeID:         envelope.Payload.Data.ScopeID,
+		AdapterName:     envelope.Payload.Data.Adapter,
+		AdapterType:     envelope.Payload.Data.AdapterType,
+		Digest:          envelope.Payload.Data.Digest,
+		ShimAddress:     envelope.Payload.Data.ShimAddress,
+		TokenFile:       envelope.Payload.Data.TokenFile,
+		EnvironmentType: envelope.Payload.Data.EnvironmentType,
+		EnvironmentName: envelope.Payload.Data.EnvironmentName,
 	}
+	ev.Environment = EnvironmentIdentity(ev.EnvironmentType, ev.EnvironmentName)
 	if ev.AdapterName == "" {
 		return LifecycleEvent{}, false
 	}

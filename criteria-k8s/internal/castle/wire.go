@@ -59,6 +59,14 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	// (shell/copilot/...), distinct from the workflow's adapter node name.
 	// The per-scope pod builder needs it to resolve adapter images.
 	ev.AdapterType = dataString(data, "adapter_type")
+	// Environment identity (CRI-233, runner fc95449): the compiled
+	// environment declaration's type and name, carried verbatim in
+	// payload.data (internal/run/sink.go) — the per-scope reconcile's
+	// co-location grouping key (CRI-234). Both keys empty (pre-fc95449
+	// engines) keeps the per-adapter pod fallback.
+	ev.EnvironmentType = dataString(data, "environment_type")
+	ev.EnvironmentName = dataString(data, "environment_name")
+	ev.Environment = events.EnvironmentIdentity(ev.EnvironmentType, ev.EnvironmentName)
 	ev.Digest = dataString(data, "digest")
 	ev.ShimAddress = dataString(data, "shim_listen_address", "shim_address")
 	ev.TokenFile = dataString(data, "token_ref", "token_file")

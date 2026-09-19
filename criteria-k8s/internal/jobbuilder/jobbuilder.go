@@ -23,6 +23,24 @@ const (
 	LabelRun = "criteria.brokenbots.dev/run"
 	// LabelRole distinguishes the runner from the adapter children.
 	LabelRole = "criteria.brokenbots.dev/role"
+	// LabelAdapterKind is the adapter implementation kind of a per-adapter
+	// (environment-less) fallback pod. Group pods can host several adapters,
+	// so their kind set lives on the AnnotationAdapterKinds annotation
+	// instead: a comma-joined kind set is illegal as a label value
+	// (CRI-234 R1).
+	LabelAdapterKind = "criteria.brokenbots.dev/adapter-kind"
+	// AnnotationAdapterKinds is the deduplicated, sorted set of adapter
+	// kinds hosted by a (scope, environment) group pod, comma-joined. It is
+	// an annotation, not a label, because the comma separator is illegal in
+	// a Kubernetes label value (CRI-234 R1).
+	AnnotationAdapterKinds = "criteria.brokenbots.dev/adapter-kinds"
+	// LabelScopeID is the scope instance id a per-scope adapter pod serves.
+	// Group pods serve exactly one scope, so the label stays single-valued
+	// under the (scope, environment) grouping.
+	LabelScopeID = "criteria.brokenbots.dev/scope-id"
+	// LabelEnvironment is the environment identity a group pod was built
+	// from (CRI-234). Absent on the per-adapter fallback pods.
+	LabelEnvironment = "criteria.brokenbots.dev/environment"
 	// RoleRunner / RoleAdapter are the LabelRole values in use.
 	RoleRunner  = "runner"
 	RoleAdapter = "adapter"
