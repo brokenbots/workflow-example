@@ -27,3 +27,22 @@ On the shared data PVC, the CriteriaRun name (`cri-<ticket>-<timestamp>` under
 `/data/.criteria/runs/`) identifies the pod run, and the engine-side run
 summary (`/data/criteria/runs/<run-id>.json`) names the workflow that
 executed and the steps it visited.
+
+## Status (2026-09-19)
+
+Run B executed as designed but returned a **negative result**: the carrier
+ticket (CRI-261, armed with `k8s-run`, invariant clear, repo URL in the
+description) sat at Ready for Development for ~5 watcher poll cycles with no
+CriteriaRun created — while a CRI-220 orphan-sweep probe (a manual
+`criteria-automation` label on the same ticket, swapped to `criteria-dirty`
+within one poll) proved the watcher alive and polling. Diagnosis: the M10.1
+routes cutover (`k8s/examples/routes-configmap.yaml`, `criteria-develop` on
+[Ready for Development] → `linear_develop_v1`) is **not applied** to the
+deployed `criteria-routes` ConfigMap; the observed firing of CRI-245's own
+run at [Triage] through the legacy intake image corroborates a pre-M10.1
+mounted payload. The routes payload is re-read every poll (CRI-217), so the
+remediation is the operator cutover (`make apply-routes`, wholesale apply —
+diff the live ConfigMap first), not a watcher restart. The full evidence
+report is recorded on CRI-245; the carrier ticket stays parked at Ready for
+Development, armed so the re-run fires automatically once the cutover is
+applied — no manual kickoff.
