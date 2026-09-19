@@ -138,8 +138,8 @@ step "ensure_confirmed_workstream" {
     allow_tools = []
     input {
         command = templatefile("./scripts/ensure_confirmed_workstream.sh.tftpl", {
-            ticket_id   = var.ticket_id
-            intake_root = var.intake_root
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
         })
     }
     outcome "success" {

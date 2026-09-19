@@ -222,10 +222,15 @@ assert_edge "set_review_state" "failure" "awaiting_human"
 
 # fetch_ticket stores the enveloped GraphQL response; the gate must read
 # through .data.issue. Rendering mimics templatefile for the two variables
-# the script consumes.
+# the script consumes, including the engine's shellquote (single-quote
+# wrapping with '\'' escaping).
 SLUG="CRI-140"
+shquote() {
+    printf "'%s'" "${1//\'/\'\\\'\'}"
+}
 render() {
-    sed -e "s|{{ .intake_root }}|$1|g" -e "s|{{ .ticket_id }}|$SLUG|g" "$2" > "$3"
+    sed -e "s@{{ .criteria_value_1 | shellquote }}@$(shquote "$1")@g" \
+        -e "s@{{ .criteria_value_2 | shellquote }}@$(shquote "$SLUG")@g" "$2" > "$3"
 }
 run_dir="$TMP/intake/$SLUG"
 mkdir -p "$run_dir"

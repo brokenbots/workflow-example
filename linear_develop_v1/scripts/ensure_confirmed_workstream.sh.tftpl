@@ -20,10 +20,12 @@
 # fetch_ticket stores Linear's GraphQL response with its data/issue envelope,
 # so every field is read through .data.issue (the fix the triage copies carry
 # over the intake originals).
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
 set -eu
 
-TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
-WORKSTREAM="{{ .intake_root }}/{{ .ticket_id }}/workstreams/{{ .ticket_id }}.md"
+TICKET_JSON="$criteria_value_1/$criteria_value_2/ticket.json"
+WORKSTREAM="$criteria_value_1/$criteria_value_2/workstreams/$criteria_value_2.md"
 
 mkdir -p "$(dirname "$WORKSTREAM")"
 
