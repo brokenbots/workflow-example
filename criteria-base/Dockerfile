@@ -33,14 +33,17 @@ RUN git clone --filter=blob:none https://github.com/brokenbots/criteria.git /src
 WORKDIR /src
 RUN git -c advice.detachedHead=false checkout --quiet "${CRITERIA_COMMIT}" \
  && test "$(git rev-parse HEAD)" = "${CRITERIA_COMMIT}"
-# CRITERIA_VERSION overrides the embedded engine version directly (release builds
-# inject exactly the release tag; empty = git describe, for unpinned dev builds).
-# A git-describe value (vX.Y.Z-N-gSHA) is a semver PRERELEASE, which the
-# criteria_version gate correctly rejects against stable lower bounds - so pinned
-# release builds must inject the exact release tag here.
+# CRITERIA_VERSION is REQUIRED and must be the exact criteria release tag the
+# CRITERIA_COMMIT sha corresponds to (e.g. v0.5.25). The image tag mirrors it
+# (v0.1-<tag>), possibly patched ahead for container-only fixes. There is
+# deliberately NO git-describe fallback: a git-describe string (vX.Y.Z-N-gSHA)
+# is a semver PRERELEASE, which the engine's criteria_version gate rejects
+# against stable lower bounds - and an image whose engine version is ambiguous
+# must not ship to the cluster at all.
 ARG CRITERIA_VERSION=""
-RUN CGO_ENABLED=0 GOARCH="${TARGETARCH}" go build -trimpath \
-    -ldflags "-X github.com/brokenbots/criteria/workflow/version.Version=${CRITERIA_VERSION:-$(git describe --tags --match 'v*' --always)}" \
+RUN test -n "${CRITERIA_VERSION}" || { echo "CRITERIA_VERSION is required (the exact criteria release tag, e.g. v0.5.25)"; exit 1; } \
+ && CGO_ENABLED=0 GOARCH="${TARGETARCH}" go build -trimpath \
+    -ldflags "-X github.com/brokenbots/criteria/workflow/version.Version=${CRITERIA_VERSION}" \
     -o /out/criteria ./cmd/criteria
 
 FROM alpine:${ALPINE_VERSION}
