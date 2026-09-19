@@ -41,6 +41,15 @@ func shortHash(s string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))[:perScopePodHashLength]
 }
 
+const (
+	// maxLabelValueLength is the Kubernetes label value limit.
+	maxLabelValueLength = 63
+	// perScopeContainerKindMax caps the kind segment of a member-sensitive
+	// group container name so the member-hash suffix always fits the
+	// 63-character DNS limit: len("adapter-") + kind + "-" + hash.
+	perScopeContainerKindMax = maxLabelValueLength - len("adapter-") - 1 - perScopePodHashLength
+)
+
 // BuildPerScopeAdapterPodGroup constructs the ONE pod hosting every adapter
 // of one (scope, environment) pair, each member as a separate container
 // (CRI-234 M7.2). Co-location is config-declared trust: adapters NOT sharing
@@ -126,7 +135,8 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 // adapterKindsLabel renders the deduplicated, sorted set of adapter kinds
 // hosted by a group pod, comma-joined, for `kubectl` triage and the
 // reconcile create-log. Each kind is sanitized individually so the joined
-// value stays a valid Kubernetes label value.
+// value stays a valid Kubernetes label value, and the joined value is
+// truncated on kind boundaries to respect the 63-character label limit.
 func adapterKindsLabel(members []events.LifecycleEvent) string {
 	seen := make(map[string]struct{}, len(members))
 	kinds := make([]string, 0, len(members))
@@ -139,17 +149,42 @@ func adapterKindsLabel(members []events.LifecycleEvent) string {
 		kinds = append(kinds, kind)
 	}
 	sort.Strings(kinds)
-	return strings.Join(kinds, ",")
+
+	label := strings.Join(kinds, ",")
+	if len(label) <= maxLabelValueLength {
+		return label
+	}
+	parts := make([]string, 0, len(kinds))
+	total := 0
+	for _, kind := range kinds {
+		if len(kind) > maxLabelValueLength {
+			kind = trimHyphens(kind[:maxLabelValueLength])
+		}
+		if total > 0 && total+1+len(kind) > maxLabelValueLength {
+			break
+		}
+		parts = append(parts, kind)
+		total += len(kind) + 1
+	}
+	return strings.Join(parts, ",")
 }
 
-// uniqueAdapterContainerName derives a deterministic per-member container
-// name: adapter-<sanitized member name>, with a -2/-3/... suffix on
-// collisions. Two members with the same name cannot occur in a healthy
-// history (ActiveProvisions keys by adapter/scope), but the engine resends
-// provision_wanted on retries, so the suffix keeps the pod spec valid and
-// byte-stable regardless.
+// uniqueAdapterContainerName derives a deterministic, member-sensitive
+// container name: adapter-<kind>-<hash of the member's handshake binding>,
+// with a -2/-3/... suffix on (defensive) collisions. The name embeds a hash
+// of the member's full binding (scope key, scope tag, digest, token file),
+// so ANY membership or binding change — a member released, a new one
+// provisioned, or a same-kind member swapped in (which a kind-only name
+// would miss) — alters the desired container name set and forces the
+// reconcile to recreate the group pod, whose container sets are immutable.
+// The kind segment is capped so the hash suffix always fits the
+// 63-character DNS limit.
 func uniqueAdapterContainerName(member events.LifecycleEvent, used map[string]int) string {
-	base := safeObjectName("adapter-" + adapterKind(member))
+	kind := safeObjectName(adapterKind(member))
+	if len(kind) > perScopeContainerKindMax {
+		kind = trimHyphens(kind[:perScopeContainerKindMax])
+	}
+	base := safeObjectName(fmt.Sprintf("adapter-%s-%s", kind, shortHash(memberBindingKey(member))))
 	if _, taken := used[base]; !taken {
 		return base
 	}
@@ -159,4 +194,18 @@ func uniqueAdapterContainerName(member events.LifecycleEvent, used map[string]in
 			return candidate
 		}
 	}
+}
+
+// memberBindingKey renders the member identity a group container must
+// reflect: the adapter/scope key plus every handshake env input the
+// container is built from (CRITERIA_REMOTE_SCOPE, CRITERIA_REMOTE_DIGEST,
+// CRITERIA_REMOTE_TOKEN_FILE). A binding change on re-provision therefore
+// also alters the container name.
+func memberBindingKey(member events.LifecycleEvent) string {
+	return strings.Join([]string{
+		member.ScopeKey(),
+		member.ScopeTag,
+		member.Digest,
+		member.TokenFile,
+	}, "\x00")
 }

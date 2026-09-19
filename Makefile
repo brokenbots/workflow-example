@@ -83,6 +83,7 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
+	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "Deploy pairing (CRI-234): the operator's runner-image default must pin the"
 	@echo "  SAME workflow image tag as the watcher - provision events only carry the"
 	@echo "  environment identity from criteria >= fc95449, so the operator image and"

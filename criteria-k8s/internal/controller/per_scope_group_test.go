@@ -42,12 +42,21 @@ func groupRelease(adapter, scopeID, environment string) events.LifecycleEvent {
 	}
 }
 
-func podContainerNames(pod corev1.Pod) []string {
-	names := make([]string, 0, len(pod.Spec.Containers))
-	for _, c := range pod.Spec.Containers {
-		names = append(names, c.Name)
+func containerEnvValue(c corev1.Container, name string) string {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return e.Value
+		}
 	}
-	return names
+	return ""
+}
+
+func podContainerKinds(pod corev1.Pod) []string {
+	kinds := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		kinds = append(kinds, containerEnvValue(c, "ADAPTER_KIND"))
+	}
+	return kinds
 }
 
 // Same environment -> one pod: two adapters sharing (scope, environment)
@@ -68,7 +77,7 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePod(t *testing.T) 
 	pods := listAdapterPods(t, cl, "default")
 	require.Len(t, pods, 1, "exactly ONE pod per (scope, environment)")
 	assert.Equal(t, jobbuilder.PerScopeAdapterGroupName(run, "scope-a", "ci"), pods[0].Name)
-	assert.ElementsMatch(t, []string{"adapter-shell", "adapter-copilot"}, podContainerNames(pods[0]),
+	assert.ElementsMatch(t, []string{"shell", "copilot"}, podContainerKinds(pods[0]),
 		"each adapter sharing the environment runs as a separate container")
 	assert.Equal(t, "ci", pods[0].Labels[jobbuilder.LabelEnvironment])
 	assert.Equal(t, "copilot,shell", pods[0].Labels[jobbuilder.LabelAdapterKinds])
@@ -101,9 +110,9 @@ func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 	require.Contains(t, byEnv, "ci")
 	require.Contains(t, byEnv, "prod")
 
-	assert.ElementsMatch(t, []string{"adapter-shell"}, podContainerNames(byEnv["ci"]),
+	assert.ElementsMatch(t, []string{"shell"}, podContainerKinds(byEnv["ci"]),
 		"the ci pod hosts only its own member")
-	assert.ElementsMatch(t, []string{"adapter-copilot", "adapter-shell"}, podContainerNames(byEnv["prod"]),
+	assert.ElementsMatch(t, []string{"copilot", "shell"}, podContainerKinds(byEnv["prod"]),
 		"the prod pod hosts exactly its two same-environment members — no pod mixes adapters of different environments")
 	assert.NotEqual(t, byEnv["ci"].Name, byEnv["prod"].Name)
 }
@@ -190,7 +199,7 @@ func TestReconcilePerScopeAdaptersRecreatesGroupAfterPartialRelease(t *testing.T
 
 	pods = listAdapterPods(t, cl, "default")
 	require.Len(t, pods, 1, "the group pod persists for the remaining member")
-	assert.ElementsMatch(t, []string{"adapter-shell"}, podContainerNames(pods[0]),
+	assert.ElementsMatch(t, []string{"shell"}, podContainerKinds(pods[0]),
 		"the released member's container must not linger: pod container sets are immutable, so the group is recreated")
 
 	// The recreated pod keeps the same (scope, environment) identity.
@@ -202,7 +211,7 @@ func TestReconcilePerScopeAdaptersRecreatesGroupAfterPartialRelease(t *testing.T
 	require.NoError(t, err)
 	pods = listAdapterPods(t, cl, "default")
 	require.Len(t, pods, 1)
-	assert.ElementsMatch(t, []string{"adapter-shell", "adapter-copilot"}, podContainerNames(pods[0]))
+	assert.ElementsMatch(t, []string{"shell", "copilot"}, podContainerKinds(pods[0]))
 }
 
 // Backward-compat: events without environment identity (pre-fc95449
@@ -295,4 +304,54 @@ func TestReconcilePerScopeAdaptersGroupedIdempotent(t *testing.T) {
 		require.Len(t, pods, 1)
 		assert.Equal(t, uid, string(pods[0].UID), "repeat reconciles must keep the existing group pod")
 	}
+}
+
+// Review R1 regression: a count-preserving, same-kind membership change in
+// one (scope, environment) — member "first"(shell) released while member
+// "second"(shell) is provisioned in the same pass — is invisible to a
+// kind-derived container NAME set. The group pod must still be recreated so
+// the newly provisioned member gets a container and the released member's
+// handshake env (stale digest against a deregistered shim) does not linger.
+func TestReconcilePerScopeAdaptersRecreatesGroupAfterSameKindMemberSwap(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	first := groupProvision("first", "shell", "scope-a", "ci")
+	first.Digest = "sha256:aaaaaaaa"
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{first}, logr.Discard())
+	require.NoError(t, err)
+	pods := listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1)
+	require.Len(t, pods[0].Spec.Containers, 1)
+	assert.Equal(t, "sha256:aaaaaaaa",
+		containerEnvValue(pods[0].Spec.Containers[0], "CRITERIA_REMOTE_DIGEST"))
+	beforeUID := string(pods[0].UID)
+
+	// Same pass, same (scope, environment), same kind, same container count:
+	// release "first" and provision "second". The castle client delivers the
+	// full accumulated history on every pass.
+	second := groupProvision("second", "shell", "scope-a", "ci")
+	second.Digest = "sha256:cccccccc"
+	history := append([]events.LifecycleEvent{first},
+		groupRelease("first", "scope-a", "ci"), second)
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, history, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, active)
+
+	pods = listAdapterPods(t, cl, "default")
+	require.Len(t, pods, 1, "the (scope, environment) keeps exactly one pod")
+	assert.Equal(t, jobbuilder.PerScopeAdapterGroupName(run, "scope-a", "ci"), pods[0].Name)
+	if beforeUID != "" {
+		assert.NotEqual(t, beforeUID, string(pods[0].UID),
+			"the group pod must be recreated: pod container sets are immutable, and the name set alone cannot detect a count-preserving same-kind member swap")
+	}
+	require.Len(t, pods[0].Spec.Containers, 1)
+	digest := containerEnvValue(pods[0].Spec.Containers[0], "CRITERIA_REMOTE_DIGEST")
+	assert.Equal(t, "sha256:cccccccc", digest,
+		"the newly provisioned member's handshake env must be in place")
+	assert.NotEqual(t, "sha256:aaaaaaaa", digest,
+		"no container carrying the released member's handshake env may survive")
+	assert.ElementsMatch(t, []string{"shell"}, podContainerKinds(pods[0]),
+		"the same-kind swap preserves the container count and kind set")
 }

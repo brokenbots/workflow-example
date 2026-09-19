@@ -142,6 +142,11 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		}
 		if err := r.Create(ctx, pod); err != nil {
 			if apierrors.IsAlreadyExists(err) {
+				// The delete above is async on a real cluster: the pod is
+				// still terminating, so the create is retried on a later
+				// pass. Log at V(1) so drift-recreation convergence is
+				// traceable without cluttering the default log level.
+				logger.V(1).Info("adapter pod already exists after delete (still terminating); converging on a later pass", "pod", name)
 				continue
 			}
 			return 0, fmt.Errorf("creating adapter pod %s: %w", name, err)
@@ -171,8 +176,10 @@ func isAdapterGroupPod(pod *corev1.Pod) bool {
 // adapterContainerNamesEqual reports whether the existing pod's container
 // name set matches the desired pod's. Only names are compared — the API
 // server defaults mutable container fields, so a deep spec comparison would
-// false-positive on cosmetic differences. A name mismatch means the group's
-// membership changed.
+// false-positive on cosmetic differences. Group container names are
+// member-sensitive (they embed a hash of each member's handshake binding),
+// so a name-set mismatch means the group's membership — or a member's
+// binding — changed.
 func adapterContainerNamesEqual(existing, desired *corev1.Pod) bool {
 	if len(existing.Spec.Containers) != len(desired.Spec.Containers) {
 		return false

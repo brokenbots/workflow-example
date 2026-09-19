@@ -57,11 +57,13 @@ func TestBuildPerScopeAdapterPodGroupSameEnvironmentOnePod(t *testing.T) {
 	require.NotNil(t, pod)
 
 	// Exactly one pod per (scope, environment): every member is a separate
-	// container of the single pod.
+	// container of the single pod, with a member-sensitive name embedding
+	// the member's own handshake binding.
 	require.Len(t, pod.Spec.Containers, 2)
-	names := []string{pod.Spec.Containers[0].Name, pod.Spec.Containers[1].Name}
-	assert.ElementsMatch(t, []string{"adapter-shell", "adapter-copilot"}, names,
-		"each adapter runs as its own container, named by implementation kind")
+	for _, c := range pod.Spec.Containers {
+		assert.Regexp(t, `^adapter-(shell|copilot)-[0-9a-f]{12}$`, c.Name,
+			"container names are member-sensitive: kind + hash of the member binding")
+	}
 
 	assert.Equal(t, "adapter", pod.Labels["criteria.brokenbots.dev/role"])
 	assert.Equal(t, "scope-a", pod.Labels["criteria.brokenbots.dev/scope-id"])
@@ -72,16 +74,16 @@ func TestBuildPerScopeAdapterPodGroupSameEnvironmentOnePod(t *testing.T) {
 		"group pods carry the kinds-set label, not the single-kind label")
 
 	// Per-member handshake env is built from each member's own event.
-	byName := map[string]corev1.Container{}
+	byKind := map[string]corev1.Container{}
 	for _, c := range pod.Spec.Containers {
-		byName[c.Name] = c
+		byKind[containerEnvMap(c)["ADAPTER_KIND"]] = c
 	}
-	shellEnv := containerEnvMap(byName["adapter-shell"])
+	shellEnv := containerEnvMap(byKind["shell"])
 	assert.Equal(t, "shell", shellEnv["ADAPTER_KIND"])
 	assert.Equal(t, "shell", shellEnv["CRITERIA_ADAPTER_NAME"])
 	assert.Equal(t, "scope-a", shellEnv["CRITERIA_SCOPE_ID"])
 	assert.Equal(t, "/data/intake/CRI-234/tokens/intake", shellEnv["CRITERIA_REMOTE_TOKEN_FILE"])
-	copilotEnv := containerEnvMap(byName["adapter-copilot"])
+	copilotEnv := containerEnvMap(byKind["copilot"])
 	assert.Equal(t, "copilot", copilotEnv["ADAPTER_KIND"])
 	assert.Equal(t, "/data/intake/CRI-234/tokens/review", copilotEnv["CRITERIA_REMOTE_TOKEN_FILE"])
 }
@@ -174,19 +176,48 @@ func TestBuildPerScopeAdapterPodGroupCarriesEnvironmentDeclarations(t *testing.T
 }
 
 func TestBuildPerScopeAdapterPodGroupContainerNameCollision(t *testing.T) {
-	// Retried provision_wanted events can duplicate a member name
-	// (ActiveProvisions collapses them; a duplicate here is defensive).
+	// Engine retries can deliver duplicate provision_wanted events;
+	// ActiveProvisions collapses them so distinct members always hash apart,
+	// but if two members still resolve to one base name (hash-prefix
+	// collision defense) the -N suffix keeps the pod spec valid.
 	run := groupTestRun()
-	members := []events.LifecycleEvent{
-		groupMember("intake", "shell", "scope-a", "ci"),
-		groupMember("intake-2", "shell", "scope-a", "ci"),
-	}
+	member := groupMember("intake", "shell", "scope-a", "ci")
 
-	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci", members)
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member, member})
 	require.NotNil(t, pod)
 	require.Len(t, pod.Spec.Containers, 2)
 	assert.NotEqual(t, pod.Spec.Containers[0].Name, pod.Spec.Containers[1].Name,
-		"container names must stay unique even when both members resolve the same kind")
+		"container names must stay unique even for identical-binding members")
+	assert.Regexp(t, `^adapter-shell-[0-9a-f]{12}(-2)?$`, pod.Spec.Containers[0].Name)
+	assert.Regexp(t, `^adapter-shell-[0-9a-f]{12}(-2)?$`, pod.Spec.Containers[1].Name)
+}
+
+// Review R1 (CRI-234): container names are member-sensitive, so a
+// count-preserving, same-kind membership change in one (scope, environment)
+// alters the desired container name set and the reconcile recreates the
+// pod — the failure mode a kind-only name derivation cannot detect.
+func TestBuildPerScopeAdapterPodGroupNameSetTracksMembership(t *testing.T) {
+	run := groupTestRun()
+
+	before := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("first", "shell", "scope-a", "ci")})
+	after := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("second", "shell", "scope-a", "ci")})
+	require.Len(t, after.Spec.Containers, 1)
+	assert.NotEqual(t, before.Spec.Containers[0].Name, after.Spec.Containers[0].Name,
+		"a same-kind member swap must be detectable by the container name set")
+
+	// A re-provision of the same member with a new digest is a binding
+	// change too: the name must follow so the stale-digest container cannot
+	// linger.
+	reprovisioned := groupMember("first", "shell", "scope-a", "ci")
+	reprovisioned.Digest = "sha256:bbbbbbbb"
+	newer := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{reprovisioned})
+	require.Len(t, newer.Spec.Containers, 1)
+	assert.NotEqual(t, before.Spec.Containers[0].Name, newer.Spec.Containers[0].Name,
+		"a digest change on re-provision must be detectable by the container name set")
 }
 
 func TestBuildPerScopeAdapterPodGroupPodShapeMatchesFallback(t *testing.T) {
