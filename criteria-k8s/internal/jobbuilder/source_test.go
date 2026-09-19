@@ -49,11 +49,14 @@ func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 	assert.Equal(t, "workflow-runner", runner.Name)
 	assert.Equal(t, "localhost:5000/criteria-base:abc123", runner.Image,
 		"url-only source mode must run on the operator's criteria base image, not the baked workflow image")
-	assert.Empty(t, job.Spec.Template.Spec.InitContainers,
-		"source mode has no repo-clone: the base image ships no gh and the workflow source is content")
+	init := job.Spec.Template.Spec.InitContainers
+	require.Len(t, init, 1, "source mode carries the per-ticket repo-clone init container (the repo_dir contract is mode-independent)")
+	assert.Equal(t, "repo-clone", init[0].Name)
+	assert.Equal(t, "localhost:5000/criteria-base:abc123", init[0].Image,
+		"the clone runs on the same process image as the runner (base image: git, no gh)")
 
-	// The run context and source env reach the runner; REPO_DIR (the
-	// repo-clone contract) deliberately does not.
+	// The run context and source env reach the runner; the runner script
+	// bridges repo_dir into the workflow vars itself.
 	assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1", envValue(runner.Env, "WORKFLOW_URL"))
 	assert.Equal(t, "", envValue(runner.Env, "WORKFLOW_REF"), "no ref declared: WORKFLOW_REF must be absent")
 	assert.Equal(t, "", envValue(runner.Env, "REPO_DIR"))
@@ -314,9 +317,15 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 		require.Equal(t, 0, proc.code, "script must succeed: %s", proc.output)
 		log := readStubLog(t, filepath.Join(dir, "stub.log"))
 		assert.Contains(t, log, "argv: [apply] [git::https://example.com/org/workflows.git?ref=main] "+
+			"[--var] [ticket_id=] [--var] [repo_dir=/data/intake//repo] "+
+			"[--var] [intake_root=/data/intake] [--var] [linear_review_state=In Review] "+
+			"[--var] [linear_work_state=In Progress] [--var] [linear_done_state=Done] "+
+			"[--var] [base_branch=main] [--var] [ci_gate_cmd=] [--var] [provider_base_url=] "+
 			"[--workflow-ref] [28777aacc3cfbe85005ddb27f548116e692c0eb4] "+
 			"[--server] [http://castle:9443] [--events-file] [/tmp/events.ndjson]",
-			"apply must receive the URL, the pin, and the forwarded flags in order: %s", log)
+			"apply must receive the URL, the bridged runtime vars, the pin, and the forwarded flags in order: %s", log)
+		assert.Contains(t, log, "[--var] [linear_api_key=file:/secrets/linear_api_key]",
+			"secret variables must ride as file: OriginRefs (D69), never as raw values: %s", log)
 		assert.Contains(t, log, "host=10.42.0.5:7778",
 			"the runner must publish its routable dial address for per-scope pods")
 		// The discovery dir is removed on exit so a later run cannot reuse it.

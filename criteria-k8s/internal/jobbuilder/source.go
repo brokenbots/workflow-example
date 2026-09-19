@@ -111,7 +111,29 @@ if [ -n "${JOB_NAME:-}" ] && [ -n "${POD_IP:-}" ]; then
     trap 'rm -rf "$run_dir"' EXIT
 fi
 
-set -- apply "$workflow_url"
+# Workflow variables: source-mode runs get the operator-side runtime values
+# as workflow vars via --var (raw strings; the engine applies each declared
+# variable type later). Without this bridge a fetched workflow's required
+# string variables (e.g. var.ticket_id in linear_develop_v1) are null at
+# compile time and the first templatefile(... shellquote(var.ticket_id))
+# step fails with "shellquote: invalid value; expected string" — every
+# earlier URL-mode run died at the per-scope digest handshake before any
+# step executed, which masked this layer. Secret variables stay out of
+# env/argv: the workflow HCL keeps direct var.<name> bindings and the
+# runner passes file: OriginRefs (--var below); the engine's
+# resolveSecretVarOrigins reads them through the secrets provider stack
+# (FileProvider) at run start and delivers the values to adapters over
+# OpenSession (D69). No jq is required: --var takes raw key=value strings.
+set -- apply "$workflow_url" \
+    --var "ticket_id=${TICKET_ID-}" \
+    --var "repo_dir=${REPO_DIR:-/data/intake/${TICKET_ID:-}/repo}" \
+    --var "intake_root=${INTAKE_ROOT:-/data/intake}" \
+    --var "linear_review_state=${LINEAR_REVIEW_STATE:-In Review}" \
+    --var "linear_work_state=${LINEAR_WORK_STATE:-In Progress}" \
+    --var "linear_done_state=${LINEAR_DONE_STATE:-Done}" \
+    --var "base_branch=${BASE_BRANCH:-main}" \
+    --var "ci_gate_cmd=${CI_GATE_CMD:-}" \
+    --var "provider_base_url=${PROVIDER_BASE_URL:-}"
 workflow_ref="${WORKFLOW_REF-}"
 if [ "$(printf '%s' "$workflow_ref" | tr -d '[:space:]')" != "" ]; then
     set -- "$@" --workflow-ref "$workflow_ref"
@@ -133,9 +155,15 @@ if [ -n "$EVENTS_FILE" ]; then
     set -- "$@" --events-file "$EVENTS_FILE"
 fi
 
-# Foreground (not exec) so the EXIT trap still cleans the discovery dir;
-# set -e propagates the criteria exit status as the container exit code.
-"$criteria_bin" "$@" --output concise
+# Foreground (not exec) so the EXIT trap still cleans the discovery dir and
+# the runtime vars file; set -e propagates the criteria exit status as the
+# container exit code. Secret variables ride as file: OriginRefs per D69 —
+# only mount paths appear in argv, values reach adapters over OpenSession.
+"$criteria_bin" "$@" \
+    --var "linear_api_key=file:/secrets/linear_api_key" \
+    --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
+    --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
+    --output concise
 `
 
 // buildSourceRunnerJob constructs the runner Job for a spec.workflowSource
@@ -161,8 +189,19 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 
 	job := buildJobBase(run, targetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
+	// Source-mode runs that need the ticket repository (e.g. linear_develop_v1
+	// drives git fetch/worktree/pr steps against var.repo_dir) get the same
+	// per-ticket clone the image-mode runner has always had: the per-ticket
+	// /data/intake/<TICKET>/repo path, cloned by an init container before the
+	// runner starts. Image-mode clones use the baked image (gh + git); source
+	// mode clones on the base image, which carries git but no gh — clone with
+	// plain git and a token-inited credential store instead of gh.
+	// Workflows that never touch the repo (triage, intake) ignore repo_dir.
+	job.Spec.Template.Spec.InitContainers = []corev1.Container{
+	    sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan),
+	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-		sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
+	    sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
 	}
 	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
 	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
@@ -243,6 +282,63 @@ func workflowOriginRecord(run *criteriav1.CriteriaRun, jobName string, source *c
 	}
 	b, _ := json.Marshal(rec)
 	return string(b)
+}
+
+// sourceRepoCloneContainer builds the per-ticket repo clone init container
+// for source-mode runs (mirrors image-mode repoCloneContainer): the
+// workflow's var.repo_dir contract expects a valid git clone with origin
+// set, whether the run is image-mode or URL-mode. The base image carries
+// git and ca-certificates but no gh, so authentication uses a plain git
+// credential store seeded from the mounted workflow token instead of
+// `gh auth git-credential`.
+func sourceRepoCloneContainer(run *criteriav1.CriteriaRun, image string, plan *workflowPlan) corev1.Container {
+	repoURL := run.Spec.RepoURL
+	repoDir := fmt.Sprintf("/data/intake/%s/repo", run.Spec.TicketID)
+	return corev1.Container{
+		Name:            "repo-clone",
+		Image:           image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		SecurityContext: restrictedContainerSecurityContext(),
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			`set -eu
+WORKFLOW_GITHUB_TOKEN=""
+if [ -r /home/criteria/secrets/workflow_github_token ]; then
+    WORKFLOW_GITHUB_TOKEN=$(cat /home/criteria/secrets/workflow_github_token)
+fi
+if [ -z "$WORKFLOW_GITHUB_TOKEN" ]; then
+    echo "WORKFLOW_GITHUB_TOKEN is required via /home/criteria/secrets/workflow_github_token" >&2
+    exit 1
+fi
+if [ -z "$REPO_URL" ]; then
+    echo "REPO_URL is required" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$REPO_DIR")"
+rm -rf "$REPO_DIR"
+git config --global credential.helper 'store'
+printf 'https://x-access-token:%s@github.com\n' "$WORKFLOW_GITHUB_TOKEN" > "$HOME/.git-credentials"
+git clone "https://github.com/$REPO_URL.git" "$REPO_DIR"
+rm -f "$HOME/.git-credentials"`,
+		},
+		Env: appendEnvDistinct([]corev1.EnvVar{
+			{Name: "REPO_URL", Value: repoURL},
+			{Name: "REPO_DIR", Value: repoDir},
+			{Name: "HOME", Value: "/tmp"},
+		}, plan.volumeEnvs()),
+		VolumeMounts: plan.cloneMounts(),
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resourceQuantity("512Mi"),
+				corev1.ResourceCPU:    resourceQuantity("250m"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resourceQuantity("2Gi"),
+				corev1.ResourceCPU:    resourceQuantity("1000m"),
+			},
+		},
+	}
 }
 
 func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
