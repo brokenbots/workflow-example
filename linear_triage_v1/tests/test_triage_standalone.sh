@@ -405,17 +405,20 @@ mutations() {
 # The written label set must be exactly the union: every pre-existing label
 # preserved, the arming label added, nothing else.
 assert_merge() {
-    local existing="$1" written="$2"
+    local existing="$1" written="$2" desc="$3" run_label_id="$4"
     # The jq variable is deliberately not named $label: "label" is a jq >= 1.6
     # keyword (the same pitfall check_internal_label.sh.tftpl documents).
-    if jq -e --argjson existing "$existing" --argjson written "$written" --arg run_label "$RUN_LABEL" '
-        ($existing + [$run_label] | unique) as $want
+    # -n: inputs arrive only via --argjson/--arg; without it jq would read the
+    # ambient stdin, which is EOF under CI runners, and jq >= 1.7 then exits 4
+    # ("no valid result") without ever evaluating the comparison.
+    if jq -en --argjson existing "$existing" --argjson written "$written" --arg lid "$run_label_id" '
+        ($existing + [$lid] | unique) as $want
         | ($written | unique) == $want
           and ($written | length) == ($written | unique | length)
     ' >/dev/null; then
-        ok "$3"
+        ok "$desc"
     else
-        fail "$3: existing=$existing written=$written"
+        fail "$desc: existing=$existing written=$written"
     fi
 }
 
@@ -434,7 +437,7 @@ if [ -z "$written" ]; then
     fail "re-arm performed no label write"
 else
     assert_merge '["l1", "l2", "l3"]' "$written" \
-        "merged write preserves every existing label and adds $RUN_LABEL"
+        "merged write preserves every existing label and adds $RUN_LABEL" "l-k8s"
 fi
 require_equal "$(mutations | grep -c .)" "1" "re-arm performs exactly one issueUpdate write"
 
