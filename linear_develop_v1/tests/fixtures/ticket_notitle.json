@@ -1,0 +1,15 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-uuid-141",
+      "identifier": "CRI-141",
+      "title": "",
+      "description": "A ticket with no title cannot carry a confirmed workstream header.",
+      "url": "https://linear.app/brokenbots/issue/CRI-141",
+      "state": { "name": "Ready for Development", "type": "started" },
+      "team": { "id": "team-uuid-1" },
+      "labels": { "nodes": [] },
+      "comments": { "nodes": [] }
+    }
+  }
+}

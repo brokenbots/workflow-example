@@ -67,7 +67,8 @@ jobs:
           rm -rf "/tmp/${archive}" /tmp/criteria-checksums.txt /tmp/criteria-install
 
       # Mirrors linear_intake_v1/Dockerfile: pre-pull the two adapter binaries
-      # that linear_triage_v1/.criteria.lock.hcl pins, so `criteria validate`
+      # that linear_triage_v1/.criteria.lock.hcl and
+      # linear_develop_v1/.criteria.lock.hcl pin, so `criteria validate`
       # can resolve and verify their schemas from the runner's local cache.
       - name: Pre-pull triage adapter binaries into the criteria cache
         env:
@@ -80,6 +81,10 @@ jobs:
       - name: Run linear_triage_v1 standalone extraction regression test (CRI-238)
         run: |
           bash linear_triage_v1/tests/test_triage_standalone.sh
+
+      - name: Run linear_develop_v1 standalone extraction regression test (CRI-239)
+        run: |
+          bash linear_develop_v1/tests/test_develop_standalone.sh
 
   validate-manifests:
     runs-on: ubuntu-latest
