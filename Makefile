@@ -119,6 +119,7 @@ endif
 validate:
 	/usr/local/bin/criteria validate linear_intake_v1
 	/usr/local/bin/criteria validate linear_triage_v1
+	/usr/local/bin/criteria validate linear_develop_v1
 
 test: validate test-criteria-k8s
 	@echo "Rendering pod-adapter manifest..."
@@ -137,6 +138,8 @@ test: validate test-criteria-k8s
 	./linear_intake_v1/tests/test_engine_pin.sh
 	@echo "Running linear_triage_v1 standalone extraction regression test (CRI-238)..."
 	./linear_triage_v1/tests/test_triage_standalone.sh
+	@echo "Running linear_develop_v1 standalone extraction regression test (CRI-239)..."
+	./linear_develop_v1/tests/test_develop_standalone.sh
 	@echo "Running container-entrypoint token substitution regression test..."
 	./k8s/tests/test_container_entrypoint_substitution.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
@@ -170,6 +173,7 @@ lint: lint-criteria-k8s
 		k8s/tests/test_job_cri_27.sh \
 		linear_intake_v1/tests/test_engine_pin.sh \
 		linear_triage_v1/tests/test_triage_standalone.sh \
+		linear_develop_v1/tests/test_develop_standalone.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
 		k8s/tests/test_per_scope_wire_token.sh \
 		k8s/tests/test_runner_server_tls.sh \

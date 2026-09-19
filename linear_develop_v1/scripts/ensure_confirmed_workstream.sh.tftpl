@@ -1,0 +1,74 @@
+#!/bin/sh
+# Write-or-reuse gate for the confirmed workstream (CRI-239). linear_develop_v1
+# fires on a triaged ticket, and the confirmed workstream is the triage
+# phase's output, published at <intake_root>/<ticket_id>/workstreams/
+# <ticket_id>.md (qa_triage_v1's workstream_out_dir and the intake bypass both
+# write there).
+#
+# Reuse: when that file already exists and is non-empty it is the triage run's
+# conclusion and is handed to the handler untouched — no re-derivation, no
+# overwrite. Write: when it is absent or empty, the workstream context is
+# reconstructed mechanically from the fetched ticket itself — title,
+# description, and the comment history (per the intake design, triage outputs
+# live in the ticket's comments). No model call is involved on either path.
+#
+# Exit criteria: the workstream file exists and is non-empty; the development
+# handler treats it as the plan. Prints one semantic source line —
+# "workstream reused: <path>" or "workstream written: <path>" — that the
+# workflow reads with startswith to record which path ran.
+#
+# fetch_ticket stores Linear's GraphQL response with its data/issue envelope,
+# so every field is read through .data.issue (the fix the triage copies carry
+# over the intake originals).
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -eu
+
+TICKET_JSON="$criteria_value_1/$criteria_value_2/ticket.json"
+WORKSTREAM="$criteria_value_1/$criteria_value_2/workstreams/$criteria_value_2.md"
+
+mkdir -p "$(dirname "$WORKSTREAM")"
+
+if [ -s "$WORKSTREAM" ]; then
+    echo "workstream reused: $WORKSTREAM"
+    exit 0
+fi
+
+TITLE=$(jq -r '.data.issue.title // empty' "$TICKET_JSON")
+DESC=$(jq -r '.data.issue.description // empty' "$TICKET_JSON")
+URL=$(jq -r '.data.issue.url // empty' "$TICKET_JSON")
+STATE=$(jq -r '.data.issue.state.name // empty' "$TICKET_JSON")
+
+if [ -z "$TITLE" ]; then
+    echo "ticket.json carries no issue title; cannot assemble the confirmed workstream" >&2
+    exit 1
+fi
+
+{
+    echo "# Workstream: $TITLE"
+    echo
+    echo "Source: $URL"
+    echo "Linear state at development start: $STATE"
+    echo
+    echo "## Ticket description"
+    echo
+    echo "$DESC"
+    echo
+    echo "## Ticket comments (triage outputs and evidence history)"
+    echo
+    jq -r '.data.issue.comments.nodes[]? | "### " + .createdAt + " — " + (.user.name // .user.displayName // "unknown") + "\n\n" + .body + "\n"' "$TICKET_JSON"
+    echo "## Required behavior"
+    echo
+    echo "Implement the work described above. The confirmed conclusions in the"
+    echo "ticket and its comments are authoritative: preserve them, do not"
+    echo "re-derive triage decisions. Add or update tests that exercise the"
+    echo "changed behavior."
+} > "$WORKSTREAM"
+
+# Guard: non-empty workstream or the assembly failed
+if [ ! -s "$WORKSTREAM" ]; then
+    echo "workstream file is empty" >&2
+    exit 1
+fi
+
+echo "workstream written: $WORKSTREAM"

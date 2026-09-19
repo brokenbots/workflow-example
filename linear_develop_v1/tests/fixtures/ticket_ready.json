@@ -1,0 +1,35 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-uuid-140",
+      "identifier": "CRI-140",
+      "title": "Deploy job races the cache warm step",
+      "description": "Steps to reproduce:\n1. Trigger a deploy while the cache warm step is still running\n2. Observe the deploy publish a partially warmed cache\n\nExpected: the deploy job waits for the cache warm step to finish before publishing.",
+      "url": "https://linear.app/brokenbots/issue/CRI-140",
+      "state": { "name": "Ready for Development", "type": "started" },
+      "team": { "id": "team-uuid-1" },
+      "labels": {
+        "nodes": [
+          { "id": "l1", "name": "Bug" },
+          { "id": "l2", "name": "internal-reproduced" }
+        ]
+      },
+      "comments": {
+        "nodes": [
+          {
+            "id": "c1",
+            "body": "**Automated QA triage completed.** Verdict: reproduced. Triage evidence: cache_warm_wait_gate. Workstream published at /tmp/criteria-intake/CRI-140/workstreams/CRI-140.md. The fix is to add a dependency edge from the deploy job to the cache warm step in the deploy graph.",
+            "createdAt": "2026-02-20T10:05:00.000Z",
+            "user": { "name": "QA Triage Bot", "displayName": "qa-triage-bot" }
+          },
+          {
+            "id": "c2",
+            "body": "Reproduction details: deploy run id rr-5173 shows the publish step starting 40s before cache_warm exits. The cache manifest written at that point is missing keys cache:model-v2 and cache:tokenizer.",
+            "createdAt": "2026-02-21T09:30:00.000Z",
+            "user": { "name": "Dana Ops", "displayName": "dana" }
+          }
+        ]
+      }
+    }
+  }
+}

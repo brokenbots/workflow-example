@@ -1,0 +1,344 @@
+// linear_develop_v1 — the development phase of linear_intake_v1, extracted
+// into an independently runnable workflow (CRI-239, per the CRI-214 §3.9
+// intake split ruled normative; CRI-238's merged triage tree 5341ab1 completes
+// the triage half).
+//
+// Fires on a TRIAGED ticket — the confirmed workstream path. The flow is
+// fetch -> write-or-reuse the confirmed workstream -> run_handler (develop ->
+// PR -> reviewer loop -> merge) -> Done:
+//
+//   handler_complete      — the handler merged its PR and the ticket was
+//                           moved to the done state.
+//   awaiting_human        — the run ended by handing the ticket to a human:
+//                           the reviewer loop could not conclude (the handler
+//                           fails the run when its bounded review/fix cycle
+//                           does not converge), a Linear write failed, or the
+//                           confirmed workstream could not be produced.
+//
+// Self-sufficient on a triaged ticket: the workstream context is
+// reconstructed from the ticket itself plus its comment history (per the
+// intake design, triage outputs live in the ticket's comments). A workstream
+// file already published by triage at
+// <intake_root>/<ticket_id>/workstreams/ is reused untouched — never
+// re-derived, never overwritten.
+//
+// No triage steps are reachable: no intake classification, no
+// internal-reproduced gate, no QA triage subworkflow, no triage reviewer, no
+// classification labels, no bug-report assembly. The confirmed workstream is
+// this workflow's input, not something it re-derives.
+//
+// Scripts are copies of linear_triage_v1's (which fixed the intake originals'
+// latent .data.issue-envelope defects); the intake tree itself is untouched —
+// its embedded develop path remains until a coordinated cutover removes it.
+
+workflow {
+    name             = "linear_develop_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "fetch_ticket"
+    target_state     = "handler_complete"
+
+    policy {
+        max_total_steps = 60
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// Absolute path of the confirmed workstream handed to the handler. Set by
+// ensure_confirmed_workstream on success — the same path triage publishes to
+// and intake's bypass writes to, so a triage-published file is found and
+// reused as-is.
+data "internal" "workstream_file" {
+    type  = string
+    value = ""
+}
+
+// Whether the confirmed workstream was reused from an earlier triage run
+// (true) or assembled from the ticket and its comments (false). Recorded so
+// the started comment tells the ticket which happened.
+data "internal" "workstream_reused" {
+    type  = bool
+    value = false
+}
+
+// URL of the PR the handler merged, for the closing Linear comment.
+data "internal" "pr_url" {
+    type  = string
+    value = ""
+}
+
+// ── Subworkflow ──────────────────────────────────────────────────────────────
+// The only cross-tree dependency of this workflow: a sibling directory,
+// referenced by relative path and locked recursively by
+// `criteria adapter lock` from this directory.
+
+subworkflow "handler" {
+    source = "../workstream_handler_v1"
+    input = {
+        ticket_id            = var.ticket_id
+        linear_review_state  = var.linear_review_state
+        workstream_file      = data.internal.workstream_file.value
+        repo_dir             = var.repo_dir
+        // branch_manager creates the worktree itself; this workflow only
+        // chooses where it lives.
+        worktree_dir         = "${var.intake_root}/${var.ticket_id}/worktree"
+        base_branch          = var.base_branch
+        ci_gate_cmd          = var.ci_gate_cmd
+        allow_dirty          = var.allow_dirty
+        provider_base_url    = var.provider_base_url
+        linear_api_key       = var.linear_api_key
+        workflow_github_token = var.workflow_github_token
+        // The handler's reviewer role must authenticate as the reviewer
+        // identity (pr_reviewer_loop approves/merges under it), which differs
+        // from the workflow identity that authors the PR. Thread the real
+        // reviewer token through; miswiring it to the workflow token makes the
+        // external "independent approval" gate approve its own PRs (see
+        // EXPERIMENT-ANALYSIS-2026-09-02.md section 3).
+        reviewer_github_token = var.reviewer_github_token
+    }
+}
+
+// ── Fetch ────────────────────────────────────────────────────────────────────
+
+// All Linear I/O is the GraphQL API via curl. GraphQL request bodies are
+// assembled with jq -n --arg, never string interpolation, so ticket content
+// and user-supplied variables cannot break the JSON.
+step "fetch_ticket" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/fetch_ticket.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+    }
+    outcome "success" { next = step.ensure_confirmed_workstream }
+    // A failed fetch cannot touch Linear at all: the issue id is unknown, so
+    // no comment or state move is possible. Exit to the awaiting-human
+    // terminal; the run record carries the failure and the watcher re-fires
+    // the ticket while it sits in its current state.
+    outcome "failure" { next = state.awaiting_human }
+}
+
+// ── Confirmed workstream: write or reuse ─────────────────────────────────────
+
+// The workflow's input contract. A confirmed workstream already published by
+// triage (or a prior develop run) at
+// <intake_root>/<ticket_id>/workstreams/<ticket_id>.md is reused untouched —
+// it is the triage run's conclusion and re-deriving or overwriting it would
+// duplicate or clobber work the ticket already did. Only when no non-empty
+// workstream exists is one assembled mechanically from the fetched ticket —
+// title, description, and the comment history, which carries the triage
+// outputs per the intake design. No model call is involved on either path.
+// The script prints a semantic source line ("workstream reused: ..." vs
+// "workstream written: ...") that the run records, and the workflow reads
+// with startswith to set workstream_reused.
+step "ensure_confirmed_workstream" {
+    target      = adapter.shell.develop
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/ensure_confirmed_workstream.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+        })
+    }
+    outcome "success" {
+        next = step.comment_handler_started
+        write {
+            target = data.internal.workstream_file.value
+            value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"
+        }
+        write {
+            target = data.internal.workstream_reused.value
+            // The comparison is evaluated correctly now that the engine's
+            // bare-traversal fast path only applies to a bare output.*
+            // reference (CRI-94 / criteria PR #360).
+            value  = startswith(output.stdout, "workstream reused")
+        }
+    }
+    // The ticket is fetched, so the ticket.json exists; failure here means
+    // the assembly itself failed (corrupt JSON, title-less ticket). Comment
+    // accurately and park the ticket In Review.
+    outcome "failure" { next = step.comment_develop_failed }
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+// Announce the run on the ticket, saying which workstream path was taken.
+// Best-effort: both outcomes continue to the work-state move — the comment is
+// observability, not a precondition for development, and a Linear outage that
+// broke the comment fails the state move right after.
+step "comment_handler_started" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_handler_started.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = data.internal.workstream_reused.value ? "reused" : "written"
+        })
+    }
+    outcome "success" { next = step.set_work_state }
+    outcome "failure" { next = step.set_work_state }
+}
+
+// Linear states are per-team and referenced by id in mutations, so the
+// configured name is resolved against the ticket's own team. An unknown name
+// fails loudly here rather than silently leaving the ticket unmoved.
+// NOTE: workflowStates' team filter takes ID, not String — declaring the
+// variable String! fails GraphQL validation with a bare HTTP 400.
+step "set_work_state" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_work_state
+        })
+    }
+    outcome "success" { next = step.run_handler }
+    // The ticket could not be moved to the work state; development is not
+    // started off an inconsistent bookkeeping state. Comment accurately, park
+    // In Review.
+    outcome "failure" { next = step.comment_develop_failed }
+}
+
+// The development itself: develop the confirmed workstream -> open a PR ->
+// reviewer loop -> merge. The child owns every repo operation; this workflow
+// only feeds it the workstream path and the credentials. Its failure terminal
+// covers the reviewer loop not concluding (the reviewer never returned a
+// verdict, or the bounded fix cycle did not converge) and every
+// infrastructure failure inside it — exactly the cases a human must see.
+step "run_handler" {
+    target = subworkflow.handler
+
+    outcome "success" {
+        next = step.comment_handler_done
+        write {
+            target = data.internal.pr_url.value
+            value  = subworkflow.pr_url
+        }
+    }
+    outcome "failure" { next = step.comment_handler_failed }
+}
+
+// ── Linear writes ────────────────────────────────────────────────────────────
+// Every comment body is assembled with jq -n --arg, never shell
+// interpolation — an apostrophe or $(...) in prose must not be able to break
+// or hijack the GraphQL request.
+
+step "comment_handler_done" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_handler_done.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.pr_url.value
+        })
+    }
+    outcome "success" { next = step.set_done_state }
+    outcome "failure" { next = step.set_done_state }
+}
+
+step "set_done_state" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_done_state
+        })
+    }
+    outcome "success" { next = state.handler_complete }
+    // The PR is merged but the ticket could not be moved to the done state —
+    // the observable outcome is not yet "Done". Comment accurately, park In
+    // Review for a human to close it out.
+    outcome "failure" { next = step.comment_done_move_failed }
+}
+
+// Reached when the handler failed: reviewer loop unconcluded, coordinator
+// cycle exhausted, or an infrastructure step inside the handler. The comment
+// is self-sufficient — no evidence-file dependency, the workstream path and
+// the review state say everything a human needs to start digging.
+step "comment_handler_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_handler_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = step.set_review_state }
+}
+
+// Reached when development never started: workstream assembly failed, or the
+// work-state move failed. The comment carries the workstream path and review
+// state — what a human needs to pick the run up.
+step "comment_develop_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_develop_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = step.set_review_state }
+}
+
+// The PR merged but the Done move failed. The comment must be accurate about
+// that — the work is done, only the bookkeeping failed.
+step "comment_done_move_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_done_move_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.pr_url.value
+            criteria_value_4 = var.linear_done_state
+            criteria_value_5 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    outcome "failure" { next = step.set_review_state }
+}
+
+// Parks the ticket in the review state for a human. Both outcomes land in the
+// same terminal: a failed state move still ends the run awaiting a human (the
+// run record carries the error, and the ticket sits wherever the last
+// successful move left it).
+step "set_review_state" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = state.awaiting_human }
+    outcome "failure" { next = state.awaiting_human }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+// Exactly two terminal outcomes (CRI-238 doctrine), neither a failure: every
+// run ends with the work delivered or by handing the ticket to a human.
+// A run that ends by asking a human to decide — reviewer loop that cannot
+// conclude, failed Linear write, unproducible workstream — is a legitimate
+// and useful conclusion: the ticket carries the context and sits in the
+// review state. Step errors surface in the run record.
+state "handler_complete" {
+    terminal = true
+    success  = true
+}
+
+state "awaiting_human" {
+    terminal = true
+    success  = true
+}

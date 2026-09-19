@@ -1,0 +1,27 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -euo pipefail
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+
+if [ -n "$criteria_value_3" ]; then
+    body="**Automated development did not start.** The confirmed workstream could not be produced or the work-state move failed. Workstream: $criteria_value_3. Moving the ticket to $criteria_value_4 for a human. The run record carries the failing step and its error."
+else
+    body="**Automated development did not start.** The confirmed workstream could not be produced or the work-state move failed. Workstream: (none). Moving the ticket to $criteria_value_4 for a human. The run record carries the failing step and its error."
+fi
+
+curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'mutation($id: String!, $body: String!) { commentCreate(input: {issueId: $id, body: $body}) { success } }' \
+        --arg id "$issue_id" \
+        --arg body "$body" \
+        '{query: $q, variables: {id: $id, body: $body}}')" \
+    https://api.linear.app/graphql \
+    | jq -e '.data.commentCreate.success == true' >/dev/null
+
+echo "comment posted"
