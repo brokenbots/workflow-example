@@ -158,12 +158,14 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 
 // adapterPodLogLabel renders the pod's adapter identification for the
 // reconcile create-log: the single kind for per-adapter fallback pods, the
-// comma-joined kind set for (scope, environment) group pods.
+// comma-joined kind set for (scope, environment) group pods. Group pods
+// carry the kind set on the AnnotationAdapterKinds annotation — the comma
+// separator is illegal in a label value (CRI-234 R1).
 func adapterPodLogLabel(pod *corev1.Pod) string {
 	if kind := pod.Labels[jobbuilder.LabelAdapterKind]; kind != "" {
 		return kind
 	}
-	return pod.Labels[jobbuilder.LabelAdapterKinds]
+	return pod.Annotations[jobbuilder.AnnotationAdapterKinds]
 }
 
 // isAdapterGroupPod reports whether pod is a (scope, environment) co-location

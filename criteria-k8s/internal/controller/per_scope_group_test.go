@@ -80,7 +80,7 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePod(t *testing.T) 
 	assert.ElementsMatch(t, []string{"shell", "copilot"}, podContainerKinds(pods[0]),
 		"each adapter sharing the environment runs as a separate container")
 	assert.Equal(t, "ci", pods[0].Labels[jobbuilder.LabelEnvironment])
-	assert.Equal(t, "copilot,shell", pods[0].Labels[jobbuilder.LabelAdapterKinds])
+	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
 	assert.Equal(t, "scope-a", pods[0].Labels[jobbuilder.LabelScopeID])
 }
 

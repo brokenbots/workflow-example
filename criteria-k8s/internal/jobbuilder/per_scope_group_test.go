@@ -9,7 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // CRI-234 M7.2: adapters sharing one (scope, environment) pair are
@@ -68,10 +71,10 @@ func TestBuildPerScopeAdapterPodGroupSameEnvironmentOnePod(t *testing.T) {
 	assert.Equal(t, "adapter", pod.Labels["criteria.brokenbots.dev/role"])
 	assert.Equal(t, "scope-a", pod.Labels["criteria.brokenbots.dev/scope-id"])
 	assert.Equal(t, "ci", pod.Labels["criteria.brokenbots.dev/environment"])
-	assert.Equal(t, "copilot,shell", pod.Labels["criteria.brokenbots.dev/adapter-kinds"],
-		"the kinds label is the deduplicated, sorted set of hosted adapters")
+	assert.Equal(t, "copilot,shell", pod.Annotations[jobbuilder.AnnotationAdapterKinds],
+		"the kinds annotation is the deduplicated, sorted set of hosted adapters")
 	assert.Empty(t, pod.Labels["criteria.brokenbots.dev/adapter-kind"],
-		"group pods carry the kinds-set label, not the single-kind label")
+		"group pods carry the kinds-set annotation, not the single-kind label")
 
 	// Per-member handshake env is built from each member's own event.
 	byKind := map[string]corev1.Container{}
@@ -86,6 +89,36 @@ func TestBuildPerScopeAdapterPodGroupSameEnvironmentOnePod(t *testing.T) {
 	copilotEnv := containerEnvMap(byKind["copilot"])
 	assert.Equal(t, "copilot", copilotEnv["ADAPTER_KIND"])
 	assert.Equal(t, "/data/intake/CRI-234/tokens/review", copilotEnv["CRITERIA_REMOTE_TOKEN_FILE"])
+}
+
+// CRI-234 R1 regression: the group pod's adapter-kinds set used to ride on
+// a LABEL, whose comma-joined value ("copilot,shell") the API server
+// rejects — a failure mode the fake.NewClientBuilder() controller tests
+// cannot see, because they never apply API-server metadata validation.
+// Validate the built pod's labels and annotations with the same helpers the
+// API server uses, so this class of failure can no longer hide behind the
+// fake client.
+func TestBuildPerScopeAdapterPodGroupMetadataIsValidForAPIServer(t *testing.T) {
+	run := groupTestRun()
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{
+			groupMember("intake", "shell", "scope-a", "ci"),
+			groupMember("review", "copilot", "scope-a", "ci"),
+		})
+	require.NotNil(t, pod)
+
+	assert.Empty(t,
+		metav1validation.ValidateLabels(pod.Labels, field.NewPath("metadata").Child("labels")),
+		"group pod labels must pass API-server label validation")
+	assert.Empty(t,
+		apivalidation.ValidateAnnotations(pod.Annotations, field.NewPath("metadata").Child("annotations")),
+		"group pod annotations must pass API-server annotation validation")
+
+	// The comma-joined kind set is an annotation value now: absent from
+	// labels (where a comma is illegal), present deduplicated and sorted on
+	// the annotation.
+	assert.NotContains(t, pod.Labels, "criteria.brokenbots.dev/adapter-kinds")
+	assert.Equal(t, "copilot,shell", pod.Annotations[jobbuilder.AnnotationAdapterKinds])
 }
 
 func TestBuildPerScopeAdapterPodGroupSeparateEnvironmentsSeparatePods(t *testing.T) {

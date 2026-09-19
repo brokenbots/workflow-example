@@ -26,11 +26,13 @@ func adapterGroupPod(name, namespace, runName string) *corev1.Pod {
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				jobbuilder.LabelRun:          runName,
-				jobbuilder.LabelRole:         jobbuilder.RoleAdapter,
-				jobbuilder.LabelScopeID:      "scope-a",
-				jobbuilder.LabelEnvironment:  "ci",
-				jobbuilder.LabelAdapterKinds: "copilot,shell",
+				jobbuilder.LabelRun:         runName,
+				jobbuilder.LabelRole:        jobbuilder.RoleAdapter,
+				jobbuilder.LabelScopeID:     "scope-a",
+				jobbuilder.LabelEnvironment: "ci",
+			},
+			Annotations: map[string]string{
+				jobbuilder.AnnotationAdapterKinds: "copilot,shell",
 			},
 		},
 		Spec: corev1.PodSpec{Containers: []corev1.Container{

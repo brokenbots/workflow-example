@@ -82,8 +82,12 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
 	labels[LabelScopeID] = safeLabelValue(scopeID)
-	labels[LabelAdapterKinds] = adapterKindsLabel(members)
 	labels[LabelEnvironment] = safeLabelValue(environment)
+	// The comma-joined kind set is an ANNOTATION value, not a label value:
+	// a comma is illegal in a Kubernetes label value (CRI-234 R1).
+	annotations := map[string]string{
+		AnnotationAdapterKinds: adapterKindsLabel(members),
+	}
 
 	containers := make([]corev1.Container, 0, len(members))
 	usedNames := make(map[string]int, len(members))
@@ -98,6 +102,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 			Name:            PerScopeAdapterGroupName(run, scopeID, environment),
 			Namespace:       targetNamespace(run),
 			Labels:          labels,
+			Annotations:     annotations,
 			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
 		},
 		Spec: corev1.PodSpec{
@@ -134,9 +139,11 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 
 // adapterKindsLabel renders the deduplicated, sorted set of adapter kinds
 // hosted by a group pod, comma-joined, for `kubectl` triage and the
-// reconcile create-log. Each kind is sanitized individually so the joined
-// value stays a valid Kubernetes label value, and the joined value is
-// truncated on kind boundaries to respect the 63-character label limit.
+// reconcile create-log. The value is an ANNOTATION value
+// (AnnotationAdapterKinds), not a label value: the comma separator is
+// illegal in a Kubernetes label value (CRI-234 R1), while annotations
+// accept any string. Each kind is sanitized individually so the dedup
+// stays stable across engine kind spellings.
 func adapterKindsLabel(members []events.LifecycleEvent) string {
 	seen := make(map[string]struct{}, len(members))
 	kinds := make([]string, 0, len(members))
@@ -149,24 +156,7 @@ func adapterKindsLabel(members []events.LifecycleEvent) string {
 		kinds = append(kinds, kind)
 	}
 	sort.Strings(kinds)
-
-	label := strings.Join(kinds, ",")
-	if len(label) <= maxLabelValueLength {
-		return label
-	}
-	parts := make([]string, 0, len(kinds))
-	total := 0
-	for _, kind := range kinds {
-		if len(kind) > maxLabelValueLength {
-			kind = trimHyphens(kind[:maxLabelValueLength])
-		}
-		if total > 0 && total+1+len(kind) > maxLabelValueLength {
-			break
-		}
-		parts = append(parts, kind)
-		total += len(kind) + 1
-	}
-	return strings.Join(parts, ",")
+	return strings.Join(kinds, ",")
 }
 
 // uniqueAdapterContainerName derives a deterministic, member-sensitive
