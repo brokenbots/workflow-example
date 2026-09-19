@@ -20,6 +20,7 @@
 ARG ALPINE_VERSION=3.20
 ARG GO_VERSION=1.26.6
 ARG CRITERIA_COMMIT=eae01816c4a2da88449833a233d1b3f6a099bef1
+ARG BUILDPLATFORM=linux/amd64
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 ARG CRITERIA_COMMIT
@@ -32,8 +33,14 @@ RUN git clone --filter=blob:none https://github.com/brokenbots/criteria.git /src
 WORKDIR /src
 RUN git -c advice.detachedHead=false checkout --quiet "${CRITERIA_COMMIT}" \
  && test "$(git rev-parse HEAD)" = "${CRITERIA_COMMIT}"
+# CRITERIA_VERSION overrides the embedded engine version directly (release builds
+# inject exactly the release tag; empty = git describe, for unpinned dev builds).
+# A git-describe value (vX.Y.Z-N-gSHA) is a semver PRERELEASE, which the
+# criteria_version gate correctly rejects against stable lower bounds - so pinned
+# release builds must inject the exact release tag here.
+ARG CRITERIA_VERSION=""
 RUN CGO_ENABLED=0 GOARCH="${TARGETARCH}" go build -trimpath \
-    -ldflags "-X github.com/brokenbots/criteria/workflow/version.Version=$(git describe --tags --match 'v*' --always)" \
+    -ldflags "-X github.com/brokenbots/criteria/workflow/version.Version=${CRITERIA_VERSION:-$(git describe --tags --match 'v*' --always)}" \
     -o /out/criteria ./cmd/criteria
 
 FROM alpine:${ALPINE_VERSION}
