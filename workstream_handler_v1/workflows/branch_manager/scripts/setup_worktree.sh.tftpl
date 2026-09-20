@@ -6,6 +6,9 @@ branch="$criteria_value_1"
 base="$criteria_value_2"
 wt="$criteria_value_3"
 echo "branch=$branch base=$base worktree=$wt"
+# TEMP DIAGNOSTIC (CRI-261 setup_worktree EPERM/not-a-repo trace): identify the real cwd.
+echo "pwd=$(pwd 2>&1)"; echo "git_dir=$(git rev-parse --git-dir 2>&1 | head -1)"
+echo "repo_dir_ls=$(ls -d /data/intake/CRI-261/repo/.git 2>&1 | head -1)"
 
 git fetch origin 2>&1 || true
 git worktree prune 2>&1 || true
