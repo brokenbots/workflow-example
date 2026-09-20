@@ -200,6 +200,15 @@ type CriteriaRunStatus struct {
 	// JobName is the name of the reconciled child Job.
 	JobName string `json:"jobName,omitempty"`
 
+	// BaseImage records the runner image the child Jobs were pinned with
+	// when this run was admitted (CRI-264). A later pass compares it
+	// against the operator's currently resolved runner image: a mismatch
+	// (the CRITERIA_BASE_IMAGE / DEFAULT_CRITERIA_IMAGE env changed while
+	// the run was in flight, e.g. a run admitted mid-rollout) fails the
+	// run fast with a BaseImageMismatch condition instead of letting the
+	// runner Job replay a stale image through backoff.
+	BaseImage string `json:"baseImage,omitempty"`
+
 	// PRNumber records the pull request number produced by the run, when
 	// known. Informational only: castle supplies no pr_url producer today
 	// (nothing publishes run.metadata), so the castle path leaves this empty

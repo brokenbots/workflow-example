@@ -107,7 +107,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            PerScopeAdapterGroupName(run, scopeID, environment),
-			Namespace:       targetNamespace(run),
+			Namespace:       TargetNamespace(run),
 			Labels:          labels,
 			Annotations:     annotations,
 			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},

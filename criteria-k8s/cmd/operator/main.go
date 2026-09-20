@@ -27,7 +27,7 @@ var (
 	metricsAddr       = flag.String("metrics-bind-address", ":8080", "Address for metrics endpoint")
 	probeAddr         = flag.String("health-probe-bind-address", ":8081", "Address for health probe endpoint")
 	defaultImage      = flag.String("default-image", getenv("DEFAULT_CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
-	criteriaBaseImage = flag.String("criteria-base-image", getenv("CRITERIA_BASE_IMAGE", jobbuilder.CriteriaBaseImageDefault), "Source-mode base image (CRI-230): minimal criteria image fetched-workflow runs execute on when the run spec carries no image")
+	criteriaBaseImage = flag.String("criteria-base-image", getenv("CRITERIA_BASE_IMAGE", "localhost:5000/criteria-base:dev"), "Source-mode base image (CRI-230): minimal criteria image fetched-workflow runs execute on when the run spec carries no image")
 	dataPVC           = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL   = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr        = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
@@ -40,7 +40,14 @@ var (
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
 	adapterSweepInterval = flag.Duration("adapter-sweep-interval", getDuration("ADAPTER_SWEEP_INTERVAL", 30*time.Second), "How often adapter pods/jobs of deleted CriteriaRuns are swept (0 disables)")
 	namespaceFlag        = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
-	development          = flag.Bool("development", false, "Enable development logging")
+	// CRI-264: the operator Deployment whose env the reconciler probes for
+	// the runner image resolution. A CriteriaRun admitted while this
+	// Deployment rolls out must not read the reconciling pod's (stale)
+	// process env: old and new operator pods both reconcile during a
+	// rollout, and the old pod's env pins the stale base image into the
+	// runner Job template.
+	operatorDeployment = flag.String("operator-deployment", getenv("OPERATOR_DEPLOYMENT", "criteria-k8s-operator"), "Operator Deployment the reconciler probes for the live CRITERIA_BASE_IMAGE / DEFAULT_CRITERIA_IMAGE values (CRI-264)")
+	development        = flag.Bool("development", false, "Enable development logging")
 )
 
 func main() {
@@ -89,6 +96,15 @@ func main() {
 
 	queue := controller.NewRunQueue()
 
+	// Direct (uncached) client for the queue recovery read and the
+	// operator-env probe: the probe must see the Deployment's currently
+	// declared env, not a possibly-stale informer copy (CRI-264).
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		logger.Error(err, "creating direct client")
+		os.Exit(1)
+	}
+
 	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
 	// of reading events.ndjson off the PVC. The operator is read-only
 	// towards castle: the runs themselves populate it (CRI-134 server-mode
@@ -101,6 +117,14 @@ func main() {
 		Scheme:   scheme,
 		Recorder: mgr.GetEventRecorderFor("criteria-k8s-operator"),
 		Castle:   castleClient,
+		// Probe the operator Deployment's declared env so a run admitted
+		// mid-rollout resolves the image the cluster deploys with instead
+		// of the reconciling pod's stale process env (CRI-264).
+		EnvProbe: &controller.DeploymentEnvProbe{
+			Client:     directClient,
+			Namespace:  *namespaceFlag,
+			Deployment: *operatorDeployment,
+		},
 		Defaults: jobbuilder.Defaults{
 			Image:             *defaultImage,
 			DataPVC:           *dataPVC,
@@ -118,11 +142,6 @@ func main() {
 
 	// Recover queue state from existing active runs before starting the manager
 	// so in-flight runs are not lost across operator restarts.
-	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		logger.Error(err, "creating direct client for queue recovery")
-		os.Exit(1)
-	}
 	if err := queue.Recover(ctx, directClient, *namespaceFlag); err != nil {
 		logger.Error(err, "recovering queue state")
 		os.Exit(1)

@@ -23,6 +23,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CRI-264: probe the operator Deployment's env for the live runner image
+  # resolution.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "events"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
