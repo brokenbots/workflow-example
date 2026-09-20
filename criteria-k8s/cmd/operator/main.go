@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,7 +29,7 @@ var (
 	metricsAddr       = flag.String("metrics-bind-address", ":8080", "Address for metrics endpoint")
 	probeAddr         = flag.String("health-probe-bind-address", ":8081", "Address for health probe endpoint")
 	defaultImage      = flag.String("default-image", getenv("DEFAULT_CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
-	criteriaBaseImage = flag.String("criteria-base-image", getenv("CRITERIA_BASE_IMAGE", "localhost:5000/criteria-base:dev"), "Source-mode base image (CRI-230): minimal criteria image fetched-workflow runs execute on when the run spec carries no image")
+	criteriaBaseImage = flag.String("criteria-base-image", getenv("CRITERIA_BASE_IMAGE", jobbuilder.CriteriaBaseImageDefault), "Source-mode base image (CRI-230): minimal criteria image fetched-workflow runs execute on when the run spec carries no image")
 	dataPVC           = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL   = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr        = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
@@ -64,17 +66,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	scheme := runtime.NewScheme()
-	if err := criteriav1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering CriteriaRun scheme")
-		os.Exit(1)
-	}
-	if err := batchv1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering batch scheme")
-		os.Exit(1)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering core scheme")
+	scheme, err := operatorScheme()
+	if err != nil {
+		logger.Error(err, "building the operator scheme")
 		os.Exit(1)
 	}
 
@@ -176,6 +170,31 @@ func main() {
 		logger.Error(err, "operator exited")
 		os.Exit(1)
 	}
+}
+
+// operatorScheme builds the runtime scheme every client in this binary is
+// constructed with (manager caches, the direct client, the operator-env
+// probe). Every kind any of those clients reads by value must be registered
+// here: a typed Get of an unregistered kind fails before any API call with
+// "no kind is registered for the type ..." (CRI-264: the missing apps/v1
+// registration made the DeploymentEnvProbe's Deployment read — and with it
+// the whole admission-race enforcement — dead in the shipped binary, while
+// the controller suite kept passing against its own scheme).
+func operatorScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	if err := criteriav1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering CriteriaRun scheme: %w", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering batch scheme: %w", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering core scheme: %w", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering apps scheme: %w", err)
+	}
+	return scheme, nil
 }
 
 func getenv(key, fallback string) string {
