@@ -18,7 +18,11 @@ TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
 
 if jq -e --arg wanted "internal-reproduced" \
     '.data.issue.labels.nodes[]? | select(.name == $wanted)' "$TICKET_JSON" > /dev/null 2>&1; then
-    echo "skip_triage"
+    # printf, not echo: the router compares output.stdout verbatim against
+    # "skip_triage", and echo's trailing newline breaks the equality
+    # (observed live on CRI-264: gate printed skip_triage, run took the
+    # QA-triage default anyway).
+    printf '%s' "skip_triage"
 else
-    echo "run_triage"
+    printf '%s' "run_triage"
 fi
