@@ -62,12 +62,14 @@ func newWorkflowPlan(run *criteriav1.CriteriaRun) *workflowPlan {
 	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env, runName: run.Name}
 }
 
-// targetNamespace resolves the namespace the run's children are created in:
+// TargetNamespace resolves the namespace the run's children are created in:
 // the workflow object's declaration when stamped, else the run's own
 // namespace. The live watcher stamps both from the same criteria-routes
 // ConfigMap, so they agree in practice; the fallback only covers a
-// namespace-less declaration.
-func targetNamespace(run *criteriav1.CriteriaRun) string {
+// namespace-less declaration. Exported because the reconciler peeks the
+// runner Job (CRI-264) and must derive its namespace the same way the job
+// builders do.
+func TargetNamespace(run *criteriav1.CriteriaRun) string {
 	if wf := run.Spec.Workflow; wf != nil && wf.Namespace != "" {
 		return wf.Namespace
 	}
@@ -170,7 +172,7 @@ func (p *workflowPlan) hostAffinityLabels() map[string]string {
 // hostname. All pods built from the plan carry all of the labels, so every
 // term resolves to the same anchor pod. Terms select within the pod's own
 // namespace (nil Namespaces): all children of a run are created in
-// targetNamespace. Nil when the plan declares no host-affinity volumes.
+// TargetNamespace. Nil when the plan declares no host-affinity volumes.
 func (p *workflowPlan) podAffinity() *corev1.Affinity {
 	labels := p.hostAffinityLabels()
 	if labels == nil {

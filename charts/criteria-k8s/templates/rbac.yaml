@@ -32,6 +32,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CRI-264: the reconciler probes the operator Deployment's env for the
+  # live runner-image resolution.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "pods/log", "events"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

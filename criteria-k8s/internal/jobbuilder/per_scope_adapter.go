@@ -74,7 +74,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
-			Namespace:       targetNamespace(run),
+			Namespace:       TargetNamespace(run),
 			Labels:          labels,
 			OwnerReferences: []metav1.OwnerReference{ownerReference(run)},
 		},

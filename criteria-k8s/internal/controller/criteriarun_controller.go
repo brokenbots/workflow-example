@@ -11,7 +11,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -47,7 +46,14 @@ type CriteriaRunReconciler struct {
 	// Castle observes run lifecycle from the castle control plane (CRI-133
 	// API). Nil or disabled means observation is off; the reconciler then
 	// relies purely on Job conditions for phase stamping.
-	Castle   castle.RunSource
+	Castle castle.RunSource
+	// EnvProbe resolves operator env values as the cluster currently
+	// declares them (CRI-264): the runner image is resolved from the live
+	// operator Deployment env rather than the reconciling pod's process
+	// env, which goes stale while the operator Deployment rolls out.
+	// Nil keeps the process-env resolution and mismatch checks run against
+	// it; a probe read error defers mismatch checks to a later pass.
+	EnvProbe OperatorEnvProbe
 	Defaults jobbuilder.Defaults
 	Queue    *RunQueue
 }
@@ -56,6 +62,7 @@ type CriteriaRunReconciler struct {
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -200,7 +207,42 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	desiredJobs := jobbuilder.BuildAll(&run, r.Defaults)
+	// CRI-264: resolve the runner image against the operator env the
+	// cluster currently declares before touching child Jobs. Peek the
+	// runner Job first: its existence decides between the reconcile pass
+	// (mismatch check against the pinned image) and the admission pass
+	// (build and create with the live-resolved defaults).
+	runnerKey := client.ObjectKey{
+		Name:      jobbuilder.RunnerJobName(&run),
+		Namespace: jobbuilder.TargetNamespace(&run),
+	}
+	var existingRunner batchv1.Job
+	runnerFound := true
+	if err := r.Get(ctx, runnerKey, &existingRunner); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("peeking runner job %s: %w", runnerKey, err)
+		}
+		runnerFound = false
+	}
+	resolvedDefaults, resolvedLive := r.resolveRunnerDefaults(ctx, &run, logger)
+	currentImage := jobbuilder.ResolveRunnerImage(&run, resolvedDefaults)
+
+	if runnerFound {
+		// Enforce only on non-terminal Jobs: a Job that already completed
+		// keeps its recorded outcome even if the env moved on afterwards.
+		if resolvedLive && !isTerminalPhase(derivePhase(&existingRunner)) {
+			if pinned, mismatch := runnerImageMismatch(&run.Status, &existingRunner, currentImage); mismatch {
+				return r.failBaseImageMismatch(ctx, &run, pinned, currentImage, logger)
+			}
+		}
+	} else if resolvedLive && run.Status.BaseImage != "" && run.Status.BaseImage != currentImage {
+		// Admission pass on a run whose status already carries a stamp
+		// from a prior operator (its Jobs are gone) with the env moved on
+		// since: fail fast instead of re-admitting on the old stamp.
+		return r.failBaseImageMismatch(ctx, &run, run.Status.BaseImage, currentImage, logger)
+	}
+
+	desiredJobs := jobbuilder.BuildAll(&run, resolvedDefaults)
 
 	var runnerJob *batchv1.Job
 	for _, desired := range desiredJobs {
@@ -225,6 +267,19 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if runnerJob == nil {
 		return ctrl.Result{}, fmt.Errorf("no runner job found in desired set")
+	}
+
+	// Stamp the runner image the child Jobs are pinned with (CRI-264). The
+	// image actually on the runner container is the ground truth: with a
+	// live resolution it agrees with the resolution (a disagreeing Job was
+	// failed fast above), and with a degraded resolution it records the
+	// process-env pin the Job was actually built with.
+	if update.Status.BaseImage == "" {
+		if pinned := jobbuilder.RunnerJobImage(runnerJob); pinned != "" {
+			update.Status.BaseImage = pinned
+		} else {
+			update.Status.BaseImage = currentImage
+		}
 	}
 
 	// Base status mirrors the runner Job, then the castle observation layers
@@ -472,17 +527,8 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 		}()
 	}
 
-	desiredJobs := jobbuilder.BuildAll(run, r.Defaults)
-	for _, desired := range desiredJobs {
-		var job batchv1.Job
-		err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &job)
-		if err == nil {
-			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("deleting child job %s: %w", desired.Name, err)
-			}
-		} else if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("getting child job %s for deletion: %w", desired.Name, err)
-		}
+	if err := r.deleteChildJobs(ctx, run); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Per-scope adapter pods are not among the desired Jobs (BuildAll omits

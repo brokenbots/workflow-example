@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,7 +42,14 @@ var (
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
 	adapterSweepInterval = flag.Duration("adapter-sweep-interval", getDuration("ADAPTER_SWEEP_INTERVAL", 30*time.Second), "How often adapter pods/jobs of deleted CriteriaRuns are swept (0 disables)")
 	namespaceFlag        = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
-	development          = flag.Bool("development", false, "Enable development logging")
+	// CRI-264: the operator Deployment whose env the reconciler probes for
+	// the runner image resolution. A CriteriaRun admitted while this
+	// Deployment rolls out must not read the reconciling pod's (stale)
+	// process env: old and new operator pods both reconcile during a
+	// rollout, and the old pod's env pins the stale base image into the
+	// runner Job template.
+	operatorDeployment = flag.String("operator-deployment", getenv("OPERATOR_DEPLOYMENT", "criteria-k8s-operator"), "Operator Deployment the reconciler probes for the live CRITERIA_BASE_IMAGE / DEFAULT_CRITERIA_IMAGE values (CRI-264)")
+	development        = flag.Bool("development", false, "Enable development logging")
 )
 
 func main() {
@@ -57,17 +66,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	scheme := runtime.NewScheme()
-	if err := criteriav1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering CriteriaRun scheme")
-		os.Exit(1)
-	}
-	if err := batchv1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering batch scheme")
-		os.Exit(1)
-	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering core scheme")
+	scheme, err := operatorScheme()
+	if err != nil {
+		logger.Error(err, "building the operator scheme")
 		os.Exit(1)
 	}
 
@@ -89,6 +90,15 @@ func main() {
 
 	queue := controller.NewRunQueue()
 
+	// Direct (uncached) client for the queue recovery read and the
+	// operator-env probe: the probe must see the Deployment's currently
+	// declared env, not a possibly-stale informer copy (CRI-264).
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		logger.Error(err, "creating direct client")
+		os.Exit(1)
+	}
+
 	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
 	// of reading events.ndjson off the PVC. The operator is read-only
 	// towards castle: the runs themselves populate it (CRI-134 server-mode
@@ -101,6 +111,14 @@ func main() {
 		Scheme:   scheme,
 		Recorder: mgr.GetEventRecorderFor("criteria-k8s-operator"),
 		Castle:   castleClient,
+		// Probe the operator Deployment's declared env so a run admitted
+		// mid-rollout resolves the image the cluster deploys with instead
+		// of the reconciling pod's stale process env (CRI-264).
+		EnvProbe: &controller.DeploymentEnvProbe{
+			Client:     directClient,
+			Namespace:  *namespaceFlag,
+			Deployment: *operatorDeployment,
+		},
 		Defaults: jobbuilder.Defaults{
 			Image:             *defaultImage,
 			DataPVC:           *dataPVC,
@@ -118,11 +136,6 @@ func main() {
 
 	// Recover queue state from existing active runs before starting the manager
 	// so in-flight runs are not lost across operator restarts.
-	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		logger.Error(err, "creating direct client for queue recovery")
-		os.Exit(1)
-	}
 	if err := queue.Recover(ctx, directClient, *namespaceFlag); err != nil {
 		logger.Error(err, "recovering queue state")
 		os.Exit(1)
@@ -157,6 +170,31 @@ func main() {
 		logger.Error(err, "operator exited")
 		os.Exit(1)
 	}
+}
+
+// operatorScheme builds the runtime scheme every client in this binary is
+// constructed with (manager caches, the direct client, the operator-env
+// probe). Every kind any of those clients reads by value must be registered
+// here: a typed Get of an unregistered kind fails before any API call with
+// "no kind is registered for the type ..." (CRI-264: the missing apps/v1
+// registration made the DeploymentEnvProbe's Deployment read — and with it
+// the whole admission-race enforcement — dead in the shipped binary, while
+// the controller suite kept passing against its own scheme).
+func operatorScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	if err := criteriav1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering CriteriaRun scheme: %w", err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering batch scheme: %w", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering core scheme: %w", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering apps scheme: %w", err)
+	}
+	return scheme, nil
 }
 
 func getenv(key, fallback string) string {

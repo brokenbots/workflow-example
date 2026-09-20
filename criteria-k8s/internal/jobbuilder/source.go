@@ -188,7 +188,7 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleRunner
 
-	job := buildJobBase(run, targetNamespace(run), jobName, labels)
+	job := buildJobBase(run, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
 	// Source-mode runs that need the ticket repository (e.g. linear_develop_v1
 	// drives git fetch/worktree/pr steps against var.repo_dir) get the same
@@ -199,10 +199,10 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 	// plain git and a token-inited credential store instead of gh.
 	// Workflows that never touch the repo (triage, intake) ignore repo_dir.
 	job.Spec.Template.Spec.InitContainers = []corev1.Container{
-	    sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan),
+		sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
-	    sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
+		sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
 	}
 	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
 	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
@@ -404,7 +404,7 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 
 	return corev1.Container{
-		Name:            "workflow-runner",
+		Name:            RunnerContainerName,
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: restrictedContainerSecurityContext(),

@@ -236,6 +236,14 @@ spec:
                 jobName:
                   type: string
                   description: Name of the reconciled child Job.
+                baseImage:
+                  type: string
+                  description: >-
+                    Runner image the child Jobs were pinned with when this
+                    run was admitted (CRI-264). A mismatch against the
+                    operator's currently resolved runner image fails the run
+                    fast with a BaseImageMismatch condition instead of
+                    replaying a stale image through backoff.
                 prNumber:
                   type: string
                   description: >-
@@ -336,6 +344,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CRI-264: probe the operator Deployment's env for the live runner image
+  # resolution.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods", "pods/exec", "events"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

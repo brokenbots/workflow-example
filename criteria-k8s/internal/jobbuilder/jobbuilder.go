@@ -50,6 +50,29 @@ const (
 	RoleAdapter = "adapter"
 )
 
+// Runner container and image resolution names shared by the job builders
+// and the reconciler (CRI-264): the reconciler reads the pinned image back
+// off the runner container by name and compares it against the resolution
+// the operator would perform today, so the two sides must agree on the
+// container name and the fallback chain.
+const (
+	// RunnerContainerName is the workflow-runner container's name in the
+	// runner Job pod template.
+	RunnerContainerName = "workflow-runner"
+	// DefaultWorkflowImage is the image-mode fallback when neither the run
+	// spec nor the operator declares an image: the baked-tree workflow
+	// image.
+	DefaultWorkflowImage = "localhost:5000/linear-intake-remote:dev"
+	// EnvCriteriaBaseImage is the operator env var the source-mode base
+	// image is resolved from (CRI-230). cmd/operator mirrors it as the
+	// --criteria-base-image flag default.
+	EnvCriteriaBaseImage = "CRITERIA_BASE_IMAGE"
+	// EnvDefaultImage is the operator env var the image-mode default image
+	// is resolved from. cmd/operator mirrors it as the --default-image
+	// flag default.
+	EnvDefaultImage = "DEFAULT_CRITERIA_IMAGE"
+)
+
 var nonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
 var nonLabel = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
@@ -234,6 +257,36 @@ func buildJobBase(run *criteriav1.CriteriaRun, namespace, name string, labels ma
 	}
 }
 
+// ResolveRunnerImage resolves the image the runner Job pins for this run
+// under the given defaults (CRI-264): source mode resolves
+// spec.image > defaults.CriteriaBaseImage > the built-in criteria-base
+// default, image mode resolves spec.image > defaults.Image > the built-in
+// workflow image. The reconciler compares this resolution against the image
+// already pinned on the run's child Jobs and its status.baseImage stamp to
+// detect a CRITERIA_BASE_IMAGE / DEFAULT_CRITERIA_IMAGE change while a run
+// is in flight, so every image-producing path must resolve through this
+// function.
+func ResolveRunnerImage(run *criteriav1.CriteriaRun, defaults Defaults) string {
+	if run.Spec.WorkflowSource != nil {
+		return sourceModeImage(run, defaults)
+	}
+	return firstNonEmpty(run.Spec.Image, defaults.Image, DefaultWorkflowImage)
+}
+
+// RunnerJobImage returns the image pinned on a runner Job's workflow-runner
+// container, or "" when the container is absent (the job builders always
+// emit the container, so "" means "no pinned image to compare"). Exported
+// for the reconciler's base-image mismatch check (CRI-264) — the reconciler
+// must read the runner container back by the same name the builders pin.
+func RunnerJobImage(runnerJob *batchv1.Job) string {
+	for i := range runnerJob.Spec.Template.Spec.Containers {
+		if runnerJob.Spec.Template.Spec.Containers[i].Name == RunnerContainerName {
+			return runnerJob.Spec.Template.Spec.Containers[i].Image
+		}
+	}
+	return ""
+}
+
 // BuildRunnerJob constructs the runner Job: repo-clone init container + workflow-runner.
 // The workflow object stamped on the run (CRI-222) supplies the target
 // namespace, the declared volumes, and the CSI secret delivery; the image
@@ -252,7 +305,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	if run.Spec.WorkflowSource != nil {
 		return buildSourceRunnerJob(run, defaults)
 	}
-	image := firstNonEmpty(run.Spec.Image, defaults.Image, "localhost:5000/linear-intake-remote:dev")
+	image := ResolveRunnerImage(run, defaults)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	providerBaseURL := firstNonEmpty(run.Spec.ProviderBaseURL, defaults.ProviderBaseURL, "http://192.168.17.116:11434/v1")
 	maxVisits := run.Spec.MaxAgentVisits
@@ -271,7 +324,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleRunner
 
-	job := buildJobBase(run, targetNamespace(run), jobName, labels)
+	job := buildJobBase(run, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
 	job.Spec.Template.Spec.InitContainers = []corev1.Container{
 		repoCloneContainer(image, repoURL, repoDir, plan),
@@ -297,7 +350,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	plan := newWorkflowPlan(run)
 
 	hasSecrets := plan.hasSecrets()
-	job := buildJobBase(run, targetNamespace(run), jobName, labels)
+	job := buildJobBase(run, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.AutomountServiceAccountToken = boolPtr(hasSecrets)
 	if hasSecrets {
 		// The OpenBao CSI provider authenticates the pod through its
@@ -426,7 +479,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 
 	return corev1.Container{
-		Name:            "workflow-runner",
+		Name:            RunnerContainerName,
 		Image:           image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: restrictedContainerSecurityContext(),
