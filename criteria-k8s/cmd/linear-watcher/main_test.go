@@ -1830,10 +1830,14 @@ func TestPollOrphanSweepSparesLiveRuns(t *testing.T) {
 
 // TestPollOrphanSweepGuardRespectsTerminalEvents covers the terminal-event
 // guard: a ticket with criteria-automation, no live CriteriaRun, but a
-// recorded terminal event (its CriteriaRun settled Failed or Succeeded) is
-// not swept as orphaned — reconciliation owns that transition, so a
-// settled ticket converges without gaining a spurious dirty marker on
-// success.
+// recorded terminal event (its CriteriaRun settled Failed or Succeeded)
+// converges through reconciliation when the phase change is still visible —
+// change-driven reconciliation fires on the new phase and removes the
+// automation marker (raising the dirty marker only on failure), so the
+// sweep must not interfere and a settled ticket must not gain a spurious
+// dirty marker on success. The sweep takes over only when reconciliation
+// cannot act — a settled ticket whose phase is already recorded (CRI-265,
+// covered by TestPollOrphanSweepBreaksStaleLabelDeadlock).
 func TestPollOrphanSweepGuardRespectsTerminalEvents(t *testing.T) {
 	t.Run("succeeded run: reconciled clean, never swept", func(t *testing.T) {
 		tw := newTestWatcher(t, routesJSON)
@@ -1875,6 +1879,87 @@ func TestPollOrphanSweepGuardRespectsTerminalEvents(t *testing.T) {
 			"a single REPLACE write performs the removal and the dirty add")
 		assert.False(t, tw.logs.contains("sweeping orphaned automation label"),
 			"a ticket with a recorded terminal event is not swept as orphaned")
+	})
+}
+
+// TestPollOrphanSweepBreaksStaleLabelDeadlock reproduces the CRI-265
+// deadlock: a ticket carries the automation label while every one of its
+// CriteriaRuns has settled and no run is live. Change-driven reconciliation
+// (CRI-252) skips the ticket because its phase is already recorded, and the
+// single-active invariant (CRI-221) blocks re-firing while the label is
+// present — so, with the old settled-run guard, the label could only be
+// cleared by hand. The sweep breaks the deadlock: settled+gone is stale by
+// definition, so the sweep removes the label directly — without re-adding
+// the dirty marker, which the terminal event already governed at settle
+// time — and the watcher fires a fresh run on the next poll.
+func TestPollOrphanSweepBreaksStaleLabelDeadlock(t *testing.T) {
+	t.Run("settled+gone ticket is swept and re-fires without human intervention", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		// A failed run settled long ago; the ticket still carries the
+		// automation label (the CRI-261 operator re-arm mid-loop).
+		liveRun(t, tw, "CRI-1", criteriav1.PhaseFailed)
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(),
+			map[string]interface{}{"name": automationLabelName}))
+
+		// First poll: reconciliation converges the phase change (removes
+		// the automation marker, raises the dirty marker) and records the
+		// Failed phase.
+		tw.pollOnce(t)
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+
+		// The operator re-arms: the automation marker re-added, the dirty
+		// marker cleared. The recorded phase is unchanged, so
+		// reconciliation will never fire again on its own and the
+		// single-active invariant blocks re-firing — with the old
+		// settled-run guard this state could never converge.
+		tw.linearS.setIssueLabels("i-1", "k8s-run", automationLabelName)
+
+		writes := tw.linearS.labelUpdateCount()
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run"}, tw.linearS.issueLabelsOf("i-1"),
+			"the sweep removes the stale automation label and does not re-add the dirty marker")
+		assert.Equal(t, writes+1, tw.linearS.labelUpdateCount(),
+			"exactly one write: the sweep's removal (reconciliation skipped the unchanged phase)")
+		assert.True(t, tw.logs.contains("removing stale automation label"))
+		assert.Len(t, tw.runs(t), 1,
+			"the invariant still blocks a same-poll re-fire: the listing read predates the sweep")
+
+		// The next poll's fresh listing no longer carries the label: the
+		// watcher fires the successor run the deadlock had been blocking.
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 2, "the watcher re-fires after the sweep cleared the stale label")
+		assert.Equal(t, []string{"k8s-run", "criteria-automation"}, tw.linearS.issueLabelsOf("i-1"),
+			"the fired run regains the automation marker")
+	})
+
+	t.Run("a dirty marker the operator left in place survives the stale-label removal", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		liveRun(t, tw, "CRI-1", criteriav1.PhaseFailed)
+		tw.linearS.setIssues(issue("i-1", "CRI-1", gateLabel(),
+			map[string]interface{}{"name": automationLabelName}))
+		tw.pollOnce(t)
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"))
+
+		// The operator re-adds the automation marker and keeps the dirty
+		// marker: the sweep removes the stale marker only.
+		tw.linearS.setIssueLabels("i-1", "k8s-run", dirtyLabelName, automationLabelName)
+
+		writes := tw.linearS.labelUpdateCount()
+		tw.pollOnce(t)
+
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty"}, tw.linearS.issueLabelsOf("i-1"),
+			"the stale automation label is removed; the sticky dirty marker is untouched")
+		assert.Equal(t, writes+1, tw.linearS.labelUpdateCount())
+
+		// The sweep acts once: the next poll neither re-sweeps the ticket
+		// nor re-adds the dirty marker (the successor run it fires only
+		// regains the automation marker).
+		tw.pollOnce(t)
+		assert.Equal(t, 1, tw.logs.infoCount("removing stale automation label"),
+			"the sweep acts once per stale marker")
+		assert.Equal(t, []string{"k8s-run", "criteria-dirty", "criteria-automation"},
+			tw.linearS.issueLabelsOf("i-1"), "the re-fired run keeps the dirty marker")
 	})
 }
 
