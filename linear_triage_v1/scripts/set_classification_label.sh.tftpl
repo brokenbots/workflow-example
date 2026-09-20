@@ -13,7 +13,7 @@ labels=$(curl -sS -f \
     -d "$(jq -n \
         --arg q 'query($name: String!) { issueLabels(filter: {name: {eq: $name}}) { nodes { id } } }' \
         --arg name "$criteria_value_3" \
-        '{query: $q, variables: {team: $team, name: $name}}')" \
+        '{query: $q, variables: {name: $name}}')" \
     https://api.linear.app/graphql)
 
 label_id=$(printf '%s' "$labels" | jq -r '.data.issueLabels.nodes[0].id // empty')
