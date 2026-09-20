@@ -221,7 +221,10 @@ grep -q 'pod-security.kubernetes.io/enforce: baseline' "$NS_RENDERED" || fail "r
 check_override() { # description set-expr pattern
     local out
     out="$(helm template criteria-k8s "$CHART" --set "$2")" || fail "helm template failed for $1"
-    printf '%s' "$out" | grep -q "$3" || fail "$1 not reflected in rendered output (--set $2)"
+    # Glob match instead of `printf | grep -q`: grep -q exits on the first
+    # match and closes the pipe, so under pipefail the writer's SIGPIPE
+    # (exit 141) turns a passing check into a spurious failure.
+    [[ "$out" == *"$3"* ]] || fail "$1 not reflected in rendered output (--set $2)"
 }
 
 check_override "operator image tag override" "images.operator.tag=1.2.3" 'image: "localhost:5000/criteria-k8s:1.2.3"'
@@ -236,25 +239,27 @@ check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
 # Empty routesConfigMap drops the routes mount entirely.
 out="$(helm template criteria-k8s "$CHART" --set watcher.routesConfigMap="")" || \
     fail "helm template failed with empty routesConfigMap"
-printf '%s' "$out" | grep -q 'mountPath: /etc/criteria/routes' && \
+[[ "$out" == *'mountPath: /etc/criteria/routes'* ]] && \
     fail "routes mount rendered despite empty watcher.routesConfigMap"
 
 out="$(helm template criteria-k8s "$CHART" --set "images.workflow.repository=ghcr.io/acme/runner" --set "images.workflow.tag=v5")" \
     || fail "helm template failed for workflow image"
-printf '%s' "$out" | grep -q 'value: "ghcr.io/acme/runner:v5"' || fail "workflow image override not reflected in DEFAULT_CRITERIA_IMAGE"
+[[ "$out" == *'value: "ghcr.io/acme/runner:v5"'* ]] || fail "workflow image override not reflected in DEFAULT_CRITERIA_IMAGE"
 
 # Empty namespace value falls back to the release namespace.
 out="$(helm template criteria-k8s "$CHART" -n alt-ns --set namespace="")" || fail "helm template failed for namespace fallback"
-printf '%s' "$out" | grep -q 'namespace: alt-ns' || fail "empty namespace does not fall back to the release namespace"
+[[ "$out" == *'namespace: alt-ns'* ]] || fail "empty namespace does not fall back to the release namespace"
 
 # -------------------------------------------------------------- toggles
 out="$(helm template criteria-k8s "$CHART" --set castle.enabled=false)" || fail "helm template failed with castle disabled"
-printf '%s' "$out" | grep -q '^kind: Service$' && fail "castle Service rendered despite castle.enabled=false"
-printf '%s' "$out" | grep -q 'name: castle$' && fail "castle Deployment rendered despite castle.enabled=false"
+# Newline-anchored globs stand in for grep's ^...$ line anchors (and keep
+# 'kind: Service' from matching 'kind: ServiceAccount'); no pipe, no SIGPIPE.
+[[ "$out" == *$'\nkind: Service\n'* ]] && fail "castle Service rendered despite castle.enabled=false"
+[[ "$out" == *$'\n  name: castle\n'* ]] && fail "castle Deployment rendered despite castle.enabled=false"
 
 out="$(helm template criteria-k8s "$CHART" --set operator.enabled=false --set watcher.enabled=false --set castle.enabled=false)" \
     || fail "helm template failed with all components disabled"
-printf '%s' "$out" | grep -q '^kind: Deployment$' && fail "Deployment rendered with all components disabled"
+[[ "$out" == *$'\nkind: Deployment\n'* ]] && fail "Deployment rendered with all components disabled"
 
 # ------------------------------------------------------- CRD packaging
 helm template criteria-k8s "$CHART" --include-crds > "$CRD_RENDERED" || fail "helm template --include-crds failed"
