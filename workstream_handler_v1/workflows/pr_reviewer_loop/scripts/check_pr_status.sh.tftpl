@@ -13,26 +13,35 @@ if [ "$pr_state" = "CLOSED" ]; then
     exit 1
 fi
 
-# Every check must be green before merge, so inspect ALL checks —
-# not just --required. A check GitHub does not mark required can
-# still block the merge, and treating "not required" as "ignorable"
-# is how a red security scan reaches merge_pr.
-checks_rc=0
-checks_json=$(gh pr checks "$pr" --json bucket,name,state,workflow 2>&1) || checks_rc=$?
+# Check classification via the REST API: the pinned gh CLI in the reviewer
+# adapter image (2.47.0) predates `gh pr checks --json` (added 2.49+), and the
+# usage error it prints was classified as checks_failed, wedging every review
+# round in a no_work cycle until max_visits (observed live on CRI-265: PR #61,
+# green CI, six rounds of "status:checks_failed"). The API path is
+# version-stable and needs only `gh api`.
+owner=$(gh repo view --json owner --jq '.owner.login')
+repo=$(gh repo view --json name --jq '.name')
 
-# exit 8 / "no checks reported" means CI has not registered check
-# runs yet (common right after a push) — pending, not failed.
-# BUT: on a repo with no Actions workflows at all, checks never
-# register, so this would loop pending forever (observed: CRI-90 on
-# workflow-example). Distinguish the two by counting the repo's
-# workflows; zero workflows means there is no CI to wait for, so fall
-# through to the review-decision logic below instead of reporting pending.
-if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
-    wf_count=$(gh api "repos/$(gh repo view --json nameWithOwner --jq '.nameWithOwner')/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+checks_rc=0
+checks_json=$(gh api "repos/$owner/$repo/commits/$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')/check-runs" \
+    --jq '[.check_runs[] | {name: .name, state: .status, conclusion: .conclusion}]' 2>&1) || checks_rc=$?
+
+if [ "$checks_rc" -ne 0 ]; then
+    echo "status:pending"
+    echo "pr_number=$pr"
+    echo "checks=api_unreachable"
+    echo "$checks_json" >&2
+    exit 0
+fi
+
+# No check runs at all: CI has not registered yet (common right after a push)
+# OR the repo has no Actions workflows at all (would loop pending forever,
+# observed: CRI-90 on workflow-example). Distinguish by counting the repo's
+# workflows; zero workflows means there is no CI to wait for.
+if [ "$(printf '%s' "$checks_json" | jq 'length')" = "0" ]; then
+    wf_count=$(gh api "repos/$owner/$repo/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
     if [ "$wf_count" = "0" ]; then
         echo "checks=none (repo has no Actions workflows; skipping CI wait)" >&2
-        checks_json='[]'
-        checks_rc=0
     else
         echo "status:pending"
         echo "pr_number=$pr"
@@ -41,31 +50,23 @@ if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks rep
     fi
 fi
 
-# Classify from buckets rather than the exit code alone: gh exits
-# non-zero for failures but cannot distinguish "still running".
-any_failing=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "fail")] | length' 2>/dev/null || echo "0")
-any_pending=$(printf '%s' "$checks_json" | jq '[.[] | select(.bucket == "pending")] | length' 2>/dev/null || echo "0")
+# Classify by state+conclusion (check-runs API): a run still in flight has
+# status != COMPLETED with conclusion null.
+any_failing=$(printf '%s' "$checks_json" | jq '[.[] | select(.conclusion != null and (.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral"))] | length' 2>/dev/null || echo "0")
+any_pending=$(printf '%s' "$checks_json" | jq '[.[] | select(.conclusion == null and .state != "COMPLETED")] | length' 2>/dev/null || echo "0")
 if [ "$any_pending" -gt 0 ] && [ "$any_failing" -eq 0 ]; then
     echo "status:pending"
     echo "pr_number=$pr"
-    printf '%s\n' "$checks_json" | jq -r '.[] | select(.bucket == "pending") | "pending_check=\(.name)"' 2>/dev/null || true
+    printf '%s\n' "$checks_json" | jq -r '.[] | select(.conclusion == null and .state != "COMPLETED") | "pending_check=\(.name)"' 2>/dev/null || true
     exit 0
 fi
 if [ "$any_failing" -gt 0 ]; then
     echo "status:checks_failed"
     echo "pr_number=$pr"
-    printf '%s\n' "$checks_json" | jq -r '.[] | select(.bucket == "fail") | "failing_check=\(.name)"' 2>/dev/null || true
-    exit 0
-fi
-if [ "$checks_rc" -ne 0 ]; then
-    echo "status:checks_failed"
-    echo "pr_number=$pr"
-    printf '%s\n' "$checks_json"
+    printf '%s\n' "$checks_json" | jq -r '.[] | select(.conclusion != null and (.conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")) | "failing_check=\(.name)"' 2>/dev/null || true
     exit 0
 fi
 
-owner=$(gh repo view --json owner --jq '.owner.login')
-repo=$(gh repo view --json name --jq '.name')
 review_decision=$(gh pr view "$pr" --json reviewDecision --jq '.reviewDecision // "REVIEW_REQUIRED"')
 
 # Viewer-agnostic approval check (mirrors the parent's check_pr):
@@ -121,4 +122,4 @@ echo "pr_number=$pr"
 echo "review_decision=$review_decision"
 echo "checks=passed"
 printf '%s\n' "$checks_json" | \
-    jq -r 'group_by(.bucket) | map([.[0].bucket, (length|tostring)] | join("=")) | .[]' 2>/dev/null || true
+    jq -r 'group_by(.state) | map([.[0].state, (length|tostring)] | join("=")) | .[]' 2>/dev/null || true
