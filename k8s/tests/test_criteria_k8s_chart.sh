@@ -126,7 +126,7 @@ grep -q 'name: castle$' "$RENDERED" || fail "castle Deployment missing"
 [ "$(count_kind Secret)" -eq 0 ] || fail "chart must not template Secret resources"
 [ "$(count_kind Namespace)" -eq 0 ] || fail "namespace must not be rendered by default (Helm skips ns; use --create-namespace)"
 
-// Namespaced RBAC for the operator (k8s/operator-rbac.yaml shape).
+# Namespaced RBAC for the operator (k8s/operator-rbac.yaml shape).
 grep -q 'criteriaruns/status' "$RENDERED" || fail "operator Role does not cover criteriaruns/status"
 grep -q 'resources: \["pods", "pods/exec", "pods/log", "events"\]' "$RENDERED" || fail "operator Role does not cover pods/exec/log/events"
 grep -q 'resourceNames: \["criteria-secrets"\]' "$RENDERED" || fail "runner Role does not scope to criteria-secrets"
@@ -136,6 +136,9 @@ grep -q 'resourceNames: \["criteria-secrets"\]' "$RENDERED" || fail "runner Role
 # aside. CRI-264: the reconciler probes the operator Deployment env for the
 # live runner-image resolution, so a drifted rule list there (e.g. a missing
 # apps/deployments get) silently degrades the probe to fail-open.
+# The extraction anchors on the first rules: block, which is the operator
+# ClusterRole's — exactly one ClusterRole exists in each file today; revisit
+# if a second one is ever added.
 clusterrole_rules() { # file
     awk '/^rules:$/{on = 1; next}
          on && /^---$/{exit}
