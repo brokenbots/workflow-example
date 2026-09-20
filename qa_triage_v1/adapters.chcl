@@ -23,6 +23,12 @@ environment "remote" "primary" {
 // give them a real checkout they are free to destroy. Whatever they do here is
 // discarded at teardown.
 environment "remote" "scratch" {
+    // Per-scope sessions: agents bound here must dispatch as per-scope
+    // operator-spawned pods (CRI-269 deferred-remote contract). Without this
+    // flag a remote-bound adapter falls back to an eager local OCI verify,
+    // which cannot succeed in a k8s runner pod (no adapter binary/OCI cache)
+    // and dies at the 5-minute handshake budget (CRI-264 refire evidence).
+    per_scope_sessions = true
     working_directory = "${var.triage_root}/scratch"
     process = {
         exec = ["*"]
