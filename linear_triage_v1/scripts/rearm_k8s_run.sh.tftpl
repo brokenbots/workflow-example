@@ -5,7 +5,6 @@ set -euo pipefail
 : "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
 run_dir="$criteria_value_1/$criteria_value_2"
 issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
-team_id=$(jq -r '.data.issue.team.id' "$run_dir/ticket.json")
 
 # Ready-for-development re-arm (CRI-240): re-attach the run-arming label so
 # the development route fires automatically once the ticket lands in the
@@ -20,11 +19,10 @@ arm=$(curl -sS -f \
     -H "Authorization: $LINEAR_API_KEY" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
-        --arg q 'query($id: String!, $team: ID!, $name: String!) { issue(id: $id) { labels { nodes { id } } } issueLabels(filter: {team: {id: {eq: $team}}, name: {eq: $name}}) { nodes { id } } }' \
+        --arg q 'query($id: String!, $name: String!) { issue(id: $id) { labels { nodes { id } } } issueLabels(filter: {name: {eq: $name}}) { nodes { id } } }' \
         --arg id "$issue_id" \
-        --arg team "$team_id" \
         --arg name "$criteria_value_3" \
-        '{query: $q, variables: {id: $id, team: $team, name: $name}}')" \
+        '{query: $q, variables: {id: $id, name: $name}}')" \
     https://api.linear.app/graphql)
 
 label_id=$(printf '%s' "$arm" | jq -r '.data.issueLabels.nodes[0].id // empty')
