@@ -316,6 +316,18 @@ if [ -z "$REPO_URL" ]; then
     exit 1
 fi
 mkdir -p "$(dirname "$REPO_DIR")"
+# REUSE a valid existing clone for the same origin instead of rm -rf + clone:
+# a refire while a previous run's adapter pods still hold the repo dir as
+# their working directory turns rm -rf into a cross-run deletion race (the
+# live session's getcwd fails and every git step of the still-running run
+# dies with "not a git repository"). Refresh an existing clone with a fetch;
+# clone only when the directory is missing or not a valid repository.
+if git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [ "$(git -C "$REPO_DIR" config --get remote.origin.url)" = "https://github.com/$REPO_URL.git" ]; then
+    git -C "$REPO_DIR" fetch --prune origin 2>&1 || true
+    echo "reusing existing clone at $REPO_DIR"
+    exit 0
+fi
 rm -rf "$REPO_DIR"
 git config --global credential.helper 'store'
 printf 'https://x-access-token:%s@github.com\n' "$WORKFLOW_GITHUB_TOKEN" > "$HOME/.git-credentials"
