@@ -128,6 +128,7 @@ set -- apply "$workflow_url" \
     --var "ticket_id=${TICKET_ID-}" \
     --var "repo_dir=${REPO_DIR:-/data/intake/${TICKET_ID:-}/repo}" \
     --var "intake_root=${INTAKE_ROOT:-/data/intake}" \
+    --var "triage_root=${TRIAGE_ROOT:-/data/triage}" \
     --var "linear_review_state=${LINEAR_REVIEW_STATE:-In Review}" \
     --var "linear_work_state=${LINEAR_WORK_STATE:-In Progress}" \
     --var "linear_done_state=${LINEAR_DONE_STATE:-Done}" \
@@ -370,6 +371,10 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		// up with it. The path is fixed so the runner script's writability
 		// check and the engine agree regardless of the image's own HOME.
 		{Name: "CRITERIA_HOME", Value: "/tmp/criteria-home"},
+		// Triage workflows default triage_root to a container-local /tmp
+		// path; agents bound to it run in per-scope adapter pods that share
+		// only the data PVC, so the root must live on the PVC (CRI-264).
+		{Name: "TRIAGE_ROOT", Value: "/data/triage"},
 		{Name: "WORKFLOW_URL", Value: source.URL},
 	}
 	if source.Ref != "" {
