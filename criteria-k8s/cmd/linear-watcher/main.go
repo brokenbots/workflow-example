@@ -432,9 +432,12 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 		// selector — runs created outside the selector convention (e.g.
 		// legacy runs carrying a different label key) are invisible to the
 		// runs index, and the label is the only other witness the invariant
-		// has. A label orphaned by a deleted run was already converged to
-		// the dirty label by the sweep above, so a label still present here
-		// backs a live workflow.
+		// has. The sweep above converges every label with no live run
+		// behind it (no runs at all → dirty swap; all runs settled → stale
+		// removal, CRI-265), so a label still present here backs either a
+		// live workflow invisible to the runs index or this poll's listing
+		// read taken before the sweep acted — the label is gone by the next
+		// poll, which then fires.
 		if slices.Contains(issue.Labels, automationLabelName) {
 			w.log.Info("skipping CriteriaRun creation: ticket carries the automation label without a matching live run (single-active invariant)",
 				"ticket", issue.Identifier)
@@ -625,7 +628,10 @@ var errLabelWriteDeferred = errors.New("label transition deferred")
 // (run firing) build on the ticket's current label state. Tickets with no
 // observed CriteriaRuns are left untouched here — the orphan sweep owns
 // that case (CRI-220): a ticket can carry the inflight marker with no run
-// behind it at all, and the sweep converges it to the dirty marker.
+// behind it at all, and the sweep converges it to the dirty marker. The
+// sweep also owns a settled ticket whose phase is already recorded: when
+// change-driven reconciliation cannot fire again (the CRI-265 deadlock),
+// the sweep removes the stale inflight marker directly.
 func (w *watcher) reconcileAutomationLabels(ctx context.Context, issue linear.Issue, ph runPhases, automationLabelID, dirtyLabelID string, currentLabelIDs map[string][]string) error {
 	if !ph.anyRun {
 		return nil
@@ -732,37 +738,55 @@ func deleteLabelID(ids []string, id string) []string {
 	return slices.Delete(slices.Clone(ids), idx, idx+1)
 }
 
-// sweepOrphanedAutomationLabels implements the CRI-220 orphan rule: a
-// ticket bearing "criteria-automation" with no live CriteriaRun in any
-// phase (including Pending) and no recorded terminal event carries a marker
-// nothing lives behind — the run was deleted manually while running, or the
-// label was orphaned by a watcher restart — so the marker is swapped for
-// "criteria-dirty".
+// sweepOrphanedAutomationLabels implements the CRI-220 orphan rule,
+// extended by CRI-265 with the stale-label rule for settled tickets. A
+// ticket bearing "criteria-automation" that the poll's CriteriaRun index
+// shows with no live run behind it falls into one of two cases, and the
+// sweep converges both directly:
+//
+//   - no CriteriaRun at all (including Pending) and no recorded terminal
+//     event: the run was deleted manually while running, or the label was
+//     orphaned by a watcher restart — nothing lives behind the marker and
+//     there is no run history, so the marker is swapped for
+//     "criteria-dirty";
+//   - every observed run settled (Failed or Succeeded) and none is live:
+//     the label is stale by definition (CRI-265). Reconciliation owns a
+//     settled ticket only while it can act — change-driven reconciliation
+//     fires only when the latest phase differs from the recorded one
+//     (CRI-252), and a settled ticket's phase is already recorded, so it
+//     will never fire again on its own — while the single-active invariant
+//     (CRI-221) blocks re-firing for as long as the label is present. The
+//     sweep is the only component that can clear such a label, so it
+//     removes it directly. The dirty marker is not touched: the terminal
+//     event already governed it at settle time (a Failed settle raised the
+//     sticky marker through reconciliation, a Succeeded settle left the
+//     ticket clean), so a plain removal converges with reconciliation's
+//     desired state without overriding an operator's cleanup.
+//
+// The one remaining defer-to-reconciliation case is a live run in any phase
+// (Pending, Running, Unknown, or the empty phase a freshly created run
+// carries until the controller sets status): its label lifecycle belongs to
+// reconciliation.
 //
 // The sweep mirrors the operator's stale-adapter sweep (CRI-144): it runs
 // deterministically on every poll, decides purely from what exists now and
 // never from remembered history, and acts once per orphan. The poll's
-// existing CriteriaRun index supplies both guards, so nothing additional is
-// listed on the k8s side:
-//   - a live run in any phase (Pending, Running, Unknown, or the empty
-//     phase a freshly created run carries until the controller sets status)
-//     leaves the label lifecycle to reconciliation;
-//   - a run that settled (Failed or Succeeded) recorded a terminal event:
-//     reconciliation owns that transition, so a Succeeded run must not gain
-//     the dirty marker here.
+// existing CriteriaRun index supplies both rules' guards, so nothing
+// additional is listed on the k8s side.
 //
 // Candidates are the project's tickets carrying "criteria-automation" in
 // any workflow state, so the sweep reaches tickets outside the
 // route-declared states. Iteration is ordered by identifier for
 // deterministic logs and write order.
 //
-// The sweep requires both label ids: it is an atomic label-state
-// transition, and candidates are only ever visible through the automation
-// label — removing that marker before the dirty marker is durable would
-// lose the orphan evidence with no retry. Writes are therefore ordered
-// dirty-marker first, and a failed dirty write defers the removal with it.
-// "criteria-dirty" itself is never removed here or anywhere in the watcher:
-// it is sticky until a cleanup workflow or a human clears it (CRI-220).
+// The sweep requires both label ids: candidates are only ever visible
+// through the automation label — removing that marker before the write is
+// durable would lose the evidence with no retry. Writes are therefore
+// single REPLACE transitions computed from the candidates read. In the
+// orphan rule the dirty add is part of the same write, ordered after the
+// removal it replaces. "criteria-dirty" itself is never removed here or
+// anywhere in the watcher: it is sticky until a cleanup workflow or a human
+// clears it (CRI-220).
 func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID string, runs map[string]runPhases, automationLabelID, dirtyLabelID string, currentLabelIDs map[string][]string) error {
 	if automationLabelID == "" || dirtyLabelID == "" {
 		w.log.V(1).Info("skipping orphan sweep: automation label ids unresolved (ensure failed this poll); deferred to next poll")
@@ -777,20 +801,31 @@ func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID s
 	})
 	swept := 0
 	for _, issue := range candidates {
-		if ph := runs[issue.Identifier]; ph.anyRun {
-			// The ticket has observed CriteriaRuns: either one is still live
-			// (any phase, including Pending) or its runs all settled,
-			// recording a terminal event. Reconciliation owns the label
-			// lifecycle in both cases.
+		// The zero value (no observed CriteriaRuns) falls through to the
+		// orphan rule below.
+		ph := runs[issue.Identifier]
+		if ph.active {
+			// A live run exists (any phase, including Pending): the label
+			// lifecycle belongs to reconciliation — the one remaining
+			// defer-to-reconciliation case.
 			continue
 		}
-		w.log.Info("sweeping orphaned automation label: no live CriteriaRun and no recorded terminal event",
-			"ticket", issue.Identifier)
+		// ph.anyRun splits the two no-live-run rules: every run settled
+		// with none live (stale label, CRI-265) versus no runs at all (the
+		// orphan rule, CRI-220).
+		stale := ph.anyRun
+		if stale {
+			w.log.Info("removing stale automation label: all CriteriaRuns terminal with no live run and the recorded phase unchanged (reconciliation cannot re-fire)",
+				"ticket", issue.Identifier)
+		} else {
+			w.log.Info("sweeping orphaned automation label: no live CriteriaRun and no recorded terminal event",
+				"ticket", issue.Identifier)
+		}
 		// CRI-252: the candidate read above supplies the issue's label IDs,
-		// so the swap is computed from that read and applied with a single
-		// REPLACE write — no per-orphan label read.
+		// so the transition is computed from that read and applied with a
+		// single REPLACE write — no per-orphan label read.
 		desired := deleteLabelID(issue.LabelIDs, automationLabelID)
-		if !slices.Contains(issue.Labels, dirtyLabelName) && w.writeReady(dirtyLabelID, dirtyLabelName, issue.Identifier, "add") {
+		if !stale && !slices.Contains(issue.Labels, dirtyLabelName) && w.writeReady(dirtyLabelID, dirtyLabelName, issue.Identifier, "add") {
 			if !slices.Contains(desired, dirtyLabelID) {
 				desired = append(desired, dirtyLabelID)
 			}
@@ -802,11 +837,20 @@ func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID s
 			if linear.IsRateLimit(err) {
 				return err
 			}
-			w.log.Error(err, "swapping orphaned automation label for dirty; deferring to next poll",
-				"ticket", issue.Identifier, "labelIDs", desired)
+			if stale {
+				w.log.Error(err, "removing stale automation label; deferring to next poll",
+					"ticket", issue.Identifier, "labelIDs", desired)
+			} else {
+				w.log.Error(err, "swapping orphaned automation label for dirty; deferring to next poll",
+					"ticket", issue.Identifier, "labelIDs", desired)
+			}
 			continue
 		}
-		w.log.Info("swapped orphaned automation label for dirty", "ticket", issue.Identifier, "labelIDs", desired)
+		if stale {
+			w.log.Info("removed stale automation label", "ticket", issue.Identifier, "labelIDs", desired)
+		} else {
+			w.log.Info("swapped orphaned automation label for dirty", "ticket", issue.Identifier, "labelIDs", desired)
+		}
 		// CRI-252: the ticket's label state is now `desired`; later REPLACE
 		// writes in this poll (run firing) must build on it.
 		currentLabelIDs[issue.Identifier] = desired
