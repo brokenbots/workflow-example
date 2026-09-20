@@ -1,0 +1,20 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -euo pipefail; exec 2>&1
+branch="$criteria_value_1"
+
+# The checkpoint discipline requires the agent to push before ending a
+# checkpoint turn (CRI-271): the loop's crash window is a single turn's
+# session, so progress only survives across turns as pushed commits.
+# This step verifies the branch head is on the remote; a missing push
+# fails the run loudly instead of silently losing a checkpoint.
+head_sha=$(git rev-parse "refs/heads/$branch" 2>/dev/null || git rev-parse HEAD)
+remote_sha=$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')
+if [ -z "$remote_sha" ]; then
+    echo "checkpoint push verification: remote branch $branch does not exist" >&2
+    exit 1
+fi
+if [ "$head_sha" != "$remote_sha" ]; then
+    echo "checkpoint push verification: local $head_sha != remote $remote_sha" >&2
+    exit 1
+fi
+echo "checkpoint_pushed=$head_sha"

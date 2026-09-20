@@ -127,6 +127,14 @@ step "check_working_tree" {
 
 // max_visits bounds the develop <-> review / ci_gate / verify_committed
 // cycles — a stuck exchange fails the run instead of looping forever.
+// The develop turn is bounded by TWO budgets: max_visits (workflow-level,
+// bounds the checkpoint loop) and the session-crash window observed at
+// ~64 minutes of a single streaming turn (CRI-271). The agent ends each
+// turn with outcome=checkpoint once its current unit of work is committed
+// and pushed, committing the loop back into itself; a turn that stays
+// under the provider timeout survives, and progress persists across turns
+// as pushed commits. A turn that dies to the session crash loses only the
+// delta since the last checkpoint.
 step "develop" {
     target     = adapter.copilot.developer
     max_visits = var.max_agent_visits
@@ -138,8 +146,26 @@ step "develop" {
     }
 
     outcome "ready_for_review" { next = step.write_work_log }
+    outcome "checkpoint"       { next = step.push_checkpoint }
     outcome "need_help"        { next = state.failed }
     outcome "default"          { next = state.failed }
+}
+
+// Pushed by the agent inside the turn (checkpoint discipline); this step
+// verifies the push landed so the loop never continues on unpushed work.
+step "push_checkpoint" {
+    target     = adapter.shell.sh
+    max_visits = var.max_checkpoint_push_visits
+    timeout    = "120s"
+
+    input {
+        command = templatefile("./scripts/verify_checkpoint_pushed.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+        })
+    }
+
+    outcome "success" { next = step.develop }
+    outcome "failure" { next = state.failed }
 }
 
 step "write_work_log" {
