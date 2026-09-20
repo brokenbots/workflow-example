@@ -16,6 +16,9 @@ environment "remote" "primary" {
 // Build, baseline tests, and the reproduction itself run inside the checked-out
 // ref. Bound lazily: the worktree is created by this subworkflow's first step.
 environment "remote" "worktree" {
+    // Per-scope sessions: CRI-269 deferred-remote contract (same rationale as
+    // qa_triage_v1's scratch env, CRI-264 refire evidence).
+    per_scope_sessions = true
     working_directory = var.worktree_dir
     process = {
         exec = ["*"]
