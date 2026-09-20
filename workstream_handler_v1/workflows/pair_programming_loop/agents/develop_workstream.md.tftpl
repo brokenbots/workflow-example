@@ -1,5 +1,7 @@
 Review the details for this workstream and then work through each item until its complete and addresses the workstream requirements, when finished call the submit_outcome tool with details of the work in the reason field.
 
+Session-lifetime reminder (checkpoint discipline): your session is killed if a turn runs too long (~1 hour), and uncommitted work is lost with it. Commit and push a checkpoint whenever a unit of work is complete, and end the turn with `submit_outcome` + outcome `checkpoint` (tree clean, branch pushed) rather than stretching one turn past the limit. On start, `git log --oneline -5` — continue from your last pushed checkpoint. Use `ready_for_review` only when the full gate is green and the workstream is complete.
+
 workstream details:
 {{ .workstream }}
 

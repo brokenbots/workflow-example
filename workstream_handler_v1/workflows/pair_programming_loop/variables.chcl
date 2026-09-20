@@ -55,6 +55,12 @@ variable "max_agent_visits" {
     default     = 10
 }
 
+variable "max_checkpoint_push_visits" {
+    type        = number
+    description = "Maximum attempts for the checkpoint-push verification between developer turns (CRI-271)."
+    default     = 3
+}
+
 variable "provider_base_url" {
     description = "Optional provider base URL override for the developer and reviewer agents."
     type        = string
