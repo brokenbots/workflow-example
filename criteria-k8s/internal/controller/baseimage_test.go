@@ -375,6 +375,46 @@ func TestReconcileDefersMismatchWhenProbeFails(t *testing.T) {
 	assert.NotEqual(t, criteriav1.PhaseFailed, updated.Status.Phase)
 }
 
+// The deferral must hold even when the process-env fallback disagrees with
+// what is already admitted: an unavailable probe yields an unverified
+// resolution, so a stamped run pinned to a different image stays alive —
+// failing it there would act on data the operator could not verify.
+func TestReconcileDefersEnforcementWhenProbeErrorsOnChangedEnv(t *testing.T) {
+	scheme := newScheme(t)
+	run := newProbeRun("cri-264-probe-down-changed")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run).
+		Build()
+	probe := &stubProbe{env: map[string]string{jobbuilder.EnvCriteriaBaseImage: baseImageNewTag}}
+	r := newProbeReconciler(cl, scheme, probe)
+
+	reconcileOnce(t, r, run)
+	job, found := runnerJobImageFor(t, cl, run)
+	require.True(t, found)
+	assert.Equal(t, baseImageNewTag, jobbuilder.RunnerJobImage(&job))
+
+	// The operator Deployment becomes unreadable while the process env has
+	// moved on to a different tag: no enforcement may fire off the
+	// unverified fallback resolution.
+	probe.env = nil
+	probe.err = errors.New("operator deployment is not readable")
+	r.Defaults.CriteriaBaseImage = baseImageOldTag
+
+	reconcileOnce(t, r, run)
+
+	_, found = runnerJobImageFor(t, cl, run)
+	require.True(t, found, "the admitted run must stay alive while the probe is down")
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhasePending, updated.Status.Phase)
+	_, ok := conditionFor(updated.Status, controller.ConditionBaseImageMismatch)
+	assert.False(t, ok, "no mismatch condition may be recorded off unverified data")
+	assert.Equal(t, baseImageNewTag, updated.Status.BaseImage)
+}
+
 // The image-mode default image (DEFAULT_CRITERIA_IMAGE) is covered by the
 // same mechanism: an env change on the baked-tree image fails in-flight
 // runs the same way.
