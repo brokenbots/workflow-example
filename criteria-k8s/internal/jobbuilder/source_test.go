@@ -318,7 +318,8 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 		log := readStubLog(t, filepath.Join(dir, "stub.log"))
 		assert.Contains(t, log, "argv: [apply] [git::https://example.com/org/workflows.git?ref=main] "+
 			"[--var] [ticket_id=] [--var] [repo_dir=/data/intake//repo] "+
-			"[--var] [intake_root=/data/intake] [--var] [linear_review_state=In Review] "+
+			"[--var] [intake_root=/data/intake] [--var] [triage_root=/data/triage] "+
+			"[--var] [linear_review_state=In Review] "+
 			"[--var] [linear_work_state=In Progress] [--var] [linear_done_state=Done] "+
 			"[--var] [base_branch=main] [--var] [ci_gate_cmd=] [--var] [provider_base_url=] "+
 			"[--workflow-ref] [28777aacc3cfbe85005ddb27f548116e692c0eb4] "+
