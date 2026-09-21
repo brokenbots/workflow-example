@@ -513,11 +513,15 @@ func adapterContainer(kind, image, runnerJobName string, plan *workflowPlan) cor
 	if kind == "copilot" {
 		resources = corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceMemory: resourceQuantity("1Gi"),
+				corev1.ResourceMemory: resourceQuantity("2Gi"),
 				corev1.ResourceCPU:    resourceQuantity("500m"),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resourceQuantity("4Gi"),
+				// CRI-272: the 4Gi cap OOM-killed the adapter mid-tool on
+				// memory-heavy workloads (npm ci + full test baseline + Go
+				// builds in one sandbox), which surfaced as the copilot
+				// session-death crash family. Raise to 8Gi.
+				corev1.ResourceMemory: resourceQuantity("8Gi"),
 				corev1.ResourceCPU:    resourceQuantity("2000m"),
 			},
 		}
