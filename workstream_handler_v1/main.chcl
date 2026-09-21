@@ -227,7 +227,37 @@ switch "route_pr_action" {
 
 step "run_pair_programming_loop" {
     target = subworkflow.pair_programming_loop
-    outcome "success" { next = step.create_pr }
+    outcome "success" { next = step.sync_head_branch }
+    outcome "failure" { next = state.failed }
+}
+
+// CRI-273 defense in depth: the developer may have worked in a second clone
+// it created itself, leaving the worktree on the empty ticket branch —
+// create_pr would then fail with "No commits between <base> and <ticket>"
+// and the merge would never run. Before creating the PR, resolve the branch
+// that actually carries the work (the agent's most recently pushed branch
+// naming this ticket, or ahead of base with no other ticket's name) and
+// check it out in the worktree. On the happy path this is a no-op: the
+// worktree branch already has commits ahead of base and is echoed back.
+// stdout (the resolved branch) is stored into data.internal.branch so
+// create_pr, push_and_respond and teardown all operate on the same branch.
+step "sync_head_branch" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/resolve_head_branch.sh.tftpl", {
+            criteria_value_1 = var.base_branch
+            criteria_value_2 = var.workstream_file
+            helper           = file("./scripts/_github_token_git_credentials.sh.tftpl")
+        })
+    }
+    timeout = "60s"
+    outcome "success" {
+        next = step.create_pr
+        write {
+            target = data.internal.branch.value
+            value  = trimspace(output.stdout)
+        }
+    }
     outcome "failure" { next = state.failed }
 }
 

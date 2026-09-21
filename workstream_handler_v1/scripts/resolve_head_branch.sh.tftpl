@@ -1,0 +1,140 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail
+
+{{ .helper }}
+
+# Resolve the branch create_pr should operate on (CRI-273).
+#
+# Normally the worktree is already on the ticket branch carrying the
+# developer's commits, and this script just echoes that branch back. It
+# exists as defense in depth for the case where the developer worked in a
+# second clone it created itself: the worktree then sits on the empty ticket
+# branch and create_pr fails with "No commits between <base> and <ticket>",
+# which blocks the merge and leaves the ticket awaiting_human. Recovery
+# order:
+#
+#   1. Fast-forward to origin/<current> when the local branch is strictly
+#      behind it and has nothing unique (the agent pushed to the same branch
+#      from its own checkout).
+#   2. Keep the current branch when it has commits ahead of the base branch.
+#   3. Otherwise check out the most recently pushed origin branch that
+#      either names this ticket or has commits ahead of base and names no
+#      other ticket.
+#   4. Otherwise keep the current branch — nothing to recover.
+#
+# stdout is exactly the resolved branch name; every diagnostic goes to
+# stderr, so the parent workflow can store stdout directly.
+
+base="$criteria_value_1"
+workstream_file="$criteria_value_2"
+
+setup_gh_token_git_credentials
+
+ticket=$(basename "$workstream_file" .md)
+ticket_lc=$(printf '%s' "$ticket" | tr '[:upper:]' '[:lower:]')
+# Boundary-aware fixed matcher for the ticket id inside a branch name, so
+# CRI-27 does not match CRI-273. `-` is a literal in ERE outside brackets.
+ticket_re=$(printf '%s' "$ticket_lc" | sed 's/[^a-z0-9-]/\\&/g')
+
+git fetch origin --prune --quiet 1>&2 || \
+    echo "head_branch_resolve: origin fetch failed, working from local refs" >&2
+
+current=$(git branch --show-current)
+if [ -z "$current" ]; then
+    echo "head_branch_resolve: worktree is on a detached HEAD; cannot resolve a branch" >&2
+    exit 1
+fi
+
+# Commits on a ref that the base branch does not have ("0" when the base
+# ref cannot be found at all, mirroring setup_worktree's local-base fallback).
+ahead_of_base() {
+    for up in "origin/$base" "$base"; do
+        if git rev-parse --verify --quiet "refs/heads/$up" >/dev/null 2>&1 \
+           || git rev-parse --verify --quiet "refs/remotes/$up" >/dev/null 2>&1; then
+            git rev-list --count "$up..$1" 2>/dev/null || printf '0'
+            return 0
+        fi
+    done
+    printf '0'
+}
+
+# 1. Same branch, pushed from the agent's own checkout: the worktree copy is
+#    strictly behind origin and has nothing unique, so fast-forward it.
+origin_current="origin/$current"
+if git rev-parse --verify --quiet "$origin_current" >/dev/null 2>&1; then
+    local_only=$(git rev-list --count "$origin_current..HEAD" 2>/dev/null || printf '0')
+    remote_only=$(git rev-list --count "HEAD..$origin_current" 2>/dev/null || printf '0')
+    if [ "$local_only" = "0" ] && [ "$remote_only" -gt 0 ]; then
+        echo "head_branch_resolve: fast-forwarding '$current' to $origin_current (agent pushed to the same branch from its own checkout)" >&2
+        git merge --ff-only "$origin_current" 1>&2 || true
+    fi
+fi
+
+# 2. Happy path: the worktree branch already carries work.
+if [ "$(ahead_of_base "HEAD")" -gt 0 ]; then
+    printf '%s\n' "$current"
+    exit 0
+fi
+
+# 3. Find the branch the agent actually pushed to. Candidates are scanned
+#    most recently pushed first; a branch that names this ticket wins over
+#    a generic one. A branch naming a different ticket (cri-<other>) belongs
+#    to a concurrent workstream and is never hijacked as this run's head.
+refs_file=$(mktemp)
+trap 'rm -f "$refs_file"' EXIT
+git for-each-ref --sort=-committerdate --sort=refname \
+    --format='%(refname)' refs/remotes/origin >"$refs_file" 2>/dev/null || true
+
+name_match=""
+generic_match=""
+while IFS= read -r ref; do
+    br="${ref#refs/remotes/origin/}"
+    case "$br" in
+        HEAD|*/HEAD) continue ;;
+    esac
+    [ "$br" = "$base" ] && continue
+    [ "$br" = "$current" ] && continue
+    # A branch with no commits ahead of base cannot back a PR; picking it
+    # would recreate the exact "No commits between" failure this recovers.
+    [ "$(ahead_of_base "$br")" -gt 0 ] || continue
+
+    br_norm=$(printf '%s' "$br" | tr '[:upper:]_' '[:lower:]-')
+    if printf '%s' "$br_norm" | grep -qE "(^|[^0-9a-z])${ticket_re}([^0-9a-z]|\$)"; then
+        if [ -z "$name_match" ]; then
+            name_match="$br"
+        fi
+        continue
+    fi
+    if printf '%s' "$br_norm" | grep -oE 'cri-?[0-9]+' | grep -iqvF -- "$ticket_lc"; then
+        continue
+    fi
+    if [ -z "$generic_match" ]; then
+        generic_match="$br"
+    fi
+done <"$refs_file"
+
+picked=""
+if [ -n "$name_match" ]; then
+    picked="$name_match"
+elif [ -n "$generic_match" ]; then
+    picked="$generic_match"
+fi
+
+if [ -n "$picked" ]; then
+    echo "head_branch_resolve: worktree branch '$current' has no commits ahead of '$base'; checking out agent branch '$picked'" >&2
+    if ! git checkout "$picked" 1>&2; then
+        if ! git checkout -B "$picked" "origin/$picked" 1>&2; then
+            echo "head_branch_resolve: could not check out '$picked' in the worktree" >&2
+            exit 1
+        fi
+    fi
+    git merge --ff-only "origin/$picked" 1>&2 || true
+fi
+
+resolved=$(git branch --show-current)
+if [ -z "$resolved" ]; then
+    echo "head_branch_resolve: worktree is on a detached HEAD after checkout" >&2
+    exit 1
+fi
+printf '%s\n' "$resolved"
