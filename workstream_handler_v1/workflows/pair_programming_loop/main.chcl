@@ -25,6 +25,7 @@ data "internal" "developer_prompt" {
     value = templatefile("./agents/missing_developer_prompt.md.tftpl", {})
 }
 
+
 data "internal" "reviewer_prompt" {
     type  = string
     value = ""
@@ -164,7 +165,18 @@ step "push_checkpoint" {
         })
     }
 
-    outcome "success" { next = step.develop }
+    // CRI-272: loop-back sessions get a SLIM continuation prompt (branch + git-log
+    // orientation + workstream title only). Re-sending the full workstream spec on
+    // every checkpoint iteration cost minutes of re-orientation per checkpoint.
+    outcome "success" {
+        next = step.develop
+        write {
+            target = data.internal.developer_prompt.value
+            value  = templatefile("./agents/develop_continue.md.tftpl", {
+                workstream = steps.read_workstream.stdout
+            })
+        }
+    }
     outcome "failure" { next = state.failed }
 }
 
