@@ -237,7 +237,12 @@ step "comment_handler_done" {
         })
     }
     outcome "success" { next = step.set_done_state }
-    outcome "failure" { next = step.set_done_state }
+    // CRI-275: the closing comment failed — a bookkeeping failure on the
+    // post-merge path, so the run ends failed (success=false) exactly as in
+    // linear_intake_v1's comment_handler_done. The Done move is skipped: the
+    // observable outcome is not "Done" and no comment marks it; the failed
+    // run record is what the watcher raises and refires on.
+    outcome "failure" { next = state.failed }
 }
 
 step "set_done_state" {

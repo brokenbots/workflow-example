@@ -221,15 +221,17 @@ assert_edge "set_work_state" "success" "run_handler"
 assert_edge "set_work_state" "failure" "comment_develop_failed"
 assert_edge "run_handler" "success" "comment_handler_done"
 assert_edge "run_handler" "failure" "comment_handler_failed"
-assert_edge "comment_handler_done" "success" "set_done_state"
-assert_edge "comment_handler_done" "failure" "set_done_state"
-assert_edge "set_done_state" "success" "handler_complete"
-assert_edge "set_done_state" "failure" "comment_done_move_failed"
 # CRI-275: bookkeeping-failure routing. A parking comment or state move that
 # fails ends the run in the failed terminal (success=false), mirroring
-# linear_intake_v1's bookkeeping-failure semantics. The Done-move-failed
-# route keeps its accurate fallback comment, parks In Review, and still ends
-# failed — the merged-PR bookkeeping failed even when the parking worked.
+# linear_intake_v1's bookkeeping-failure semantics — including the closing
+# comment on the post-merge path (comment_handler_done), whose failure skips
+# the Done move entirely. The Done-move-failed route keeps its accurate
+# fallback comment, parks In Review, and still ends failed — the merged-PR
+# bookkeeping failed even when the parking worked.
+assert_edge "comment_handler_done" "success" "set_done_state"
+assert_edge "comment_handler_done" "failure" "failed"
+assert_edge "set_done_state" "success" "handler_complete"
+assert_edge "set_done_state" "failure" "comment_done_move_failed"
 assert_edge "comment_handler_failed" "success" "set_review_state"
 assert_edge "comment_handler_failed" "failure" "failed"
 assert_edge "comment_develop_failed" "success" "set_review_state"
