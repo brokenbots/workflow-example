@@ -97,7 +97,9 @@ while IFS= read -r ref; do
     [ "$br" = "$current" ] && continue
     # A branch with no commits ahead of base cannot back a PR; picking it
     # would recreate the exact "No commits between" failure this recovers.
-    [ "$(ahead_of_base "$br")" -gt 0 ] || continue
+    # Fully qualify the candidate: a remote-only branch name does not
+    # resolve in rev-list, so the ahead check must use origin/<branch>.
+    [ "$(ahead_of_base "origin/$br")" -gt 0 ] || continue
 
     br_norm=$(printf '%s' "$br" | tr '[:upper:]_' '[:lower:]-')
     if printf '%s' "$br_norm" | grep -qE "(^|[^0-9a-z])${ticket_re}([^0-9a-z]|\$)"; then
