@@ -86,6 +86,16 @@ jobs:
         run: |
           bash linear_develop_v1/tests/test_develop_standalone.sh
 
+      # The adapter binaries pre-pulled above match workstream_handler_v1's
+      # lockfile pins, so structural compile tests can resolve them locally.
+      - name: Run workstream_handler_v1 regression tests
+        run: |
+          for t in workstream_handler_v1/tests/test_*.sh; do
+            echo "::group::$t"
+            bash "$t"
+            echo "::endgroup::"
+          done
+
   validate-manifests:
     runs-on: ubuntu-latest
     steps:
