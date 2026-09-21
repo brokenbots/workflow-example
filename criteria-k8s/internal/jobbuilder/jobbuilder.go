@@ -139,7 +139,7 @@ func adapterImage(kind string) string {
 	case "shell":
 		return "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"
 	case "copilot":
-		return "localhost:5000/criteria-adapter-copilot:k8s-0.5.7"
+		return "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
 	default:
 		return fmt.Sprintf("localhost:5000/criteria-adapter-%s:k8s-3", kind)
 	}
