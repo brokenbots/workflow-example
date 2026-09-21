@@ -13,7 +13,7 @@ adapter "shell" "wt" {
 adapter "copilot" "devops" {
     environment = shell.worktree
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.4"
+    version     = "0.5.8"
     secrets {
         GITHUB_TOKEN = "env:DEVOPS_GITHUB_TOKEN"
     }

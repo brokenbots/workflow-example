@@ -34,7 +34,7 @@ adapter "shell" "triage" {
 adapter "copilot" "triage_reviewer" {
     environment = remote.triage
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.6"
+    version     = "0.5.8"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token

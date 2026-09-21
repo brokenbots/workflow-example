@@ -25,7 +25,7 @@ adapter "shell" "reviewer" {
 adapter "copilot" "pr_reviewer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.6"
+    version = "0.5.8"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     //
     // Both adapters in this child receive only the reviewer token. No

@@ -1,15 +1,15 @@
 schema_version = 1
 adapter "copilot" "devops" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.4"
-  version              = "0.5.4"
-  resolved_digest      = "sha256:b3bea8a4f03e3caccdeea6fca9aab6f9422528d855603c1b4c0f9c64b7b76e9e"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.8"
+  version              = "0.5.8"
+  resolved_digest      = "sha256:135845cb463f92a7a9e8b7cfe917839a2828b4ba62de6370adde61c6c4161acc"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.4"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.8"
     }
   }
 }
