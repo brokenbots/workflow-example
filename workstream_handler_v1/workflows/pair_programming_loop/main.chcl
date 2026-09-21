@@ -128,17 +128,26 @@ step "check_working_tree" {
 
 // max_visits bounds the develop <-> review / ci_gate / verify_committed
 // cycles — a stuck exchange fails the run instead of looping forever.
-// The develop turn is bounded by TWO budgets: max_visits (workflow-level,
-// bounds the checkpoint loop) and the session-crash window observed at
-// ~64 minutes of a single streaming turn (CRI-271). The agent ends each
-// turn with outcome=checkpoint once its current unit of work is committed
-// and pushed, committing the loop back into itself; a turn that stays
-// under the provider timeout survives, and progress persists across turns
-// as pushed commits. A turn that dies to the session crash loses only the
-// delta since the last checkpoint.
+// The develop turn is bounded by THREE budgets: max_visits (workflow-level,
+// bounds the checkpoint loop), the session-crash window observed at
+// ~64 minutes of a single streaming turn (CRI-271), and the step timeout
+// below (CRI-275). The agent ends each turn with outcome=checkpoint once
+// its current unit of work is committed and pushed, committing the loop
+// back into itself; a turn that stays under the provider timeout survives,
+// and progress persists across turns as pushed commits. A turn that dies to
+// the session crash loses only the delta since the last checkpoint.
 step "develop" {
     target     = adapter.copilot.developer
     max_visits = var.max_agent_visits
+    // CRI-275: step-level ceiling for a single turn. The engine cannot judge
+    // agent-call duration, so the workflow declares it: a turn wedged on a
+    // provider request that never answers (observed: 51+ min silent before a
+    // manual kill) otherwise runs unbounded. Sized to the checkpoint
+    // discipline's ~45-60m turn limit. A timed-out step produces no agent
+    // verdict, so it lands on the default outcome below, which routes
+    // through the checkpoint loop; the next turn resumes from the last
+    // pushed commit.
+    timeout = "60m"
 
     allow_tools = ["*"]
 
@@ -149,7 +158,16 @@ step "develop" {
     outcome "ready_for_review" { next = step.write_work_log }
     outcome "checkpoint"       { next = step.push_checkpoint }
     outcome "need_help"        { next = state.failed }
-    outcome "default"          { next = state.failed }
+    // CRI-275: a turn that ends without a verdict routes through the
+    // checkpoint loop instead of failing the run — push_checkpoint verifies
+    // the last pushed commit and the next turn resumes from it. Two sources
+    // of no-verdict turns: the engine emits outcome "failure" when the step
+    // timeout above fires (verified: "context deadline exceeded" — CRI-275)
+    // and when the copilot adapter's session dies or the agent never calls
+    // submit_outcome. need_help stays terminal (the agent itself declared it
+    // cannot proceed); max_visits still bounds the whole cycle.
+    outcome "failure"          { next = step.push_checkpoint }
+    outcome "default"          { next = step.push_checkpoint }
 }
 
 // Pushed by the agent inside the turn (checkpoint discipline); this step
@@ -271,6 +289,12 @@ step "ci_gate" {
 step "review" {
     target     = adapter.copilot.reviewer
     max_visits = var.max_agent_visits
+    // CRI-275: same turn ceiling as the develop step — a wedged reviewer turn
+    // (provider request that never answers) would otherwise hang the run
+    // forever. On timeout the step produces no verdict, which falls through
+    // to the failure/default routes below; the run ends through its terminal
+    // failure state and the caller's park-for-human path takes over.
+    timeout = "60m"
 
     allow_tools = ["*"]
 
