@@ -5,4 +5,4 @@ Do NOT re-do work: your first and only orientation is `git log --oneline -15` �
 Workstream (title only; full spec was provided in your first session and is at docs/ or the workstream file):
 {{ .workstream }}
 
-Discipline: same as before — commit and push per unit of work, end the turn with `submit_outcome` + outcome `checkpoint` (tree clean, branch pushed) after a significant unit (~2-3 per hour, not after every tiny step), `ready_for_review` only when the FULL gate is green and the workstream is complete. Then end by calling the `submit_outcome` tool with the correct value.
+Discipline: same as before — a checkpoint is a mid-turn `git commit` + `git push` and then CONTINUE working; do not call `submit_outcome` for a checkpoint. End the turn with outcome `checkpoint` only when the turn approaches the session limit (~45 min) and you are between units. `ready_for_review` only when the FULL gate is green and the workstream is complete. Then end by calling the `submit_outcome` tool with the correct value.
