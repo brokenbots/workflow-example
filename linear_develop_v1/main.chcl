@@ -237,7 +237,12 @@ step "comment_handler_done" {
         })
     }
     outcome "success" { next = step.set_done_state }
-    outcome "failure" { next = step.set_done_state }
+    // CRI-275: the closing comment failed — a bookkeeping failure on the
+    // post-merge path, so the run ends failed (success=false) exactly as in
+    // linear_intake_v1's comment_handler_done. The Done move is skipped: the
+    // observable outcome is not "Done" and no comment marks it; the failed
+    // run record is what the watcher raises and refires on.
+    outcome "failure" { next = state.failed }
 }
 
 step "set_done_state" {
@@ -271,7 +276,11 @@ step "comment_handler_failed" {
         })
     }
     outcome "success" { next = step.set_review_state }
-    outcome "failure" { next = step.set_review_state }
+    // CRI-275: the handoff comment failed, so the ticket is not in a
+    // discoverable state — parking is pointless without the comment. The run
+    // ends failed (success=false) so castle records the failure and the
+    // watcher raises the dirty label for a human.
+    outcome "failure" { next = state.failed }
 }
 
 // Reached when development never started: workstream assembly failed, or the
@@ -288,7 +297,10 @@ step "comment_develop_failed" {
         })
     }
     outcome "success" { next = step.set_review_state }
-    outcome "failure" { next = step.set_review_state }
+    // CRI-275: same as comment_handler_failed — the failed-development
+    // comment did not land, so the run ends failed instead of declaring
+    // success.
+    outcome "failure" { next = state.failed }
 }
 
 // The PR merged but the Done move failed. The comment must be accurate about
@@ -304,14 +316,38 @@ step "comment_done_move_failed" {
             criteria_value_5 = var.linear_review_state
         })
     }
-    outcome "success" { next = step.set_review_state }
-    outcome "failure" { next = step.set_review_state }
+    outcome "success" { next = step.park_after_done_move_failed }
+    // CRI-275: the parking comment failed too — the ticket is stuck in the
+    // done move's original position and no comment marks it. The run ends
+    // failed so the watcher alerts.
+    outcome "failure" { next = state.failed }
 }
 
-// Parks the ticket in the review state for a human. Both outcomes land in the
-// same terminal: a failed state move still ends the run awaiting a human (the
-// run record carries the error, and the ticket sits wherever the last
-// successful move left it).
+// CRI-275: the PR merged but the Done move failed, and the fallback comment
+// landed. Parking the ticket In Review keeps the context for a human — but
+// the run's bookkeeping failed, so the run must record FAILED regardless of
+// whether the parking itself succeeds (a human should not discover stuck
+// tickets by reading raw events; the failed record is what the watcher
+// refires/alerts on).
+step "park_after_done_move_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.linear_review_state
+        })
+    }
+    outcome "success" { next = state.failed }
+    outcome "failure" { next = state.failed }
+}
+
+// Parks the ticket in the review state for a human. CRI-275: the two
+// outcomes now split — a failed state move is a bookkeeping failure (the
+// ticket is not in the review state the run promised), so the run ends
+// failed; a clean parking still ends the run awaiting a human, which is a
+// legitimate success (the run record carries the handler's error, and the
+// ticket sits In Review with an accurate comment).
 step "set_review_state" {
     target = adapter.shell.develop
     input {
@@ -322,17 +358,21 @@ step "set_review_state" {
         })
     }
     outcome "success" { next = state.awaiting_human }
-    outcome "failure" { next = state.awaiting_human }
+    outcome "failure" { next = state.failed }
 }
 
 // ── Terminal states ──────────────────────────────────────────────────────────
 
-// Exactly two terminal outcomes (CRI-238 doctrine), neither a failure: every
-// run ends with the work delivered or by handing the ticket to a human.
-// A run that ends by asking a human to decide — reviewer loop that cannot
-// conclude, failed Linear write, unproducible workstream — is a legitimate
-// and useful conclusion: the ticket carries the context and sits in the
-// review state. Step errors surface in the run record.
+// Exactly three terminal states (CRI-275), two of them successful (CRI-238
+// doctrine — a run either delivers the work or hands the ticket to a human
+// with the bookkeeping intact; a failed Linear write on the way out is a
+// legitimate awaiting_human ending, not a run failure). The failed terminal
+// records bookkeeping failures: the parking comment or the state move did
+// not land, so the ticket is not in a discoverable state and castle must
+// record the run as failed (success=false) — that record is what lets the
+// watcher raise the dirty label and refire the ticket while it sits in a
+// watched state, instead of a human discovering stuck tickets by reading
+// raw events.
 state "handler_complete" {
     terminal = true
     success  = true
@@ -341,4 +381,9 @@ state "handler_complete" {
 state "awaiting_human" {
     terminal = true
     success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
 }

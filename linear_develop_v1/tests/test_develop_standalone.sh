@@ -7,7 +7,10 @@ set -euo pipefail
 #
 #   1. the tree validates standalone and references no linear_intake_v1 or
 #      linear_triage_v1 asset;
-#   2. the graph has exactly two terminal states, both success, both
+#   2. the graph has exactly three terminal states — two success
+#      (handler_complete, awaiting_human) and one failed bookkeeping
+#      terminal (CRI-275: a parking comment or state move that does not
+#      land records the run failed so the watcher can refire/alert) — all
 #      reachable, its only subworkflow is workstream_handler_v1, and no
 #      triage symbol (classification, internal-reproduced gate, QA triage,
 #      triage reviewer, labels) appears anywhere in it — no triage step is
@@ -19,7 +22,9 @@ set -euo pipefail
 #      comments, and a title-less ticket fails loudly;
 #   4. the develop edge wiring is exactly the intake develop path's shape
 #      (fetch -> workstream gate -> started comment -> work state -> handler
-#      -> done comment -> done state | failure comments -> review state);
+#      -> done comment -> done state | failure comments -> review state),
+#      with CRI-275's bookkeeping-failure edges ending in the failed
+#      terminal;
 #   5. linear_intake_v1, linear_triage_v1 and qa_triage_v1 are untouched.
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -89,13 +94,24 @@ fi
 GRAPH="$TMP/graph.json"
 
 terminals="$(jq -r '[.states[] | select(.terminal)] | length' "$GRAPH")"
-[ "$terminals" -eq 2 ] || fail "expected exactly 2 terminal states, got $terminals"
+[ "$terminals" -eq 3 ] || fail "expected exactly 3 terminal states, got $terminals"
 
 terminal_names="$(jq -r '[.states[] | select(.terminal) | .name] | sort | join(" ")' "$GRAPH")"
-require_equal "$terminal_names" "awaiting_human handler_complete" "terminal states are exactly awaiting_human and handler_complete"
+require_equal "$terminal_names" "awaiting_human failed handler_complete" "terminal states are exactly awaiting_human, failed and handler_complete"
 
-jq -e '[.states[] | select(.terminal) | .success] | all' "$GRAPH" >/dev/null \
-    || fail "terminal states must both be success=true: every run ends with the PR merged or by handing the ticket to a human"
+# CRI-275: terminal success flags reflect delivery state. The delivery and
+# handoff terminals stay success (the PR merged, or the ticket was parked
+# In Review with an accurate comment); a bookkeeping failure — a parking
+# comment or a state move that did not land — records the run failed so the
+# watcher raises the dirty label and can refire the ticket.
+for t in handler_complete awaiting_human; do
+    jq -e --arg t "$t" '.states[] | select(.terminal and .name == $t and .success)' "$GRAPH" >/dev/null \
+        || fail "terminal $t must be success=true"
+done
+ok "delivery/handoff terminals are success=true"
+jq -e '.states[] | select(.terminal and .name == "failed" and (.success | not))' "$GRAPH" >/dev/null \
+    || fail "terminal failed must be success=false: bookkeeping failures must be recorded as run failures"
+ok "bookkeeping-failure terminal is success=false"
 
 # Every step and terminal reachable from initial_state; both terminal
 # outcomes reachable is asserted by membership here.
@@ -134,7 +150,7 @@ unreachable_steps="$(jq -r '.steps[] | .name' "$GRAPH" | while read -r s; do
 done)"
 [ -z "$unreachable_steps" ] || fail "steps not reachable from initial_state: $unreachable_steps"
 
-for state_name in awaiting_human handler_complete; do
+for state_name in awaiting_human failed handler_complete; do
     if [ "${reachable[$state_name]+set}" = "set" ]; then
         ok "terminal outcome reachable: $state_name"
     else
@@ -167,7 +183,7 @@ switch_count="$(jq -r '.switches | length' "$GRAPH")"
 
 # The step set is exactly the develop path — no intake/triage steps.
 step_names="$(jq -r '[.steps[] | .name] | sort | join(" ")' "$GRAPH")"
-expected_steps="comment_develop_failed comment_done_move_failed comment_handler_done comment_handler_failed comment_handler_started ensure_confirmed_workstream fetch_ticket run_handler set_done_state set_review_state set_work_state"
+expected_steps="comment_develop_failed comment_done_move_failed comment_handler_done comment_handler_failed comment_handler_started ensure_confirmed_workstream fetch_ticket park_after_done_move_failed run_handler set_done_state set_review_state set_work_state"
 require_equal "$step_names" "$expected_steps" "step set is exactly the develop path"
 
 # The confirmed-workstream gate is deterministic shell — no model tools.
@@ -205,18 +221,27 @@ assert_edge "set_work_state" "success" "run_handler"
 assert_edge "set_work_state" "failure" "comment_develop_failed"
 assert_edge "run_handler" "success" "comment_handler_done"
 assert_edge "run_handler" "failure" "comment_handler_failed"
+# CRI-275: bookkeeping-failure routing. A parking comment or state move that
+# fails ends the run in the failed terminal (success=false), mirroring
+# linear_intake_v1's bookkeeping-failure semantics — including the closing
+# comment on the post-merge path (comment_handler_done), whose failure skips
+# the Done move entirely. The Done-move-failed route keeps its accurate
+# fallback comment, parks In Review, and still ends failed — the merged-PR
+# bookkeeping failed even when the parking worked.
 assert_edge "comment_handler_done" "success" "set_done_state"
-assert_edge "comment_handler_done" "failure" "set_done_state"
+assert_edge "comment_handler_done" "failure" "failed"
 assert_edge "set_done_state" "success" "handler_complete"
 assert_edge "set_done_state" "failure" "comment_done_move_failed"
 assert_edge "comment_handler_failed" "success" "set_review_state"
-assert_edge "comment_handler_failed" "failure" "set_review_state"
+assert_edge "comment_handler_failed" "failure" "failed"
 assert_edge "comment_develop_failed" "success" "set_review_state"
-assert_edge "comment_develop_failed" "failure" "set_review_state"
-assert_edge "comment_done_move_failed" "success" "set_review_state"
-assert_edge "comment_done_move_failed" "failure" "set_review_state"
+assert_edge "comment_develop_failed" "failure" "failed"
+assert_edge "comment_done_move_failed" "success" "park_after_done_move_failed"
+assert_edge "comment_done_move_failed" "failure" "failed"
+assert_edge "park_after_done_move_failed" "success" "failed"
+assert_edge "park_after_done_move_failed" "failure" "failed"
 assert_edge "set_review_state" "success" "awaiting_human"
-assert_edge "set_review_state" "failure" "awaiting_human"
+assert_edge "set_review_state" "failure" "failed"
 
 # ── 3. Confirmed-workstream gate on real fixture shapes ──────────────────────
 
