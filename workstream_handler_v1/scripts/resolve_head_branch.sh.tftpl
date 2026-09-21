@@ -110,7 +110,7 @@ while IFS= read -r ref; do
         fi
         continue
     fi
-    if printf '%s' "$br_norm" | grep -oE 'cri-?[0-9]+' | grep -iqvF -- "$ticket_lc"; then
+    if printf '%s' "$br_norm" | grep -oE 'cri-?[0-9]+' | grep -qxvF -- "$ticket_lc"; then
         continue
     fi
     if [ -z "$generic_match" ]; then

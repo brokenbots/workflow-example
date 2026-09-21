@@ -164,6 +164,20 @@ out=$(run_resolve)
 [ "$(wt_branch)" = "${TICKET}" ] || fail "hijacked another ticket's branch (on $(wt_branch))"
 echo "==> OK"
 
+echo "==> Scenario: hijack guard — a branch whose ticket id is a prefix of ${TICKET} is never picked"
+reset_fixture
+# CRI-9 shares a prefix with CRI-91/92/95/97/98; their cri-9X-* branches must
+# never be adopted, even when they are the only ones ahead of base. CRI-9 is
+# also a prefix of CRI-90/99 — only whole-id equality should pass.
+commit_push "${AGENT}" "cri-91-other" "p91.txt" "other prefix ticket" "2026-01-01T03:00:00Z"
+commit_push "${AGENT}" "cri-95-other" "p95.txt" "other prefix ticket" "2026-01-01T03:01:00Z"
+commit_push "${AGENT}" "cri-98-other" "p98.txt" "other prefix ticket" "2026-01-01T03:02:00Z"
+commit_push "${AGENT}" "cri-99-other" "p99.txt" "other prefix ticket" "2026-01-01T03:03:00Z"
+out=$(run_resolve)
+[ "$(printf '%s' "$out")" = "${TICKET}" ] || fail "expected ${TICKET} (no prefix-collision hijack), got '${out}'"
+[ "$(wt_branch)" = "${TICKET}" ] || fail "worktree moved to a prefix-collision branch (on $(wt_branch))"
+echo "==> OK"
+
 echo "==> Scenario: preference — name-matching branch wins over a newer generic one"
 reset_fixture
 commit_push "${AGENT}" "cri-9-older-fix" "older.txt" "older" "2026-01-01T04:00:00Z"
