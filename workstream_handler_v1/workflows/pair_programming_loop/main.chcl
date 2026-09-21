@@ -143,10 +143,10 @@ step "develop" {
     // agent-call duration, so the workflow declares it: a turn wedged on a
     // provider request that never answers (observed: 51+ min silent before a
     // manual kill) otherwise runs unbounded. Sized to the checkpoint
-    // discipline's ~45-60m turn limit. A timed-out step produces no agent
-    // verdict, so it lands on the default outcome below, which routes
-    // through the checkpoint loop; the next turn resumes from the last
-    // pushed commit.
+    // discipline's ~45-60m turn limit. A timed-out step produces outcome
+    // "failure" (engine emits "context deadline exceeded" as failure), so it
+    // routes through the checkpoint loop below; the next turn resumes from
+    // the last pushed commit.
     timeout = "60m"
 
     allow_tools = ["*"]

@@ -292,8 +292,9 @@ step "comment_develop_failed" {
         })
     }
     outcome "success" { next = step.set_review_state }
-    // CRI-275: same as comment_handler_failed — the parking comment failed,
-    // so the run ends failed instead of declaring success.
+    // CRI-275: same as comment_handler_failed — the failed-development
+    // comment did not land, so the run ends failed instead of declaring
+    // success.
     outcome "failure" { next = state.failed }
 }
 
