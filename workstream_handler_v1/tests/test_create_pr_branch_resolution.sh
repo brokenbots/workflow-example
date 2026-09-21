@@ -35,6 +35,14 @@ echo "==> Checking sync_head_branch hands off to create_pr and fails loudly..."
 jq -e '.steps[] | select(.name == "sync_head_branch") | .outcomes[] | select(.name == "success" and .next == "create_pr")' "${COMPILE_OUT}" >/dev/null
 jq -e '.steps[] | select(.name == "sync_head_branch") | .outcomes[] | select(.name == "failure" and .next == "failed")' "${COMPILE_OUT}" >/dev/null
 
+# criteria compile omits step writes, so pin the branch write-back in the
+# source, scoped to the sync_head_branch step block.
+echo "==> Checking the resolved branch is written back to data.internal.branch..."
+sync_step=$(sed -n '/^step "sync_head_branch" {/,/^}/p' "${ROOT_DIR}/main.chcl")
+printf '%s' "${sync_step}" | grep -q 'target = data.internal.branch.value' \
+    && printf '%s' "${sync_step}" | grep -q 'value  = trimspace(output.stdout)' \
+    || { echo "FAIL: sync_head_branch does not write the resolved branch into data.internal.branch" >&2; exit 1; }
+
 echo "==> Checking create_pr still derives the branch from the worktree..."
 grep -q 'git branch --show-current' "${ROOT_DIR}/scripts/create_pr.sh.tftpl" \
     || { echo "FAIL: create_pr.sh.tftpl no longer reads the worktree's branch" >&2; exit 1; }

@@ -78,12 +78,14 @@ if [ "$(ahead_of_base "HEAD")" -gt 0 ]; then
 fi
 
 # 3. Find the branch the agent actually pushed to. Candidates are scanned
-#    most recently pushed first; a branch that names this ticket wins over
+#    most recently pushed first (the LAST --sort key is the primary one in
+#    git for-each-ref, so -committerdate comes last and refname is only the
+#    deterministic tiebreak); a branch that names this ticket wins over
 #    a generic one. A branch naming a different ticket (cri-<other>) belongs
 #    to a concurrent workstream and is never hijacked as this run's head.
 refs_file=$(mktemp)
 trap 'rm -f "$refs_file"' EXIT
-git for-each-ref --sort=-committerdate --sort=refname \
+git for-each-ref --sort=refname --sort=-committerdate \
     --format='%(refname)' refs/remotes/origin >"$refs_file" 2>/dev/null || true
 
 name_match=""

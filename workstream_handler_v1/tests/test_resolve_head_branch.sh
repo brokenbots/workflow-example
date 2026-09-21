@@ -15,6 +15,10 @@
 #   - no candidates: worktree branch stays checked out
 #   - hijack guard: a branch naming another ticket is never picked
 #   - preference: a name-matching branch wins over a newer generic one
+#   - recency among ticket-name matches: most recently pushed wins even
+#     when it sorts last alphabetically
+#   - recency among generic candidates: most recently pushed wins even
+#     when it sorts last alphabetically
 #   - empty name-match: a name-matching branch with no commits is skipped
 #   - loud failure: the agent branch held by another worktree cannot be
 #     checked out -> non-zero exit instead of a silent wrong-branch PR
@@ -167,6 +171,30 @@ commit_push "${AGENT}" "zz-generic-newer" "newer.txt" "newer" "2026-01-01T05:00:
 out=$(run_resolve)
 [ "$(printf '%s' "$out")" = "cri-9-older-fix" ] || fail "expected the name-matching branch, got '${out}'"
 [ "$(wt_branch)" = "cri-9-older-fix" ] || fail "worktree not on the name-matching branch (on $(wt_branch))"
+echo "==> OK"
+
+echo "==> Scenario: recency among ticket-name matches — most recently pushed wins"
+reset_fixture
+# cri-9-alpha is pushed first (older) and sorts first alphabetically; the
+# selector must still pick the most recently pushed cri-9-zeta.
+commit_push "${AGENT}" "cri-9-alpha" "alpha.txt" "alpha" "2026-01-01T04:00:00Z"
+commit_push "${AGENT}" "cri-9-zeta" "zeta.txt" "zeta" "2026-01-01T05:00:00Z"
+out=$(run_resolve)
+[ "$(printf '%s' "$out")" = "cri-9-zeta" ] || fail "expected the most recently pushed name match, got '${out}'"
+[ "$(wt_branch)" = "cri-9-zeta" ] || fail "worktree not on the most recently pushed name match (on $(wt_branch))"
+[ "$(wt_head)" = "$(git -C "${REPO}" rev-parse "origin/cri-9-zeta")" ] || \
+    fail "worktree HEAD is not origin/cri-9-zeta"
+echo "==> OK"
+
+echo "==> Scenario: recency among generic candidates — most recently pushed wins"
+reset_fixture
+commit_push "${AGENT}" "aa-generic-older" "old.txt" "old" "2026-01-01T04:00:00Z"
+commit_push "${AGENT}" "zz-generic2" "new.txt" "new" "2026-01-01T05:00:00Z"
+out=$(run_resolve)
+[ "$(printf '%s' "$out")" = "zz-generic2" ] || fail "expected the most recently pushed generic candidate, got '${out}'"
+[ "$(wt_branch)" = "zz-generic2" ] || fail "worktree not on the most recently pushed generic candidate (on $(wt_branch))"
+[ "$(wt_head)" = "$(git -C "${REPO}" rev-parse "origin/zz-generic2")" ] || \
+    fail "worktree HEAD is not origin/zz-generic2"
 echo "==> OK"
 
 echo "==> Scenario: empty name-match is skipped — a branch with no commits cannot back a PR"
