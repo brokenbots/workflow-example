@@ -76,7 +76,7 @@ jobs:
         run: |
           mkdir -p "$CRITERIA_HOME/adapters"
           criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.3
-          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.6
+          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.8
 
       - name: Run linear_triage_v1 standalone extraction regression test (CRI-238)
         run: |

@@ -94,13 +94,9 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// If the run is already terminal, do not re-enter the queue on a resync.
-	// Release any stale admission slot and prompt the next queued run.
+	// Release any stale admission slot so the next queued run is admitted.
 	if isTerminalPhase(run.Status.Phase) {
-		if next := r.Queue.Release(&run); next != nil {
-			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
-				logger.Error(err, "reconciling next queued CriteriaRun after terminal resync", "next", *next)
-			}
-		}
+		r.Queue.Release(&run)
 		// Stale per-scope adapters of a terminal run: the engine releases
 		// every scope when the run ends, so any surviving adapter pod dials a
 		// deregistered shim forever ("scope ... is not registered" every 2s)
@@ -150,7 +146,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Enqueue the run for (repoURL, class)-keyed admission control
 	// (CRI-242). Only admitted runs are allowed to create child Jobs.
-	admitted, qstatus, prevRunning := r.Queue.Enqueue(&run)
+	admitted, qstatus, _ := r.Queue.Enqueue(&run)
 
 	update := run.DeepCopy()
 	update.Status.ObservedGeneration = run.Generation
@@ -169,13 +165,14 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, fmt.Errorf("updating queue status: %w", err)
 			}
 		}
-		// Refresh the currently running run's queue status so it shows the
-		// newly queued run in its pending list.
-		if prevRunning != nil {
-			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *prevRunning}); err != nil {
-				logger.Error(err, "reconciling running CriteriaRun after enqueue", "running", *prevRunning)
-			}
-		}
+		// CRI-291: the currently running run's queue status is refreshed on
+		// its own next pass (poll cadence or watch event), never by a nested
+		// synchronous reconcile here. A nested call re-enters Reconcile with
+		// this run's request still stamped on the context, so every status
+		// write inside it logs and keys off the WRONG run identity — the
+		// cross-contamination signature of CRI-291 — and its requeue
+		// decisions are silently dropped. The queued run's own
+		// queueRequeueInterval requeue keeps admission progressing.
 		return ctrl.Result{RequeueAfter: queueRequeueInterval}, nil
 	}
 
@@ -328,14 +325,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
-	// Release the queue slot when the run has finished. If another run is
-	// queued for the same repo, reconcile it so it can start promptly.
+	// Release the queue slot when the run has finished so the next queued
+	// run for the same repo is admitted. It is picked up by its own requeue
+	// or watch event — never a nested reconcile (CRI-291).
 	if isTerminalPhase(phase) {
-		if next := r.Queue.Release(&run); next != nil {
-			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
-				logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)
-			}
-		}
+		r.Queue.Release(&run)
 	}
 
 	// Requeue policy:
@@ -518,14 +512,9 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 	logger.Info("finalizing CriteriaRun")
 
 	// Release the queue slot before deleting the run so the next queued run
-	// can be admitted.
-	if next := r.Queue.Release(run); next != nil {
-		defer func() {
-			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
-				logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)
-			}
-		}()
-	}
+	// can be admitted; it is picked up by its own requeue, not a nested
+	// reconcile (CRI-291).
+	r.Queue.Release(run)
 
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err
