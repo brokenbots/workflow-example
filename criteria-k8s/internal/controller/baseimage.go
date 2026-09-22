@@ -152,11 +152,9 @@ func (r *CriteriaRunReconciler) failBaseImageMismatch(ctx context.Context, run *
 	if err := r.Status().Update(ctx, update); err != nil {
 		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on base-image mismatch: %w", err)
 	}
-	if next := r.Queue.Release(run); next != nil {
-		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: *next}); err != nil {
-			logger.Error(err, "reconciling next queued CriteriaRun", "next", *next)
-		}
-	}
+	// Release the queue slot so the next queued run is admitted (CRI-291: it
+	// is picked up by its own requeue, not a nested reconcile).
+	r.Queue.Release(run)
 	return ctrl.Result{}, nil
 }
 
