@@ -638,7 +638,11 @@ func TestReconcileCastleErrorStillStampsJobPhaseAndReleasesQueue(t *testing.T) {
 	assert.Empty(t, updatedA.Status.TicketState)
 	assert.Empty(t, updatedA.Status.CastleRunID)
 
-	// The queue slot was released: the queued run is admitted promptly.
+	// The queue slot was released: B is admitted in queue state and its
+	// own next pass picks it up (CRI-291: no nested handoff inside A's pass).
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runB)})
+	require.NoError(t, err)
+
 	var updatedB criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &updatedB))
 	require.NotNil(t, updatedB.Status.Queue)
@@ -1063,8 +1067,9 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 	assert.Equal(t, "cri-117-a", updatedB.Status.Queue.Running)
 	assert.Equal(t, []string{"cri-117-b"}, updatedB.Status.Queue.Pending)
 
-	// Mark A's runner job as complete. Reconciling A releases the slot and
-	// triggers B's reconcile automatically.
+	// Mark A's runner job as complete. Reconciling A releases the repo slot,
+	// which admits B in queue state only; B is actuated by its own reconcile
+	// pass (CRI-291: no nested synchronous handoff inside A's pass).
 	runnerA := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-117-a", Namespace: "default"},
 		Status: batchv1.JobStatus{
@@ -1082,9 +1087,24 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runA), &updatedA))
 	assert.Equal(t, criteriav1.PhaseSucceeded, updatedA.Status.Phase)
 
+	var jobsAfterRelease batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobsAfterRelease, client.InNamespace("default")))
+	assert.Len(t, jobsAfterRelease.Items, 3,
+		"A's terminal pass admits B in queue state without actuating it")
+
+	var releasedB criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &releasedB))
+	require.NotNil(t, releasedB.Status.Queue)
+	assert.Equal(t, 1, releasedB.Status.Queue.Position,
+		"B's queue status is refreshed on its own next pass, not during A's")
+
+	// B's own reconcile pass picks up the admitted slot and creates its jobs.
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runB)})
+	require.NoError(t, err)
+
 	var allJobs batchv1.JobList
 	require.NoError(t, cl.List(context.Background(), &allJobs, client.InNamespace("default")))
-	assert.Len(t, allJobs.Items, 6, "B should now be admitted and have created its jobs")
+	assert.Len(t, allJobs.Items, 6, "B's own reconcile pass creates its jobs")
 
 	var admittedB criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &admittedB))
@@ -1255,6 +1275,12 @@ func TestQueueFairnessFIFO(t *testing.T) {
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 		require.NoError(t, err)
 	}
+
+	// The running run's queue snapshot is refreshed on its own next pass
+	// (CRI-291: no nested refresh inside the queued runs' passes), so
+	// reconciling runs[0] again shows the queue order preserved FIFO.
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runs[0])})
+	require.NoError(t, err)
 
 	var first criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runs[0]), &first))

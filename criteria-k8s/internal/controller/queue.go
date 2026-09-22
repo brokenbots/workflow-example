@@ -44,8 +44,9 @@ func NewRunQueue() *RunQueue {
 // Enqueue registers the run for its (repoURL, class) queue and returns
 // admission state along with queue status. If no run is currently admitted
 // for the queue, the head of the queue is admitted. When the run is queued
-// behind another run, prevRunning is the currently admitted run so the
-// caller can refresh its queue status.
+// behind another run, prevRunning is the currently admitted run (exposed for
+// tests and diagnostics; the controller must never reconcile it
+// synchronously from inside Reconcile — CRI-291).
 func (q *RunQueue) Enqueue(run *criteriav1.CriteriaRun) (admitted bool, status *criteriav1.CriteriaRunQueueStatus, prevRunning *types.NamespacedName) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
