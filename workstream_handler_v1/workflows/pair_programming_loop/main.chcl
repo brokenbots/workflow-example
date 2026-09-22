@@ -62,7 +62,12 @@ step "read_workstream" {
         next = step.checkout_branch
         write {
             target = data.internal.branch.value
-            value  = steps.get_branch_name.stdout
+            // basename's stdout carries a trailing newline; without the trim the
+            // newline rides along into every consumer of data.internal.branch —
+            // push_checkpoint rendered it into `git ls-remote origin
+            // "refs/heads/CRI-287\n"`, which matched nothing and failed the
+            // checkpoint loop on a branch that was verifiably pushed (CRI-295).
+            value  = trimspace(steps.get_branch_name.stdout)
         }
         write {
             target = data.internal._log_file.value

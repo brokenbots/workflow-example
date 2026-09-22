@@ -1,6 +1,11 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 set -euo pipefail; exec 2>&1
 branch="$criteria_value_1"
+# The branch value travels through stdout writes on its way here and can carry
+# stray edge whitespace (observed: a trailing newline from an untrimmed
+# `basename` write made the refs/heads match below fail on a pushed branch,
+# CRI-295). Trim the edges; internal whitespace in a real branch name survives.
+branch="$(printf '%s' "$branch" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
 # The checkpoint discipline requires the agent to push before ending a
 # checkpoint turn (CRI-271): the loop's crash window is a single turn's
