@@ -51,11 +51,14 @@ jobs:
         run: |
           bash linear_intake_v1/tests/test_engine_pin.sh
 
-      # Mirrors linear_intake_v1/Dockerfile: same pinned release, verified
-      # against the release SHA256SUMS before install.
-      - name: Install criteria v0.5.22 (SHA256SUMS-verified)
+      # Source-mode test tooling for this suite. Rolled to v0.5.32 (b2d0b66)
+      # in CRI-300: the flat WorkflowGraphs shape only exists from this
+      # release onward, and the smoke test below (test_workflow_graphs_flat.sh)
+      # asserts that emitter contract. This does NOT change the image-mode
+      # pin in linear_intake_v1/Dockerfile (still v0.5.22, coordinator-owned).
+      - name: Install criteria v0.5.32 (SHA256SUMS-verified)
         run: |
-          version="v0.5.22"
+          version="v0.5.32"
           archive="criteria-${version}-linux-amd64.tar.gz"
           base="https://github.com/brokenbots/criteria/releases/download/${version}"
           curl -fL "${base}/${archive}" -o "/tmp/${archive}"
@@ -85,6 +88,12 @@ jobs:
       - name: Run linear_develop_v1 standalone extraction regression test (CRI-239)
         run: |
           bash linear_develop_v1/tests/test_develop_standalone.sh
+
+      # CRI-300: pin the flat WorkflowGraphs emitter contract on the v0.5.32
+      # engine (skips cleanly on engines that predate the event).
+      - name: Run flat WorkflowGraphs shape smoke test (CRI-300)
+        run: |
+          bash linear_intake_v1/tests/test_workflow_graphs_flat.sh
 
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
