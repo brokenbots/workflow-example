@@ -46,14 +46,16 @@ chain="$(jq -r '[.subworkflows[0].name,
                  .subworkflows[0].body.subworkflows[0].name,
                  .subworkflows[0].body.subworkflows[0].body.subworkflows[0].name] | join(" ")' "$GRAPH")"
 require_equal "$chain" "flat_l1 flat_l2 flat_l3" "compiled graph nests 3 subworkflow levels"
-jq -e '.subworkflows[0].body.subworkflows[0].body.subworkflows[0].body | has("subworkflows") | not' "$GRAPH" >/dev/null \
-    || fail "deepest compiled layer still embeds a subworkflows key"
-ok "deepest compiled layer is a leaf (no nested subworkflows)"
+if jq -e '.subworkflows[0].body.subworkflows[0].body.subworkflows[0].body | has("subworkflows") | not' "$GRAPH" >/dev/null; then
+    ok "deepest compiled layer is a leaf (no nested subworkflows)"
+else
+    fail "deepest compiled layer still embeds a subworkflows key"
+fi
 
 # ── 2. Run the fixture and gate on the WorkflowGraphs event ─────────────────
 
-"$CRITERIA" apply "$FIXTURE" --events-file "$TMP/events.ndjson" >/dev/null 2>&1 \
-    || { echo "FAIL: criteria apply: $(tail -5 "$TMP/events.ndjson" 2>/dev/null || true)" >&2; exit 1; }
+"$CRITERIA" apply "$FIXTURE" --events-file "$TMP/events.ndjson" >/dev/null 2>"$TMP/apply.err" \
+    || { echo "FAIL: criteria apply: $(tail -3 "$TMP/apply.err")" >&2; exit 1; }
 
 wg_count="$(jq -s '[.[] | select(.payload_type == "WorkflowGraphs")] | length' "$TMP/events.ndjson")"
 if [ "$wg_count" -eq 0 ]; then
@@ -79,14 +81,12 @@ require_equal "$bodies_with_key" "0" "no layer body string contains a subworkflo
 
 mismatched="$(jq -r '[ .[0].payload.subworkflows[] | select((.body | fromjson | .name) != .name) | .name ]
                      | join(" ")' <<<"$wg")"
-[ -z "$mismatched" ] || fail "body name mismatches layer name for: $mismatched"
-ok "every layer body parses and matches its layer name"
+if [ -z "$mismatched" ]; then ok "every layer body parses and matches its layer name"; else fail "body name mismatches layer name for: $mismatched"; fi
 
 misplaced="$(jq -r '[ .[0].payload.subworkflows[] | . as $l
                      | select(($l.sourcePath | contains($l.name)) | not) | $l.name ]
                     | join(" ")' <<<"$wg")"
-[ -z "$misplaced" ] || fail "sourcePath does not embed the layer path for: $misplaced"
-ok "sourcePath embeds each layer's nested path (depth-3 reaches the emitter)"
+if [ -z "$misplaced" ]; then ok "sourcePath embeds each layer's nested path (depth-3 reaches the emitter)"; else fail "sourcePath does not embed the layer path for: $misplaced"; fi
 
 if [ "$FAILED" -gt 0 ]; then
     echo "FAILED: $FAILED assertion(s)" >&2
