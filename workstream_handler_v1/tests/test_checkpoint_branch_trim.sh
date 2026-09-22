@@ -129,7 +129,19 @@ out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "clean branch value did not report checkpoint_pushed: ${out}"
 echo "==> OK"
 
+echo "==> Scenario: loud failure preserved — whitespace-only branch value"
+SCRIPT="${WORK_DIR}/verify_ws_only.sh"
+render_with_value "${SCRIPT}" "criteria_value_1='   \n  '"
+if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
+    fail "expected failure for a whitespace-only branch value, got: ${out}"
+fi
+[[ "${out}" == *"checkpoint push verification: branch value is empty"* ]] \
+    || fail "expected the empty-branch signature, got: ${out}"
+echo "==> OK"
+
 echo "==> Scenario: loud failure preserved — branch absent from the remote"
+SCRIPT="${WORK_DIR}/verify_missing.sh"
+render_with_value "${SCRIPT}" "criteria_value_1='${TICKET}'"
 git -C "${REPO}" push -q origin --delete "${TICKET}"
 if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
     fail "expected failure for a branch missing on the remote, got: ${out}"

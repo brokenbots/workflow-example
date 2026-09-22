@@ -6,6 +6,13 @@ branch="$criteria_value_1"
 # `basename` write made the refs/heads match below fail on a pushed branch,
 # CRI-295). Trim the edges; internal whitespace in a real branch name survives.
 branch="$(printf '%s' "$branch" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+# A whitespace-only value trims to empty, and `ls-remote origin refs/heads/`
+# lists every branch — an empty name must fail loudly instead of matching a
+# random head.
+if [ -z "$branch" ]; then
+    echo "checkpoint push verification: branch value is empty" >&2
+    exit 1
+fi
 
 # The checkpoint discipline requires the agent to push before ending a
 # checkpoint turn (CRI-271): the loop's crash window is a single turn's
