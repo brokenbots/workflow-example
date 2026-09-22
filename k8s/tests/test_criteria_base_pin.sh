@@ -28,7 +28,14 @@ set -euo pipefail
 #   - a pin beyond eae0181 ships an emitted contract that has not been
 #     audited against the operator's event parser.
 #
-# To move off eae0181, re-audit the emitted adapter event contract, then
+# Audited to b2d0b66 (v0.5.32, 2026-09-22, operator): proto delta vs eae0181 is
+# purely ADDITIVE - new WorkflowGraphs message + oneof arm workflow_graphs = 37
+# (CRI-278/298/299: best-effort metadata event; no existing field renumbered or
+# removed; adapter event contract untouched). Castle ingest + run-viewer
+# consumer verified live. criteria-base builds the engine, not the SDK, so the
+# additive events.proto does not affect adapter wire v2.
+#
+# To move off b2d0b66, re-audit the emitted adapter event contract, then
 # update AUDITED_COMMIT here and the equality checks in
 # k8s/tests/test_criteria_base.sh and criteria-base/tests/smoke_test.sh in
 # the same change.
@@ -41,7 +48,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="eae01816c4a2da88449833a233d1b3f6a099bef1"
+AUDITED_COMMIT="b2d0b66400b9d07d152df0c6d3069499c76d5ec7"
 
 fail() {
     echo "FAIL: $1" >&2
