@@ -99,7 +99,7 @@ data:
             {
               "name": "linear-api-key",
               "secretProviderClass": "linear-spc",
-              "mountPath": "/secrets",
+              "mountPath": "/home/criteria/linear-secrets",
               "env": {
                 "LINEAR_API_KEY": "linear_api_key"
               }
@@ -154,7 +154,7 @@ data:
             {
               "name": "linear-api-key",
               "secretProviderClass": "linear-spc",
-              "mountPath": "/secrets",
+              "mountPath": "/home/criteria/linear-secrets",
               "env": {
                 "LINEAR_API_KEY": "linear_api_key"
               }
@@ -210,7 +210,7 @@ data:
             {
               "name": "linear-api-key",
               "secretProviderClass": "linear-spc",
-              "mountPath": "/secrets",
+              "mountPath": "/home/criteria/linear-secrets",
               "env": {
                 "LINEAR_API_KEY": "linear_api_key"
               }
@@ -267,7 +267,7 @@ data:
             {
               "name": "linear-api-key",
               "secretProviderClass": "linear-spc",
-              "mountPath": "/secrets",
+              "mountPath": "/home/criteria/linear-secrets",
               "env": {
                 "LINEAR_API_KEY": "linear_api_key"
               }
@@ -285,7 +285,8 @@ data:
         },
         "ticket-cleanup-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1?ref=a84ef55ea705988a5373c915a2a5e9ded2ec8f11",
+          "ref": "a84ef55ea705988a5373c915a2a5e9ded2ec8f11",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -305,14 +306,6 @@ data:
               "mountPath": "/repo"
             },
             {
-              "name": "wf-cache",
-              "kind": "nfs",
-              "server": "nfs.internal",
-              "path": "/export/workflow-cache",
-              "mountPath": "/mnt/workflow-cache",
-              "readOnly": true
-            },
-            {
               "name": "scratch",
               "kind": "tmp",
               "mountPath": "/tmp/scratch",
@@ -323,9 +316,18 @@ data:
             {
               "name": "linear-api-key",
               "secretProviderClass": "linear-spc",
-              "mountPath": "/secrets",
+              "mountPath": "/home/criteria/linear-secrets",
               "env": {
                 "LINEAR_API_KEY": "linear_api_key"
+              }
+            },
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
               }
             }
           ]
