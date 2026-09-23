@@ -1,21 +1,37 @@
 intake_root={{ .intake_root | shellquote }}
 ticket_id={{ .ticket_id | shellquote }}
 set -euo pipefail
-command -v curl jq >/dev/null
+command -v wget >/dev/null
 : "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
 
 run_dir="$intake_root/$ticket_id"
-issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
 
-curl -sS -f \
-    -H "Authorization: $LINEAR_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n \
-        --arg q 'mutation($id: String!, $body: String!) { commentCreate(input: {issueId: $id, body: $body}) { success } }' \
-        --arg id "$issue_id" \
-        --arg body "cleanup pass: dirty label verified as a routing surface (validation run C)" \
-        '{query: $q, variables: {id: $id, body: $body}}')" \
-    https://api.linear.app/graphql \
-    | jq -e '.data.commentCreate.success == true' >/dev/null
+# The issue UUID from the fetched ticket.json (no jq on the criteria-base
+# image: extract .data.issue.id with grep/sed).
+issue_id=$(grep -o '"issue":{"id":"[^"]*"' "$run_dir/ticket.json" | \
+    sed 's/^"issue":{"id":"\([^"]*\)".*/\1/')
+if [ -z "$issue_id" ]; then
+    echo "no issue id in fetched ticket.json; cannot post the cleanup comment" >&2
+    exit 1
+fi
+
+# Fixed evidence body — no ticket content is interpolated, so the JSON
+# needs no escaping layer.
+body="cleanup pass: dirty label verified as a routing surface (validation run C)"
+request="{\"query\":\"mutation(\$id: String!, \$body: String!) { commentCreate(input: {issueId: \$id, body: \$body}) { success } }\",\"variables\":{\"id\":\"$issue_id\",\"body\":\"$body\"}}"
+
+response=$(wget -q -O - \
+    --header "Authorization: $LINEAR_API_KEY" \
+    --header "Content-Type: application/json" \
+    --post-data "$request" \
+    https://api.linear.app/graphql)
+
+# Require the in-band success flag (CRI-275: the run must not lie about
+# its evidence — a failed comment ends the run failed).
+if ! printf '%s' "$response" | grep -q '"commentCreate":{"success":true}'; then
+    echo "cleanup comment was not accepted by Linear" >&2
+    printf '%s' "$response" >&2
+    exit 1
+fi
 
 echo "cleanup comment posted"

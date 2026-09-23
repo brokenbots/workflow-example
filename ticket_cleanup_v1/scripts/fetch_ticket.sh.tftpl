@@ -1,7 +1,7 @@
 intake_root={{ .intake_root | shellquote }}
 ticket_id={{ .ticket_id | shellquote }}
 set -euo pipefail
-command -v curl jq >/dev/null
+command -v wget >/dev/null
 : "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
 
 # The ticket id becomes a directory name and a JSON string.
@@ -17,27 +17,32 @@ run_dir="$intake_root/$ticket_id"
 mkdir -p "$run_dir"
 
 # Linear's issue(id:) accepts the human identifier ("CRI-32") in
-# place of the UUID.
-http=$(curl -sS -o "$run_dir/ticket.json" -w '%{http_code}' \
-    -H "Authorization: $LINEAR_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n \
-        --arg q 'query($id: String!) { issue(id: $id) { id identifier title url state { name } } }' \
-        --arg id "$ticket_id" \
-        '{query: $q, variables: {id: $id}}')" \
-    https://api.linear.app/graphql)
+# place of the UUID. BusyBox wget --post-data carries the request body;
+# the JSON body is a fixed shape with the ticket id interpolated as a
+# quoted string — the identifier-shape case above guarantees the
+# interpolation is safe (no quotes/backslashes can appear in $ticket_id).
+request="{\"query\":\"query(\$id: String!) { issue(id: \$id) { id identifier title url state { name } } }\",\"variables\":{\"id\":\"$ticket_id\"}}"
 
-if [ "$http" != "200" ]; then
-    echo "Linear API returned HTTP $http for ticket $ticket_id" >&2
+# BusyBox wget: non-2xx responses exit non-zero with the body on stderr.
+if ! wget -q -O "$run_dir/ticket.json" \
+    --header "Authorization: $LINEAR_API_KEY" \
+    --header "Content-Type: application/json" \
+    --post-data "$request" \
+    https://api.linear.app/graphql 2>/dev/null; then
+    echo "Linear API request failed for ticket $ticket_id" >&2
+    cat "$run_dir/ticket.json" >&2 2>/dev/null || true
+    exit 1
+fi
+
+# GraphQL reports application errors in-band with HTTP 200: an issue
+# response always carries .data.issue.id; a missing id means an error
+# payload. Extracted with grep/sed (no jq on the criteria-base image).
+if ! grep -q '"issue"' "$run_dir/ticket.json" || \
+   ! grep -q '"id"' "$run_dir/ticket.json"; then
+    echo "Linear ticket not found: $ticket_id" >&2
     cat "$run_dir/ticket.json" >&2
     exit 1
 fi
 
-# GraphQL reports application errors in-band with HTTP 200.
-if [ "$(jq -r '.data.issue.id // empty' "$run_dir/ticket.json")" = "" ]; then
-    echo "Linear ticket not found: $ticket_id" >&2
-    jq -c '.errors // empty' "$run_dir/ticket.json" >&2 || true
-    exit 1
-fi
-
-jq -r '.data.issue | "fetched \(.identifier): \(.title) [state: \(.state.name)]"' "$run_dir/ticket.json"
+grep -o '"identifier":"[^"]*"' "$run_dir/ticket.json" | head -1 | \
+    sed 's/^"identifier":"\([^"]*\)".*/fetched \1/'

@@ -222,11 +222,19 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 	if wf.Type != TypeURL {
 		t.Errorf("cleanup workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
 	}
-	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1" {
+	// Validation run C corrected two assumptions from the original landing:
+	// the pinless fetch fails to resolve the subtree, so the object pins the
+	// squash-merge commit a84ef55; and the base entrypoint's repo-clone init
+	// unconditionally requires WORKFLOW_GITHUB_TOKEN, so the object binds the
+	// github-tokens CSI surface (the cleanup pass itself performs zero git
+	// operations — the mount exists for the entrypoint, not the workflow).
+	// linear-api-key rides at /home/criteria/linear-secrets: the runner
+	// script's hardcoded file: OriginRef path (lstat-checked before any step).
+	if !strings.HasPrefix(wf.URL, "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1") {
 		t.Errorf("cleanup workflow url = %q, want the ticket_cleanup_v1 subtree", wf.URL)
 	}
-	if wf.Ref != "" {
-		t.Errorf("cleanup workflow ref = %q, want empty (shipped pinless — the squash-merge commit is only nameable in a follow-up re-pin, CRI-241/CRI-243 convention)", wf.Ref)
+	if wf.Ref != "a84ef55ea705988a5373c915a2a5e9ded2ec8f11" {
+		t.Errorf("cleanup workflow ref = %q, want the ticket_cleanup_v1 squash-merge commit a84ef55 (pinless HEAD resolution fails on the subtree; CRI-241/CRI-243 follow-up re-pin convention)", wf.Ref)
 	}
 	if wf.Image != "" {
 		t.Errorf("cleanup workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
@@ -234,14 +242,12 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 	if wf.Class != ClassTriage {
 		t.Errorf("cleanup workflow class = %q, want %q (CRI-242 read-only admission)", wf.Class, ClassTriage)
 	}
-	if len(wf.Volumes) != 4 || len(wf.Secrets) != 1 {
-		t.Errorf("ticket-cleanup-url = %+v, want 4 volumes and exactly 1 secret (linear-api-key only)", wf)
+	if len(wf.Volumes) != 3 || len(wf.Secrets) != 2 {
+		t.Errorf("ticket-cleanup-url = %+v, want 3 volumes and 2 secrets (linear-api-key + github-tokens: the entrypoint requires WORKFLOW_GITHUB_TOKEN)", wf)
 	}
 	for _, s := range wf.Secrets {
-		for envName := range s.Env {
-			if strings.Contains(strings.ToLower(envName), "github") {
-				t.Errorf("ticket-cleanup-url secret env %q binds a GitHub token — the cleanup pass does zero git operations", envName)
-			}
+		if s.Name == "linear-api-key" && s.MountPath != "/home/criteria/linear-secrets" {
+			t.Errorf("ticket-cleanup-url linear-api-key mountPath = %q, want /home/criteria/linear-secrets (the runner's file: OriginRef path)", s.MountPath)
 		}
 	}
 
