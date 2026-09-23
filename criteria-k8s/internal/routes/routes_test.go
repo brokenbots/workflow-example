@@ -233,8 +233,8 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 	if !strings.HasPrefix(wf.URL, "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1") {
 		t.Errorf("cleanup workflow url = %q, want the ticket_cleanup_v1 subtree", wf.URL)
 	}
-	if wf.Ref != "a84ef55ea705988a5373c915a2a5e9ded2ec8f11" {
-		t.Errorf("cleanup workflow ref = %q, want the ticket_cleanup_v1 squash-merge commit a84ef55 (pinless HEAD resolution fails on the subtree; CRI-241/CRI-243 follow-up re-pin convention)", wf.Ref)
+	if wf.Ref != "0b8136650d5622381bf18a597ed93b8c272ba19b" {
+		t.Errorf("cleanup workflow ref = %q, want the ticket_cleanup_v1 squash-merge commit 0b813665 (pinless HEAD resolution fails on the subtree; CRI-241/CRI-243 follow-up re-pin convention)", wf.Ref)
 	}
 	if wf.Image != "" {
 		t.Errorf("cleanup workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
