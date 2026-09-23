@@ -1,0 +1,1 @@
+This file was created by validation run D (plan CRI-214, M10.5): the run that produced it executed a url+image workflow object — content fetched from the git URL, process running in the provided image — through the criteria-develop dev route. Cross-ref: CRI-247.
