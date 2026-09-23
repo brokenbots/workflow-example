@@ -11,9 +11,11 @@ import (
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -63,8 +65,8 @@ func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 	assert.Equal(t, "CRI-231", envValue(runner.Env, "TICKET_ID"))
 	assert.Equal(t, "https://github.com/brokenbots/workflow-example.git", envValue(runner.Env, "REPO_URL"))
 	assert.Equal(t, job.Name, envValue(runner.Env, "JOB_NAME"))
-	assert.Equal(t, "/tmp/criteria-home", envValue(runner.Env, "CRITERIA_HOME"),
-		"source-mode engine state is container-local (CRI-237): the adapter pods take the token on the wire, so the shared /data PVC is no longer mounted into the source runner")
+	assert.Equal(t, "/data/criteria-home/cri-231-url", envValue(runner.Env, "CRITERIA_HOME"),
+		"source-mode engine run state must live on the shared data PVC, pod-scoped by job name, so CRI-125 step checkpoints survive a runner-container restart (CRI-303); adapter pods still take the accept token on the wire (CRI-237)")
 	for _, e := range runner.Env {
 		if e.Name == "POD_IP" {
 			require.NotNil(t, e.ValueFrom)
@@ -91,6 +93,89 @@ func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 		volNames[v.Name] = true
 	}
 	assert.True(t, volNames["data"], "engine run state lives on the shared data PVC (CRITERIA_HOME)")
+}
+
+// CRI-303: the source-mode engine's run state (CRI-125 step checkpoints, run
+// metadata, the workflow cache) must live on the shared data PVC so a
+// runner-container restart (OnFailure restart policy) resumes the in-flight
+// run through checkpoint reattach instead of replaying fresh. The home is
+// pod-scoped by job name so concurrent runs on the shared PVC never collide,
+// mirroring the WORKFLOW_ORIGIN_METADATA runs/<JOB_NAME> layout.
+func TestSourceModeCriteriaHomeOnDataPVC(t *testing.T) {
+	run := urlRun("cri-303-home", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://example.com/wf.git",
+	}, "")
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	runner := job.Spec.Template.Spec.Containers[0]
+
+	home := envValue(runner.Env, "CRITERIA_HOME")
+	assert.Equal(t, "/data/criteria-home/cri-303-home", home,
+		"CRITERIA_HOME must be the per-run data-PVC directory keyed by the runner job name (CRI-303)")
+	assert.Contains(t, home, "/data/criteria-home/"+envValue(runner.Env, "JOB_NAME"),
+		"the home must be scoped by the same JOB_NAME the runner publishes its state under")
+
+	// The home resolves through the shared data mount: the runner carries
+	// the run's data PVC at /data, so the pod-scoped home is on the PVC and
+	// outlives the container writable layer.
+	mounts := make(map[string]corev1.VolumeMount)
+	for _, m := range runner.VolumeMounts {
+		mounts[m.MountPath] = m
+	}
+	dataMount, ok := mounts["/data"]
+	require.True(t, ok, "the runner must mount the shared data PVC at /data: %v", runner.VolumeMounts)
+	assert.Equal(t, "data", dataMount.Name)
+
+	volumes := make(map[string]corev1.Volume)
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	dataVol, ok := volumes[dataMount.Name]
+	require.True(t, ok, "the mounted data volume must exist in the pod volume list")
+	require.NotNil(t, dataVol.PersistentVolumeClaim,
+		"the engine run state must ride a PVC, not a container-local emptyDir")
+	assert.Equal(t, "criteria-data", dataVol.PersistentVolumeClaim.ClaimName,
+		"the checkpoint-bearing home must land on the run's data PVC")
+
+	// A second run on the same PVC gets its own pod-scoped directory.
+	other := urlRun("cri-303-other", &criteriav1.RunWorkflowSource{Type: "url", URL: "git::https://example.com/wf.git"}, "")
+	otherJob := jobbuilder.BuildRunnerJob(other, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	assert.Equal(t, "/data/criteria-home/cri-303-other",
+		envValue(otherJob.Spec.Template.Spec.Containers[0].Env, "CRITERIA_HOME"),
+		"concurrent runs on the shared PVC must not share a CRITERIA_HOME")
+}
+
+// CRI-237 preserved on the relocated path (CRI-303): a source-mode run's
+// adapter pods keep taking the accept token on the wire and read nothing
+// under the moved CRITERIA_HOME — the token files the engine keeps there
+// are engine-internal legacy delivery for image-mode engines only.
+func TestSourceModeAdapterPodsNeverReadMovedCriteriaHome(t *testing.T) {
+	run := urlRun("cri-303-wire", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://example.com/wf.git",
+	}, "")
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-303",
+		ScopeID:     "root",
+		AdapterName: "shell",
+		Digest:      "deadbeef",
+		ShimAddress: "10.0.0.5:7778",
+		AcceptToken: "accept-rotate-1",
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, scope, "10.0.0.10")
+	require.NotNil(t, pod)
+	container := pod.Spec.Containers[0]
+
+	envNames := make(map[string]bool)
+	for _, e := range container.Env {
+		envNames[e.Name] = true
+		assert.NotContains(t, e.Value, "/data/criteria-home",
+			"adapter env %s must not reference the relocated CRITERIA_HOME: adapter tokens ride the wire (CRI-237)", e.Name)
+	}
+	assert.True(t, envNames["CRITERIA_REMOTE_TOKEN"], "the accept token must be delivered on the wire")
+	assert.False(t, envNames["CRITERIA_REMOTE_TOKEN_FILE"], "no token-file surface on a wire-delivered adapter pod")
 }
 
 // CRI-231 requirement 3: in url+image source mode the URL is injected
