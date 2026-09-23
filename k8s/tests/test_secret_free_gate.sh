@@ -38,7 +38,8 @@ excluded() {
         # (x-access-token:*** interpolated from an env var at runtime).
         */jobbuilder/source.go) return 0 ;;
         # The gate itself carries the patterns.
-        k8s/tests/test_secret_free.sh|scripts/test_secret_free_gate.sh) return 0 ;;
+        # The gate itself carries the patterns.
+        k8s/tests/test_secret_free_gate.sh|scripts/test_secret_free_gate.sh) return 0 ;;
         # Lockfiles carry sigstore SUBJECT lines (issuer/subject URLs, no secrets).
         *) return 1 ;;
     esac
