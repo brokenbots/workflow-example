@@ -120,6 +120,7 @@ validate:
 	/usr/local/bin/criteria validate linear_intake_v1
 	/usr/local/bin/criteria validate linear_triage_v1
 	/usr/local/bin/criteria validate linear_develop_v1
+	/usr/local/bin/criteria validate ticket_cleanup_v1
 
 # CRI-241 + CRI-243: apply the criteria-routes ConfigMap live. Deploy
 # ordering for the CRI-243 cutover (the criteria project's routes become

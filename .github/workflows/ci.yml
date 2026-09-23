@@ -89,6 +89,13 @@ jobs:
         run: |
           bash linear_develop_v1/tests/test_develop_standalone.sh
 
+      # CRI-310: the dirty-label cleanup workflow (carrier for CRI-246,
+      # validation run C) — minimal single-adapter tree, fired through the
+      # criteria-cleanup route on a criteria-dirty ticket.
+      - name: Run ticket_cleanup_v1 standalone regression test (CRI-310)
+        run: |
+          bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
+
       # CRI-300: pin the flat WorkflowGraphs emitter contract on the v0.5.32
       # engine (skips cleanly on engines that predate the event).
       - name: Run flat WorkflowGraphs shape smoke test (CRI-300)

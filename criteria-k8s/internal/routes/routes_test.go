@@ -82,14 +82,15 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 4 {
-		t.Errorf("workflowLibrary size = %d, want 4", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 5 {
+		t.Errorf("workflowLibrary size = %d, want 5", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 2 {
-		t.Errorf("routes size = %d, want 2", len(p.Routes))
+	if len(p.Routes) != 3 {
+		t.Errorf("routes size = %d, want 3", len(p.Routes))
 	}
-	if p.Routes[0].Project != "Criteria K8s Workflow Runner" || p.Routes[1].Project != "Criteria K8s Workflow Runner" {
-		t.Errorf("routes = %+v, want both routed for project %q", p.Routes, "Criteria K8s Workflow Runner")
+	if p.Routes[0].Project != "Criteria K8s Workflow Runner" || p.Routes[1].Project != "Criteria K8s Workflow Runner" ||
+		p.Routes[2].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("routes = %+v, want all routed for project %q", p.Routes, "Criteria K8s Workflow Runner")
 	}
 	wf, ok := p.WorkflowLibrary["linear-intake-v1"]
 	if !ok {
@@ -178,6 +179,98 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	}
 	if len(triageWf.Volumes) != 4 || len(triageWf.Secrets) != 2 {
 		t.Errorf("linear-triage-url = %+v, want 4 volumes and 2 secrets like linear-intake-url", triageWf)
+	}
+}
+
+// CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
+// dirty label is a ROUTING SURFACE. A ticket carrying the watcher's sticky
+// "criteria-dirty" label in "Ready for Development" resolves to the
+// criteria-cleanup route and the ticket-cleanup-url object — the
+// tag-based specific route beats the tag-less general develop route by the
+// specific-over-general priority (matchRoute). A ticket without the dirty
+// label keeps the general develop route, a dirty ticket in "Triage" keeps
+// the triage route (the state gate still applies), and the object ships
+// url-only, on the triage (read-only) admission class, pinned to no commit
+// (this repository squash merges — every shipped pin names a main-landed
+// squash commit set in a follow-up change, CRI-241/CRI-243 convention — so
+// the pin for the freshly added tree is a documented follow-up) and
+// credential-free beyond the Linear API key (the cleanup pass does zero git
+// operations).
+func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("reading shipped example: %v", err)
+	}
+	p, err := Parse([]byte(extractRoutesJSON(t, string(data))))
+	if err != nil {
+		t.Fatalf("Parse(shipped example) failed: %v", err)
+	}
+
+	// The dirty-labeled ticket routes to the cleanup workflow — this is the
+	// validation run C path.
+	sel, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"criteria-dirty"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve(Ready for Development, criteria-dirty): %v", err)
+	}
+	if sel.Route.Name != "criteria-cleanup" {
+		t.Errorf("dirty ticket matched route = %q, want %q (the tag-based specific route must beat the tag-less develop route)", sel.Route.Name, "criteria-cleanup")
+	}
+	if sel.Name != "ticket-cleanup-url" {
+		t.Errorf("dirty ticket resolved workflow = %q, want %q", sel.Name, "ticket-cleanup-url")
+	}
+	wf := sel.Workflow
+	if wf.Type != TypeURL {
+		t.Errorf("cleanup workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
+	}
+	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1" {
+		t.Errorf("cleanup workflow url = %q, want the ticket_cleanup_v1 subtree", wf.URL)
+	}
+	if wf.Ref != "" {
+		t.Errorf("cleanup workflow ref = %q, want empty (shipped pinless — the squash-merge commit is only nameable in a follow-up re-pin, CRI-241/CRI-243 convention)", wf.Ref)
+	}
+	if wf.Image != "" {
+		t.Errorf("cleanup workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
+	}
+	if wf.Class != ClassTriage {
+		t.Errorf("cleanup workflow class = %q, want %q (CRI-242 read-only admission)", wf.Class, ClassTriage)
+	}
+	if len(wf.Volumes) != 4 || len(wf.Secrets) != 1 {
+		t.Errorf("ticket-cleanup-url = %+v, want 4 volumes and exactly 1 secret (linear-api-key only)", wf)
+	}
+	for _, s := range wf.Secrets {
+		for envName := range s.Env {
+			if strings.Contains(strings.ToLower(envName), "github") {
+				t.Errorf("ticket-cleanup-url secret env %q binds a GitHub token — the cleanup pass does zero git operations", envName)
+			}
+		}
+	}
+
+	// The priority holds both ways: a ticket WITHOUT the dirty label keeps
+	// the general develop route.
+	dev, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve(Ready for Development, no dirty label): %v", err)
+	}
+	if dev.Route.Name != "criteria-develop" || dev.Name != "linear-develop-url" {
+		t.Errorf("non-dirty ticket resolves to %q/%q, want criteria-develop/linear-develop-url", dev.Route.Name, dev.Name)
+	}
+
+	// And the state gate still applies: a dirty ticket in Triage keeps the
+	// triage route (the cleanup route is declared for
+	// "Ready for Development" only).
+	triage, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", []string{"criteria-dirty"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve(Triage, criteria-dirty): %v", err)
+	}
+	if triage.Route.Name != "criteria-triage" || triage.Name != "linear-triage-url" {
+		t.Errorf("dirty Triage ticket resolves to %q/%q, want criteria-triage/linear-triage-url", triage.Route.Name, triage.Name)
+	}
+
+	// The cleanup route declares no new states, so the watcher-facing
+	// TicketStates union is unchanged by CRI-310.
+	want := []string{"Ready for Development", "Triage"}
+	if got := p.TicketStates(); !slices.Equal(got, want) {
+		t.Errorf("TicketStates() = %v, want %v (CRI-310 must not grow the union)", got, want)
 	}
 }
 

@@ -1,0 +1,120 @@
+// ticket_cleanup_v1 — the dirty-label cleanup workflow (CRI-310, carrier for
+// CRI-246 / plan CRI-214 M10.4, validation run C).
+//
+// Fires on a ticket stuck with the sticky "criteria-dirty" label (the watcher
+// raises it when the ticket's latest run Failed). The dirty label is a
+// ROUTING SURFACE (plan section 3.5): the criteria-cleanup route selects this
+// workflow for dirty-labeled tickets in "Ready for Development", and the
+// specific-route-over-general priority (internal/routes/routes.go matchRoute)
+// makes it beat criteria-develop for those tickets — proving label-based
+// routing end to end.
+//
+// The flow is deliberately minimal — fetch -> comment -> done:
+//
+//   fetch_ticket         reads the ticket (Linear issue(id:)) into
+//                        <intake_root>/<ticket_id>/ticket.json
+//   post_cleanup_comment posts the fixed evidence comment:
+//                        "cleanup pass: dirty label verified as a routing
+//                        surface (validation run C)"
+//
+// and exits success. No subworkflows, no repo operations, no model calls.
+// The only credential is the Linear API key (resolved via the existing
+// SecretProviderClass reference, plan section 3.8) — the cleanup pass does
+// zero git operations, so no GitHub tokens are bound.
+//
+// A failed Linear write ends the run failed (CRI-275 doctrine: the run must
+// not lie about its evidence); a failed fetch ends the run failed directly —
+// the ticket id is unknown or unfetched, so no comment is possible.
+
+workflow {
+    name             = "ticket_cleanup_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "fetch_ticket"
+    target_state     = "done"
+
+    policy {
+        max_total_steps = 10
+    }
+}
+
+// Absolute path under which per-ticket working directories live. Same default
+// as the sibling trees so the run's artifacts stay OUTSIDE the repository.
+variable "intake_root" {
+    description = "Absolute path under which per-ticket working directories live (<intake_root>/<ticket_id>/). Must be OUTSIDE the repository."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+variable "ticket_id" {
+    description = "Linear ticket identifier to clean up (e.g. \"CRI-32\"). Doubles as the run's slug: artifacts live under <intake_root>/<ticket_id>/."
+    type        = string
+}
+
+variable "linear_api_key" {
+    type        = string
+    secret      = true
+    description = "Linear API key; bound to the adapter over the secret channel, never interpolated into step input."
+}
+
+// The single shell adapter. No environment block: like the CRI-244
+// validation-run-a child fixture, every operation happens under intake_root
+// in the process working directory.
+adapter "shell" "cleanup" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.3"
+    secrets {
+        LINEAR_API_KEY = var.linear_api_key
+    }
+}
+
+// ── Fetch ────────────────────────────────────────────────────────────────────
+
+// All Linear I/O is the GraphQL API via curl. GraphQL request bodies are
+// assembled with jq -n --arg, never string interpolation, so ticket content
+// cannot break the JSON.
+step "fetch_ticket" {
+    target = adapter.shell.cleanup
+    input {
+        command = templatefile("./scripts/fetch_ticket.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+    }
+    outcome "success" { next = step.post_cleanup_comment }
+    // A failed fetch cannot touch Linear at all: the issue id is unknown, so
+    // no comment is possible. Exit failed; the watcher re-fires the ticket
+    // while it sits in its current state.
+    outcome "failure" { next = state.failed }
+}
+
+// ── Evidence comment ─────────────────────────────────────────────────────────
+
+// Post the fixed cleanup evidence comment on the ticket. The body is the
+// exact string the validation run C shepherd greps the ticket for.
+step "post_cleanup_comment" {
+    target = adapter.shell.cleanup
+    input {
+        command = templatefile("./scripts/post_cleanup_comment.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+    }
+    outcome "success" { next = state.done }
+    // CRI-275: the evidence comment failed — the run must not lie about its
+    // evidence, so the run ends failed and the watcher raises the dirty
+    // label for a human.
+    outcome "failure" { next = state.failed }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

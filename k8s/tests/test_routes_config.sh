@@ -453,12 +453,14 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 2,
-            f"shipped example routes = {len(base['routes'])}, want the two criteria project split routes")
+shipped_err(len(base["routes"]) == 3,
+            f"shipped example routes = {len(base['routes'])}, want the two criteria project split routes plus the CRI-310 cleanup route")
 triage_route = next((r for r in base["routes"] if r.get("name") == "criteria-triage"), None)
 develop_route = next((r for r in base["routes"] if r.get("name") == "criteria-develop"), None)
+cleanup_route = next((r for r in base["routes"] if r.get("name") == "criteria-cleanup"), None)
 shipped_err(triage_route is not None, "shipped example: routes missing the criteria-triage route")
 shipped_err(develop_route is not None, "shipped example: routes missing the criteria-develop route")
+shipped_err(cleanup_route is not None, "shipped example: routes missing the criteria-cleanup route (CRI-310)")
 shipped_err(all(r.get("project") == "Criteria K8s Workflow Runner" for r in base["routes"]),
             "shipped example: every route must target the criteria project")
 
@@ -474,6 +476,24 @@ if develop_route is not None:
         failures.append(
             f"shipped example: criteria-develop states = {develop_route.get('states')}, want [Ready for Development]"
         )
+
+# CRI-310 (validation run C): the dirty label is a routing surface. The
+# cleanup route selects on the watcher's sticky criteria-dirty tag over the
+# same project and state as the general develop route — the
+# specific-over-general tag priority (internal/routes/routes.go matchRoute)
+# is what makes a dirty-labeled ticket fire ticket-cleanup-url instead of
+# linear-develop-url.
+if cleanup_route is not None:
+    if cleanup_route.get("workflow") != "ticket-cleanup-url":
+        failures.append("shipped example: criteria-cleanup must fire ticket-cleanup-url")
+    if cleanup_route.get("tags") != ["criteria-dirty"]:
+        failures.append(f"shipped example: criteria-cleanup tags = {cleanup_route.get('tags')}, want [criteria-dirty]")
+    if cleanup_route.get("states") != ["Ready for Development"]:
+        failures.append(
+            f"shipped example: criteria-cleanup states = {cleanup_route.get('states')}, want [Ready for Development]"
+        )
+    if "tagMatch" in cleanup_route:
+        failures.append("shipped example: criteria-cleanup must keep the tagMatch=all default")
 
 triage_wf = base[LIB].get("linear-triage-url")
 if not isinstance(triage_wf, dict):
@@ -504,6 +524,40 @@ else:
         failures.append("shipped example: linear-develop-url ref must pin the CRI-239 commit 7645feb")
     if "image" in develop_wf:
         failures.append("shipped example: linear-develop-url must be url-only (no process image)")
+
+# CRI-310: ticket-cleanup-url — the dirty-label cleanup workflow object
+# (url-only, on criteria-base). It ships WITHOUT a 'ref' pin deliberately:
+# this repository squash merges (every shipped pin names a main-landed
+# squash commit, set in follow-up changes CRI-241/CRI-243 once the squashed
+# merge commit existed — unknowable while the tree PR was open), so the pin
+# is a documented follow-up; until it lands, the fetch resolves the tree at
+# the default branch head exactly like the pinless linear-intake-url
+# object. Secret-free beyond the Linear API key: the cleanup pass does zero
+# git operations, so no GitHub tokens may be bound.
+cleanup_wf = base[LIB].get("ticket-cleanup-url")
+if not isinstance(cleanup_wf, dict):
+    failures.append("shipped example: workflowLibrary missing the ticket-cleanup-url object (CRI-310)")
+else:
+    if cleanup_wf.get("type") != "url" or "url" not in cleanup_wf:
+        failures.append("shipped example: ticket-cleanup-url must be a url workflow")
+    if cleanup_wf.get("url") != "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1":
+        failures.append("shipped example: ticket-cleanup-url must point at the ticket_cleanup_v1 subtree")
+    if "ref" in cleanup_wf:
+        failures.append(
+            "shipped example: ticket-cleanup-url must ship pinless (the squash-merge commit is only"
+            " nameable in a follow-up re-pin, CRI-241/CRI-243 convention)"
+        )
+    if cleanup_wf.get("class") != "triage":
+        failures.append("shipped example: ticket-cleanup-url must declare class=triage (CRI-242 read-only admission)")
+    if "image" in cleanup_wf:
+        failures.append("shipped example: ticket-cleanup-url must be url-only (no process image)")
+    cleanup_secrets = cleanup_wf.get("secrets")
+    if not isinstance(cleanup_secrets, list) or len(cleanup_secrets) != 1 \
+            or cleanup_secrets[0].get("name") != "linear-api-key":
+        failures.append("shipped example: ticket-cleanup-url must bind exactly the linear-api-key secret")
+    if cleanup_secrets and isinstance(cleanup_secrets, list) and any(
+            "github" in json.dumps(s).lower() for s in cleanup_secrets):
+        failures.append("shipped example: ticket-cleanup-url must not bind GitHub tokens (no git operations)")
 
 # ------------------------------------------------------------ schema checks
 schema = json.load(open(schema_path, encoding="utf-8"))
