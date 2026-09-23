@@ -22,14 +22,14 @@
 # route fires linear_triage_v1 on [Triage] and the 'criteria-develop' route
 # fires linear_develop_v1 on [Ready for Development], both url-only via git
 # URL with ADR-0005 D7 commit pins:
-#   - linear-triage-url is pinned to 9db68c3 (CRI-240), the commit that last
-#     touched the linear_triage_v1 tree — the merged triage tree carrying the
-#     k8s-run re-arm machinery the dev route's auto-firing depends on. Its
+#   - linear-triage-url is pinned to current main (91153bc, CRI-311 loop
+#     recovery 2026-09-23) — the triage/develop tree content is identical to
+#     the earlier CRI-240 pin. Its
 #     class is 'triage' (CRI-242/M9.5): triage work is read-only against the
 #     repo, so triage runs admit concurrently with any run on the same
 #     repoURL while dev runs serialize per repoURL.
-#   - linear-develop-url is pinned to 7645feb (CRI-239), the commit that
-#     merged the develop tree; class stays omitted (defaults to dev).
+#   - linear-develop-url is pinned to current main (91153bc); class stays
+#     omitted (defaults to dev).
 # CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
 # dirty label is a ROUTING SURFACE. The 'ticket-cleanup-url' object fetches
 # the ticket_cleanup_v1 tree (url-only, no image, on criteria-base — the
@@ -41,9 +41,9 @@
 # priority (internal/routes/routes.go matchRoute). Its class is 'triage'
 # (CRI-242): the cleanup pass is read-only against the repo.
 # The object ships WITHOUT a 'ref' pin deliberately: this repository squash
-# merges (the shipped pins all name main-landed commits — 7645feb is PR
-# #48's squash, 9db68c3 PR #49's — set in FOLLOW-UP changes CRI-241/CRI-243
-# once the squashed merge commit existed and was unguessable before). A
+# merges (the shipped pins all name main-landed commits — set in FOLLOW-UP
+# changes CRI-241/CRI-243 once the squashed merge commit existed and was
+# unguessable before). A
 # follow-up change must pin 'ref' to the merge commit that lands
 # ticket_cleanup_v1, per the same "any change to a subtree must re-pin its
 # object's 'ref'" rule below; until then the fetch resolves the tree at the
@@ -85,7 +85,8 @@ data:
               "claim": "criteria-data",
               "mountPath": "/data",
               "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
               }
             },
             {
@@ -126,7 +127,8 @@ data:
               "claim": "criteria-data",
               "mountPath": "/data",
               "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
               }
             },
             {
@@ -134,14 +136,6 @@ data:
               "kind": "pvc",
               "claim": "criteria-repo",
               "mountPath": "/repo"
-            },
-            {
-              "name": "wf-cache",
-              "kind": "nfs",
-              "server": "nfs.internal",
-              "path": "/export/workflow-cache",
-              "mountPath": "/mnt/workflow-cache",
-              "readOnly": true
             },
             {
               "name": "scratch",
@@ -172,8 +166,8 @@ data:
         },
         "linear-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1",
-          "ref": "7645feb42e6f2c473696bd63997fca111d41453d",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821",
+          "ref": "91153bc90b8fb48cec215c2a4cbc425dd11b7821",
           "namespace": "criteria-jobs",
           "volumes": [
             {
@@ -182,7 +176,8 @@ data:
               "claim": "criteria-data",
               "mountPath": "/data",
               "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
               }
             },
             {
@@ -190,14 +185,6 @@ data:
               "kind": "pvc",
               "claim": "criteria-repo",
               "mountPath": "/repo"
-            },
-            {
-              "name": "wf-cache",
-              "kind": "nfs",
-              "server": "nfs.internal",
-              "path": "/export/workflow-cache",
-              "mountPath": "/mnt/workflow-cache",
-              "readOnly": true
             },
             {
               "name": "scratch",
@@ -228,8 +215,8 @@ data:
         },
         "linear-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1",
-          "ref": "9db68c35daf92d2200092176cf1b4ef6741f1bd3",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821",
+          "ref": "91153bc90b8fb48cec215c2a4cbc425dd11b7821",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -239,7 +226,8 @@ data:
               "claim": "criteria-data",
               "mountPath": "/data",
               "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
               }
             },
             {
@@ -247,14 +235,6 @@ data:
               "kind": "pvc",
               "claim": "criteria-repo",
               "mountPath": "/repo"
-            },
-            {
-              "name": "wf-cache",
-              "kind": "nfs",
-              "server": "nfs.internal",
-              "path": "/export/workflow-cache",
-              "mountPath": "/mnt/workflow-cache",
-              "readOnly": true
             },
             {
               "name": "scratch",
@@ -296,7 +276,8 @@ data:
               "claim": "criteria-data",
               "mountPath": "/data",
               "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
               }
             },
             {

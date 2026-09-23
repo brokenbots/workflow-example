@@ -368,8 +368,10 @@ negative = [
     ("workflow-unknown-type", True, mutate(lambda d: d[LIB][BAKED].update(type="baked"))),
     ("workflow-unknown-class", True, mutate(lambda d: d[LIB][BAKED].update(**{"class": "concurrent"}))),
     ("pvc-volume-without-claim", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].pop("claim"))),
-    ("nfs-volume-without-server", True, mutate(lambda d: d[LIB][URLWF]["volumes"][2].pop("server"))),
-    ("nfs-volume-without-path", True, mutate(lambda d: d[LIB][URLWF]["volumes"][2].pop("path"))),
+    ("nfs-volume-without-server", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
+        2, {"name": "wf-cache", "kind": "nfs", "path": "/export/workflow-cache", "mountPath": "/mnt/workflow-cache", "readOnly": True}))),
+    ("nfs-volume-without-path", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
+        2, {"name": "wf-cache", "kind": "nfs", "server": "nfs.internal", "mountPath": "/mnt/workflow-cache", "readOnly": True}))),
     ("pvc-volume-with-sizelimit", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(sizeLimit="8Gi"))),
     ("volume-unknown-kind", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(kind="hostPath"))),
     ("volume-relative-mountpath", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(mountPath="data"))),
@@ -501,12 +503,13 @@ if not isinstance(triage_wf, dict):
 else:
     if triage_wf.get("type") != "url" or "url" not in triage_wf:
         failures.append("shipped example: linear-triage-url must be a url workflow")
-    if triage_wf.get("url") != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1":
-        failures.append("shipped example: linear-triage-url must point at the linear_triage_v1 subtree")
+    if not str(triage_wf.get("url", "")).startswith(
+            "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821"):
+        failures.append("shipped example: linear-triage-url must point at the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery: tree content identical to the 9db68c3 pin)")
     if not FULL_SHA.match(triage_wf.get("ref") or ""):
         failures.append("shipped example: linear-triage-url ref must be a pinned 40-hex commit SHA (D7)")
-    if triage_wf.get("ref") != "9db68c35daf92d2200092176cf1b4ef6741f1bd3":
-        failures.append("shipped example: linear-triage-url ref must pin the CRI-240 commit 9db68c3")
+    if triage_wf.get("ref") != "91153bc90b8fb48cec215c2a4cbc425dd11b7821":
+        failures.append("shipped example: linear-triage-url ref must pin the current main commit 91153bc")
     if triage_wf.get("class") != "triage":
         failures.append("shipped example: linear-triage-url must declare class=triage (CRI-242 read-only admission)")
     if "image" in triage_wf:
@@ -516,12 +519,13 @@ develop_wf = base[LIB].get("linear-develop-url")
 if not isinstance(develop_wf, dict):
     failures.append("shipped example: workflowLibrary missing the linear-develop-url object")
 else:
-    if develop_wf.get("url") != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1":
-        failures.append("shipped example: linear-develop-url must point at the linear_develop_v1 subtree")
+    if not str(develop_wf.get("url", "")).startswith(
+            "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821"):
+        failures.append("shipped example: linear-develop-url must point at the linear_develop_v1 subtree pinned to current main (CRI-311 loop recovery: tree content identical to the 7645feb pin)")
     if not FULL_SHA.match(develop_wf.get("ref") or ""):
         failures.append("shipped example: linear-develop-url ref must be a pinned 40-hex commit SHA (D7)")
-    if develop_wf.get("ref") != "7645feb42e6f2c473696bd63997fca111d41453d":
-        failures.append("shipped example: linear-develop-url ref must pin the CRI-239 commit 7645feb")
+    if develop_wf.get("ref") != "91153bc90b8fb48cec215c2a4cbc425dd11b7821":
+        failures.append("shipped example: linear-develop-url ref must pin the current main commit 91153bc")
     if "image" in develop_wf:
         failures.append("shipped example: linear-develop-url must be url-only (no process image)")
 
