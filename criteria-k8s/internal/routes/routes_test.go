@@ -139,7 +139,9 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	// Ref pins track current main since the CRI-311 loop recovery
 	// (2026-09-23): the 09-18 pins (7645feb / 9db68c3) predate CRI-269's
 	// per_scope_sessions contract, so the shipped objects were re-pinned to
-	// 91153bc (tree content identical, environment contract advanced).
+	// 91153bc — advancing both the subtree content (develop: main.chcl +
+	// adapters.chcl; triage: adapters.chcl + script templates) and the
+	// environment contract.
 	if wf.Ref != "91153bc90b8fb48cec215c2a4cbc425dd11b7821" {
 		t.Errorf("workflow ref = %q, want the re-pinned current-main develop commit (CRI-311 loop recovery)", wf.Ref)
 	}
@@ -177,7 +179,7 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 		t.Errorf("triage workflow url = %q, want the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery)", triageWf.URL)
 	}
 	if triageWf.Ref != "91153bc90b8fb48cec215c2a4cbc425dd11b7821" {
-		t.Errorf("triage workflow ref = %q, want the re-pinned current-main triage commit (CRI-311 loop recovery: tree content identical to the 9db68c3 pin)", triageWf.Ref)
+		t.Errorf("triage workflow ref = %q, want the re-pinned current-main triage commit (CRI-311 loop recovery)", triageWf.Ref)
 	}
 	if triageWf.Image != "" {
 		t.Errorf("triage workflow image = %q, want empty (url-only must not declare a process image)", triageWf.Image)

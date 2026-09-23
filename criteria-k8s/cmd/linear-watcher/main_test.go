@@ -1383,7 +1383,7 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		assert.Equal(t, "url", spec.WorkflowSource.Type)
 		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.URL)
 		assert.Equal(t, "91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.Ref,
-			"the shipped object pins the current-main commit (CRI-311 loop recovery: tree content identical to the 7645feb pin)")
+			"the shipped object pins the current-main commit (CRI-311 loop recovery)")
 		assert.Empty(t, spec.Image, "url-only develop runs execute on the criteria base image: no spec.image")
 	})
 
@@ -1422,7 +1422,7 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		assert.Equal(t, "url", spec.WorkflowSource.Type)
 		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.URL)
 		assert.Equal(t, "91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.Ref,
-			"the shipped object pins the current-main commit (CRI-311 loop recovery: tree content identical to the 9db68c3 pin)")
+			"the shipped object pins the current-main commit (CRI-311 loop recovery)")
 		assert.Empty(t, spec.Image, "url-only triage runs execute on the criteria base image: no spec.image")
 	})
 }
