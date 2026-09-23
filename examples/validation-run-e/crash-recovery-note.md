@@ -1,0 +1,1 @@
+This file was created by validation run E (plan CRI-214; CRI-253 forced-crash validation): the run that produced it had its runner container killed mid-run and resumed from the CRI-125 step checkpoint on restart, completing through the normal dev leg with no fresh-run replay and no token desync. Cross-ref: CRI-253, CRI-245.
