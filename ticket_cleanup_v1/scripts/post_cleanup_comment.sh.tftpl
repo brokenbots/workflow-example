@@ -1,0 +1,21 @@
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
+set -euo pipefail
+command -v curl jq >/dev/null
+: "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
+
+run_dir="$intake_root/$ticket_id"
+issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
+
+curl -sS -f \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg q 'mutation($id: String!, $body: String!) { commentCreate(input: {issueId: $id, body: $body}) { success } }' \
+        --arg id "$issue_id" \
+        --arg body "cleanup pass: dirty label verified as a routing surface (validation run C)" \
+        '{query: $q, variables: {id: $id, body: $body}}')" \
+    https://api.linear.app/graphql \
+    | jq -e '.data.commentCreate.success == true' >/dev/null
+
+echo "cleanup comment posted"
