@@ -112,6 +112,15 @@ jobs:
             echo "::endgroup::"
           done
 
+  secret-free-gate:
+    name: Secret-free shipped configs (CRI-250)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the deterministic secret grep gate (plan CRI-214 3.8)
+        run: |
+          bash k8s/tests/test_secret_free_gate.sh
+
   validate-manifests:
     runs-on: ubuntu-latest
     steps:
