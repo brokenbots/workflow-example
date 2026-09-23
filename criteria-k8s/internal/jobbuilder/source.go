@@ -31,6 +31,22 @@ import (
 // base image. The Makefile's CRITERIA_BASE_IMAGE variable mirrors the name.
 const CriteriaBaseImageDefault = "localhost:5000/criteria-base:dev"
 
+// sourceCriteriaHomeRoot is the data-PVC-scoped root of the source-mode
+// engine state (CRI-303): the runner mounts the data PVC at /data, so run
+// state placed here survives a runner-container restart, which a
+// container-local path cannot. Image mode keeps its own /data/criteria root
+// (frozen pre-eae0181 engine, legacy token-file delivery) untouched; the
+// two roots never share state.
+const sourceCriteriaHomeRoot = "/data/criteria-home"
+
+// sourceCriteriaHome renders the per-run CRITERIA_HOME for a source-mode
+// runner: the data PVC root scoped by the runner job name, mirroring the
+// WORKFLOW_ORIGIN_METADATA runs/<JOB_NAME> layout so concurrent runs on the
+// shared PVC never collide.
+func sourceCriteriaHome(jobName string) string {
+	return fmt.Sprintf("%s/%s", sourceCriteriaHomeRoot, jobName)
+}
+
 // sourceRunnerScript is the inline runner contract for source-mode runs. It
 // implements the criteria-base entrypoint semantics (CRI-230) so url-only
 // and url+image runs behave identically — the image only changes which
@@ -73,12 +89,16 @@ if ! mkdir -p "$criteria_home" 2>/dev/null || [ ! -w "$criteria_home" ]; then
     echo "CRITERIA_HOME $criteria_home is not a directory writable by the runner uid" >&2
     exit 70
 fi
-# The engine keeps run state (rotated accept-token files, run metadata, the
-# workflow cache) under CRITERIA_HOME. Source-mode runs keep it
-# container-local (CRI-237): the operator delivers adapter tokens on the
-# wire, so no state has to be shared through the data volume. Export the
-# verified path so criteria uses the same home even when the container env
-# did not declare one.
+# The engine keeps run state (CRI-125 step checkpoints, run metadata, the
+# workflow cache) under CRITERIA_HOME. The operator points source-mode
+# CRITERIA_HOME at a per-run directory on the shared data PVC, scoped by
+# JOB_NAME (CRI-303), so the state survives a runner-container restart
+# within the pod: the restarted entrypoint's resumeInFlightRuns finds the
+# CRI-125 checkpoints and reattaches to the in-flight run instead of
+# replaying fresh. Adapter tokens still ride the wire (CRI-237): the PVC
+# copy is restart survivability, not token sharing. Export the verified
+# path so criteria uses the same home even when the container env did not
+# declare one.
 export CRITERIA_HOME
 
 # CRI-232: record the run's workflow origin into run metadata at admission,
@@ -362,15 +382,25 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		{Name: "JOB_NAME", Value: JobName(run)},
 		{Name: "PROVIDER_BASE_URL", Value: providerBaseURL},
 		{Name: "MAX_AGENT_VISITS", Value: fmt.Sprintf("%d", maxVisits)},
-		// CRITERIA_HOME container-local (CRI-237): source-mode runners build
-		// the eae0181 engine, which carries the accept token on provision
-		// events, so the operator delivers it to adapter pods on the wire
-		// and no token file has to be readable from the shared volume. The
-		// engine's run state (rotated token files, run metadata, the
-		// workflow cache) lives inside the runner container and is cleaned
-		// up with it. The path is fixed so the runner script's writability
-		// check and the engine agree regardless of the image's own HOME.
-		{Name: "CRITERIA_HOME", Value: "/tmp/criteria-home"},
+		// CRITERIA_HOME on the shared data PVC, scoped to this run by
+		// JOB_NAME (CRI-303): the engine's run state — CRI-125 step
+		// checkpoints, run metadata, the workflow cache — must survive a
+		// runner-container restart (the OnFailure restart policy wipes the
+		// container writable layer), so the restarted entrypoint's
+		// resumeInFlightRuns finds the checkpoints and reattaches to the
+		// in-flight run (CRI-125) instead of replaying fresh. The JOB_NAME
+		// subdirectory mirrors the WORKFLOW_ORIGIN_METADATA
+		// runs/<JOB_NAME> layout and keeps concurrent runs on the shared
+		// PVC from colliding. The path is fixed so the runner script's
+		// writability check and the engine agree regardless of the image's
+		// own HOME.
+		//
+		// Tokens still ride the wire (CRI-237): the operator delivers the
+		// accept token to adapter pods over the shim channel, and no
+		// adapter reads anything under this path — the token files the
+		// engine keeps here are engine-internal legacy delivery, exercised
+		// only by image-mode engines under /data/criteria.
+		{Name: "CRITERIA_HOME", Value: sourceCriteriaHome(JobName(run))},
 		// Triage workflows default triage_root to a container-local /tmp
 		// path; agents bound to it run in per-scope adapter pods that share
 		// only the data PVC, so the root must live on the PVC (CRI-264).
