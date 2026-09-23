@@ -1366,7 +1366,7 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		assert.Equal(t, "linear-develop-url", wf.Name,
 			"the dev route fires the linear-develop-url workflow object (linear_develop_v1)")
 		assert.Equal(t, "criteria-jobs", wf.Namespace)
-		require.Len(t, wf.Volumes, 4, "the develop object declares the same storage surface as intake-url")
+		require.Len(t, wf.Volumes, 3, "the develop object declares the CRI-311 loop-recovery storage surface (data, repo, scratch)")
 		require.Len(t, wf.Secrets, 2)
 		assert.Equal(t, "dev", wf.Class,
 			"the develop object omits class, so the run stamps the dev default (per-repo serialization)")
@@ -1381,9 +1381,9 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		spec := runs[0].Spec
 		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
 		assert.Equal(t, "url", spec.WorkflowSource.Type)
-		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1", spec.WorkflowSource.URL)
-		assert.Equal(t, "7645feb42e6f2c473696bd63997fca111d41453d", spec.WorkflowSource.Ref,
-			"the shipped object pins the merged develop tree commit (ADR-0005 D7)")
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.URL)
+		assert.Equal(t, "91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.Ref,
+			"the shipped object pins the current-main commit (CRI-311 loop recovery)")
 		assert.Empty(t, spec.Image, "url-only develop runs execute on the criteria base image: no spec.image")
 	})
 
@@ -1420,9 +1420,9 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 			"the triage object declares class=triage: the run admits concurrently (read-only against the repo)")
 		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
 		assert.Equal(t, "url", spec.WorkflowSource.Type)
-		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1", spec.WorkflowSource.URL)
-		assert.Equal(t, "9db68c35daf92d2200092176cf1b4ef6741f1bd3", spec.WorkflowSource.Ref,
-			"the shipped object pins the commit that last touched linear_triage_v1 (ADR-0005 D7)")
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.URL)
+		assert.Equal(t, "91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.Ref,
+			"the shipped object pins the current-main commit (CRI-311 loop recovery)")
 		assert.Empty(t, spec.Image, "url-only triage runs execute on the criteria base image: no spec.image")
 	})
 }

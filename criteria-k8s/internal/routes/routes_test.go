@@ -133,17 +133,23 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	if wf.Type != TypeURL {
 		t.Errorf("workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
 	}
-	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1" {
-		t.Errorf("workflow url = %q, want the linear_develop_v1 subtree", wf.URL)
+	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821" {
+		t.Errorf("workflow url = %q, want the linear_develop_v1 subtree pinned to current main (CRI-311 loop recovery)", wf.URL)
 	}
-	if wf.Ref != "7645feb42e6f2c473696bd63997fca111d41453d" {
-		t.Errorf("workflow ref = %q, want the merged develop tree commit (ADR-0005 D7 pin)", wf.Ref)
+	// Ref pins track current main since the CRI-311 loop recovery
+	// (2026-09-23): the 09-18 pins (7645feb / 9db68c3) predate CRI-269's
+	// per_scope_sessions contract, so the shipped objects were re-pinned to
+	// 91153bc — advancing both the subtree content (develop: main.chcl +
+	// adapters.chcl; triage: adapters.chcl + script templates) and the
+	// environment contract.
+	if wf.Ref != "91153bc90b8fb48cec215c2a4cbc425dd11b7821" {
+		t.Errorf("workflow ref = %q, want the re-pinned current-main develop commit (CRI-311 loop recovery)", wf.Ref)
 	}
 	if wf.Image != "" {
 		t.Errorf("workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
 	}
-	if len(wf.Volumes) != 4 || len(wf.Secrets) != 2 {
-		t.Errorf("linear-develop-url = %+v, want 4 volumes and 2 secrets like linear-intake-url", wf)
+	if len(wf.Volumes) != 3 || len(wf.Secrets) != 2 {
+		t.Errorf("linear-develop-url = %+v, want 3 volumes (data, repo, scratch — wf-cache dropped by the CRI-311 loop-recovery re-pin) and 2 secrets", wf)
 	}
 
 	// The union of declared states is what the watcher queries Linear for;
@@ -155,8 +161,9 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 
 	// The split pattern is the criteria project's actual workflow (CRI-243,
 	// plan CRI-214 exit condition 3): Triage resolves to the split triage
-	// tree — linear_triage_v1 fetched url-only with the ADR-0005 D7 commit
-	// pin, admitted on the concurrent read-only triage queue class.
+	// tree — linear_triage_v1 fetched url-only with the current-main pin
+	// (CRI-311 loop recovery), admitted on the concurrent read-only triage
+	// queue class.
 	triage, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", nil, nil))
 	if err != nil {
 		t.Fatalf("Resolve(Triage): %v", err)
@@ -168,17 +175,17 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	if triageWf.Type != TypeURL {
 		t.Errorf("triage workflow type = %q, want %q (url-only, minimal criteria base runtime)", triageWf.Type, TypeURL)
 	}
-	if triageWf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1" {
-		t.Errorf("triage workflow url = %q, want the linear_triage_v1 subtree", triageWf.URL)
+	if triageWf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821" {
+		t.Errorf("triage workflow url = %q, want the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery)", triageWf.URL)
 	}
-	if triageWf.Ref != "9db68c35daf92d2200092176cf1b4ef6741f1bd3" {
-		t.Errorf("triage workflow ref = %q, want the commit that last touched linear_triage_v1 (ADR-0005 D7 pin, CRI-240)", triageWf.Ref)
+	if triageWf.Ref != "91153bc90b8fb48cec215c2a4cbc425dd11b7821" {
+		t.Errorf("triage workflow ref = %q, want the re-pinned current-main triage commit (CRI-311 loop recovery)", triageWf.Ref)
 	}
 	if triageWf.Image != "" {
 		t.Errorf("triage workflow image = %q, want empty (url-only must not declare a process image)", triageWf.Image)
 	}
-	if len(triageWf.Volumes) != 4 || len(triageWf.Secrets) != 2 {
-		t.Errorf("linear-triage-url = %+v, want 4 volumes and 2 secrets like linear-intake-url", triageWf)
+	if len(triageWf.Volumes) != 3 || len(triageWf.Secrets) != 2 {
+		t.Errorf("linear-triage-url = %+v, want 3 volumes (data, repo, scratch — wf-cache dropped by the CRI-311 loop-recovery re-pin) and 2 secrets", triageWf)
 	}
 }
 
