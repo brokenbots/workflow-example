@@ -526,38 +526,44 @@ else:
         failures.append("shipped example: linear-develop-url must be url-only (no process image)")
 
 # CRI-310: ticket-cleanup-url — the dirty-label cleanup workflow object
-# (url-only, on criteria-base). It ships WITHOUT a 'ref' pin deliberately:
-# this repository squash merges (every shipped pin names a main-landed
-# squash commit, set in follow-up changes CRI-241/CRI-243 once the squashed
-# merge commit existed — unknowable while the tree PR was open), so the pin
-# is a documented follow-up; until it lands, the fetch resolves the tree at
-# the default branch head exactly like the pinless linear-intake-url
-# object. Secret-free beyond the Linear API key: the cleanup pass does zero
-# git operations, so no GitHub tokens may be bound.
+# (url-only, on criteria-base). Validation run C corrected two assumptions
+# from the original landing: (1) the pinless fetch fails to resolve the
+# subtree ("resolve git ref HEAD ... exit status 128"), so the object pins
+# to the tree's squash-merge commit a84ef55 per the CRI-241/CRI-243
+# follow-up convention; (2) the criteria-base entrypoint unconditionally
+# requires WORKFLOW_GITHUB_TOKEN via /home/criteria/secrets (repo-clone
+# init rejects the pod without it), so the object must bind the
+# github-tokens CSI surface even though the cleanup pass itself performs
+# zero git operations. linear-api-key rides at
+# /home/criteria/linear-secrets — the runner script's hardcoded file:
+# OriginRef path (lstat-checked before any step executes).
 cleanup_wf = base[LIB].get("ticket-cleanup-url")
 if not isinstance(cleanup_wf, dict):
     failures.append("shipped example: workflowLibrary missing the ticket-cleanup-url object (CRI-310)")
 else:
     if cleanup_wf.get("type") != "url" or "url" not in cleanup_wf:
         failures.append("shipped example: ticket-cleanup-url must be a url workflow")
-    if cleanup_wf.get("url") != "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1":
+    if not str(cleanup_wf.get("url", "")).startswith(
+            "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1"):
         failures.append("shipped example: ticket-cleanup-url must point at the ticket_cleanup_v1 subtree")
-    if "ref" in cleanup_wf:
+    if not cleanup_wf.get("ref"):
         failures.append(
-            "shipped example: ticket-cleanup-url must ship pinless (the squash-merge commit is only"
-            " nameable in a follow-up re-pin, CRI-241/CRI-243 convention)"
+            "shipped example: ticket-cleanup-url must pin the ticket_cleanup_v1 squash-merge commit"
+            " (CRI-241/CRI-243 follow-up re-pin convention; pinless HEAD resolution fails on the subtree)"
         )
     if cleanup_wf.get("class") != "triage":
         failures.append("shipped example: ticket-cleanup-url must declare class=triage (CRI-242 read-only admission)")
     if "image" in cleanup_wf:
         failures.append("shipped example: ticket-cleanup-url must be url-only (no process image)")
     cleanup_secrets = cleanup_wf.get("secrets")
-    if not isinstance(cleanup_secrets, list) or len(cleanup_secrets) != 1 \
-            or cleanup_secrets[0].get("name") != "linear-api-key":
-        failures.append("shipped example: ticket-cleanup-url must bind exactly the linear-api-key secret")
-    if cleanup_secrets and isinstance(cleanup_secrets, list) and any(
-            "github" in json.dumps(s).lower() for s in cleanup_secrets):
-        failures.append("shipped example: ticket-cleanup-url must not bind GitHub tokens (no git operations)")
+    names = [s.get("name") for s in cleanup_secrets] if isinstance(cleanup_secrets, list) else []
+    if set(cleanup_secrets and [s.get("name") for s in cleanup_secrets] or []) != {"linear-api-key", "github-tokens"}:
+        failures.append("shipped example: ticket-cleanup-url must bind exactly linear-api-key + github-tokens"
+                        " (the base entrypoint requires WORKFLOW_GITHUB_TOKEN; validation run C)")
+    for s in cleanup_secrets if isinstance(cleanup_secrets, list) else []:
+        if s.get("name") == "linear-api-key" and s.get("mountPath") != "/home/criteria/linear-secrets":
+            failures.append("shipped example: ticket-cleanup-url linear-api-key mountPath must be"
+                            " /home/criteria/linear-secrets (the runner's file: OriginRef path)")
 
 # ------------------------------------------------------------ schema checks
 schema = json.load(open(schema_path, encoding="utf-8"))

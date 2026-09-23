@@ -215,22 +215,22 @@ render() {
 
 run_dir="$TMP/intake/$SLUG"
 
-# Stub curl: records every request body to $CURL_LOG, serves the canned
-# ticket response for the issue query, and the canned commentCreate response
-# for the mutation. Behavior is steered with $CURL_STUB_HTTP and
-# $CURL_STUB_COMMENT.
+# Stub wget: records every --post-data body to $CURL_STUB_LOG, serves the
+# canned ticket response for the issue query, and the canned commentCreate
+# response for the mutation — the same canned behavior the original curl
+# stub provided, over the base image's actual HTTP client (validation run C
+# corrected the script toolset from curl+jq to BusyBox wget).
 mkdir -p "$TMP/stub"
-cat > "$TMP/stub/curl" <<'STUB'
+cat > "$TMP/stub/wget" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 body=""
-out="/dev/null"
-http_code="0"
+out="/dev/stdout"
 args=("$@")
 for i in "${!args[@]}"; do
     case "${args[$i]}" in
-        -d) body="${args[$((i + 1))]}" ;;
-        -o) out="${args[$((i + 1))]}" ;;
+        --post-data) body="${args[$((i + 1))]}" ;;
+        -O) out="${args[$((i + 1))]}" ;;
     esac
 done
 printf '%s' "$body" >> "$CURL_STUB_LOG"
@@ -238,17 +238,19 @@ printf '\n' >> "$CURL_STUB_LOG"
 case "$body" in
     *commentCreate*)
         if [ "${CURL_STUB_COMMENT:-ok}" != "ok" ]; then
-            exit 22
+            exit 8
         fi
         printf '{"data":{"commentCreate":{"success":true}}}'
         ;;
     *)
         printf '%s' "$CURL_STUB_TICKET" > "$out"
-        printf '%s' "${CURL_STUB_HTTP:-200}"
+        if [ "${CURL_STUB_HTTP:-200}" != "200" ]; then
+            exit 8
+        fi
         ;;
 esac
 STUB
-chmod +x "$TMP/stub/curl"
+chmod +x "$TMP/stub/wget"
 
 export CURL_STUB_LOG="$TMP/requests.log"
 : > "$CURL_STUB_LOG"
