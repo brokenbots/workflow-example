@@ -187,6 +187,10 @@ func (w *watcher) run(ctx context.Context) error {
 			var rl *linear.RateLimitError
 			if errors.As(err, &rl) {
 				interval = w.nextBackoffInterval(interval, rl)
+			} else if ctx.Err() != nil {
+				// Shutdown mid-poll: not a poll failure. The loop's
+				// select below exits on ctx.Done(); logging here would
+				// misattribute an orderly stop to Linear (CRI-252).
 			} else {
 				w.log.Error(err, "poll failed")
 			}
