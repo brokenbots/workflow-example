@@ -285,8 +285,8 @@ data:
         },
         "ticket-cleanup-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1?ref=a84ef55ea705988a5373c915a2a5e9ded2ec8f11",
-          "ref": "a84ef55ea705988a5373c915a2a5e9ded2ec8f11",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1?ref=0b8136650d5622381bf18a597ed93b8c272ba19b",
+          "ref": "0b8136650d5622381bf18a597ed93b8c272ba19b",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
