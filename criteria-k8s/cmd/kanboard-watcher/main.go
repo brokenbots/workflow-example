@@ -405,6 +405,7 @@ func (w *watcher) buildCriteriaRun(task kanboard.Task, repoURL string, sel *rout
 		MaxAgentVisits:   w.maxAgentVisits,
 		ProviderBaseURL:  w.providerBaseURL,
 	}
+	stampWorkflowSource(&spec, sel.Workflow)
 	return &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -466,6 +467,26 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		}
 	}
 	return out
+}
+
+// stampWorkflowSource resolves the source-mode spec fields from a url-type
+// routes workflow object, identical to the linear watcher's stamping (CRI-231):
+// spec.workflowSource carries the URL the runner fetches and applies at run
+// time (plus the fail-closed ref pin), and url+image additionally stamps
+// spec.image. Image-type routes leave both unset so the operator's default
+// image remains the source of truth for baked workflows.
+func stampWorkflowSource(spec *criteriav1.CriteriaRunSpec, wf routes.Workflow) {
+	if wf.Type != routes.TypeURL || strings.TrimSpace(wf.URL) == "" {
+		return
+	}
+	spec.WorkflowSource = &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  wf.URL,
+		Ref:  wf.Ref,
+	}
+	if strings.TrimSpace(wf.Image) != "" {
+		spec.Image = wf.Image
+	}
 }
 
 // workflowClass resolves the admission queue class (CRI-242): an omitted
