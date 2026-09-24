@@ -81,6 +81,11 @@ spec:
             # operator.jobArch=arm64 on an arm64 cluster.
             - name: CRITERIA_JOB_ARCH
               value: {{ .Values.operator.jobArch | quote }}
+            # KB-3: opt-in built-in linear-spc/copilot-spc secret volumes on
+            # workflow-less (legacy) runs. Default false — a cluster without
+            # the OpenBao Secrets Store CSI driver cannot mount them.
+            - name: CRITERIA_LEGACY_SECRET_VOLUMES
+              value: {{ .Values.operator.legacySecretVolumes | quote }}
           {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
           volumeMounts:
             - name: criteria-data

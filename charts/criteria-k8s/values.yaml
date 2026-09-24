@@ -69,6 +69,12 @@ operator:
   # (runner + per-scope adapters): the arch of the nodes workflow pods
   # schedule on. A cluster property — set it to arm64 for an arm64 cluster.
   jobArch: amd64
+  # Opt-in built-in legacy secret volumes (KB-3): a run without a stamped
+  # workflow mounts only the data + scripts volumes unless this is true.
+  # The built-in linear-spc/copilot-spc CSI volumes require the Secrets
+  # Store CSI driver; set true only on an OpenBao-equipped cluster that
+  # still runs workflow-less runs.
+  legacySecretVolumes: false
   resources:
     requests:
       memory: 128Mi
