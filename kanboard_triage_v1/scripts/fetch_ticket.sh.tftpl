@@ -45,7 +45,7 @@ rpc() {
         "$KANBOARD_URL"
 }
 
-task=$(rpc getTask "{\"task_id\":$task_id}") || {
+task=$(rpc getTask "{\"task_id\":$task_id}" | jq -c ".result // empty") || {
     echo "Kanboard task not found: $task_id" >&2
     exit 1
 }
@@ -53,7 +53,7 @@ task=$(rpc getTask "{\"task_id\":$task_id}") || {
 # returns a map {tag_link_id: tag_name}; normalize to [{name}] so downstream
 # scripts read a stable .tags[].name shape.
 tags=$(rpc getTaskTags "{\"task_id\":$task_id}" | jq -c '[.result[]] | map({name: .})')
-comments=$(rpc getAllComments "{\"task_id\":$task_id}")
+comments=$(rpc getAllComments "{\"task_id\":$task_id}" | jq -c ".result // []")
 
 jq -n --argjson task "$task" --argjson tags "$tags" --argjson comments "$comments" \
     '{task: $task, tags: $tags, comments: $comments}' > "$run_dir/ticket.json"
