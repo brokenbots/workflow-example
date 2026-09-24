@@ -42,7 +42,7 @@ fi
     echo
     echo "## Task comments (reported behavior and evidence)"
     echo
-    jq -r '.comments[]? | "### " + (.date_creation // "unknown") + " — " + "comment" + "\n\n" + .comment + "\n"' "$TICKET_JSON"
+    jq -r '.comments[]? | "### " + ((.date_creation // "unknown") | tostring) + " — " + "comment" + "\n\n" + (.comment // "") + "\n"' "$TICKET_JSON"
 } > "$REPORT"
 
 # Guard: non-empty report or report assembly failed

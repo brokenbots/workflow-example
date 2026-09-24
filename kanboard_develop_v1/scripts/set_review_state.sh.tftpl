@@ -23,10 +23,10 @@ rpc() {
         "$KANBOARD_URL"
 }
 
-task=$(rpc getTask "{\"task_id\":$task_id}")
+task=$(rpc getTask "{\"task_id\":$task_id}" | jq -c ".result // empty")
 current_col=$(printf '%s' "$task" | jq -r '.column_id')
 
-cols=$(rpc getColumns "{\"project_id\":$project_id}")
+cols=$(rpc getColumns "{\"project_id\":$project_id}" | jq -c ".result // []")
 target_col=$(printf '%s' "$cols" | jq -r --arg name "$criteria_value_3" 'map(select(.title == $name)) | .[0].id // empty')
 
 if [ -z "$target_col" ]; then
