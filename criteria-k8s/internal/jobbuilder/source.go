@@ -180,11 +180,29 @@ fi
 # the runtime vars file; set -e propagates the criteria exit status as the
 # container exit code. Secret variables ride as file: OriginRefs per D69 —
 # only mount paths appear in argv, values reach adapters over OpenSession.
-"$criteria_bin" "$@" \
-    --var "linear_api_key=file:/home/criteria/linear-secrets/linear_api_key" \
-    --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \
-    --var "reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token" \
-    --output concise
+# The pair set is derived from the declared secrets (CRITERIA_SECRET_VARS,
+# newline-separated varname=absfile) so every workflow's secret vars arrive,
+# not just the linear ones the entrypoint used to hardcode. The loop runs in
+# a subshell and appends into the vars file read back below: a piped while
+# cannot mutate the parent's argv.
+secret_vars="${CRITERIA_SECRET_VARS-}"
+: > "$criteria_home/secret-vars.args"
+printf '%s\n' "$secret_vars" | while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    case "$pair" in
+        *=file:/*) ;;
+        *) echo "CRITERIA_SECRET_VARS entry is not a file: OriginRef: '$pair'" >&2; exit 66 ;;
+    esac
+    printf '%s\n' "$pair" >> "$criteria_home/secret-vars.args"
+done
+if [ -s "$criteria_home/secret-vars.args" ]; then
+    while IFS= read -r pair; do
+        set -- "$@" --var "$pair"
+    done < "$criteria_home/secret-vars.args"
+    rm -f "$criteria_home/secret-vars.args"
+fi
+
+"$criteria_bin" "$@" --output concise
 `
 
 // buildSourceRunnerJob constructs the runner Job for a spec.workflowSource
@@ -432,6 +450,9 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CastleAddr})
 	}
 	env = appendEnvDistinct(env, plan.runnerEnvs())
+	// D69: the entrypoint derives its secret --var pairs from the declared
+	// secrets (see secretVarBindings); newline-separated varname=absfile.
+	env = append(env, corev1.EnvVar{Name: "CRITERIA_SECRET_VARS", Value: secretVarBindings(plan)})
 
 	return corev1.Container{
 		Name:            RunnerContainerName,

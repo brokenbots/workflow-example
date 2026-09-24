@@ -398,6 +398,11 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 			"JOB_NAME=cri-231",
 			"POD_IP=10.42.0.5",
 			"CRITERIA_RUN_DIR_ROOT=" + filepath.Join(dir, "runs"),
+			// The linear routes' declared secrets render this pair set via
+			// secretVarBindings; the script loops it into --var args.
+			"CRITERIA_SECRET_VARS=linear_api_key=file:/home/criteria/linear-secrets/linear_api_key\n" +
+				"reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token\n" +
+				"workflow_github_token=file:/home/criteria/secrets/workflow_github_token",
 		}, dir)
 		require.Equal(t, 0, proc.code, "script must succeed: %s", proc.output)
 		log := readStubLog(t, filepath.Join(dir, "stub.log"))
@@ -736,6 +741,57 @@ func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
 			})
 		}
 	})
+}
+
+// The kanboard routes stamp a workflow object whose secrets declare
+// KANBOARD_URL/kanboard_url and KANBOARD_APP_TOKEN/kanboard_app_token; the
+// source runner must derive those file: OriginRef pairs (this is the KB-1
+// deadlock fix — the hardcoded linear-only list silently dropped them, so
+// every kanboard triage run died at fetch_ticket's env guard and refired in
+// a loop). The linear triples must keep arriving too.
+func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
+	run := urlRun("kb-1-1790222552", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=e2dd01dcf44c8d2cf197d49461748dfcb0055f91",
+	}, "")
+	run.Spec.Workflow = &criteriav1.RunWorkflow{
+		Name:      "kanboard-triage-url",
+		Type:      "url",
+		Namespace: "criteria-jobs",
+		Secrets: []criteriav1.RunWorkflowSecret{
+			{Name: "github-tokens", SecretProviderClass: "copilot-spc", MountPath: "/home/criteria/secrets",
+				Env: map[string]string{"WORKFLOW_GITHUB_TOKEN": "workflow_github_token", "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"}},
+			{Name: "kanboard-secrets", SecretProviderClass: "kanboard-spc", MountPath: "/home/criteria/kanboard-secrets",
+				Env: map[string]string{"KANBOARD_APP_TOKEN": "kanboard_app_token", "KANBOARD_URL": "kanboard_url"}},
+		},
+	}
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	runner := job.Spec.Template.Spec.Containers[0]
+	var cvs string
+	for _, e := range runner.Env {
+		if e.Name == "CRITERIA_SECRET_VARS" {
+			cvs = e.Value
+		}
+	}
+	require.NotEmpty(t, cvs, "source runner must carry the derived secret-var pair set")
+	for _, want := range []string{
+		"kanboard_app_token=file:/home/criteria/kanboard-secrets/kanboard_app_token",
+		"kanboard_url=file:/home/criteria/kanboard-secrets/kanboard_url",
+		"workflow_github_token=file:/home/criteria/secrets/workflow_github_token",
+		"reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token",
+	} {
+		assert.Contains(t, cvs, want, "derived pair set must cover every declared secret key")
+	}
+	// And the script turns the pair set into --var args ahead of --output.
+	dir := t.TempDir()
+	code, out, log := runSourceRunnerScript(t, job.Spec.Template.Spec.Containers[0].Command[2], map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": cvs,
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 0, code, out)
+	assert.Contains(t, log, "[--var] [kanboard_app_token=file:/home/criteria/kanboard-secrets/kanboard_app_token]",
+		"the derived kanboard pair must reach the criteria apply argv: %s", log)
 }
 
 // originRecordPath returns the record path the runner writes for a job.
