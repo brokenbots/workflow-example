@@ -57,6 +57,13 @@ spec:
             # spec.image from the route, so this is the url-only default.
             - name: CRITERIA_BASE_IMAGE
               value: "{{ .Values.images.criteriaBase.repository }}:{{ .Values.images.criteriaBase.tag }}"
+            # Adapter image fallback (CRI-214 M14): registry host and
+            # default tag for adapter image references the operator composes
+            # itself (ADAPTER_REGISTRY / ADAPTER_TAG).
+            - name: ADAPTER_REGISTRY
+              value: {{ .Values.images.adapter.registry | quote }}
+            - name: ADAPTER_TAG
+              value: {{ .Values.images.adapter.tag | quote }}
             - name: CRITERIA_DATA_PVC
               value: {{ .Values.pvc.data.name | quote }}
             - name: PROVIDER_BASE_URL
