@@ -213,7 +213,10 @@ func (w *watcher) poll(ctx context.Context) error {
 		w.log.Error(err, "loading routes payload; failing closed and skipping poll", "routesFile", w.routesFile)
 		return nil
 	}
-	states := routesPayload.TicketStates()
+	// Dual-source scoping (mirrors the linear watcher): query only the
+	// watched project's routes' columns, so linear state names never reach
+	// the Kanboard query.
+	states := routesPayload.ProjectStates(w.projectName)
 	w.log.V(1).Info("polling kanboard for task columns declared by routes", "states", states)
 
 	tasks, err := w.kb.GetAllTasks(ctx, w.projectID)

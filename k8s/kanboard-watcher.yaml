@@ -1,0 +1,110 @@
+# Kanboard watcher deployment — appended to criteria-k8s/config/install.yaml
+# (kept as a standalone overlay file so the shipped install.yaml stays
+# upstream-clean; apply this after install.yaml).
+# Requires: kanboard-spc (operator-prereqs overlay), criteria-routes ConfigMap
+# with the kanboard workflow library + routes, criteria-k8s image with the
+# kanboard-watcher binary.
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: kanboard-spc
+  namespace: criteria-jobs
+spec:
+  provider: openbao
+  parameters:
+    roleName: criteria-jobs
+    objects: |
+      - objectName: kanboard_app_token
+        secretPath: criteria/data/linear
+        secretKey: kanboard_app_token
+        filePermission: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: criteria-kanboard-watcher
+  namespace: criteria-jobs
+  labels:
+    app.kubernetes.io/name: criteria-kanboard-watcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-kanboard-watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-kanboard-watcher
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: catch
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: watcher
+          image: localhost:5000/criteria-k8s:kanboard-watcher
+          imagePullPolicy: IfNotPresent
+          command: ["/kanboard-watcher"]
+          env:
+            - name: NAMESPACE
+              value: "criteria-jobs"
+            # Subpath endpoint: the Kanboard instance lives at /kanboard on
+            # the catch ingress (traefik StripPrefix).
+            - name: KANBOARD_URL
+              value: "http://catch.internal.nullop.io/kanboard/jsonrpc.php"
+            - name: KANBOARD_PROJECT_NAME
+              value: "Kanboard Tickets"
+            - name: KANBOARD_TRIGGER_TAG
+              value: "k8s-run"
+            - name: KANBOARD_WORKFLOWS_TAG_GROUP
+              value: "workflows"
+            - name: POLL_INTERVAL
+              value: "60s"
+            - name: CRITERIA_IMAGE
+              value: "localhost:5000/linear-intake-remote:dev"
+            - name: PROVIDER_BASE_URL
+              value: "http://192.168.17.116:11434/v1"
+            - name: MAX_AGENT_VISITS
+              value: "2"
+          volumeMounts:
+            - name: kanboard-secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: routes-config
+              mountPath: /etc/criteria/routes
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+      volumes:
+        - name: kanboard-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: kanboard-spc
+        - name: routes-config
+          configMap:
+            name: criteria-routes
+            optional: true

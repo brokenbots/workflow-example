@@ -82,15 +82,33 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 5 {
-		t.Errorf("workflowLibrary size = %d, want 5", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 7 {
+		t.Errorf("workflowLibrary size = %d, want 7", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 3 {
-		t.Errorf("routes size = %d, want 3", len(p.Routes))
+	if len(p.Routes) != 5 {
+		t.Errorf("routes size = %d, want 5", len(p.Routes))
 	}
 	if p.Routes[0].Project != "Criteria K8s Workflow Runner" || p.Routes[1].Project != "Criteria K8s Workflow Runner" ||
 		p.Routes[2].Project != "Criteria K8s Workflow Runner" {
 		t.Errorf("routes = %+v, want all routed for project %q", p.Routes, "Criteria K8s Workflow Runner")
+	}
+	// The kanboard objects are present alongside the linear ones (dual-source
+	// coexistence): the kanboard routes target the Kanboard Tickets project.
+	kb, ok := p.WorkflowLibrary["kanboard-triage-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing kanboard-triage-url")
+	}
+	if kb.Type != TypeURL || kb.Class != ClassTriage || len(kb.Volumes) != 3 || len(kb.Secrets) != 2 {
+		t.Errorf("kanboard-triage-url = %+v, want triage-class url workflow with 3 volumes and 2 secrets", kb)
+	}
+	kbRoutes := 0
+	for _, r := range p.Routes {
+		if r.Project == "Kanboard Tickets" {
+			kbRoutes++
+		}
+	}
+	if kbRoutes != 2 {
+		t.Errorf("kanboard routes = %d, want 2 (triage + develop on the Kanboard Tickets project)", kbRoutes)
 	}
 	wf, ok := p.WorkflowLibrary["linear-intake-v1"]
 	if !ok {
@@ -154,7 +172,12 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 
 	// The union of declared states is what the watcher queries Linear for;
 	// the dev route must grow it beyond [Triage].
-	want := []string{"Ready for Development", "Triage"}
+	// The kanboard routes join the union (dual-source coexistence): the
+	// linear watcher now also queries the kanboard columns... no — the
+	// kanboard watcher queries those. The union here is shared payload
+	// state, so it grows to include them; the linear watcher filters by
+	// its own project's routes at Resolve time.
+	want := []string{"Backlog", "Ready", "Ready for Development", "Triage"}
 	if got := p.TicketStates(); !slices.Equal(got, want) {
 		t.Errorf("TicketStates() = %v, want %v", got, want)
 	}
@@ -279,11 +302,13 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 		t.Errorf("dirty Triage ticket resolves to %q/%q, want criteria-triage/linear-triage-url", triage.Route.Name, triage.Name)
 	}
 
-	// The cleanup route declares no new states, so the watcher-facing
-	// TicketStates union is unchanged by CRI-310.
-	want := []string{"Ready for Development", "Triage"}
+	// The cleanup route declares no new linear states, so CRI-310 held the
+	// linear union. The kanboard routes (dual-source coexistence) add their
+	// own columns to the shared payload's union — the linear watcher filters
+	// them out per-project at Resolve time.
+	want := []string{"Backlog", "Ready", "Ready for Development", "Triage"}
 	if got := p.TicketStates(); !slices.Equal(got, want) {
-		t.Errorf("TicketStates() = %v, want %v (CRI-310 must not grow the union)", got, want)
+		t.Errorf("TicketStates() = %v, want %v (the kanboard routes grow the union; CRI-310 held for the linear routes alone)", got, want)
 	}
 }
 

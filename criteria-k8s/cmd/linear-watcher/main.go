@@ -262,9 +262,13 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 	}
 	// CRI-218: the routes payload is also the configuration of record for
 	// which workflow states trigger runs. The watcher queries the union of
-	// all routes' declared states; routes omitting states default to
-	// [Triage]. An empty union (no routes) queries nothing: fail closed.
-	states := routesPayload.TicketStates()
+	// the watched project's routes' declared states; routes omitting states
+	// default to [Triage]. An empty union (no routes for this project)
+	// queries nothing: fail closed. Dual-source note: the payload may carry
+	// kanboard routes whose columns (Backlog/Ready) are not Linear state
+	// names — ProjectStates scopes the union to this watcher's project so
+	// the kanboard columns never reach the Linear query.
+	states := routesPayload.ProjectStates(w.projectName)
 	// CRI-252: resolve the automation label ids once (startup-cached); a
 	// cache miss (an ID an earlier ensure failed to resolve) re-ensures
 	// here, and a rate limit aborts the poll before any further Linear
