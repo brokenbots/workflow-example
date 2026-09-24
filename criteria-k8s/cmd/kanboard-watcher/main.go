@@ -219,11 +219,6 @@ func (w *watcher) poll(ctx context.Context) error {
 	states := routesPayload.ProjectStates(w.projectName)
 	w.log.V(1).Info("polling kanboard for task columns declared by routes", "states", states)
 
-	tasks, err := w.kb.GetAllTasks(ctx, w.projectID)
-	if err != nil {
-		return err
-	}
-
 	// Runs index: one CriteriaRun list per poll backs both the firing gate
 	// and phase reconciliation. Only this watcher's runs (source=kanboard)
 	// are indexed, so the Linear watcher's runs never collide.
@@ -232,7 +227,17 @@ func (w *watcher) poll(ctx context.Context) error {
 		return err
 	}
 
+	// Tasks are fetched AFTER the runs index so the firing loop sees the
+	// post-reconciliation column: a task the previous poll's run just
+	// settled (and reconciled to Done/Review) must not fire again off a
+	// stale Backlog snapshot (observed live: the smoke task re-fired after
+	// its first run Succeeded because the stale listing said Backlog).
+	tasks, err := w.kb.GetAllTasks(ctx, w.projectID)
+	if err != nil {
+		return err
+	}
 	// Phase reconciliation: move task columns on phase changes.
+
 	for _, task := range tasks {
 		ticketID := task.Identifier()
 		ph, ok := runs[ticketID]
