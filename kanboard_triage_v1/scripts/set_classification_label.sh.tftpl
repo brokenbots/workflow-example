@@ -15,7 +15,7 @@ task_id="${criteria_value_2#KB-}"
 # setTaskTags replaces the task's whole tag list.
 project_id=$(jq -r '.task.project_id' "$run_dir/ticket.json")
 
-desired=$(printf '%s' "$run_dir/ticket.json" | jq -r \
+desired=$(printf '%s' "$run_dir/ticket.json" | jq -c \
     --arg desired "$criteria_value_3" \
     --arg conflicting "$criteria_value_4" \
     '[.tags[]?.name
