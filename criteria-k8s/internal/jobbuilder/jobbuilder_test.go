@@ -97,7 +97,11 @@ func TestBuildRunnerJob(t *testing.T) {
 	// Verify only the runner pod uses the criteria-runner service account.
 	assert.Equal(t, "criteria-runner", job.Spec.Template.Spec.ServiceAccountName)
 
-	// Verify volumes.
+	// Verify volumes: a workflow-less (legacy) run mounts only the run-state
+	// data volume and the scripts ConfigMap by default — the built-in
+	// linear-spc/copilot-spc CSI secret volumes are opt-in operator config
+	// (KB-3), because a cluster without the OpenBao CSI driver cannot mount
+	// them (FailedMount).
 	volNames := make(map[string]bool)
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		volNames[v.Name] = true
@@ -105,15 +109,11 @@ func TestBuildRunnerJob(t *testing.T) {
 			require.NotNil(t, v.PersistentVolumeClaim)
 			assert.Equal(t, "criteria-data", v.PersistentVolumeClaim.ClaimName)
 		}
-		if v.Name == "linear-secrets" {
-			require.NotNil(t, v.CSI)
-			assert.Equal(t, "secrets-store.csi.k8s.io", v.CSI.Driver)
-		}
 	}
 	assert.False(t, volNames["repo"], "runner must not mount the shared repo PVC; it clones into /data/intake/<ticket>/repo")
 	assert.True(t, volNames["data"])
-	assert.True(t, volNames["linear-secrets"])
-	assert.True(t, volNames["copilot-secrets"])
+	assert.False(t, volNames["linear-secrets"], "built-in secret volume is opt-in operator config (KB-3); default off")
+	assert.False(t, volNames["copilot-secrets"], "built-in secret volume is opt-in operator config (KB-3); default off")
 	assert.False(t, volNames["shell-secrets"], "runner pod must not mount shell-secrets")
 
 	// Runner pod must have exactly one init and one container.
@@ -153,11 +153,108 @@ func TestBuildRunnerJob(t *testing.T) {
 	require.NotNil(t, podIP.ValueFrom.FieldRef)
 	assert.Equal(t, "status.podIP", podIP.ValueFrom.FieldRef.FieldPath)
 
-	// repo-clone must mount the workflow token from the copilot-spc, not shell-spc.
+	// repo-clone mounts only the run-state data volume: the copilot-spc
+	// token mount is opt-in operator config (KB-3), default off.
 	clone := job.Spec.Template.Spec.InitContainers[0]
+	require.Len(t, clone.VolumeMounts, 1)
+	assert.Equal(t, "data", clone.VolumeMounts[0].Name)
+}
+
+// KB-3: a workflow-less (legacy) run must produce a pod spec free of CSI
+// secret volumes by default — on a cluster without the Secrets Store CSI
+// driver the built-in linear-spc/copilot-spc volumes can never mount
+// (FailedMount) and the pod never leaves ContainerCreating. Both runner
+// modes (image and source) build from the nil plan, so both must be
+// covered; the same default applies to the runner and repo-clone mounts.
+func TestLegacyRunnerWithoutWorkflowHasNoCSISecretVolumes(t *testing.T) {
+	imageRun := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb3-legacy-image"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "KB3-IMAGE",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			Image:    "localhost:5000/linear-intake-remote:dev",
+		},
+	}
+	sourceRun := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb3-legacy-source"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "KB3-SOURCE",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			WorkflowSource: &criteriav1.RunWorkflowSource{
+				Type: "url",
+				URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+			},
+		},
+	}
+
+	for _, run := range []*criteriav1.CriteriaRun{imageRun, sourceRun} {
+		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+		spec := job.Spec.Template.Spec
+
+		for _, v := range spec.Volumes {
+			require.Nil(t, v.CSI, "run %s: volume %q must not be a CSI volume; the legacy fallback mounts only data + scripts (KB-3)", run.Name, v.Name)
+		}
+		require.Len(t, spec.Volumes, 2, "run %s: legacy volumes must be exactly data + scripts", run.Name)
+		assert.Equal(t, "data", spec.Volumes[0].Name)
+		assert.Equal(t, "scripts", spec.Volumes[1].Name)
+
+		runner := spec.Containers[0]
+		require.Len(t, runner.VolumeMounts, 2, "run %s: legacy runner mounts must be exactly data + scripts", run.Name)
+		assert.Equal(t, "data", runner.VolumeMounts[0].Name)
+		assert.Equal(t, "scripts", runner.VolumeMounts[1].Name)
+
+		clone := spec.InitContainers[0]
+		require.Len(t, clone.VolumeMounts, 1, "run %s: legacy repo-clone mounts only the data volume (KB-3)", run.Name)
+		assert.Equal(t, "data", clone.VolumeMounts[0].Name)
+	}
+}
+
+// KB-3: Defaults.LegacySecretVolumes opts the built-in legacy secret
+// volumes back in for OpenBao-equipped clusters that still run
+// workflow-less runs: the runner and repo-clone mount the linear-spc /
+// copilot-spc CSI volumes exactly as before the default changed.
+func TestLegacyRunnerSecretVolumesOperatorOptIn(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb3-legacy-optin"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "KB3-OPTIN",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			Image:    "localhost:5000/linear-intake-remote:dev",
+		},
+	}
+
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+		DataPVC:             "criteria-data",
+		LegacySecretVolumes: true,
+	})
+	spec := job.Spec.Template.Spec
+
+	volNames := make(map[string]bool)
+	for _, v := range spec.Volumes {
+		volNames[v.Name] = true
+	}
+	assert.True(t, volNames["linear-secrets"], "opted-in built-in secret volume present")
+	assert.True(t, volNames["copilot-secrets"])
+
+	linear := findVolume(t, spec.Volumes, "linear-secrets")
+	require.NotNil(t, linear.CSI)
+	assert.Equal(t, "linear-spc", linear.CSI.VolumeAttributes["secretProviderClass"])
+	copilot := findVolume(t, spec.Volumes, "copilot-secrets")
+	require.NotNil(t, copilot.CSI)
+	assert.Equal(t, "copilot-spc", copilot.CSI.VolumeAttributes["secretProviderClass"])
+
+	runner := spec.Containers[0]
+	linearMount := findMount(t, runner.VolumeMounts, "linear-secrets")
+	assert.Equal(t, "/secrets/linear_api_key", linearMount.MountPath)
+	assert.Equal(t, "linear_api_key", linearMount.SubPath)
+	copilotMount := findMount(t, runner.VolumeMounts, "copilot-secrets")
+	assert.Equal(t, "/home/criteria/secrets", copilotMount.MountPath)
+
+	clone := spec.InitContainers[0]
 	require.Len(t, clone.VolumeMounts, 2)
 	assert.Equal(t, "data", clone.VolumeMounts[0].Name)
 	assert.Equal(t, "copilot-secrets", clone.VolumeMounts[1].Name)
+	assert.Equal(t, "/home/criteria/secrets", clone.VolumeMounts[1].MountPath)
 }
 
 // KB-2: the child Job/pod node arch is operator config, not a hard-coded

@@ -154,6 +154,11 @@ grep -q 'value: "168h"' "$RENDERED" || fail "operator RETENTION_PERIOD default i
 grep -q 'name: RETENTION_INTERVAL' "$RENDERED" || fail "operator deployment missing RETENTION_INTERVAL"
 grep -q 'name: DEFAULT_CRITERIA_IMAGE' "$RENDERED" || fail "operator deployment missing DEFAULT_CRITERIA_IMAGE"
 grep -q 'name: CRITERIA_JOB_ARCH' "$RENDERED" || fail "operator deployment missing CRITERIA_JOB_ARCH"
+# KB-3: the built-in legacy secret volumes are opt-in; the default renders
+# the env with value "false" and operator.legacySecretVolumes drives it.
+grep -q 'name: CRITERIA_LEGACY_SECRET_VOLUMES' "$RENDERED" || fail "operator deployment missing CRITERIA_LEGACY_SECRET_VOLUMES"
+awk '/name: CRITERIA_LEGACY_SECRET_VOLUMES/{getline; if ($0 !~ /value: "false"/) exit 1}' "$RENDERED" \
+    || fail "CRITERIA_LEGACY_SECRET_VOLUMES default is not \"false\""
 grep -q 'command: \["/manager"\]' "$RENDERED" || fail "operator container command missing"
 grep -q -- '--namespace' "$RENDERED" || fail "operator deployment missing --namespace flag"
 grep -q 'mountPath: /data$' "$RENDERED" || fail "operator does not mount /data"
@@ -235,6 +240,7 @@ check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'
 check_override "Linear project override" "watcher.linearProjectName=Other Project" 'value: "Other Project"'
 check_override "operator job arch override" "operator.jobArch=arm64" 'value: "arm64"'
+check_override "operator legacy secret volumes override" "operator.legacySecretVolumes=true" 'value: "true"'
 check_override "routes ConfigMap override" "watcher.routesConfigMap=my-routes" 'name: my-routes'
 check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
 

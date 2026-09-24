@@ -237,12 +237,12 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 	// plain git and a token-inited credential store instead of gh.
 	// Workflows that never touch the repo (triage, intake) ignore repo_dir.
 	job.Spec.Template.Spec.InitContainers = []corev1.Container{
-		sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan),
+		sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan, defaults.LegacySecretVolumes),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
 		sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
 	}
-	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
+	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC, defaults.LegacySecretVolumes)
 	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
 	return job
 }
@@ -330,7 +330,7 @@ func workflowOriginRecord(run *criteriav1.CriteriaRun, jobName string, source *c
 // git and ca-certificates but no gh, so authentication uses a plain git
 // credential store seeded from the mounted workflow token instead of
 // `gh auth git-credential`.
-func sourceRepoCloneContainer(run *criteriav1.CriteriaRun, image string, plan *workflowPlan) corev1.Container {
+func sourceRepoCloneContainer(run *criteriav1.CriteriaRun, image string, plan *workflowPlan, legacySecretVolumes bool) corev1.Container {
 	repoURL := run.Spec.RepoURL
 	repoDir := fmt.Sprintf("/data/intake/%s/repo", run.Spec.TicketID)
 	return corev1.Container{
@@ -378,7 +378,7 @@ rm -f "$HOME/.git-credentials"`,
 			{Name: "REPO_DIR", Value: repoDir},
 			{Name: "HOME", Value: "/tmp"},
 		}, plan.volumeEnvs()),
-		VolumeMounts: plan.cloneMounts(),
+		VolumeMounts: plan.cloneMounts(legacySecretVolumes),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("512Mi"),
@@ -461,7 +461,7 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/bin/sh", "-c", sourceRunnerScript},
 		Env:             env,
-		VolumeMounts:    plan.runnerMounts(),
+		VolumeMounts:    plan.runnerMounts(defaults.LegacySecretVolumes),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("2Gi"),

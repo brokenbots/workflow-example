@@ -81,6 +81,10 @@ const (
 	// JobArchDefault is the node arch child Job/pod templates select when
 	// the operator declares none: the current cluster is amd64.
 	JobArchDefault = "amd64"
+	// EnvLegacySecretVolumes is the operator env var the built-in legacy
+	// secret volumes are enabled from: cmd/operator mirrors it as the
+	// --legacy-secret-volumes flag default (KB-3).
+	EnvLegacySecretVolumes = "CRITERIA_LEGACY_SECRET_VOLUMES"
 )
 
 var nonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -155,6 +159,18 @@ type Defaults struct {
 	// operator.jobArch), not per-workflow state. Empty falls back to the
 	// built-in amd64 default.
 	JobArch string
+	// LegacySecretVolumes opts workflow-less (legacy) runs back into the
+	// built-in linear-spc/copilot-spc OpenBao CSI secret volumes and their
+	// mounts (KB-3). Those volumes hard-require the Secrets Store CSI
+	// driver and the two SecretProviderClasses, which a cluster without
+	// OpenBao CSI cannot mount (FailedMount), so they are opt-in operator
+	// config (flag --legacy-secret-volumes / env
+	// CRITERIA_LEGACY_SECRET_VOLUMES / Helm operator.legacySecretVolumes):
+	// default false keeps the legacy fallback mountable everywhere, and an
+	// OpenBao-equipped cluster that still runs workflow-less runs sets it
+	// to restore the pre-KB-3 delivery. Runs with a stamped workflow
+	// declare their own secrets and are never affected.
+	LegacySecretVolumes bool
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
@@ -351,12 +367,12 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	job := buildJobBase(run, defaults, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
 	job.Spec.Template.Spec.InitContainers = []corev1.Container{
-		repoCloneContainer(image, repoURL, repoDir, plan),
+		repoCloneContainer(image, repoURL, repoDir, plan, defaults.LegacySecretVolumes),
 	}
 	job.Spec.Template.Spec.Containers = []corev1.Container{
 		workflowRunnerContainer(run, image, repoDir, intakeRoot, triageRoot, providerBaseURL, maxVisits, defaults, plan),
 	}
-	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC)
+	job.Spec.Template.Spec.Volumes = plan.runnerVolumes(dataPVC, defaults.LegacySecretVolumes)
 	plan.applyHostAffinity(job.Spec.Template.Labels, &job.Spec.Template.Spec)
 	return job
 }
@@ -402,7 +418,7 @@ func restrictedContainerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-func repoCloneContainer(image, repoURL, repoDir string, plan *workflowPlan) corev1.Container {
+func repoCloneContainer(image, repoURL, repoDir string, plan *workflowPlan, legacySecretVolumes bool) corev1.Container {
 	return corev1.Container{
 		Name:            "repo-clone",
 		Image:           image,
@@ -433,7 +449,7 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 			{Name: "REPO_URL", Value: repoURL},
 			{Name: "REPO_DIR", Value: repoDir},
 		}, plan.volumeEnvs()),
-		VolumeMounts: plan.cloneMounts(),
+		VolumeMounts: plan.cloneMounts(legacySecretVolumes),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("512Mi"),
@@ -512,7 +528,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/runner.sh"},
 		Env:             env,
-		VolumeMounts:    plan.runnerMounts(),
+		VolumeMounts:    plan.runnerMounts(defaults.LegacySecretVolumes),
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceMemory: resourceQuantity("2Gi"),

@@ -6,7 +6,8 @@
 // render the same plan for their declared volumes/secrets/env; only the
 // runner image and the runner entrypoint differ. Every builder consumes the
 // plan; runs without a stamped workflow keep the built-in defaults
-// verbatim.
+// verbatim, except the built-in legacy secret volumes, which are opt-in
+// operator config (KB-3) because they hard-require the OpenBao CSI driver.
 package jobbuilder
 
 import (
@@ -236,11 +237,16 @@ func (p *workflowPlan) applyHostAffinity(labels map[string]string, spec *corev1.
 // runnerVolumes renders the runner job's pod volume list: the run-state
 // data volume, the declared volumes and CSI secret volumes, and the
 // pod-adapter scripts ConfigMap. Runs without a stamped workflow object
-// keep the built-in secret volumes — a stamped workflow declares its own
+// mount only the data and scripts volumes by default (KB-3): the built-in
+// linear-spc/copilot-spc secret volumes need the Secrets Store CSI driver
+// and those SecretProviderClasses, which a cluster without OpenBao CSI
+// cannot mount (FailedMount). legacySecretVolumes (operator config) opts
+// the built-in secret volumes back in for OpenBao-equipped clusters that
+// still run workflow-less runs; a stamped workflow declares its own
 // secrets and replaces them.
-func (p *workflowPlan) runnerVolumes(dataPVC string) []corev1.Volume {
+func (p *workflowPlan) runnerVolumes(dataPVC string, legacySecretVolumes bool) []corev1.Volume {
 	volumes := p.podVolumes(dataPVC, true)
-	if p == nil {
+	if p == nil && legacySecretVolumes {
 		volumes = append(volumes,
 			csiVolume("linear-secrets", "linear-spc"),
 			csiVolume("copilot-secrets", "copilot-spc"),
@@ -350,8 +356,16 @@ func workflowVolume(vol criteriav1.RunWorkflowVolume) corev1.Volume {
 // always carries the run-state data mount: legacy (pre-eae0181) engines
 // still deliver adapter tokens through files on the shared volume, and the
 // runner's discovery publishing needs the workflow's declared /data (CRI-237).
-func (p *workflowPlan) runnerMounts() []corev1.VolumeMount {
+// The built-in legacy secret mounts ride the same operator config as the
+// volumes they mount (KB-3).
+func (p *workflowPlan) runnerMounts(legacySecretVolumes bool) []corev1.VolumeMount {
 	if p == nil {
+		if !legacySecretVolumes {
+			return []corev1.VolumeMount{
+				{Name: dataVolumeName, MountPath: dataMountPath},
+				{Name: scriptsVolumeName, MountPath: scriptsMountPath},
+			}
+		}
 		return []corev1.VolumeMount{
 			{Name: dataVolumeName, MountPath: dataMountPath},
 			{Name: "linear-secrets", MountPath: "/secrets/linear_api_key", SubPath: "linear_api_key"},
@@ -363,8 +377,13 @@ func (p *workflowPlan) runnerMounts() []corev1.VolumeMount {
 }
 
 // cloneMounts renders the repo-clone init container's mounts.
-func (p *workflowPlan) cloneMounts() []corev1.VolumeMount {
+func (p *workflowPlan) cloneMounts(legacySecretVolumes bool) []corev1.VolumeMount {
 	if p == nil {
+		if !legacySecretVolumes {
+			return []corev1.VolumeMount{
+				{Name: dataVolumeName, MountPath: dataMountPath},
+			}
+		}
 		return []corev1.VolumeMount{
 			{Name: dataVolumeName, MountPath: dataMountPath},
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
