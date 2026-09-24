@@ -283,7 +283,8 @@ func (w *watcher) poll(ctx context.Context) error {
 			// member made Resolve fail closed (ErrUnknownWorkflow) and the
 			// watcher never fired any bypass-tagged task.
 			if tag == w.triggerTag || tag == "internal-reproduced" ||
-				tag == "Bug" || tag == "Feature" {
+				tag == "Bug" || tag == "Feature" ||
+				strings.HasPrefix(tag, repoTagPrefix) {
 				// Classification tags the workflows themselves set (Bug /
 				// Feature via set_classification_label) are routing signals
 				// too: without the exemption the bypass path's own tag
