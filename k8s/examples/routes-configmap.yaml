@@ -312,6 +312,107 @@ data:
               }
             }
           ]
+        },
+        "kanboard-triage-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=2255658f24090b422037154a6cb3fcf647e78f41",
+          "ref": "2255658f24090b422037154a6cb3fcf647e78f41",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+              }
+            },
+            {
+              "name": "kanboard-secrets",
+              "secretProviderClass": "kanboard-spc",
+              "mountPath": "/home/criteria/kanboard-secrets",
+              "env": {
+                "KANBOARD_APP_TOKEN": "kanboard_app_token",
+                "KANBOARD_URL": "kanboard_url"
+              }
+            }
+          ]
+        },
+        "kanboard-develop-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=2255658f24090b422037154a6cb3fcf647e78f41",
+          "ref": "2255658f24090b422037154a6cb3fcf647e78f41",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+              }
+            },
+            {
+              "name": "kanboard-secrets",
+              "secretProviderClass": "kanboard-spc",
+              "mountPath": "/home/criteria/kanboard-secrets",
+              "env": {
+                "KANBOARD_APP_TOKEN": "kanboard_app_token",
+                "KANBOARD_URL": "kanboard_url"
+              }
+            }
+          ]
         }
       },
       "routes": [
@@ -340,6 +441,22 @@ data:
           ],
           "states": [
             "Ready for Development"
+          ]
+        },
+        {
+          "name": "kanboard-triage",
+          "workflow": "kanboard-triage-url",
+          "project": "Kanboard Tickets",
+          "states": [
+            "Backlog"
+          ]
+        },
+        {
+          "name": "kanboard-develop",
+          "workflow": "kanboard-develop-url",
+          "project": "Kanboard Tickets",
+          "states": [
+            "Ready"
           ]
         }
       ]

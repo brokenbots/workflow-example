@@ -1,0 +1,13 @@
+{
+  "task": {
+    "id": 101,
+    "title": "",
+    "description": "A task with no title cannot anchor a bug report or workstream.",
+    "project_id": 1,
+    "column_id": 5,
+    "swimlane_id": 1,
+    "owner_id": 0
+  },
+  "tags": [],
+  "comments": []
+}

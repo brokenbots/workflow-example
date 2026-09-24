@@ -1,0 +1,27 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+if [ "$criteria_value_4" = "reused" ]; then
+    body="**Automated development started on the triaged ticket.** The confirmed workstream published by triage is reused untouched: $criteria_value_3. The implementation handler will develop it, open a PR, and run the reviewer loop; the ticket will be commented again when the handler finishes."
+else
+    body="**Automated development started on the triaged ticket.** No published workstream was found, so the workstream context was reconstructed from the ticket and its comments: $criteria_value_3. The implementation handler will develop it, open a PR, and run the reviewer loop; the ticket will be commented again when the handler finishes."
+fi
+
+curl -sS -f \
+    -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg m 'createComment' \
+        --arg body "$body" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:$task_id|tonumber,user_id:0,content:$body}}')" \
+    "$KANBOARD_URL" \
+    | jq -e '.result == true' >/dev/null
+
+echo "comment posted"

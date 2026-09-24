@@ -1,0 +1,36 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+# Ported from linear_triage_v1's set_classification_label.sh.tftpl. Kanboard
+# has no global label registry to look up ids against: createTag ensures the
+# project-level tag exists (idempotent), then setTaskTags applies the task's
+# desired tag set — the same REMOVE-conflicting + ADD-desired semantics, since
+# setTaskTags replaces the task's whole tag list.
+project_id=$(jq -r '.task.project_id' "$run_dir/ticket.json")
+
+desired=$(printf '%s' "$run_dir/ticket.json" | jq -r \
+    --arg desired "$criteria_value_3" \
+    --arg conflicting "$criteria_value_4" \
+    '[.tags[]?.name
+      | select((. | ascii_downcase) != ($desired | ascii_downcase))
+      | select((. | ascii_downcase) != ($conflicting | ascii_downcase))] + [$desired] | unique')
+
+rpc() {
+    curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg m "$1" --argjson p "$2" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+        "$KANBOARD_URL"
+}
+
+tag_params=$(jq -n --argjson project_id "$project_id" --arg tag "$criteria_value_3" '{project_id:$project_id,tag:$tag}')
+rpc createTag "$tag_params" >/dev/null
+rpc setTaskTags "{\"project_id\":$project_id,\"task_id\":$task_id,\"tags\":$desired}" | jq -e '.result == true' >/dev/null
+
+echo "tag $criteria_value_3 applied; conflicting $criteria_value_4 removed"

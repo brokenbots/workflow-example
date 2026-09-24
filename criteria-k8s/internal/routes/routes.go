@@ -437,6 +437,31 @@ func (p *Payload) TicketStates() []string {
 	return states
 }
 
+// ProjectStates returns the deduplicated, sorted union of the routes'
+// declared states for ONE project. The dual-source watchers share one
+// routes payload: the linear watcher must query Linear only for the states
+// its own project's routes declare (the kanboard columns Backlog/Ready are
+// not Linear state names), and likewise the kanboard watcher for its
+// columns. TicketStates remains the whole-payload union for callers that
+// genuinely want it.
+func (p *Payload) ProjectStates(project string) []string {
+	seen := make(map[string]bool)
+	states := make([]string, 0)
+	for i := range p.Routes {
+		if p.Routes[i].Project != project {
+			continue
+		}
+		for _, s := range p.Routes[i].States {
+			if !seen[s] {
+				seen[s] = true
+				states = append(states, s)
+			}
+		}
+	}
+	slices.Sort(states)
+	return states
+}
+
 // Selector carries the ticket-facing inputs to Resolve.
 type Selector struct {
 	// Project is the ticket's Linear project name.

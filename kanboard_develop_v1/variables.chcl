@@ -1,0 +1,94 @@
+variable "ticket_id" {
+    description = "Kanboard task identifier to process (e.g. \"KB-10\", as the watcher stamps it; a bare task id \"10\" is also accepted). Doubles as the run's slug: every artifact lives under <intake_root>/<ticket_id>/. The workflow assumes the task is triaged — fired on a Ready-column task whose comments carry the triage outputs."
+    type        = string
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for every agent in the composed workflow. Empty preserves each agent's configured URL."
+    type        = string
+    default     = ""
+}
+
+// Defaults to "" rather than being required: it is referenced from adapter
+// config, which must be resolvable at compile time. A required variable leaves
+// it unknown and the compile fails. Always pass it at apply time.
+variable "repo_dir" {
+    description = "Absolute path of the repository's primary working tree. Passed through to workstream_handler_v1, which runs all repo operations itself. Empty runs in the process working directory."
+    type        = string
+    default     = ""
+}
+
+// Deliberately OUTSIDE the repository under test, same discipline as
+// qa_triage_v1's triage_root: development artifacts (ticket JSON, confirmed
+// workstream, handler worktree) must never land in the repo's working tree.
+// Same default as kanboard_triage_v1, so a workstream the triage phase
+// published under this root is found and reused as-is.
+variable "intake_root" {
+    description = "Absolute path under which per-ticket working directories live (<intake_root>/<ticket_id>/). Must be OUTSIDE the repository under test, and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS. Shared with the triage workflow's default so its published workstream is reused."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+variable "kanboard_review_column" {
+    description = "Name of the Kanboard board column the task is moved to whenever the run ends awaiting a human: the reviewer loop could not conclude, a Kanboard write failed, or the confirmed workstream could not be produced. Resolved by name against the task's project (must exist there — e.g. the watcher's review column \"Review\"); an unknown name fails the run loudly."
+    type        = string
+    default     = "Review"
+}
+
+variable "kanboard_work_column" {
+    description = "Name of the Kanboard board column set immediately before implementation begins. Resolved against the task's project."
+    type        = string
+    default     = "Work in progress"
+}
+
+variable "kanboard_done_column" {
+    description = "Name of the Kanboard board column set after the implementation PR has merged. Resolved against the task's project; an unknown name fails the step loudly and routes the run to the review column with the merge already recorded in a comment."
+    type        = string
+    default     = "Done"
+}
+
+// ── workstream_handler_v1 pass-throughs ──────────────────────────────────────
+
+variable "base_branch" {
+    description = "workstream_handler_v1: base branch to fork from and validate against."
+    type        = string
+    default     = "main"
+}
+
+variable "ci_gate_cmd" {
+    description = "workstream_handler_v1: command the pair programming loop runs as its CI gate (exit 0 = clean). Empty skips the gate. Set it to mirror what the remote CI actually runs (e.g. 'make ci && make vuln-scan')."
+    type        = string
+    default     = ""
+}
+
+variable "allow_dirty" {
+    description = "workstream_handler_v1: allow the pair programming loop to run even if the working tree has uncommitted changes."
+    type        = bool
+    default     = false
+}
+
+// ── Kanboard API ─────────────────────────────────────────────────────────────
+
+variable "kanboard_url" {
+    description = "Kanboard JSON-RPC endpoint (jsonrpc.php, subpath included). All Kanboard I/O goes through it with the app token."
+    type        = string
+    secret      = true
+}
+
+variable "kanboard_app_token" {
+    type   = string
+    secret = true
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}
+
+// GitHub token for the reviewer identity. Kept separate from
+// the workflow token: the handler's reviewer role must authenticate as the
+// reviewer identity, which differs from the identity that authors the PR.
+variable "reviewer_github_token" {
+    type   = string
+    secret = true
+}

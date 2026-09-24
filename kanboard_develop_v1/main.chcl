@@ -1,0 +1,389 @@
+// kanboard_develop_v1 — the development phase of the Kanboard intake split: a
+// port of linear_develop_v1 to the Kanboard JSON-RPC API (independent tree,
+// same CRI-239 extraction ruling: scripts are COPIES, independently runnable;
+// the Linear tree is untouched).
+//
+// Fires on a TRIAGED task — the confirmed workstream path. The flow is
+// fetch -> write-or-reuse the confirmed workstream -> run_handler (develop ->
+// PR -> reviewer loop -> merge) -> Done:
+//
+//   handler_complete      — the handler merged its PR and the task was
+//                           moved to the done column.
+//   awaiting_human        — the run ended by handing the task to a human:
+//                           the reviewer loop could not conclude (the handler
+//                           fails the run when its bounded review/fix cycle
+//                           does not converge), a Kanboard write failed, or
+//                           the confirmed workstream could not be produced.
+//
+// Self-sufficient on a triaged task: the workstream context is reconstructed
+// from the task itself plus its comment history. A workstream file already
+// published by triage at <intake_root>/<ticket_id>/workstreams/ is reused
+// untouched — never re-derived, never overwritten.
+//
+// Ticket-source mapping: board columns for workflow states, JSON-RPC for
+// GraphQL. The handler subworkflow is shared with the Linear tree and keeps
+// its own Linear bookkeeping; the kanboard tree passes it an empty ticket_id,
+// which disables that path entirely, and performs the equivalent task-column
+// bookkeeping itself against Kanboard.
+
+workflow {
+    name             = "kanboard_develop_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "fetch_ticket"
+    target_state     = "handler_complete"
+
+    policy {
+        max_total_steps = 60
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// Absolute path of the confirmed workstream handed to the handler. Set by
+// ensure_confirmed_workstream on success — the same path triage publishes to
+// and intake's bypass writes to, so a triage-published file is found and
+// reused as-is.
+data "internal" "workstream_file" {
+    type  = string
+    value = ""
+}
+
+// Whether the confirmed workstream was reused from an earlier triage run
+// (true) or assembled from the ticket and its comments (false). Recorded so
+// the started comment tells the ticket which happened.
+data "internal" "workstream_reused" {
+    type  = bool
+    value = false
+}
+
+// URL of the PR the handler merged, for the closing Kanboard comment.
+data "internal" "pr_url" {
+    type  = string
+    value = ""
+}
+
+// ── Subworkflow ──────────────────────────────────────────────────────────────
+// The only cross-tree dependency of this workflow: a sibling directory,
+// referenced by relative path and locked recursively by
+// `criteria adapter lock` from this directory.
+
+subworkflow "handler" {
+    source = "../workstream_handler_v1"
+    input = {
+        // Empty ticket_id disables the handler's own Linear bookkeeping
+        // (its set_linear_review_state step is skipped entirely, see the
+        // route_reviewer_creds switch). The kanboard tree owns ticket
+        // bookkeeping itself: the fetch/review/done column moves happen in
+        // this tree's steps against Kanboard. The handler's linear_api_key
+        // variable stays bound (required by its signature) but with an
+        // empty value: no Linear call is reachable with ticket_id empty.
+        ticket_id            = ""
+        linear_review_state  = ""
+        linear_api_key       = ""
+        workstream_file      = data.internal.workstream_file.value
+        repo_dir             = var.repo_dir
+        // branch_manager creates the worktree itself; this workflow only
+        // chooses where it lives.
+        worktree_dir         = "${var.intake_root}/${var.ticket_id}/worktree"
+        base_branch          = var.base_branch
+        ci_gate_cmd          = var.ci_gate_cmd
+        allow_dirty          = var.allow_dirty
+        provider_base_url    = var.provider_base_url
+        workflow_github_token = var.workflow_github_token
+        // The handler's reviewer role must authenticate as the reviewer
+        // identity (pr_reviewer_loop approves/merges under it), which differs
+        // from the workflow identity that authors the PR. Thread the real
+        // reviewer token through; miswiring it to the workflow token makes the
+        // external "independent approval" gate approve its own PRs (see
+        // EXPERIMENT-ANALYSIS-2026-09-02.md section 3).
+        reviewer_github_token = var.reviewer_github_token
+    }
+}
+
+// ── Fetch ────────────────────────────────────────────────────────────────────
+
+// All Kanboard I/O is the JSON-RPC API via curl (basic auth jsonrpc:$KANBOARD_APP_TOKEN).
+// Request bodies are assembled with jq -n --arg, never string interpolation, so
+// task content cannot break the JSON.
+step "fetch_ticket" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/fetch_ticket.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+    }
+    outcome "success" { next = step.ensure_confirmed_workstream }
+    // A failed fetch cannot touch Kanboard at all: the task id is unknown, so
+    // no comment or state move is possible. Exit to the awaiting-human
+    // terminal; the run record carries the failure and the watcher re-fires
+    // the ticket while it sits in its current state.
+    outcome "failure" { next = state.awaiting_human }
+}
+
+// ── Confirmed workstream: write or reuse ─────────────────────────────────────
+
+// The workflow's input contract. A confirmed workstream already published by
+// triage (or a prior develop run) at
+// <intake_root>/<ticket_id>/workstreams/<ticket_id>.md is reused untouched —
+// it is the triage run's conclusion and re-deriving or overwriting it would
+// duplicate or clobber work the ticket already did. Only when no non-empty
+// workstream exists is one assembled mechanically from the fetched ticket —
+// title, description, and the comment history, which carries the triage
+// outputs per the intake design. No model call is involved on either path.
+// The script prints a semantic source line ("workstream reused: ..." vs
+// "workstream written: ...") that the run records, and the workflow reads
+// with startswith to set workstream_reused.
+step "ensure_confirmed_workstream" {
+    target      = adapter.shell.develop
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/ensure_confirmed_workstream.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+        })
+    }
+    outcome "success" {
+        next = step.comment_handler_started
+        write {
+            target = data.internal.workstream_file.value
+            value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"
+        }
+        write {
+            target = data.internal.workstream_reused.value
+            // The comparison is evaluated correctly now that the engine's
+            // bare-traversal fast path only applies to a bare output.*
+            // reference (CRI-94 / criteria PR #360).
+            value  = startswith(output.stdout, "workstream reused")
+        }
+    }
+    // The ticket is fetched, so the ticket.json exists; failure here means
+    // the assembly itself failed (corrupt JSON, title-less ticket). Comment
+    // accurately and park the task in the review column.
+    outcome "failure" { next = step.comment_develop_failed }
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+// Announce the run on the ticket, saying which workstream path was taken.
+// Best-effort: both outcomes continue to the work-state move — the comment is
+// observability, not a precondition for development, and a Kanboard outage that
+// broke the comment fails the column move right after.
+step "comment_handler_started" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_handler_started.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = data.internal.workstream_reused.value ? "reused" : "written"
+        })
+    }
+    outcome "success" { next = step.set_work_state }
+    outcome "failure" { next = step.set_work_state }
+}
+
+// Kanboard columns are per-project and resolved by title against the task's
+// own project board. An unknown name fails loudly here rather than silently
+// leaving the task unmoved.
+step "set_work_state" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.kanboard_work_column
+        })
+    }
+    outcome "success" { next = step.run_handler }
+    // The ticket could not be moved to the work state; development is not
+    // started off an inconsistent bookkeeping state. Comment accurately, park
+    // In Review.
+    outcome "failure" { next = step.comment_develop_failed }
+}
+
+// The development itself: develop the confirmed workstream -> open a PR ->
+// reviewer loop -> merge. The child owns every repo operation; this workflow
+// only feeds it the workstream path and the credentials. Its failure terminal
+// covers the reviewer loop not concluding (the reviewer never returned a
+// verdict, or the bounded fix cycle did not converge) and every
+// infrastructure failure inside it — exactly the cases a human must see.
+step "run_handler" {
+    target = subworkflow.handler
+
+    outcome "success" {
+        next = step.comment_handler_done
+        write {
+            target = data.internal.pr_url.value
+            value  = subworkflow.pr_url
+        }
+    }
+    outcome "failure" { next = step.comment_handler_failed }
+}
+
+// ── Kanboard writes ─────────────────────────────────────────────────────────
+// Every comment body is assembled with jq -n --arg, never shell
+// interpolation — an apostrophe or $(...) in prose must not be able to break
+// or hijack the GraphQL request.
+
+step "comment_handler_done" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_handler_done.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.pr_url.value
+        })
+    }
+    outcome "success" { next = step.set_done_state }
+    // CRI-275: the closing comment failed — a bookkeeping failure on the
+    // post-merge path, so the run ends failed (success=false) exactly as in
+    // linear_intake_v1's comment_handler_done. The Done move is skipped: the
+    // observable outcome is not "Done" and no comment marks it; the failed
+    // run record is what the watcher raises and refires on.
+    outcome "failure" { next = state.failed }
+}
+
+step "set_done_state" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.kanboard_done_column
+        })
+    }
+    outcome "success" { next = state.handler_complete }
+    // The PR is merged but the ticket could not be moved to the done state —
+    // the observable outcome is not yet "Done". Comment accurately, park In
+    // Review for a human to close it out.
+    outcome "failure" { next = step.comment_done_move_failed }
+}
+
+// Reached when the handler failed: reviewer loop unconcluded, coordinator
+// cycle exhausted, or an infrastructure step inside the handler. The comment
+// is self-sufficient — no evidence-file dependency, the workstream path and
+// the review state say everything a human needs to start digging.
+step "comment_handler_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_handler_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = var.kanboard_review_column
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    // CRI-275: the handoff comment failed, so the ticket is not in a
+    // discoverable state — parking is pointless without the comment. The run
+    // ends failed (success=false) so castle records the failure and the
+    // watcher raises the dirty label for a human.
+    outcome "failure" { next = state.failed }
+}
+
+// Reached when development never started: workstream assembly failed, or the
+// work-state move failed. The comment carries the workstream path and review
+// state — what a human needs to pick the run up.
+step "comment_develop_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_develop_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.workstream_file.value
+            criteria_value_4 = var.kanboard_review_column
+        })
+    }
+    outcome "success" { next = step.set_review_state }
+    // CRI-275: same as comment_handler_failed — the failed-development
+    // comment did not land, so the run ends failed instead of declaring
+    // success.
+    outcome "failure" { next = state.failed }
+}
+
+// The PR merged but the Done move failed. The comment must be accurate about
+// that — the work is done, only the bookkeeping failed.
+step "comment_done_move_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/comment_done_move_failed.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = data.internal.pr_url.value
+            criteria_value_4 = var.kanboard_done_column
+            criteria_value_5 = var.kanboard_review_column
+        })
+    }
+    outcome "success" { next = step.park_after_done_move_failed }
+    // CRI-275: the parking comment failed too — the ticket is stuck in the
+    // done move's original position and no comment marks it. The run ends
+    // failed so the watcher alerts.
+    outcome "failure" { next = state.failed }
+}
+
+// CRI-275: the PR merged but the Done move failed, and the fallback comment
+// landed. Parking the ticket In Review keeps the context for a human — but
+// the run's bookkeeping failed, so the run must record FAILED regardless of
+// whether the parking itself succeeds (a human should not discover stuck
+// tickets by reading raw events; the failed record is what the watcher
+// refires/alerts on).
+step "park_after_done_move_failed" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.kanboard_review_column
+        })
+    }
+    outcome "success" { next = state.failed }
+    outcome "failure" { next = state.failed }
+}
+
+// Parks the ticket in the review state for a human. CRI-275: the two
+// outcomes now split — a failed state move is a bookkeeping failure (the
+// ticket is not in the review state the run promised), so the run ends
+// failed; a clean parking still ends the run awaiting a human, which is a
+// legitimate success (the run record carries the handler's error, and the
+// ticket sits In Review with an accurate comment).
+step "set_review_state" {
+    target = adapter.shell.develop
+    input {
+        command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            criteria_value_1 = var.intake_root
+            criteria_value_2 = var.ticket_id
+            criteria_value_3 = var.kanboard_review_column
+        })
+    }
+    outcome "success" { next = state.awaiting_human }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+// Exactly three terminal states (CRI-275), two of them successful (CRI-238
+// doctrine — a run either delivers the work or hands the ticket to a human
+// with the bookkeeping intact; a failed Linear write on the way out is a
+// legitimate awaiting_human ending, not a run failure). The failed terminal
+// records bookkeeping failures: the parking comment or the state move did
+// not land, so the ticket is not in a discoverable state and castle must
+// record the run as failed (success=false) — that record is what lets the
+// watcher raise the dirty label and refire the ticket while it sits in a
+// watched state, instead of a human discovering stuck tickets by reading
+// raw events.
+state "handler_complete" {
+    terminal = true
+    success  = true
+}
+
+state "awaiting_human" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

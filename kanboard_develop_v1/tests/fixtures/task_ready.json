@@ -1,0 +1,31 @@
+{
+  "task": {
+    "id": 140,
+    "title": "Deploy job races the cache warm step",
+    "description": "Steps to reproduce:\n1. Trigger a deploy while the cache warm step is still running\n2. Observe the deploy publish a partially warmed cache\n\nExpected: the deploy job waits for the cache warm step to finish before publishing.",
+    "project_id": 1,
+    "column_id": 6,
+    "swimlane_id": 1,
+    "owner_id": 0,
+    "date_creation": 1790000000,
+    "date_modification": 1790000100
+  },
+  "tags": [
+    { "name": "Bug" },
+    { "name": "internal-reproduced" }
+  ],
+  "comments": [
+    {
+      "id": 1,
+      "task_id": 140,
+      "user_id": 4,
+      "comment": "**Automated QA triage completed.** Verdict: reproduced. Triage evidence: cache_warm_wait_gate. Workstream published at /tmp/criteria-intake/KB-140/workstreams/KB-140.md. The fix is to add a dependency edge from the deploy job to the cache warm step in the deploy graph."
+    },
+    {
+      "id": 2,
+      "task_id": 140,
+      "user_id": 2,
+      "comment": "Reproduction details: deploy run id rr-5173 shows the publish step starting 40s before cache_warm exits. The cache manifest written at that point is missing keys cache:model-v2 and cache:tokenizer."
+    }
+  ]
+}

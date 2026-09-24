@@ -1,0 +1,54 @@
+#!/bin/sh
+# Mechanical bug report for the standalone triage workflow. kanboard_triage_v1
+# has no intake classifier agent (intake classifies before its triage phase;
+# here the spec's flow is fetch -> gate -> QA triage), so the report QA triage
+# requires is assembled mechanically from the fetched task: title, description,
+# comment history. No model call re-derives the analysis.
+#
+# Ported from linear_triage_v1's write_bug_report.sh.tftpl: the Linear
+# .data.issue envelope becomes the Kanboard {task, tags, comments} envelope.
+# The report basename is load-bearing: qa_triage_v1 derives its run slug from
+# it, so its evidence lands at <triage_root>/<ticket_id>/ and its published
+# workstream at <workstream_out_dir>/<ticket_id>.md.
+set -eu
+
+TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
+REPORT="{{ .intake_root }}/{{ .ticket_id }}/{{ .ticket_id }}.md"
+
+if [ ! -s "$TICKET_JSON" ]; then
+    echo "ticket.json missing or empty; cannot assemble a bug report" >&2
+    exit 1
+fi
+
+TITLE=$(jq -r '.task.title // empty' "$TICKET_JSON")
+DESC=$(jq -r '.task.description // empty' "$TICKET_JSON")
+STATE=$(jq -r '.task.column_id // empty' "$TICKET_JSON")
+
+if [ -z "$TITLE" ]; then
+    echo "ticket.json carries no task title; cannot assemble a bug report" >&2
+    exit 1
+fi
+
+{
+    echo "# Bug report: $TITLE"
+    echo
+    echo "Source: Kanboard task KB-$(jq -r '.task.id' "$TICKET_JSON")"
+    echo
+    echo "Board column at intake: $STATE"
+    echo
+    echo "## Reported problem"
+    echo
+    echo "$DESC"
+    echo
+    echo "## Task comments (reported behavior and evidence)"
+    echo
+    jq -r '.comments[]? | "### " + (.date_creation // "unknown") + " — " + "comment" + "\n\n" + .comment + "\n"' "$TICKET_JSON"
+} > "$REPORT"
+
+# Guard: non-empty report or report assembly failed
+if [ ! -s "$REPORT" ]; then
+    echo "bug report is empty" >&2
+    exit 1
+fi
+
+echo "bug report written: $REPORT"
