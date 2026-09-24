@@ -114,7 +114,11 @@ data:
                 "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         },
         "linear-intake-url": {
           "type": "url",
@@ -162,7 +166,11 @@ data:
                 "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         },
         "linear-develop-url": {
           "type": "url",
@@ -211,7 +219,11 @@ data:
                 "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         },
         "linear-triage-url": {
           "type": "url",
@@ -261,7 +273,11 @@ data:
                 "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         },
         "ticket-cleanup-url": {
           "type": "url",
@@ -311,7 +327,11 @@ data:
                 "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         },
         "kanboard-triage-url": {
           "type": "url",
@@ -362,7 +382,11 @@ data:
                 "KANBOARD_URL": "kanboard_url"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         },
         "kanboard-develop-url": {
           "type": "url",
@@ -412,7 +436,11 @@ data:
                 "KANBOARD_URL": "kanboard_url"
               }
             }
-          ]
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
+          }
         }
       },
       "routes": [

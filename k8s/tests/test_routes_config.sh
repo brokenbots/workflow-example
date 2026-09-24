@@ -72,7 +72,7 @@ SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 NOSPACE_RE = re.compile(r"^\S+$")
 MOUNT_RE = re.compile(r"^/")
 
-WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env"}
+WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages"}
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states"}
@@ -238,6 +238,20 @@ def validate_workflow(name, workflow, where, errs):
                 validate_secret(secret, f"{where}.secrets[{i}]", errs)
     if "env" in workflow:
         check_env(workflow["env"], where, errs)
+    if "adapterImages" in workflow:
+        # CRI-214 M14: per-adapter-kind image override, same surface as
+        # volumes/secrets/env. Keys are adapter kinds (DNS-1123 labels,
+        # matching the Go validator and the CRD propertyNames pattern);
+        # values are full image references (non-blank, no whitespace).
+        images = workflow["adapterImages"]
+        if not isinstance(images, dict):
+            errs.append(f"{where}.adapterImages must be an object")
+        else:
+            for kind, ref in images.items():
+                if not is_label(kind):
+                    errs.append(f"{where}.adapterImages kind {kind!r} is not a DNS-1123 label")
+                if not isinstance(ref, str) or NOSPACE_RE.match(ref) is None:
+                    errs.append(f"{where}.adapterImages.{kind} must be a non-blank string")
     if wtype == "image":
         if "image" not in workflow:
             errs.append(f"{where}: type image requires image")
@@ -357,6 +371,9 @@ positive = [
     ("volume-read-only", mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(readOnly=True))),
     ("volume-subpath", mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(subPath="intake"))),
     ("workflow-level-env", mutate(lambda d: d[LIB][BAKED].update(env={"ALLOW_DIRTY": "false"}))),
+    ("workflow-adapter-images-override", mutate(lambda d: d[LIB][BAKED].update(
+        adapterImages={"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+                       "copilot": "localhost:5000/criteria-adapter-copilot@sha256:" + "0" * 64}))),
 ]
 
 negative = [
@@ -378,6 +395,10 @@ negative = [
     ("volume-unknown-field", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(hostPath="/srv"))),
     ("unknown-top-level-field", True, mutate(lambda d: d.update(workflowLibraryTypo={}))),
     ("unknown-route-field", True, mutate(lambda d: d["routes"][0].update(workflowRef="x"))),
+    ("adapter-images-bad-kind", True, mutate(lambda d: d[LIB][BAKED].update(
+        adapterImages={"Shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}))),
+    ("adapter-images-blank-ref", True, mutate(lambda d: d[LIB][BAKED].update(
+        adapterImages={"shell": " "}))),
     ("route-empty-states", True, mutate(lambda d: d["routes"][0].update(states=[]))),
     ("route-null-states", True, mutate(lambda d: d["routes"][0].update(states=None))),
     ("route-duplicate-states", True, mutate(lambda d: d["routes"][0].update(states=["Triage", "Triage"]))),
