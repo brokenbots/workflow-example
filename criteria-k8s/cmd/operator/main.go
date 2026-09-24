@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -40,6 +41,13 @@ var (
 	// a cluster property, so it is operator config (env CRITERIA_JOB_ARCH,
 	// Helm operator.jobArch), never per-workflow state.
 	jobArch = flag.String("job-arch", getenv(jobbuilder.EnvJobArch, jobbuilder.JobArchDefault), "kubernetes.io/arch nodeSelector value stamped on child Job/pod templates (cluster property)")
+	// KB-3: the built-in linear-spc/copilot-spc secret volumes a
+	// workflow-less (legacy) run mounts require the Secrets Store CSI
+	// driver and those SecretProviderClasses, so they are opt-in operator
+	// config. Default off keeps the legacy pod mountable on clusters
+	// without OpenBao CSI; set true to restore the pre-KB-3 delivery on an
+	// OpenBao-equipped cluster.
+	legacySecretVolumes = flag.Bool("legacy-secret-volumes", getBool(jobbuilder.EnvLegacySecretVolumes, false), "Mount the built-in linear-spc/copilot-spc CSI secret volumes on runs without a stamped workflow (requires the OpenBao Secrets Store CSI driver)")
 	dataPVC         = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
@@ -139,6 +147,7 @@ func main() {
 			AdapterRegistry:   *adapterRegistry,
 			AdapterTag:        *adapterTag,
 			JobArch:           *jobArch,
+			LegacySecretVolumes: *legacySecretVolumes,
 		},
 		Queue: queue,
 	}
@@ -221,6 +230,17 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return fallback
+}
+
+// getBool resolves an operator env var to a bool flag default: the parsed
+// value when it parses, else the fallback (mirrors getDuration's leniency).
+func getBool(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback
