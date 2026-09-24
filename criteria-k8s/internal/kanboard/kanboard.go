@@ -383,11 +383,15 @@ func (c *Client) MoveTaskToColumn(ctx context.Context, taskID int, columnName st
 	if colID == t.ColumnID {
 		return nil // already there; idempotent
 	}
+	// moveTaskPosition requires swimlane_id on 1.2.54 (omitting it fails
+	// with -32602 "Wrong number of arguments"). The task's current swimlane
+	// is preserved.
 	return c.call(ctx, "moveTaskPosition", map[string]interface{}{
-		"project_id": t.ProjectID,
-		"task_id":    taskID,
-		"column_id":  colID,
-		"position":   1,
+		"project_id":  t.ProjectID,
+		"task_id":     taskID,
+		"column_id":   colID,
+		"position":    1,
+		"swimlane_id": t.SwimlaneID,
 	}, nil)
 }
 

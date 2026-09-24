@@ -39,7 +39,8 @@ if [ "$target_col" = "$current_col" ]; then
     exit 0
 fi
 
-rpc moveTaskPosition "{\"project_id\":$project_id,\"task_id\":$task_id,\"column_id\":$target_col,\"position\":1}" \
+swimlane_id=$(printf '%s' "$task" | jq -r '.swimlane_id // 1')
+rpc moveTaskPosition "{\"project_id\":$project_id,\"task_id\":$task_id,\"column_id\":$target_col,\"position\":1,\"swimlane_id\":$swimlane_id}" \
     | jq -e '.result == true' >/dev/null
 
 echo "task moved to $criteria_value_3"
