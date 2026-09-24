@@ -206,8 +206,6 @@ spec:
                         stamps on this workflow's adapter pods, ahead of the
                         event's image_reference and the configured
                         registry/tag defaults.
-                      propertyNames:
-                        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
                       additionalProperties:
                         type: string
                         pattern: '^\S+$'
@@ -418,6 +416,14 @@ spec:
           image: localhost:5000/criteria-k8s:dev
           imagePullPolicy: IfNotPresent
           command: ["/manager"]
+          env:
+            # Adapter image fallback (CRI-214 M14): registry host and default
+            # tag for adapter image references the operator composes itself
+            # (ADAPTER_REGISTRY / ADAPTER_TAG).
+            - name: ADAPTER_REGISTRY
+              value: "localhost:5000"
+            - name: ADAPTER_TAG
+              value: "k8s-3"
           ports:
             - name: metrics
               containerPort: 8080

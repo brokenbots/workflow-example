@@ -241,8 +241,8 @@ def validate_workflow(name, workflow, where, errs):
     if "adapterImages" in workflow:
         # CRI-214 M14: per-adapter-kind image override, same surface as
         # volumes/secrets/env. Keys are adapter kinds (DNS-1123 labels,
-        # matching the Go validator and the CRD propertyNames pattern);
-        # values are full image references (non-blank, no whitespace).
+        # matching the Go validator and the routes-schema/shell-test key
+        # check); values are full image references (non-blank, no whitespace).
         images = workflow["adapterImages"]
         if not isinstance(images, dict):
             errs.append(f"{where}.adapterImages must be an object")
