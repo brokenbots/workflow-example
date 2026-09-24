@@ -36,23 +36,23 @@ manifest=$(cat "$EXAMPLE")
 [ -n "$manifest" ] || fail "routes ConfigMap example is empty"
 
 # ------------------------------------------------------------ manifest shape
-printf '%s' "$manifest" | grep -q '^kind: ConfigMap$' || \
+grep -q <<< "$manifest" '^kind: ConfigMap$' || \
     fail "example is not a ConfigMap"
-printf '%s' "$manifest" | grep -q '^  name: criteria-routes$' || \
+grep -q <<< "$manifest" '^  name: criteria-routes$' || \
     fail "example ConfigMap is not named criteria-routes"
-printf '%s' "$manifest" | grep -q '^  namespace: criteria-jobs$' || \
+grep -q <<< "$manifest" '^  namespace: criteria-jobs$' || \
     fail "example ConfigMap is not namespaced to criteria-jobs"
-printf '%s' "$manifest" | grep -q '^  routes.json: |$' || \
+grep -q <<< "$manifest" '^  routes.json: |$' || \
     fail "example ConfigMap does not carry the routes.json data key"
-printf '%s' "$manifest" | grep -q '^kind: Secret$' && \
+grep -q <<< "$manifest" '^kind: Secret$' && \
     fail "example ConfigMap must not contain a Secret resource"
-printf '%s' "$manifest" | grep -q 'secretKeyRef' && \
+grep -q <<< "$manifest" 'secretKeyRef' && \
     fail "example ConfigMap uses secretKeyRef"
-printf '%s' "$manifest" | grep -q 'secretRef' && \
+grep -q <<< "$manifest" 'secretRef' && \
     fail "example ConfigMap uses secretRef"
-printf '%s' "$manifest" | grep -q 'envFrom:' && \
+grep -q <<< "$manifest" 'envFrom:' && \
     fail "example ConfigMap uses envFrom"
-printf '%s' "$manifest" | grep -q 'stringData' && \
+grep -q <<< "$manifest" 'stringData' && \
     fail "example ConfigMap uses stringData"
 printf '%s' "$manifest" | grep -Eq 'ghp_[A-Za-z0-9]|github_pat_|BEGIN (RSA |EC )?PRIVATE KEY' && \
     fail "example ConfigMap embeds credential material"
@@ -455,16 +455,24 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 3,
-            f"shipped example routes = {len(base['routes'])}, want the two criteria project split routes plus the CRI-310 cleanup route")
+shipped_err(len(base["routes"]) == 5,
+            f"shipped example routes = {len(base['routes'])}, want the two criteria project split routes, "
+            "the CRI-310 cleanup route, and the two kanboard routes (dual-source coexistence)")
 triage_route = next((r for r in base["routes"] if r.get("name") == "criteria-triage"), None)
 develop_route = next((r for r in base["routes"] if r.get("name") == "criteria-develop"), None)
 cleanup_route = next((r for r in base["routes"] if r.get("name") == "criteria-cleanup"), None)
+kanboard_triage_route = next((r for r in base["routes"] if r.get("name") == "kanboard-triage"), None)
+kanboard_develop_route = next((r for r in base["routes"] if r.get("name") == "kanboard-develop"), None)
 shipped_err(triage_route is not None, "shipped example: routes missing the criteria-triage route")
 shipped_err(develop_route is not None, "shipped example: routes missing the criteria-develop route")
 shipped_err(cleanup_route is not None, "shipped example: routes missing the criteria-cleanup route (CRI-310)")
-shipped_err(all(r.get("project") == "Criteria K8s Workflow Runner" for r in base["routes"]),
-            "shipped example: every route must target the criteria project")
+shipped_err(kanboard_triage_route is not None,
+            "shipped example: routes missing the kanboard-triage route (dual-source coexistence)")
+shipped_err(kanboard_develop_route is not None,
+            "shipped example: routes missing the kanboard-develop route (dual-source coexistence)")
+shipped_err(all(r.get("project") == "Criteria K8s Workflow Runner"
+                for r in base["routes"] if r.get("name", "").startswith("criteria-")),
+            "shipped example: every criteria-* route must target the criteria project")
 
 if triage_route is not None:
     if triage_route.get("workflow") != "linear-triage-url":
@@ -496,6 +504,22 @@ if cleanup_route is not None:
         )
     if "tagMatch" in cleanup_route:
         failures.append("shipped example: criteria-cleanup must keep the tagMatch=all default")
+
+# Dual-source coexistence: the kanboard routes fire their own watcher's
+# project and states (Kanboard Tickets / Backlog and Ready), url-only, with
+# the routes-test asserting the library objects elsewhere.
+for route, wf_name, states in (
+        (kanboard_triage_route, "kanboard-triage-url", ["Backlog"]),
+        (kanboard_develop_route, "kanboard-develop-url", ["Ready"]),
+):
+    if route is None:
+        continue
+    if route.get("workflow") != wf_name:
+        failures.append(f"shipped example: {route.get('name')} must fire {wf_name}")
+    if route.get("project") != "Kanboard Tickets":
+        failures.append(f"shipped example: {route.get('name')} must target the Kanboard Tickets project")
+    if route.get("states") != states:
+        failures.append(f"shipped example: {route.get('name')} states = {route.get('states')}, want {states}")
 
 triage_wf = base[LIB].get("linear-triage-url")
 if not isinstance(triage_wf, dict):

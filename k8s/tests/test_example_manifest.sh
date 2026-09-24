@@ -17,39 +17,45 @@ fail() {
 [ -f "$EXAMPLE" ] || fail "k8s/examples/ticket-job.yaml is missing"
 
 manifest=$(cat "$EXAMPLE")
+# NOTE: use here-strings (grep -q <<<"$manifest") rather than
+# `printf | grep -q`: grep -q exits at the first match, closing the pipe
+# while printf is still writing the 22KB manifest — printf dies with
+# SIGPIPE (141) and pipefail turns the whole pipeline non-zero even though
+# grep matched. The flaky CI failures (missing X / no Job resources) were
+# exactly that race, not real manifest drift.
 [ -n "$manifest" ] || fail "example manifest is empty"
 
-printf '%s' "$manifest" | grep -q 'name: linear-spc' || \
+grep -q <<< "$manifest" 'name: linear-spc' || \
     fail "missing linear-spc SecretProviderClass"
-printf '%s' "$manifest" | grep -q 'name: copilot-spc' || \
+grep -q <<< "$manifest" 'name: copilot-spc' || \
     fail "missing copilot-spc SecretProviderClass"
-printf '%s' "$manifest" | grep -q 'name: shell-spc' && \
+grep -q <<< "$manifest" 'name: shell-spc' && \
     fail "shell-spc SecretProviderClass must not be present"
 
-printf '%s' "$manifest" | grep -q 'name: workflow-runner' || \
+grep -q <<< "$manifest" 'name: workflow-runner' || \
     fail "missing workflow-runner container"
-printf '%s' "$manifest" | grep -q 'name: adapter-copilot' || \
+grep -q <<< "$manifest" 'name: adapter-copilot' || \
     fail "missing adapter-copilot container"
-printf '%s' "$manifest" | grep -q 'name: adapter-shell' || \
+grep -q <<< "$manifest" 'name: adapter-shell' || \
     fail "missing adapter-shell container"
-printf '%s' "$manifest" | grep -q 'name: repo-clone' || \
+grep -q <<< "$manifest" 'name: repo-clone' || \
     fail "missing repo-clone init container"
 
-printf '%s' "$manifest" | grep -q 'secretKeyRef' && \
+grep -q <<< "$manifest" 'secretKeyRef' && \
     fail "example manifest uses secretKeyRef"
-printf '%s' "$manifest" | grep -q 'secretRef' && \
+grep -q <<< "$manifest" 'secretRef' && \
     fail "example manifest uses secretRef"
-printf '%s' "$manifest" | grep -q 'envFrom:' && \
+grep -q <<< "$manifest" 'envFrom:' && \
     fail "example manifest uses envFrom for secrets"
 
 # Runner pod still uses CSI; adapter pods must not.
-printf '%s' "$manifest" | grep -q 'driver: secrets-store.csi.k8s.io' || \
+grep -q <<< "$manifest" 'driver: secrets-store.csi.k8s.io' || \
     fail "example manifest does not use the Secrets Store CSI driver"
-printf '%s' "$manifest" | grep -q 'secretProviderClass: linear-spc' || \
+grep -q <<< "$manifest" 'secretProviderClass: linear-spc' || \
     fail "missing linear-spc CSI volume"
-printf '%s' "$manifest" | grep -q 'secretProviderClass: copilot-spc' || \
+grep -q <<< "$manifest" 'secretProviderClass: copilot-spc' || \
     fail "missing copilot-spc CSI volume"
-printf '%s' "$manifest" | grep -q 'secretProviderClass: shell-spc' && \
+grep -q <<< "$manifest" 'secretProviderClass: shell-spc' && \
     fail "shell-spc CSI volume must not be present"
 
 # Confirm three Jobs (runner + two adapters) instead of one three-container pod.
@@ -72,20 +78,20 @@ printf '%s' "$adapter_block" | grep -q 'emptyDir: {}' && \
     fail "adapter Job uses emptyDir instead of the shared /repo PVC"
 
 # Per-run discovery directory and listen-address widening must be present.
-printf '%s' "$manifest" | grep -q 'run_dir="/data/.criteria/runs' || \
+grep -q <<< "$manifest" 'run_dir="/data/.criteria/runs' || \
     fail "runner script does not create per-run discovery directory"
-printf '%s' "$manifest" | grep -q 'listen_address = "0.0.0.0:7778"' || \
+grep -q <<< "$manifest" 'listen_address = "0.0.0.0:7778"' || \
     fail "runner script does not widen listen_address"
 
-printf '%s' "$manifest" | grep -q 'app.kubernetes.io/name: criteria-run' || \
+grep -q <<< "$manifest" 'app.kubernetes.io/name: criteria-run' || \
     fail "example manifest missing criteria-run label"
 
 # The header comment must still point readers at the main README.
-printf '%s' "$manifest" | grep -q 'See k8s/README.md' || \
+grep -q <<< "$manifest" 'See k8s/README.md' || \
     fail "example manifest header does not reference k8s/README.md"
 
 # Confirm all resources are Jobs, not Deployments or CronJobs.
-printf '%s' "$manifest" | grep -q '^kind: Job$' || \
+grep -q <<< "$manifest" '^kind: Job$' || \
     fail "example manifest contains no Job resources"
 
 if command -v kubectl >/dev/null 2>&1; then
