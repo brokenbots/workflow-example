@@ -72,6 +72,15 @@ const (
 	// is resolved from. cmd/operator mirrors it as the --default-image
 	// flag default.
 	EnvDefaultImage = "DEFAULT_CRITERIA_IMAGE"
+	// EnvJobArch is the operator env var the child Job/pod node arch is
+	// resolved from: cmd/operator mirrors it as the --job-arch flag
+	// default. Arch is a cluster property (the nodes the child pods must
+	// schedule on), so it is operator config, never a per-run or per-route
+	// setting.
+	EnvJobArch = "CRITERIA_JOB_ARCH"
+	// JobArchDefault is the node arch child Job/pod templates select when
+	// the operator declares none: the current cluster is amd64.
+	JobArchDefault = "amd64"
 )
 
 var nonDNS = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -139,6 +148,13 @@ type Defaults struct {
 	// operator composes itself (CRI-214 M14). Empty falls back to the
 	// built-in default.
 	AdapterTag string
+	// JobArch is the kubernetes.io/arch nodeSelector value stamped on every
+	// child Job/pod template (runner, adapters, per-scope pods): the arch
+	// of the nodes the cluster schedules workflow work on. It is operator
+	// config (flag --job-arch / env CRITERIA_JOB_ARCH / Helm
+	// operator.jobArch), not per-workflow state. Empty falls back to the
+	// built-in amd64 default.
+	JobArch string
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
@@ -215,7 +231,16 @@ func ownerReference(run *criteriav1.CriteriaRun) metav1.OwnerReference {
 	return ref
 }
 
-func buildJobBase(run *criteriav1.CriteriaRun, namespace, name string, labels map[string]string) *batchv1.Job {
+// jobNodeArch resolves the kubernetes.io/arch nodeSelector value for child
+// Job/pod templates: the operator-configured arch, else the built-in amd64
+// default. Arch is a cluster property — every scheduling surface (runner
+// Jobs, adapter Jobs, per-scope pods) must resolve it through this helper
+// so the sites cannot drift.
+func jobNodeArch(defaults Defaults) string {
+	return firstNonEmpty(defaults.JobArch, JobArchDefault)
+}
+
+func buildJobBase(run *criteriav1.CriteriaRun, defaults Defaults, namespace, name string, labels map[string]string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
@@ -231,7 +256,7 @@ func buildJobBase(run *criteriav1.CriteriaRun, namespace, name string, labels ma
 				},
 				Spec: corev1.PodSpec{
 					NodeSelector: map[string]string{
-						"kubernetes.io/arch": "amd64",
+						"kubernetes.io/arch": jobNodeArch(defaults),
 					},
 					Tolerations: []corev1.Toleration{
 						{
@@ -323,7 +348,7 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleRunner
 
-	job := buildJobBase(run, TargetNamespace(run), jobName, labels)
+	job := buildJobBase(run, defaults, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
 	job.Spec.Template.Spec.InitContainers = []corev1.Container{
 		repoCloneContainer(image, repoURL, repoDir, plan),
@@ -352,7 +377,7 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	image := resolveAdapterImage(plan, events.LifecycleEvent{}, kind, defaults)
 
 	hasSecrets := plan.hasSecrets()
-	job := buildJobBase(run, TargetNamespace(run), jobName, labels)
+	job := buildJobBase(run, defaults, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.AutomountServiceAccountToken = boolPtr(hasSecrets)
 	if hasSecrets {
 		// The OpenBao CSI provider authenticates the pod through its

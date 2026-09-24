@@ -68,6 +68,7 @@ helm template criteria-k8s charts/criteria-k8s
 | `operator.retentionPeriod` | `168h` | Keep per-ticket intake/triage artifacts this long after the last write (`0s` disables sweeping). Go duration. |
 | `operator.retentionInterval` | `1h` | How often the retention sweep runs. Go duration. |
 | `operator.providerBaseUrl` | `http://192.168.17.116:11434/v1` | Ollama-compatible provider endpoint handed to adapter workflows. |
+| `operator.jobArch` | `amd64` | `kubernetes.io/arch` nodeSelector value stamped on child Job/pod templates (runner + per-scope adapters). Cluster property: set to `arm64` for an arm64 cluster. |
 | `operator.resources` | `128Mi/100m` requests, `512Mi/500m` limits | Operator pod resources. |
 | `watcher.enabled` | `true` | Deploy the Linear watcher. |
 | `watcher.replicaCount` | `1` | Watcher replicas. |

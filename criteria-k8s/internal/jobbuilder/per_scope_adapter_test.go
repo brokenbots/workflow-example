@@ -86,6 +86,34 @@ func TestBuildPerScopeAdapterPod(t *testing.T) {
 	assert.Equal(t, "catch", pod.Spec.Tolerations[0].Key)
 }
 
+// KB-2: the per-scope adapter pod's node arch is operator config, not a
+// hard-coded amd64 literal; an unconfigured operator keeps the amd64 default.
+func TestBuildPerScopeAdapterPodArchFollowsOperatorConfig(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-arch", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-ARCH"},
+	}
+	scope := events.LifecycleEvent{
+		Event:       events.EventProvisionWanted,
+		RunID:       "CRI-ARCH",
+		ScopeID:     "root",
+		ScopeTag:    "root-scope",
+		AdapterName: "shell",
+		AdapterType: "shell",
+		Digest:      "sha256:deadbeef",
+	}
+
+	pod := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{JobArch: "arm64"}, scope, "10.0.0.10")
+	require.NotNil(t, pod)
+	assert.Equal(t, "arm64", pod.Spec.NodeSelector["kubernetes.io/arch"],
+		"the per-scope adapter pod must stamp the operator-configured node arch")
+
+	fallback := jobbuilder.BuildPerScopeAdapterPod(run, jobbuilder.Defaults{}, scope, "10.0.0.10")
+	require.NotNil(t, fallback)
+	assert.Equal(t, jobbuilder.JobArchDefault, fallback.Spec.NodeSelector["kubernetes.io/arch"],
+		"an operator without a configured arch must keep the built-in default")
+}
+
 func TestBuildPerScopeAdapterPodResolvesKindFromAdapterType(t *testing.T) {
 	// CRI-140: the provision-wanted event's adapter field is the workflow's
 	// adapter node name (the instance, "intake"), not the implementation

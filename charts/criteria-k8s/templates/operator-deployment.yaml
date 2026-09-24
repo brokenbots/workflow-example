@@ -76,6 +76,11 @@ spec:
             # patching CASTLE_TOKEN into the deployment env.
             - name: CASTLE_ADDR
               value: {{ .Values.operator.castleAddr | quote }}
+            # Node arch for child Job/pod templates (runner + per-scope
+            # adapters): a cluster property, not per-workflow state. Set
+            # operator.jobArch=arm64 on an arm64 cluster.
+            - name: CRITERIA_JOB_ARCH
+              value: {{ .Values.operator.jobArch | quote }}
           {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
           volumeMounts:
             - name: criteria-data

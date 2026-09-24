@@ -65,6 +65,10 @@ operator:
   # API for run/adapter lifecycle instead of reading events.ndjson off the
   # data PVC. Empty disables observation (Job conditions only).
   castleAddr: http://castle:8080
+  # kubernetes.io/arch nodeSelector value stamped on child Job/pod templates
+  # (runner + per-scope adapters): the arch of the nodes workflow pods
+  # schedule on. A cluster property — set it to arm64 for an arm64 cluster.
+  jobArch: amd64
   resources:
     requests:
       memory: 128Mi

@@ -160,6 +160,43 @@ func TestBuildRunnerJob(t *testing.T) {
 	assert.Equal(t, "copilot-secrets", clone.VolumeMounts[1].Name)
 }
 
+// KB-2: the child Job/pod node arch is operator config, not a hard-coded
+// amd64 literal. Every scheduling surface (image-mode runner, source-mode
+// runner, adapter Jobs) must stamp the configured arch, and an unconfigured
+// operator must keep the amd64 default.
+func TestJobArchNodeSelectorFollowsOperatorConfig(t *testing.T) {
+	imageRun := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-arch-image"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-ARCH-IMAGE",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			Image:    "localhost:5000/linear-intake-remote:dev",
+		},
+	}
+	sourceRun := urlRun("cri-arch-source", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+	}, "")
+	arm64Defaults := jobbuilder.Defaults{JobArch: "arm64"}
+
+	runner := jobbuilder.BuildRunnerJob(imageRun, arm64Defaults)
+	assert.Equal(t, "arm64", runner.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"],
+		"the image-mode runner Job must stamp the operator-configured node arch")
+
+	sourceRunner := jobbuilder.BuildRunnerJob(sourceRun, arm64Defaults)
+	assert.Equal(t, "arm64", sourceRunner.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"],
+		"the source-mode runner Job must stamp the operator-configured node arch")
+
+	adapter := jobbuilder.BuildAdapterJob(imageRun, arm64Defaults, "shell")
+	assert.Equal(t, "arm64", adapter.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"],
+		"the adapter Job must stamp the operator-configured node arch")
+
+	// Empty JobArch keeps the built-in amd64 default for the current cluster.
+	fallbackRunner := jobbuilder.BuildRunnerJob(imageRun, jobbuilder.Defaults{})
+	assert.Equal(t, jobbuilder.JobArchDefault, fallbackRunner.Spec.Template.Spec.NodeSelector["kubernetes.io/arch"],
+		"an operator without a configured arch must keep the built-in default")
+}
+
 func TestBuildAll(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-42"},

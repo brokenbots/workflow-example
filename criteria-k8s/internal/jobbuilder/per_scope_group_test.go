@@ -282,6 +282,24 @@ func TestBuildPerScopeAdapterPodGroupPodShapeMatchesFallback(t *testing.T) {
 	assert.Equal(t, "adapter", pod.Labels["criteria.brokenbots.dev/role"])
 }
 
+// KB-2: the group pod's node arch is operator config, not a hard-coded
+// amd64 literal; an unconfigured operator keeps the amd64 default.
+func TestBuildPerScopeAdapterPodGroupArchFollowsOperatorConfig(t *testing.T) {
+	run := groupTestRun()
+
+	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{JobArch: "arm64"}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}, "10.0.0.10")
+	require.NotNil(t, pod)
+	assert.Equal(t, "arm64", pod.Spec.NodeSelector["kubernetes.io/arch"],
+		"the per-scope group pod must stamp the operator-configured node arch")
+
+	fallback := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}, "10.0.0.10")
+	require.NotNil(t, fallback)
+	assert.Equal(t, jobbuilder.JobArchDefault, fallback.Spec.NodeSelector["kubernetes.io/arch"],
+		"an operator without a configured arch must keep the built-in default")
+}
+
 func TestPerScopeAdapterGroupName(t *testing.T) {
 	run := groupTestRun()
 

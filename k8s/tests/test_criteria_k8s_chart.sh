@@ -153,6 +153,7 @@ grep -q 'name: RETENTION_PERIOD' "$RENDERED" || fail "operator deployment missin
 grep -q 'value: "168h"' "$RENDERED" || fail "operator RETENTION_PERIOD default is not 168h"
 grep -q 'name: RETENTION_INTERVAL' "$RENDERED" || fail "operator deployment missing RETENTION_INTERVAL"
 grep -q 'name: DEFAULT_CRITERIA_IMAGE' "$RENDERED" || fail "operator deployment missing DEFAULT_CRITERIA_IMAGE"
+grep -q 'name: CRITERIA_JOB_ARCH' "$RENDERED" || fail "operator deployment missing CRITERIA_JOB_ARCH"
 grep -q 'command: \["/manager"\]' "$RENDERED" || fail "operator container command missing"
 grep -q -- '--namespace' "$RENDERED" || fail "operator deployment missing --namespace flag"
 grep -q 'mountPath: /data$' "$RENDERED" || fail "operator does not mount /data"
@@ -233,6 +234,7 @@ check_override "poll interval override" "watcher.pollInterval=30s" 'value: "30s"
 check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'
 check_override "Linear project override" "watcher.linearProjectName=Other Project" 'value: "Other Project"'
+check_override "operator job arch override" "operator.jobArch=arm64" 'value: "arm64"'
 check_override "routes ConfigMap override" "watcher.routesConfigMap=my-routes" 'name: my-routes'
 check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
 
