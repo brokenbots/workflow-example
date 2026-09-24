@@ -31,7 +31,11 @@ import (
 // They are the Kanboard analogue of the Linear watcher's automation labels
 // (criteria-automation / criteria-dirty) plus the states the workflows set:
 // a live run parks the task in workColumnName, a failed run parks it in
-// reviewColumnName for a human, a succeeded run moves it to doneColumnName.
+// reviewColumnName for a human, a succeeded dev-class run moves it to
+// doneColumnName. A succeeded triage-class run is the middle of the chain,
+// not its end: the triage workflow's re-arm path moves the ticket into the
+// develop route's trigger column and the watcher leaves that move in place
+// (KB-9).
 const (
 	defaultPollInterval = 60 * time.Second
 	workColumnName      = "Work in progress"
@@ -171,11 +175,14 @@ type watcher struct {
 	workflowsTagGroup string
 	repoValidator     func(string) bool
 	projectID         int
-	// lastPhases records, per ticket, the latest CriteriaRun phase seen at
-	// the previous poll, so reconciliation only acts on phase changes (the
-	// CRI-252 change-driven discipline). In-memory only.
-	lastPhases map[string]criteriav1.CriteriaRunPhase
-	log        logr.Logger
+	// lastRuns records, per ticket, the runs index entry seen at the
+	// previous poll, so reconciliation only acts on changes (the CRI-252
+	// change-driven discipline). The run identity is part of the record:
+	// two settled runs of different classes can both read Succeeded — the
+	// triage run handing off to the dev run (KB-9) — and the second settle
+	// must still reconcile. In-memory only.
+	lastRuns map[string]runPhases
+	log      logr.Logger
 }
 
 func (w *watcher) run(ctx context.Context) error {
@@ -231,33 +238,35 @@ func (w *watcher) poll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Phase reconciliation: move task columns on phase changes, then update
+	// Phase reconciliation: move task columns on run changes, then update
 	// the in-memory task structs with the new column so the firing loop
 	// below sees the post-reconciliation column — a task whose run just
 	// settled must not fire again off its pre-settle column (observed live:
 	// the smoke task re-fired after Succeeded because the listing still
-	// said Backlog).
+	// said Backlog). The record carries the run identity, not just the
+	// phase: a settled triage run followed by a settled dev run both read
+	// Succeeded, and the dev settle must still reconcile (KB-9).
 	for i := range tasks {
 		ticketID := tasks[i].Identifier()
 		ph, ok := runs[ticketID]
 		if !ok || !ph.anyRun {
 			continue
 		}
-		if prev, seen := w.lastPhases[ticketID]; seen && prev == ph.latestPhase {
+		if prev, seen := w.lastRuns[ticketID]; seen && prev == ph {
 			continue
 		}
 		if newCol, changed := w.reconcileTaskColumn(ctx, tasks[i], ph); changed {
 			tasks[i].ColumnID = newCol
 			tasks[i].ColumnName = w.columnNameFor(ctx, tasks[i].ProjectID, newCol)
 		}
-		if w.lastPhases == nil {
-			w.lastPhases = make(map[string]criteriav1.CriteriaRunPhase)
+		if w.lastRuns == nil {
+			w.lastRuns = make(map[string]runPhases)
 		}
-		w.lastPhases[ticketID] = ph.latestPhase
+		w.lastRuns[ticketID] = ph
 	}
-	for ticketID := range w.lastPhases {
+	for ticketID := range w.lastRuns {
 		if _, ok := runs[ticketID]; !ok {
-			delete(w.lastPhases, ticketID)
+			delete(w.lastRuns, ticketID)
 		}
 	}
 
@@ -329,7 +338,10 @@ func (w *watcher) poll(ctx context.Context) error {
 
 // indexRunPhases lists CriteriaRuns created by this watcher (source=kanboard)
 // and groups them by ticket. The KB source label isolates them from the
-// Linear watcher's runs so both watchers coexist in one namespace.
+// Linear watcher's runs so both watchers coexist in one namespace. The
+// ticket's most recent run (creation time, name tiebreak — the linear
+// watcher's runNewer) is the reconciliation authority, so its phase and
+// admission class drive the column moves.
 func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, error) {
 	list := &criteriav1.CriteriaRunList{}
 	req := client.ListOptions{
@@ -339,54 +351,92 @@ func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, err
 	if err := w.client.List(ctx, list, &req); err != nil {
 		return nil, err
 	}
-	out := make(map[string]runPhases)
+	type ticketRuns struct {
+		active bool
+		latest criteriav1.CriteriaRun
+	}
+	groups := make(map[string]*ticketRuns)
 	for i := range list.Items {
 		run := &list.Items[i]
 		t := run.Spec.TicketID
 		if !strings.HasPrefix(t, "KB-") {
 			continue
 		}
-		ph := out[t]
-		ph.anyRun = true
+		g := groups[t]
+		if g == nil {
+			g = &ticketRuns{}
+			groups[t] = g
+		}
 		switch run.Status.Phase {
 		case criteriav1.PhaseFailed, criteriav1.PhaseSucceeded:
-			// settled; keeps latestPhase authority below
+			// settled: nothing in flight from this run
 		default:
-			ph.active = true
+			// Pending, Running, Unknown — and the empty phase a freshly
+			// created run carries until the controller sets status — are
+			// all in flight (CRI-219).
+			g.active = true
 		}
-		if phaseRank(run.Status.Phase) >= phaseRank(ph.latestPhase) {
-			ph.latestPhase = run.Status.Phase
+		if g.latest.Name == "" || runNewer(run, &g.latest) {
+			g.latest = *run
 		}
-		out[t] = ph
+	}
+	out := make(map[string]runPhases, len(groups))
+	for ticket, g := range groups {
+		ph := runPhases{
+			active:      g.active,
+			latestPhase: g.latest.Status.Phase,
+			latestRun:   g.latest.Name,
+			anyRun:      true,
+		}
+		if g.latest.Spec.Workflow != nil {
+			ph.latestClass = g.latest.Spec.Workflow.Class
+		}
+		out[ticket] = ph
 	}
 	return out, nil
 }
 
-func phaseRank(p criteriav1.CriteriaRunPhase) int {
-	switch p {
-	case criteriav1.PhaseSucceeded:
-		return 3
-	case criteriav1.PhaseFailed:
-		return 2
-	case criteriav1.PhaseRunning:
-		return 1
-	default:
-		return 0
+// runNewer reports whether run sorts after cur (creation time, with the
+// name as a deterministic tiebreak), used to pick a ticket's most recent
+// CriteriaRun. Identical to the linear watcher's runNewer.
+func runNewer(run, cur *criteriav1.CriteriaRun) bool {
+	if !run.CreationTimestamp.Equal(&cur.CreationTimestamp) {
+		return cur.CreationTimestamp.Before(&run.CreationTimestamp)
 	}
+	return run.Name > cur.Name
 }
 
 type runPhases struct {
 	active      bool
 	latestPhase criteriav1.CriteriaRunPhase
+	// latestRun is the name of the run holding latestPhase and latestClass
+	// the admission class stamped on its spec workflow (triage vs dev).
+	// The class decides whether a Succeeded phase stamps Done (KB-9); the
+	// identity lets the reconcile gate tell two settled runs apart when
+	// both read Succeeded.
+	latestRun   string
+	latestClass string
 	anyRun      bool
 }
 
 // reconcileTaskColumn moves the Kanboard task between board columns as its
-// runs progress — the Kanboard analogue of the Linear watcher's automation
-// labels:
-//   - run in flight  -> task to the work column
-//   - run Succeeded  -> task to the done column
-//   - run Failed     -> task to the review column (human)
+// latest run progresses — the Kanboard analogue of the Linear watcher's
+// automation labels:
+//   - run in flight        -> task to the work column
+//   - dev run Succeeded    -> task to the done column
+//   - triage run Succeeded -> column untouched (KB-9)
+//   - run Failed           -> task to the review column (human)
+//
+// A triage-class success is the middle of the triage -> develop chain, not
+// its end: the triage workflow's re-arm path (rearm_k8s_run +
+// set_ready_state) moves the ticket into the develop route's trigger
+// column, and stamping Done here would reconcile the ticket out from under
+// that handoff before the develop route can fire (observed live on KB-2:
+// triage succeeded, the watcher moved the ticket Ready -> Done, and the
+// develop run never fired). The triage workflow owns the column choice on
+// its success path, so the watcher leaves the task where the workflow put
+// it. Only a dev-class success stamps Done — or a legacy run predating
+// class stamping (empty class), which ran the old terminal flow.
 //
 // reconcileTaskColumn returns the task's new Kanboard column id and whether
 // the column changed. The caller updates its in-memory task copy so the
@@ -395,6 +445,9 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 	var target string
 	switch ph.latestPhase {
 	case criteriav1.PhaseSucceeded:
+		if ph.latestClass == criteriav1.RunClassTriage {
+			return task.ColumnID, false
+		}
 		target = doneColumnName
 	case criteriav1.PhaseFailed:
 		target = reviewColumnName
