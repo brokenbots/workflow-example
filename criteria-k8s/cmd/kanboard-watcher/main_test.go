@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -184,6 +185,33 @@ const testRoutesJSON = `{
   ]
 }`
 
+// chainRoutesJSON mirrors the live criteria-routes split for Kanboard
+// (k8s/examples/routes-configmap.yaml): the triage route fires a
+// triage-class workflow from Backlog and the develop route (default dev
+// class) fires from Ready — the triage -> develop chain whose handoff the
+// KB-9 reconciliation bug swallowed.
+const chainRoutesJSON = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "kanboard-triage-wf": {
+      "type": "image",
+      "image": "localhost:5000/kanboard-triage:dev",
+      "namespace": "criteria-jobs",
+      "class": "triage"
+    },
+    "kanboard-develop-wf": {
+      "type": "image",
+      "image": "localhost:5000/kanboard-develop:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "routes": [
+    {"name": "kanboard-triage", "workflow": "kanboard-triage-wf", "project": "Kanboard Tickets", "states": ["Backlog"]},
+    {"name": "kanboard-develop", "workflow": "kanboard-develop-wf", "project": "Kanboard Tickets", "states": ["Ready"]}
+  ]
+}`
+
 type testWatcher struct {
 	w      *watcher
 	kbS    *kbServer
@@ -211,6 +239,7 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 		{"id": 6, "title": "Review"},
 		{"id": 7, "title": "Work in progress"},
 		{"id": 8, "title": "Done"},
+		{"id": 9, "title": "Ready"},
 	}
 	recorder := &logRecorder{}
 	w := &watcher{
@@ -261,6 +290,62 @@ func (tw *testWatcher) setRunPhase(t *testing.T, ticket string, phase criteriav1
 	if err := tw.client.Status().Update(context.Background(), &run); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// addRun pre-creates a settled CriteriaRun for a ticket, shaped the way an
+// earlier poll's run looks to a later poll: kanboard source label, ticket
+// label, and the admission class stamped on its spec workflow. The name
+// must be timestamp-shaped ("kb-<id>-<unix>") because runs created later
+// by the watcher win the newest-run tiebreak by name when creation
+// timestamps are equal (the fake client leaves them zero).
+func (tw *testWatcher) addRun(t *testing.T, name, ticket, class string, phase criteriav1.CriteriaRunPhase) {
+	t.Helper()
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "criteria-jobs",
+			Labels: map[string]string{
+				"ticket":                         strings.ToLower(ticket),
+				"app.kubernetes.io/managed-by":   "criteria-kanboard-watcher",
+				"criteria.brokenbots.dev/source": "kanboard",
+			},
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: ticket,
+			RepoURL:  "brokenbots/workflow-example",
+		},
+	}
+	if class != "" {
+		run.Spec.Workflow = &criteriav1.RunWorkflow{Name: "kanboard-triage", Class: class}
+	}
+	require.NoError(t, tw.client.Create(context.Background(), run))
+	run.Status.Phase = phase
+	require.NoError(t, tw.client.Status().Update(context.Background(), run))
+}
+
+// runByName fetches one run by name (a ticket can carry several runs —
+// the triage run handing off to the dev run — so setRunPhase's
+// single-run-per-ticket assumption does not hold on the chain).
+func (tw *testWatcher) runByName(t *testing.T, name string) *criteriav1.CriteriaRun {
+	t.Helper()
+	list := &criteriav1.CriteriaRunList{}
+	if err := tw.client.List(context.Background(), list, client.InNamespace("criteria-jobs")); err != nil {
+		t.Fatal(err)
+	}
+	for i := range list.Items {
+		if list.Items[i].Name == name {
+			return &list.Items[i]
+		}
+	}
+	t.Fatalf("run %q not found", name)
+	return nil
+}
+
+func (tw *testWatcher) setRunPhaseByName(t *testing.T, name string, phase criteriav1.CriteriaRunPhase) {
+	t.Helper()
+	run := tw.runByName(t, name)
+	run.Status.Phase = phase
+	require.NoError(t, tw.client.Status().Update(context.Background(), run))
 }
 
 func TestPollFiresOnTriggerTaggedBacklogTask(t *testing.T) {
@@ -325,6 +410,128 @@ func TestFailedRunMovesTaskToReview(t *testing.T) {
 	tw.pollOnce(t)
 
 	assert.Equal(t, 6, tw.kbS.taskColumn(14), "failed run moves task to Review")
+}
+
+// TestTriageRouteStampsTriageClass pins the fixture contract the KB-9
+// regression relies on: the triage route's workflow class reaches the run
+// spec, so the reconcile can tell a triage settle from a dev settle.
+func TestTriageRouteStampsTriageClass(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(19, 5, "k8s-run") // Backlog
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	require.NotNil(t, runs[0].Spec.Workflow)
+	assert.Equal(t, "kanboard-triage-wf", runs[0].Spec.Workflow.Name)
+	assert.Equal(t, criteriav1.RunClassTriage, runs[0].Spec.Workflow.Class)
+}
+
+// KB-9 regression: a triage run succeeded and the triage workflow's
+// set_ready_state moved the ticket to the develop route's trigger column.
+// Before the fix, the watcher's next poll reconciled Ready -> Done before
+// the firing loop ran, and the develop route never fired (observed live on
+// KB-2: triage kb-2-1790274734 succeeded, the watcher moved the ticket to
+// Done at 18:33:13, and no develop run fired until an operator moved the
+// ticket back). The next poll must fire the develop run and leave the
+// ticket in Ready.
+func TestTriageSucceededFiresDevelopFromReady(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(20, 9, "k8s-run", "internal-reproduced") // Ready, armed bypass ticket
+	tw.addRun(t, "kb-20-0000000001", "KB-20", criteriav1.RunClassTriage, criteriav1.PhaseSucceeded)
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 9, tw.kbS.taskColumn(20),
+		"triage-class success must not stamp Done over the develop trigger column")
+	runs := tw.runs(t)
+	require.Len(t, runs, 2, "develop run must fire within one poll of the ticket landing in Ready")
+	var dev *criteriav1.CriteriaRun
+	for i := range runs {
+		if runs[i].Name != "kb-20-0000000001" {
+			dev = &runs[i]
+		}
+	}
+	require.NotNil(t, dev)
+	require.NotNil(t, dev.Spec.Workflow)
+	assert.Equal(t, "kanboard-develop-wf", dev.Spec.Workflow.Name, "the run fired from Ready is the develop route")
+}
+
+// Full KB-9 chain: triage succeeded and the ticket is armed in Ready ->
+// the develop route fires within one poll -> the live develop run parks
+// the ticket in the work column -> only the develop run's own success
+// stamps Done. The second Succeeded (develop) must reconcile even though
+// the triage settle already recorded Succeeded — the reconcile gate tracks
+// run identity, not just the phase value.
+func TestTriageSucceededThenDevelopSucceedsStampsDone(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(21, 9, "k8s-run", "internal-reproduced") // Ready, armed bypass ticket
+	tw.addRun(t, "kb-21-0000000001", "KB-21", criteriav1.RunClassTriage, criteriav1.PhaseSucceeded)
+
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 2, "develop fires within one poll of Ready")
+	assert.Equal(t, 9, tw.kbS.taskColumn(21), "develop fire is not pre-empted by a Done reconcile")
+	var devName string
+	for _, r := range tw.runs(t) {
+		if r.Name != "kb-21-0000000001" {
+			devName = r.Name
+		}
+	}
+	require.NotEmpty(t, devName, "the watcher-created run is the develop run")
+
+	// Next poll: the develop run is in flight; the ticket parks in the work column.
+	tw.pollOnce(t)
+	assert.Equal(t, 7, tw.kbS.taskColumn(21), "live develop run parks the ticket in the work column")
+	assert.Len(t, tw.runs(t), 2, "no duplicate run while the develop run is live")
+
+	// The develop run settles: only now does the ticket stamp Done.
+	tw.setRunPhaseByName(t, devName, criteriav1.PhaseSucceeded)
+	tw.pollOnce(t)
+
+	assert.Equal(t, 8, tw.kbS.taskColumn(21), "only a dev-class success stamps Done")
+	assert.Len(t, tw.runs(t), 2, "a settled ticket in Done fires nothing (no route on Done)")
+}
+
+// A legacy run predating class stamping (empty spec workflow class) keeps
+// the old terminal flow: success stamps Done.
+func TestLegacyRunWithoutClassStampsDone(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(22, 9, "k8s-run", "internal-reproduced")
+	tw.addRun(t, "kb-22-0000000001", "KB-22", "", criteriav1.PhaseSucceeded)
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 8, tw.kbS.taskColumn(22), "pre-CRI-242 runs (empty class) keep the Done stamp")
+}
+
+// A failed triage-class run still parks the ticket in Review for a human —
+// the triage guard only changes the success path.
+func TestFailedTriageRunMovesTaskToReview(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(23, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.addRun(t, "kb-23-0000000001", "KB-23", criteriav1.RunClassTriage, criteriav1.PhaseFailed)
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 6, tw.kbS.taskColumn(23), "failed triage run moves task to Review")
+}
+
+// runNewer picks a ticket's most recent run by creation time with the name
+// as the deterministic tiebreak.
+func TestRunNewer(t *testing.T) {
+	early := metav1.NewTime(time.Now().Add(-time.Hour))
+	late := metav1.NewTime(time.Now())
+	older := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-1-100", CreationTimestamp: early}}
+	newer := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-1-200", CreationTimestamp: late}}
+	assert.True(t, runNewer(newer, older), "later creation timestamp sorts newer")
+	assert.False(t, runNewer(older, newer), "earlier creation timestamp sorts older")
+
+	sameTime := metav1.NewTime(time.Now())
+	a := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-1-100", CreationTimestamp: sameTime}}
+	b := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-1-200", CreationTimestamp: sameTime}}
+	assert.True(t, runNewer(b, a), "equal timestamps tiebreak by name (b > a)")
+	assert.False(t, runNewer(a, b), "equal timestamps tiebreak by name (a < b)")
 }
 
 func TestNoRouteFailsClosed(t *testing.T) {
