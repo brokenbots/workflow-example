@@ -186,8 +186,11 @@ func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
 	assert.Equal(t, jobbuilder.PerScopeAdapterPodName(run, "shell", "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"), pods[0].Name)
 
 	container := pods[0].Spec.Containers[0]
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", container.Image,
-		"the image must resolve to an existing registry image for the adapter KIND, never criteria-adapter-intake")
+	// CRI-214 M14: the event carries a digest but no image_reference
+	// (pre-M14 engine shape), so the image resolves from the configured
+	// defaults.
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-3", container.Image,
+		"the image must resolve from the configured defaults for the adapter KIND, never criteria-adapter-intake")
 	assert.Equal(t, "shell", pods[0].Labels["criteria.brokenbots.dev/adapter-kind"])
 
 	envNames := make(map[string]string)

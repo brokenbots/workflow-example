@@ -110,8 +110,11 @@ func TestBuildPerScopeAdapterPodResolvesKindFromAdapterType(t *testing.T) {
 
 	container := pod.Spec.Containers[0]
 	assert.Equal(t, "adapter-shell", container.Name)
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", container.Image,
-		"the per-scope pod image must resolve to an existing registry image for the adapter KIND")
+	// CRI-214 M14: the event carries neither a digest nor an
+	// image_reference, so the image resolves from the operator's configured
+	// registry/tag defaults.
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-3", container.Image,
+		"the per-scope pod image must resolve from the configured registry/tag defaults for the adapter KIND")
 	assert.Equal(t, "shell", pod.Labels["criteria.brokenbots.dev/adapter-kind"])
 
 	envNames := make(map[string]string)
@@ -178,8 +181,10 @@ func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
 	require.NotNil(t, pod)
 
 	container := pod.Spec.Containers[0]
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", container.Image,
-		"a shell/intake provision_wanted must resolve to the shell adapter image, not criteria-adapter-intake")
+	// CRI-214 M14: the pre-M14 emission carries a digest but no
+	// image_reference, so the image resolves from the configured defaults.
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-3", container.Image,
+		"a shell/intake provision_wanted without image_reference must resolve to the configured shell adapter image, not criteria-adapter-intake")
 	assert.NotContains(t, container.Image, "criteria-adapter-intake",
 		"no code path may reference a criteria-adapter-intake image for this declaration")
 	assert.Equal(t, "shell", pod.Labels["criteria.brokenbots.dev/adapter-kind"])

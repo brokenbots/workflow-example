@@ -101,7 +101,7 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 				},
 			},
 			Containers: []corev1.Container{
-				perScopeAdapterContainer(run, scope, plan, fmt.Sprintf("adapter-%s", kind), runnerIP),
+				perScopeAdapterContainer(run, defaults, scope, plan, fmt.Sprintf("adapter-%s", kind), runnerIP),
 			},
 			Volumes: plan.adapterVolumes(dataPVC, includeData),
 		},
@@ -126,8 +126,11 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 // plus a routable CRITERIA_REMOTE_HOST dial address built from the resolved
 // runner pod IP and the event's shim listen port — while pre-eae0181 events
 // keep the CRITERIA_REMOTE_TOKEN_FILE file surface and the discovery-file
-// host polling.
-func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.LifecycleEvent, plan *workflowPlan, name, runnerIP string) corev1.Container {
+// host polling. The container's image resolves per member (CRI-214 M14):
+// the workflow object's adapterImages override, else the member event's
+// digest-verified image_reference, else the operator's registry/tag
+// defaults.
+func perScopeAdapterContainer(run *criteriav1.CriteriaRun, defaults Defaults, scope events.LifecycleEvent, plan *workflowPlan, name, runnerIP string) corev1.Container {
 	kind := adapterKind(scope)
 
 	digest := scope.Digest
@@ -180,7 +183,7 @@ func perScopeAdapterContainer(run *criteriav1.CriteriaRun, scope events.Lifecycl
 
 	return corev1.Container{
 		Name:            name,
-		Image:           adapterImage(kind),
+		Image:           resolveAdapterImage(plan, scope, kind, defaults),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		SecurityContext: restrictedContainerSecurityContext(),
 		Command:         []string{"/opt/criteria-pod-adapter/adapter.sh"},
