@@ -355,6 +355,88 @@ func TestBuildAll(t *testing.T) {
 	}
 }
 
+// KB-5: the legacy (run-duration) adapter Job fan-out derives its kinds
+// from the run's workflow record — the stamped workflow object's
+// adapterImages keys — instead of the built-in {shell, copilot} list, so a
+// third kind provisions its adapter Job without an operator recompile.
+func TestBuildAllDerivesAdapterKindsFromWorkflow(t *testing.T) {
+	wf := &criteriav1.RunWorkflow{
+		Name: "linear-intake-v1",
+		Type: "image",
+		AdapterImages: map[string]string{
+			"shell":   "localhost:5000/criteria-adapter-shell:k8s-3",
+			"copilot": "localhost:5000/criteria-adapter-copilot:k8s-3",
+			"noop":    "localhost:5000/criteria-adapter-noop:k8s-3",
+		},
+	}
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb5-kinds", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "KB-5",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			Workflow: wf,
+		},
+	}
+
+	jobs := jobbuilder.BuildAll(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	require.Len(t, jobs, 4, "the runner plus one adapter Job per recorded kind")
+
+	for _, kind := range []string{"shell", "copilot", "noop"} {
+		adapter := findJob(t, jobs, "kb5-kinds-adapter-"+kind)
+		assert.Equal(t, "adapter", adapter.Spec.Template.Labels["criteria.brokenbots.dev/role"])
+		assert.Equal(t, kind, adapter.Spec.Template.Labels["criteria.brokenbots.dev/adapter-kind"])
+		assert.Equal(t, "adapter-"+kind, adapter.Spec.Template.Spec.Containers[0].Name)
+		assert.Equal(t, "criteria-jobs", adapter.Namespace)
+	}
+
+	// The recorded kind's image resolves from the workflow object's
+	// adapterImages override (CRI-214 M14).
+	noop := findJob(t, jobs, "kb5-kinds-adapter-noop")
+	assert.Equal(t, "localhost:5000/criteria-adapter-noop:k8s-3", noop.Spec.Template.Spec.Containers[0].Image,
+		"a kind beyond {shell, copilot} must build its adapter Job from the declared image without an operator recompile")
+
+	// Per-scope sessions are unaffected: no legacy fan-out at all.
+	perScope := *run
+	perScope.Spec.PerScopeSessions = true
+	assert.Len(t, jobbuilder.BuildAll(&perScope, jobbuilder.Defaults{DataPVC: "criteria-data"}), 1,
+		"per-scope sessions must keep returning only the runner Job")
+}
+
+// KB-5: a stamped workflow that records no adapterImages — and a run with
+// no workflow object at all — keeps the built-in {shell, copilot} fan-out
+// and its KB-3 volume shape (data + scripts only, no CSI volumes).
+func TestBuildAllWithoutRecordedKindsKeepsDefaultFanOut(t *testing.T) {
+	defaults := jobbuilder.Defaults{DataPVC: "criteria-data"}
+
+	workflowless := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb5-no-wf"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "KB-5",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+	jobs := jobbuilder.BuildAll(workflowless, defaults)
+	require.Len(t, jobs, 3)
+	for _, kind := range []string{"shell", "copilot"} {
+		adapter := findJob(t, jobs, "kb5-no-wf-adapter-"+kind)
+		assert.Len(t, adapter.Spec.Template.Spec.Volumes, 2, "legacy adapter volumes stay data + scripts")
+		for _, v := range adapter.Spec.Template.Spec.Volumes {
+			assert.Nil(t, v.CSI, "adapter volume %q must not be CSI without a declaration", v.Name)
+		}
+	}
+
+	stamped := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "kb5-no-images", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "KB-5",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+			Workflow: &criteriav1.RunWorkflow{Name: "linear-intake-v1", Type: "image"},
+		},
+	}
+	assert.Len(t, jobbuilder.BuildAll(stamped, defaults), 3,
+		"a workflow without adapterImages must keep the built-in {shell, copilot} fan-out")
+}
+
 func TestRunnerUsesPerTicketRepoClone(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-99"},
