@@ -3,6 +3,7 @@ package kanboard
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -104,12 +105,14 @@ func newFakeServer(t *testing.T) *fakeServer {
 				resp["result"] = task
 			}
 		case "getTaskTags":
+			// Real Kanboard shape: task_id-only params, result is a map of
+			// tag-link-id -> tag name.
 			tid := params["task_id"].(int)
-			tags := []interface{}{}
-			for _, name := range s.tags[tid] {
-				tags = append(tags, map[string]interface{}{"name": name})
+			tagMap := map[string]interface{}{}
+			for i, name := range s.tags[tid] {
+				tagMap[fmt.Sprintf("%d", 1000+tid*10+i)] = name
 			}
-			resp["result"] = tags
+			resp["result"] = tagMap
 		case "moveTaskPosition":
 			tid := params["task_id"].(int)
 			if task, ok := s.tasks[tid]; ok {
@@ -196,8 +199,9 @@ func TestGetAllTasksHydratesNamesAndTags(t *testing.T) {
 	for _, task := range tasks {
 		byID[task.ID] = task
 	}
+	// fetchTagNames sorts tag names (deterministic map iteration order).
 	if got := byID[10]; got.ProjectName != "Tickets" || got.ColumnName != "Backlog" ||
-		len(got.Tags) != 2 || got.Tags[0] != "k8s-run" {
+		len(got.Tags) != 2 || got.Tags[0] != "bug" || got.Tags[1] != "k8s-run" {
 		t.Errorf("task 10 hydration wrong: %+v", got)
 	}
 	if got := byID[11]; got.ColumnName != "Ready" || len(got.Tags) != 0 {

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,24 @@ func New(baseURL, appToken string) *Client {
 		AppToken: appToken,
 		HTTP:     &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// fetchTagNames returns a task's tag names. Kanboard's getTaskTags takes
+// only task_id and returns a map keyed by tag-link id with tag names as
+// values; the names are extracted in the JSON-decoded order of the map (Go
+// sorts map keys when encoding JSON, so the order is deterministic).
+func (c *Client) fetchTagNames(ctx context.Context, taskID int, out *[]string) error {
+	var raw map[string]string
+	if err := c.call(ctx, "getTaskTags", map[string]interface{}{"task_id": taskID}, &raw); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(raw))
+	for _, name := range raw {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	*out = names
+	return nil
 }
 
 // rpcRequest is the JSON-RPC 2.0 request envelope.
@@ -197,15 +216,14 @@ func (c *Client) GetAllTasks(ctx context.Context, projectID int) ([]Task, error)
 			SwimlaneID:  t.SwimlaneID,
 			OwnerID:     t.OwnerID,
 		}
-		var tags []struct {
-			Name string `json:"name"`
-		}
-		if err := c.call(ctx, "getTaskTags", map[string]interface{}{"project_id": task.ProjectID, "task_id": task.ID}, &tags); err != nil {
+		// Kanboard's getTaskTags takes ONLY task_id and returns a map of
+		// tag-link-id -> tag name (verified against 1.2.54: passing
+		// project_id too fails with -32602 "Too many arguments").
+		var tagNames []string
+		if err := c.fetchTagNames(ctx, task.ID, &tagNames); err != nil {
 			return nil, err
 		}
-		for _, tg := range tags {
-			task.Tags = append(task.Tags, tg.Name)
-		}
+		task.Tags = tagNames
 		out = append(out, task)
 	}
 	return out, nil
@@ -315,16 +333,10 @@ func (c *Client) columnNames(ctx context.Context, projectID int) (map[int]string
 	if err != nil {
 		return nil, err
 	}
-	names := make(map[int]string, len(cols))
-	for title, id := range cols {
-		names[id] = title
-	}
-	// Reuse the same map shape as GetColumns but inverted.
 	out := make(map[int]string, len(cols))
 	for title, id := range cols {
 		out[id] = title
 	}
-	_ = names
 	return out, nil
 }
 
@@ -342,13 +354,10 @@ func (c *Client) GetTask(ctx context.Context, taskID int) (*Task, error) {
 		SwimlaneID: t.SwimlaneID,
 		OwnerID:    t.OwnerID,
 	}
-	var tags []struct {
-		Name string `json:"name"`
-	}
-	if err := c.call(ctx, "getTaskTags", map[string]interface{}{"project_id": task.ProjectID, "task_id": task.ID}, &tags); err == nil {
-		for _, tg := range tags {
-			task.Tags = append(task.Tags, tg.Name)
-		}
+	// Same API shape as GetAllTasks hydration (map of tag-link-id -> name).
+	var tagNames []string
+	if err := c.fetchTagNames(ctx, task.ID, &tagNames); err == nil {
+		task.Tags = tagNames
 	}
 	return &task, nil
 }

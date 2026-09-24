@@ -22,16 +22,17 @@ rpc() {
         "$KANBOARD_URL"
 }
 
-current=$(rpc getTaskTags "{\"project_id\":$project_id,\"task_id\":$task_id}")
-# getTaskTags returns the raw result [{name}]; unwrap .result before mapping.
-current_tags=$(printf '%s' "$current" | jq -c '.result')
+# getTaskTags takes ONLY task_id (project_id too fails with -32602) and
+# returns a map {tag_link_id: tag_name}; unwrap and normalize to names.
+current=$(rpc getTaskTags "{\"task_id\":$task_id}")
+current_tags=$(printf '%s' "$current" | jq -c '[.result[]]')
 
-if printf '%s' "$current_tags" | jq -e --arg wanted "$criteria_value_3" 'map(.name) | index($wanted)' >/dev/null; then
+if printf '%s' "$current_tags" | jq -e --arg wanted "$criteria_value_3" 'index($wanted)' >/dev/null; then
     echo "task already carries $criteria_value_3; no re-arm write needed"
     exit 0
 fi
 
-tags=$(printf '%s' "$current_tags" | jq -c --arg arm "$criteria_value_3" 'map(.name) + [$arm] | unique')
+tags=$(printf '%s' "$current_tags" | jq -c --arg arm "$criteria_value_3" '. + [$arm] | unique')
 
 tag_params=$(jq -n --argjson project_id "$project_id" --arg tag "$criteria_value_3" '{project_id:$project_id,tag:$tag}')
 rpc createTag "$tag_params" >/dev/null

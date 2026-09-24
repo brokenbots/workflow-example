@@ -337,8 +337,9 @@ class Handler(BaseHTTPRequestHandler):
                 json.dump(tasks, open(TASKS_FILE, "w"))
             resp = {"result": cfg.get("mutation_success", True)}
         elif method == "getTaskTags":
+            # Real Kanboard shape: {tag_link_id: tag_name} map.
             tasks = json.load(open(TASKS_FILE))
-            resp = {"result": tasks["tags"]}
+            resp = {"result": {str(1000 + i): t["name"] for i, t in enumerate(tasks["tags"])}}
         elif method == "createTag":
             resp = {"result": cfg.get("tag_id", 7)}
         elif method == "getColumns":
@@ -404,7 +405,9 @@ cp "$TREE_ROOT/tests/fixtures/task_tagged.json" "$run_dir/ticket.json"
 
 # Seed the mock's task/tag state; the fixture is the fetch-time snapshot, the
 # mock is the API truth.
-# getTaskTags returns [{name}]; normalize string seeds to that shape.
+# Task-tag state in the mock mirrors the real system: getTaskTags serves
+# {tag_link_id: name}; setTaskTags accepts [{name}...]. The fixture envelope
+# stores tags as [{name}].
 seed() {
     jq -n --argjson fixture "$(cat "$TREE_ROOT/tests/fixtures/task_tagged.json")" \
         --argjson api_tags "$1" \

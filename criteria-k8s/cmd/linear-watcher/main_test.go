@@ -125,8 +125,8 @@ type linearServer struct {
 	// rejection instead of its normal response: HTTP 429 (with an optional
 	// Retry-After header) or a 200 GraphQL RATELIMITED error carrying a
 	// rateLimitResult duration in milliseconds.
-	requests            int
-	queriesServed       []string
+	requests      int
+	queriesServed []string
 	// timestamps and rejected record, per request, when it was served and
 	// whether it got the rate-limit rejection — the back-off cadence test
 	// (CRI-252) asserts when the watcher actually re-issues Linear

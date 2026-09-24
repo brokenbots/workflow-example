@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,12 +126,13 @@ func newKbServer(t *testing.T) *kbServer {
 		case "getTask":
 			resp["result"] = s.tasks[intParam("task_id")]
 		case "getTaskTags":
+			// Real Kanboard shape: task_id-only params, map result.
 			tid := intParam("task_id")
-			tags := []interface{}{}
-			for _, name := range s.tags[tid] {
-				tags = append(tags, map[string]interface{}{"name": name})
+			tagMap := map[string]interface{}{}
+			for i, name := range s.tags[tid] {
+				tagMap[fmt.Sprintf("%d", 1000+tid*10+i)] = name
 			}
-			resp["result"] = tags
+			resp["result"] = tagMap
 		case "moveTaskPosition":
 			tid := intParam("task_id")
 			if task, ok := s.tasks[tid]; ok {
