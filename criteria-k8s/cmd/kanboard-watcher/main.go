@@ -276,8 +276,14 @@ func (w *watcher) poll(ctx context.Context) error {
 		// ungrouped tags as overrides.
 		tagGroups := map[string]string{}
 		for _, tag := range task.Tags {
-			if tag == w.triggerTag {
-				continue // the gate tag never names a workflow
+			// Routing-signal tags never name a workflow: the trigger gate
+			// tag, and internal-reproduced — the triage bypass signal the
+			// kanboard_triage_v1 gate reads (Kanboard analogue of the Linear
+			// internal-reproduced label). Treating it as a workflows-group
+			// member made Resolve fail closed (ErrUnknownWorkflow) and the
+			// watcher never fired any bypass-tagged task.
+			if tag == w.triggerTag || tag == "internal-reproduced" {
+				continue
 			}
 			tagGroups[tag] = w.workflowsTagGroup
 		}
