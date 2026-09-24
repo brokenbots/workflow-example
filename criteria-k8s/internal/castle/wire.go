@@ -68,6 +68,11 @@ func lifecycleFromEnvelope(env *v1.Envelope) (events.LifecycleEvent, bool) {
 	ev.EnvironmentName = dataString(data, "environment_name")
 	ev.Environment = events.EnvironmentIdentity(ev.EnvironmentType, ev.EnvironmentName)
 	ev.Digest = dataString(data, "digest")
+	// The pinned adapter image reference rides provision payload.data from
+	// runner commit 4079d836 (CRI-214 M14): the jobbuilder prefers it for
+	// adapter pods once the event's digest is present. Empty on older
+	// engines, which resolve from configured defaults.
+	ev.ImageReference = dataString(data, "image_reference")
 	ev.ShimAddress = dataString(data, "shim_listen_address", "shim_address")
 	ev.TokenFile = dataString(data, "token_ref", "token_file")
 	// The accept token rides provision payload.data from runner commit

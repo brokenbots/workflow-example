@@ -123,6 +123,71 @@ func TestLifecycleFromEnvelopeResolvesAdapterType(t *testing.T) {
 	assert.Equal(t, parsed[0], got, "castle wire conversion must match the file parser on the v0.5.22 emission")
 }
 
+// CRI-214 M14 (runner 4079d836): the castle conversion must carry
+// image_reference, the lockfile-pinned adapter image the engine publishes on
+// provision_wanted payload.data. A conversion that drops it silently wedges
+// per-scope pods back on the operator's registry/tag defaults.
+func TestLifecycleFromEnvelopeResolvesImageReference(t *testing.T) {
+	data := mustStruct(t, map[string]any{
+		"adapter":             "intake",
+		"adapter_type":        "shell",
+		"digest":              "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		"image_reference":     "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
+		"scope_instance_id":   "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
+		"shim_listen_address": "[::]:7778",
+		"token_ref":           "/data/.criteria/runs/cri-140/token",
+	})
+	env := &v1.Envelope{
+		SchemaVersion: 1,
+		RunId:         "CRI-140",
+		Seq:           1,
+		Payload: &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{
+			Adapter: "intake",
+			Kind:    "adapter.lifecycle.provision_wanted",
+			Data:    data,
+		}},
+	}
+
+	got, ok := lifecycleFromEnvelope(env)
+	require.True(t, ok)
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", got.ImageReference,
+		"image_reference must survive the envelope conversion verbatim")
+	assert.Equal(t, "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635", got.Digest)
+
+	// Parity with the file parser over the equivalent emission.
+	parsed, err := events.ParseLifecycleEventsBytes([]byte(`{"payload_type":"AdapterEvent","run_id":"CRI-140","payload":{"adapter":"intake","kind":"adapter.lifecycle.provision_wanted","data":{"adapter":"intake","adapter_type":"shell","digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635","image_reference":"localhost:5000/criteria-adapter-shell:k8s-0.5.4-2","scope_instance_id":"9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46","shim_listen_address":"[::]:7778","token_ref":"/data/.criteria/runs/cri-140/token"}}}`))
+	require.NoError(t, err)
+	require.Len(t, parsed, 1)
+	assert.Equal(t, parsed[0], got, "castle wire conversion must match the file parser on the M14 emission")
+}
+
+// A pre-M14 provision_wanted envelope (no image_reference key) keeps
+// ImageReference empty: the jobbuilder then resolves from configured
+// defaults instead of synthesizing a registry path.
+func TestLifecycleFromEnvelopeWithoutImageReferenceStaysEmpty(t *testing.T) {
+	data := mustStruct(t, map[string]any{
+		"adapter":           "intake",
+		"adapter_type":      "shell",
+		"digest":            "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		"scope_instance_id": "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46",
+	})
+	env := &v1.Envelope{
+		SchemaVersion: 1,
+		RunId:         "CRI-140",
+		Seq:           1,
+		Payload: &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{
+			Adapter: "intake",
+			Kind:    "adapter.lifecycle.provision_wanted",
+			Data:    data,
+		}},
+	}
+
+	got, ok := lifecycleFromEnvelope(env)
+	require.True(t, ok)
+	assert.Empty(t, got.ImageReference,
+		"a pre-M14 emission must not synthesize an image reference")
+}
+
 // A nested released envelope converts to a release event carrying the
 // engine's verbatim adapter name; the client resolves the asymmetry against
 // the provisioned adapter for the scope instance.

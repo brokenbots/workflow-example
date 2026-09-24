@@ -174,3 +174,47 @@ func TestParseLifecycleEventsNestedWithoutAcceptTokenStaysEmpty(t *testing.T) {
 	assert.Empty(t, events[0].AcceptToken,
 		"a pre-eae0181 emission must not synthesize a wire token")
 }
+
+// CRI-214 M14 (runner 4079d836): provision_wanted payload.data carries
+// image_reference, the adapter image reference the workflow lockfile pinned,
+// verbatim. The operator consumes it for adapter pods once the event's
+// digest is present.
+func TestParseLifecycleEventsNestedImageReference(t *testing.T) {
+	payload := `{"payload_type":"AdapterEvent","run_id":"CRI-214","payload":` +
+		`{"kind":"adapter.lifecycle.provision_wanted","data":` +
+		`{"adapter":"intake","adapter_type":"shell",` +
+		`"digest":"sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",` +
+		`"image_reference":"localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",` +
+		`"scope_instance_id":"root","scope_name":"","shim_listen_address":"[::]:7778",` +
+		`"token_ref":"/data/.criteria/runs/cri-214/remote-tokens/root/noop.token",` +
+		`"accept_token":"accept-rotate-1"}}}`
+
+	events, err := ParseLifecycleEventsBytes([]byte(payload))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", events[0].ImageReference,
+		"image_reference rides payload.data verbatim from the lockfile pin")
+	assert.Equal(t, "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635", events[0].Digest,
+		"the digest travels alongside image_reference: only digest-verified references are consumed")
+}
+
+// A provision_wanted emission without image_reference (pre-M14 engines, e.g.
+// v0.5.34 and earlier) must keep ImageReference empty so the operator falls
+// back to its configured registry/tag defaults.
+func TestParseLifecycleEventsNestedWithoutImageReferenceStaysEmpty(t *testing.T) {
+	events, err := ParseLifecycleEventsBytes([]byte(capturedNestedProvisionWanted))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Empty(t, events[0].ImageReference,
+		"a pre-M14 emission must not synthesize an image reference")
+}
+
+// The flat operator shape accepts image_reference on provision_wanted lines,
+// mirroring the nested payload mapping.
+func TestParseLifecycleEventsFlatImageReference(t *testing.T) {
+	input := `{"event":"provision_wanted","run_id":"CRI-42","scope_id":"root","adapter_name":"shell","digest":"abc123","image_reference":"localhost:5000/criteria-adapter-shell:k8s-3"}`
+	events, err := ParseLifecycleEventsBytes([]byte(input))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-3", events[0].ImageReference)
+}
