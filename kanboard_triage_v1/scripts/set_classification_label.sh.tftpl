@@ -15,12 +15,15 @@ task_id="${criteria_value_2#KB-}"
 # setTaskTags replaces the task's whole tag list.
 project_id=$(jq -r '.task.project_id' "$run_dir/ticket.json")
 
-desired=$(printf '%s' "$run_dir/ticket.json" | jq -c \
+# Read the file directly: the printf-pipes-the-path-string form made jq parse
+# the literal filename (exit 5, 'Invalid literal at EOF'), so desired was
+# always empty and setTaskTags received an empty tags value (invalid params).
+desired=$(jq -c \
     --arg desired "$criteria_value_3" \
     --arg conflicting "$criteria_value_4" \
     '[.tags[]?.name
       | select((. | ascii_downcase) != ($desired | ascii_downcase))
-      | select((. | ascii_downcase) != ($conflicting | ascii_downcase))] + [$desired] | unique')
+      | select((. | ascii_downcase) != ($conflicting | ascii_downcase))] + [$desired] | unique' "$run_dir/ticket.json")
 
 rpc() {
     curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
