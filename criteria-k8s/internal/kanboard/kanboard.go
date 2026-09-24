@@ -366,8 +366,9 @@ func (c *Client) GetTask(ctx context.Context, taskID int) (*Task, error) {
 // the workflow-side state moves (the analogue of Linear's set_review_state).
 func (c *Client) MoveTaskToColumn(ctx context.Context, taskID int, columnName string) error {
 	var t struct {
-		ProjectID int `json:"project_id"`
-		ColumnID  int `json:"column_id"`
+		ProjectID  int `json:"project_id"`
+		ColumnID   int `json:"column_id"`
+		SwimlaneID int `json:"swimlane_id"`
 	}
 	if err := c.call(ctx, "getTask", map[string]interface{}{"task_id": taskID}, &t); err != nil {
 		return err
