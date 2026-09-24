@@ -1,4 +1,9 @@
 #!/bin/sh
+# Template inputs (shellquoted): the port dropped linear_triage_v1's two
+# assignment lines, leaving $ticket_id / $intake_root unset under set -u —
+# every fetch_ticket step died in 1ms with 'parameter not set'.
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
 # Fetch a Kanboard task and its comment history into ticket.json.
 # Ported from linear_triage_v1's fetch_ticket.sh.tftpl: the Linear GraphQL
 # issue(id:) lookup becomes Kanboard's getTask + getTaskTags + getAllComments.

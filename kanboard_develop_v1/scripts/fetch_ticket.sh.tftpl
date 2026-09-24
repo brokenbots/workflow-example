@@ -1,4 +1,8 @@
 #!/bin/sh
+# Template inputs (shellquoted): same missing-assignment fix as the triage
+# tree - without these, $ticket_id / $intake_root are unset under set -u.
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
 # Fetch a Kanboard task and its comment history into ticket.json.
 # Ported from linear_triage_v1's fetch_ticket.sh.tftpl: the Linear GraphQL
 # issue(id:) lookup becomes Kanboard's getTask + getTaskTags + getAllComments.
