@@ -42,6 +42,13 @@ images:
   criteriaBase:
     repository: localhost:5000/criteria-base
     tag: dev
+  # Adapter image fallback (CRI-214 M14): the registry host and default tag
+  # for adapter image references the operator composes itself — the fallback
+  # when neither the workflow object's adapterImages override nor the
+  # provision_wanted event's digest-verified image_reference resolves one.
+  adapter:
+    registry: localhost:5000
+    tag: k8s-3
 
 # Operator: reconciles CriteriaRun resources into runner/adapter Jobs and
 # sweeps expired per-ticket artifacts off the data PVC.

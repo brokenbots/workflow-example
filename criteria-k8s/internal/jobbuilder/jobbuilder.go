@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 )
 
 // Labels shared by every child object the operator reconciles. The
@@ -128,22 +129,20 @@ type Defaults struct {
 	// never used by the baked-tree path. Empty falls back to the built-in
 	// criteria-base default.
 	CriteriaBaseImage string
+	// AdapterRegistry is the adapter registry host (CRI-214 M14): the
+	// registry the operator composes fallback adapter image references
+	// from, when neither the workflow object's adapterImages override nor
+	// the event's digest-verified image_reference resolves one. Empty falls
+	// back to the built-in default.
+	AdapterRegistry string
+	// AdapterTag is the default adapter image tag for references the
+	// operator composes itself (CRI-214 M14). Empty falls back to the
+	// built-in default.
+	AdapterTag string
 }
 
 // adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
 var adapterKinds = []string{"shell", "copilot"}
-
-// adapterImage returns the remote adapter image for a given adapter kind.
-func adapterImage(kind string) string {
-	switch kind {
-	case "shell":
-		return "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"
-	case "copilot":
-		return "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"
-	default:
-		return fmt.Sprintf("localhost:5000/criteria-adapter-%s:k8s-3", kind)
-	}
-}
 
 // Build returns the runner Job for a CriteriaRun. It is retained for callers
 // that only need the runner; new reconciler code should prefer BuildAll.
@@ -340,7 +339,6 @@ func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job
 // BuildAdapterJob constructs a dedicated adapter Job for the given kind.
 func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string) *batchv1.Job {
 	jobName := AdapterJobName(run, kind)
-	image := adapterImage(kind)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 
 	labels := baseLabels(run)
@@ -348,6 +346,10 @@ func BuildAdapterJob(run *criteriav1.CriteriaRun, defaults Defaults, kind string
 	labels["criteria.brokenbots.dev/adapter-kind"] = kind
 
 	plan := newWorkflowPlan(run)
+	// Legacy run-duration adapter Jobs have no lifecycle event, so the
+	// image resolves from the workflow object's override and the operator's
+	// configured registry/tag defaults (CRI-214 M14).
+	image := resolveAdapterImage(plan, events.LifecycleEvent{}, kind, defaults)
 
 	hasSecrets := plan.hasSecrets()
 	job := buildJobBase(run, TargetNamespace(run), jobName, labels)

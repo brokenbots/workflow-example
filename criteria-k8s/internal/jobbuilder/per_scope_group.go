@@ -101,7 +101,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 	for _, member := range members {
 		name := uniqueAdapterContainerName(member, usedNames)
 		usedNames[name]++
-		containers = append(containers, perScopeAdapterContainer(run, member, plan, name, runnerIP))
+		containers = append(containers, perScopeAdapterContainer(run, defaults, member, plan, name, runnerIP))
 	}
 
 	pod := &corev1.Pod{

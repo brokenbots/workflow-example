@@ -49,6 +49,10 @@ type workflowPlan struct {
 	volumes []criteriav1.RunWorkflowVolume
 	secrets []criteriav1.RunWorkflowSecret
 	env     map[string]string
+	// adapterImages is the workflow object's per-kind adapter image
+	// override (CRI-214 M14): kind -> full image reference, preferred over
+	// the event's image_reference and the operator's registry/tag defaults.
+	adapterImages map[string]string
 	// runName scopes the same-host affinity labels to this run (CRI-235).
 	runName string
 }
@@ -59,7 +63,17 @@ func newWorkflowPlan(run *criteriav1.CriteriaRun) *workflowPlan {
 	if wf == nil {
 		return nil
 	}
-	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env, runName: run.Name}
+	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env, adapterImages: wf.AdapterImages, runName: run.Name}
+}
+
+// adapterImageOverride returns the workflow object's image override for the
+// adapter kind, or "" when the plan declares none for it. Nil plans (no
+// stamped workflow object) resolve to "".
+func (p *workflowPlan) adapterImageOverride(kind string) string {
+	if p == nil {
+		return ""
+	}
+	return p.adapterImages[kind]
 }
 
 // TargetNamespace resolves the namespace the run's children are created in:

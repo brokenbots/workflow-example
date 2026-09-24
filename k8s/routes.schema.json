@@ -117,6 +117,17 @@
         "env": {
           "$ref": "#/definitions/envMap",
           "description": "Static environment variables set on every run of this workflow."
+        },
+        "adapterImages": {
+          "type": "object",
+          "description": "Per-adapter-kind image references this workflow pins for the operator (CRI-214 M14). Keys are adapter kinds (e.g. shell, copilot); values are full image references, conventionally digest-pinned. The override wins over the provision_wanted event's image_reference and the operator's configured registry/tag defaults.",
+          "propertyNames": {
+            "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^\\S+$"
+          }
         }
       },
       "allOf": [

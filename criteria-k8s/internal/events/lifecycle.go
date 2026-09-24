@@ -49,6 +49,12 @@ type payloadEventData struct {
 	// delivery channel). Runner commits from eae0181 (CRI-236) onward also
 	// carry the raw accept_token; older engines deliver only via files.
 	TokenFile string `json:"token_ref"`
+	// ImageReference is the pinned adapter image reference resolved from
+	// the workflow lockfile (CRI-214 M14, runner commit 4079d836), carried
+	// verbatim on provision_wanted payload.data. Empty on events from
+	// older engines; the operator then resolves from its configured
+	// registry/tag defaults.
+	ImageReference string `json:"image_reference"`
 	// AcceptToken is the engine-minted per-scope accept token (CRI-236,
 	// runner commit eae0181), delivered in provision payload.data. The
 	// operator forwards it to the adapter pod's shim channel directly, so
@@ -90,6 +96,14 @@ type LifecycleEvent struct {
 	// Digest is the pinned lockfile digest for the adapter image, including
 	// the "sha256:" prefix.
 	Digest string `json:"digest,omitempty"`
+
+	// ImageReference is the adapter image reference the workflow lockfile
+	// pinned, carried verbatim on provision_wanted payload.data (CRI-214
+	// M14, runner commit 4079d836). The jobbuilder prefers it for adapter
+	// pods once the event's digest is present, so only digest-verified
+	// references are consumed. Empty on events from older engines, which
+	// fall back to the operator's configured registry/tag defaults.
+	ImageReference string `json:"image_reference,omitempty"`
 
 	// ShimAddress is the runner dial address the adapter should phone home to.
 	ShimAddress string `json:"shim_address,omitempty"`
@@ -219,6 +233,7 @@ func lifecycleEventFromPayload(envelope payloadEnvelope) (LifecycleEvent, bool) 
 		AdapterName:     envelope.Payload.Data.Adapter,
 		AdapterType:     envelope.Payload.Data.AdapterType,
 		Digest:          envelope.Payload.Data.Digest,
+		ImageReference:  envelope.Payload.Data.ImageReference,
 		ShimAddress:     envelope.Payload.Data.ShimAddress,
 		TokenFile:       envelope.Payload.Data.TokenFile,
 		AcceptToken:     envelope.Payload.Data.AcceptToken,

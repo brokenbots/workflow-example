@@ -961,6 +961,12 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 			out.Env[k] = v
 		}
 	}
+	if wf.AdapterImages != nil {
+		out.AdapterImages = make(map[string]string, len(wf.AdapterImages))
+		for k, v := range wf.AdapterImages {
+			out.AdapterImages[k] = v
+		}
+	}
 	if len(wf.Volumes) > 0 {
 		out.Volumes = make([]criteriav1.RunWorkflowVolume, 0, len(wf.Volumes))
 		for _, v := range wf.Volumes {
