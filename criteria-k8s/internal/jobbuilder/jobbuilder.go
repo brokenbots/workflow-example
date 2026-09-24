@@ -4,6 +4,7 @@ package jobbuilder
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -173,8 +174,33 @@ type Defaults struct {
 	LegacySecretVolumes bool
 }
 
-// adapterKinds lists the adapter types that get a dedicated Job per CriteriaRun.
-var adapterKinds = []string{"shell", "copilot"}
+// defaultAdapterKinds is the built-in adapter kind set the legacy
+// (run-duration) adapter Job fan-out provisions when the run's workflow
+// record declares none (KB-5).
+var defaultAdapterKinds = []string{"shell", "copilot"}
+
+// legacyAdapterKinds derives the adapter kinds the legacy (run-duration)
+// adapter Job fan-out provisions for one run (KB-5). A stamped workflow
+// object records its kinds as the keys of adapterImages (CRI-214 M14, the
+// same routes surface that overrides each kind's image), so the fan-out
+// provisions one Job per recorded kind — sorted, for deterministic
+// ordering — and a new kind reaches the legacy path without an operator
+// recompile. Runs without a stamped workflow, or with a workflow that
+// records no adapterImages, keep the built-in {shell, copilot} default.
+// Per-scope sessions never reach this fan-out (BuildAll returns the runner
+// only), so the derivation shapes the legacy non-per-scope path alone.
+func legacyAdapterKinds(run *criteriav1.CriteriaRun) []string {
+	wf := run.Spec.Workflow
+	if wf == nil || len(wf.AdapterImages) == 0 {
+		return defaultAdapterKinds
+	}
+	kinds := make([]string, 0, len(wf.AdapterImages))
+	for kind := range wf.AdapterImages {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
+}
 
 // Build returns the runner Job for a CriteriaRun. It is retained for callers
 // that only need the runner; new reconciler code should prefer BuildAll.
@@ -182,16 +208,19 @@ func Build(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 	return BuildRunnerJob(run, defaults)
 }
 
-// BuildAll returns the runner Job plus one adapter Job per adapter kind. All
-// Jobs are owner-referenced to the CriteriaRun for orphan cleanup. When the
-// run opts into per-scope sessions, only the runner Job is returned; adapter
+// BuildAll returns the runner Job plus one adapter Job per adapter kind.
+// The kinds derive from the run's workflow record (KB-5): a stamped
+// workflow object fans out from its adapterImages keys, while every other
+// run keeps the built-in {shell, copilot} default. All Jobs are
+// owner-referenced to the CriteriaRun for orphan cleanup. When the run
+// opts into per-scope sessions, only the runner Job is returned; adapter
 // pods are reconciled independently from the engine's lifecycle events.
 func BuildAll(run *criteriav1.CriteriaRun, defaults Defaults) []*batchv1.Job {
 	jobs := []*batchv1.Job{BuildRunnerJob(run, defaults)}
 	if run.Spec.PerScopeSessions {
 		return jobs
 	}
-	for _, kind := range adapterKinds {
+	for _, kind := range legacyAdapterKinds(run) {
 		jobs = append(jobs, BuildAdapterJob(run, defaults, kind))
 	}
 	return jobs
