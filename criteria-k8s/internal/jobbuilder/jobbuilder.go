@@ -335,6 +335,11 @@ func buildJobBase(run *criteriav1.CriteriaRun, defaults Defaults, namespace, nam
 // detect a CRITERIA_BASE_IMAGE / DEFAULT_CRITERIA_IMAGE change while a run
 // is in flight, so every image-producing path must resolve through this
 // function.
+//
+// A run whose stamped workflow is type url but that carries no
+// spec.workflowSource never reaches this resolution: admission refuses it
+// fail-closed (KB-6), so the image-mode fallback applies only to genuinely
+// legacy (non-url) runs.
 func ResolveRunnerImage(run *criteriav1.CriteriaRun, defaults Defaults) string {
 	if run.Spec.WorkflowSource != nil {
 		return sourceModeImage(run, defaults)

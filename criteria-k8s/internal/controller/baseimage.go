@@ -162,27 +162,13 @@ func (r *CriteriaRunReconciler) failBaseImageMismatch(ctx context.Context, run *
 // status update, preserving the transition time when the condition is
 // already stamped (a later operator pass must not churn the timestamp).
 func markBaseImageMismatch(update *criteriav1.CriteriaRun, generation int64, pinned, current string) {
-	cond := metav1.Condition{
+	upsertCondition(update, metav1.Condition{
 		Type:               ConditionBaseImageMismatch,
 		Status:             metav1.ConditionTrue,
 		Reason:             ConditionBaseImageMismatch,
 		Message:            fmt.Sprintf("runner image pinned as %q at admission but the operator now resolves %q; the run is failed so the watcher can refire on the current image (CRI-264)", pinned, current),
 		ObservedGeneration: generation,
-	}
-	for i := range update.Status.Conditions {
-		if update.Status.Conditions[i].Type != cond.Type {
-			continue
-		}
-		if update.Status.Conditions[i].Status != cond.Status {
-			cond.LastTransitionTime = metav1.Now()
-		} else {
-			cond.LastTransitionTime = update.Status.Conditions[i].LastTransitionTime
-		}
-		update.Status.Conditions[i] = cond
-		return
-	}
-	cond.LastTransitionTime = metav1.Now()
-	update.Status.Conditions = append(update.Status.Conditions, cond)
+	})
 }
 
 // deleteChildJobs deletes the child Jobs the job builders would reconcile

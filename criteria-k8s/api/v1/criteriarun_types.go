@@ -104,7 +104,9 @@ type RunWorkflow struct {
 	Name string `json:"name"`
 
 	// Type is the workflow source type (ADR-0005 D1): "image" (workflow
-	// baked into the image) or "url" (fetched at run admission).
+	// baked into the image) or "url" (fetched at run admission). The
+	// operator refuses a type "url" run whose spec carries no
+	// workflowSource instead of falling back to the baked image (KB-6).
 	Type string `json:"type"`
 
 	// Namespace is the namespace the workflow's runs are admitted into.

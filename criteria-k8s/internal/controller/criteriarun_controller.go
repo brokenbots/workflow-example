@@ -34,6 +34,10 @@ const (
 	// eventReasonSingleActive is the Kubernetes event reason emitted when
 	// admission refuses a second live CriteriaRun for a ticket (CRI-221).
 	eventReasonSingleActive = "SecondActiveRunForTicket"
+	// eventReasonWorkflowSourceMissing is the Kubernetes event reason
+	// emitted when admission refuses a url-type CriteriaRun whose spec
+	// carries no workflowSource (KB-6).
+	eventReasonWorkflowSourceMissing = "WorkflowSourceMissing"
 )
 
 // CriteriaRunReconciler reconciles a CriteriaRun object into a batch/v1 Job.
@@ -142,6 +146,15 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
+
+	// KB-6: a url-type workflow run carries its workflow source in
+	// spec.workflowSource; without one there is nothing for a source-mode
+	// runner to fetch and the run would silently fall through to the baked
+	// workflow image. Fail closed at admission, before the run occupies an
+	// admission slot or touches child Jobs.
+	if workflowSourceMissing(&run) {
+		return r.refuseMissingWorkflowSource(ctx, &run, logger)
 	}
 
 	// Enqueue the run for (repoURL, class)-keyed admission control
