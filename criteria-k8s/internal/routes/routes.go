@@ -96,6 +96,11 @@ type Workflow struct {
 	Volumes []Volume          `json:"volumes,omitempty"`
 	Secrets []Secret          `json:"secrets,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	// AdapterImages is the per-adapter-kind image override (CRI-214 M14):
+	// adapter kind ("shell", "copilot", ...) to a full image reference the
+	// operator stamps on this workflow's adapter pods, ahead of the event's
+	// image_reference and the configured registry/tag defaults.
+	AdapterImages map[string]string `json:"adapterImages,omitempty"`
 }
 
 // Volume is a storage volume of kind pvc, nfs, or tmp.
@@ -137,9 +142,10 @@ type Route struct {
 }
 
 var (
-	labelRe     = mustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	envNameRe   = mustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	secretKeyRe = mustCompile(`^[A-Za-z0-9._-]+$`)
+	labelRe      = mustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	envNameRe    = mustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	secretKeyRe  = mustCompile(`^[A-Za-z0-9._-]+$`)
+	whitespaceRe = mustCompile(`\s`)
 )
 
 func mustCompile(pattern string) *regexp.Regexp {
@@ -299,6 +305,9 @@ func validateWorkflow(name string, wf Workflow) error {
 	if err := validateEnvMap(wf.Env, "env"); err != nil {
 		return err
 	}
+	if err := validateAdapterImages(wf.AdapterImages); err != nil {
+		return err
+	}
 	seenVolumes := make(map[string]bool, len(wf.Volumes))
 	for i, v := range wf.Volumes {
 		if err := validateVolume(v); err != nil {
@@ -384,6 +393,22 @@ func validateEnvMap(env map[string]string, where string) error {
 		}
 		if value == "" {
 			return fmt.Errorf("%s.%s must be a string value", where, name)
+		}
+	}
+	return nil
+}
+
+// validateAdapterImages checks the workflow's per-kind adapter image
+// override (CRI-214 M14): keys are adapter kinds (DNS-1123 labels, matching
+// the kinds resolved from adapter_type), values are non-empty image
+// references without whitespace.
+func validateAdapterImages(images map[string]string) error {
+	for kind, ref := range images {
+		if !labelRe.MatchString(kind) {
+			return fmt.Errorf("adapterImages has invalid adapter kind %q", kind)
+		}
+		if ref == "" || whitespaceRe.MatchString(ref) {
+			return fmt.Errorf("adapterImages.%s must be a non-empty image reference without whitespace", kind)
 		}
 	}
 	return nil

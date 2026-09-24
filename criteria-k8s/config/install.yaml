@@ -198,6 +198,19 @@ spec:
                       description: Static environment variables set on every run of this workflow.
                       additionalProperties:
                         type: string
+                    adapterImages:
+                      type: object
+                      description: >-
+                        Per-adapter-kind image override (CRI-214 M14):
+                        adapter kind to a full image reference the operator
+                        stamps on this workflow's adapter pods, ahead of the
+                        event's image_reference and the configured
+                        registry/tag defaults.
+                      propertyNames:
+                        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+                      additionalProperties:
+                        type: string
+                        pattern: '^\S+$'
                 workflowSource:
                   type: object
                   description: >-

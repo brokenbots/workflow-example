@@ -137,6 +137,13 @@ type RunWorkflow struct {
 
 	// Env is the workflow's static environment mapping.
 	Env map[string]string `json:"env,omitempty"`
+
+	// AdapterImages is the per-adapter-kind image override (CRI-214 M14)
+	// stamped from the routes workflow object: adapter kind to a full
+	// image reference the jobbuilder prefers for this workflow's adapter
+	// pods, ahead of the event's image_reference and the operator's
+	// configured registry/tag defaults.
+	AdapterImages map[string]string `json:"adapterImages,omitempty"`
 }
 
 // RunWorkflowVolume is a storage volume stamped from the routes ConfigMap.
@@ -337,6 +344,13 @@ func (in *RunWorkflow) DeepCopyInto(out *RunWorkflow) {
 	}
 	if in.Env != nil {
 		in, out := &in.Env, &out.Env
+		*out = make(map[string]string, len(*in))
+		for k, v := range *in {
+			(*out)[k] = v
+		}
+	}
+	if in.AdapterImages != nil {
+		in, out := &in.AdapterImages, &out.AdapterImages
 		*out = make(map[string]string, len(*in))
 		for k, v := range *in {
 			(*out)[k] = v

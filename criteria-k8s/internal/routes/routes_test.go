@@ -747,3 +747,72 @@ func TestParseAndResolveCarryWorkflowClass(t *testing.T) {
 		t.Fatalf("resolved class = %q, want %q", sel.Workflow.Class, ClassTriage)
 	}
 }
+
+// CRI-214 M14: the workflow-library object carries the per-adapter-kind
+// image override. An omitted or populated map validates; bad adapter kinds,
+// empty values, and whitespace in values fail closed.
+func TestValidateAdapterImages(t *testing.T) {
+	for _, images := range []map[string]string{
+		nil,
+		{},
+		{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"},
+		{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.8"},
+		{"intake": "ghcr.io/acme/adapter-intake@sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+	} {
+		p := validPayload()
+		wf := p.WorkflowLibrary["wf-default"]
+		wf.AdapterImages = images
+		p.WorkflowLibrary["wf-default"] = wf
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate(adapterImages=%v) failed: %v", images, err)
+		}
+	}
+
+	cases := []struct {
+		name    string
+		images  map[string]string
+		wantSub string
+	}{
+		{"uppercase kind", map[string]string{"Shell": "i"}, "invalid adapter kind"},
+		{"kind with underscore", map[string]string{"bad_kind": "i"}, "invalid adapter kind"},
+		{"empty value", map[string]string{"shell": ""}, "without whitespace"},
+		{"whitespace in value", map[string]string{"shell": "reg.io/i:tag extra"}, "without whitespace"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPayload()
+			wf := p.WorkflowLibrary["wf-default"]
+			wf.AdapterImages = tc.images
+			p.WorkflowLibrary["wf-default"] = wf
+			err := p.Validate()
+			if err == nil {
+				t.Fatalf("Validate succeeded, want error containing %q", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+// CRI-214 M14: Parse preserves the adapterImages block declared on a
+// workflow-library object and Resolve carries it through, so the watcher
+// stamps the per-kind overrides the routes payload declared.
+func TestParseAndResolveCarryAdapterImages(t *testing.T) {
+	raw := []byte(`{"apiVersion":"criteria.brokenbots.dev/v1","kind":"Routes","workflowLibrary":{"wf-default":{"type":"image","image":"i","namespace":"criteria-jobs","adapterImages":{"shell":"localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}},"routes":[{"name":"intake","workflow":"wf-default","project":"Runner"}]}`)
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	want := "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"
+	if got := p.WorkflowLibrary["wf-default"].AdapterImages["shell"]; got != want {
+		t.Fatalf("parsed adapterImages.shell = %q, want %q", got, want)
+	}
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if got := sel.Workflow.AdapterImages["shell"]; got != want {
+		t.Fatalf("resolved adapterImages.shell = %q, want %q", got, want)
+	}
+}
