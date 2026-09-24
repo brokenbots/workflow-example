@@ -218,18 +218,22 @@ func TestMoveTaskToColumnIdempotent(t *testing.T) {
 	s.tasks[10] = map[string]interface{}{"id": 10, "title": "T", "project_id": 1, "column_id": 5}
 	c := New(s.ts.URL, s.appToken())
 
-	if err := c.MoveTaskToColumn(context.Background(), 10, "Ready"); err != nil {
+	col, err := c.MoveTaskToColumn(context.Background(), 10, "Ready")
+	if err != nil {
 		t.Fatalf("move: %v", err)
+	}
+	if col != 6 {
+		t.Fatalf("move returned col %d, want 6", col)
 	}
 	if s.tasks[10]["column_id"] != 6 {
 		t.Fatalf("task not moved: %+v", s.tasks[10])
 	}
 	// Moving to the current column is a no-op.
-	if err := c.MoveTaskToColumn(context.Background(), 10, "Ready"); err != nil {
+	if _, err := c.MoveTaskToColumn(context.Background(), 10, "Ready"); err != nil {
 		t.Fatalf("idempotent move: %v", err)
 	}
 	// Unknown column fails loudly.
-	if err := c.MoveTaskToColumn(context.Background(), 10, "Nowhere"); err == nil {
+	if _, err := c.MoveTaskToColumn(context.Background(), 10, "Nowhere"); err == nil {
 		t.Fatal("move to unknown column must fail")
 	}
 }

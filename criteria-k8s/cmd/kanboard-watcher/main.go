@@ -227,19 +227,18 @@ func (w *watcher) poll(ctx context.Context) error {
 		return err
 	}
 
-	// Tasks are fetched AFTER the runs index so the firing loop sees the
-	// post-reconciliation column: a task the previous poll's run just
-	// settled (and reconciled to Done/Review) must not fire again off a
-	// stale Backlog snapshot (observed live: the smoke task re-fired after
-	// its first run Succeeded because the stale listing said Backlog).
 	tasks, err := w.kb.GetAllTasks(ctx, w.projectID)
 	if err != nil {
 		return err
 	}
-	// Phase reconciliation: move task columns on phase changes.
-
-	for _, task := range tasks {
-		ticketID := task.Identifier()
+	// Phase reconciliation: move task columns on phase changes, then update
+	// the in-memory task structs with the new column so the firing loop
+	// below sees the post-reconciliation column — a task whose run just
+	// settled must not fire again off its pre-settle column (observed live:
+	// the smoke task re-fired after Succeeded because the listing still
+	// said Backlog).
+	for i := range tasks {
+		ticketID := tasks[i].Identifier()
 		ph, ok := runs[ticketID]
 		if !ok || !ph.anyRun {
 			continue
@@ -247,7 +246,10 @@ func (w *watcher) poll(ctx context.Context) error {
 		if prev, seen := w.lastPhases[ticketID]; seen && prev == ph.latestPhase {
 			continue
 		}
-		w.reconcileTaskColumn(ctx, task, ph)
+		if newCol, changed := w.reconcileTaskColumn(ctx, tasks[i], ph); changed {
+			tasks[i].ColumnID = newCol
+			tasks[i].ColumnName = w.columnNameFor(ctx, tasks[i].ProjectID, newCol)
+		}
 		if w.lastPhases == nil {
 			w.lastPhases = make(map[string]criteriav1.CriteriaRunPhase)
 		}
@@ -373,7 +375,11 @@ type runPhases struct {
 //   - run in flight  -> task to the work column
 //   - run Succeeded  -> task to the done column
 //   - run Failed     -> task to the review column (human)
-func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, ph runPhases) {
+//
+// reconcileTaskColumn returns the task's new Kanboard column id and whether
+// the column changed. The caller updates its in-memory task copy so the
+// firing loop sees the post-reconciliation column.
+func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, ph runPhases) (int, bool) {
 	var target string
 	switch ph.latestPhase {
 	case criteriav1.PhaseSucceeded:
@@ -384,13 +390,15 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 		target = workColumnName
 	}
 	if target == "" || target == task.ColumnName {
-		return
+		return task.ColumnID, false
 	}
-	if err := w.kb.MoveTaskToColumn(ctx, task.ID, target); err != nil {
+	newCol, err := w.kb.MoveTaskToColumn(ctx, task.ID, target)
+	if err != nil {
 		w.log.Error(err, "moving task column", "ticket", task.Identifier(), "target", target)
-		return
+		return task.ColumnID, false
 	}
 	w.log.Info("moved task column", "ticket", task.Identifier(), "from", task.ColumnName, "to", target)
+	return newCol, true
 }
 
 // buildCriteriaRun stamps a CriteriaRun for a Kanboard task. TicketID is
@@ -423,6 +431,20 @@ func (w *watcher) buildCriteriaRun(task kanboard.Task, repoURL string, sel *rout
 		},
 		Spec: spec,
 	}
+}
+
+// columnNameFor resolves a column id to its title via the cached project map.
+func (w *watcher) columnNameFor(ctx context.Context, projectID, columnID int) string {
+	cols, err := w.kb.GetColumns(ctx, projectID)
+	if err != nil {
+		return ""
+	}
+	for title, id := range cols {
+		if id == columnID {
+			return title
+		}
+	}
+	return ""
 }
 
 // convertWorkflow deep-copies a resolved routes workflow object into the

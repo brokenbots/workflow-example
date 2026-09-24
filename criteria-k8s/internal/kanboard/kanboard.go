@@ -364,36 +364,39 @@ func (c *Client) GetTask(ctx context.Context, taskID int) (*Task, error) {
 
 // MoveTaskToColumn moves a task to the named column of its project. It backs
 // the workflow-side state moves (the analogue of Linear's set_review_state).
-func (c *Client) MoveTaskToColumn(ctx context.Context, taskID int, columnName string) error {
+func (c *Client) MoveTaskToColumn(ctx context.Context, taskID int, columnName string) (int, error) {
 	var t struct {
 		ProjectID  int `json:"project_id"`
 		ColumnID   int `json:"column_id"`
 		SwimlaneID int `json:"swimlane_id"`
 	}
 	if err := c.call(ctx, "getTask", map[string]interface{}{"task_id": taskID}, &t); err != nil {
-		return err
+		return 0, err
 	}
 	cols, err := c.GetColumns(ctx, t.ProjectID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	colID, ok := cols[columnName]
 	if !ok {
-		return fmt.Errorf("kanboard column %q not found on project %d", columnName, t.ProjectID)
+		return 0, fmt.Errorf("kanboard column %q not found on project %d", columnName, t.ProjectID)
 	}
 	if colID == t.ColumnID {
-		return nil // already there; idempotent
+		return t.ColumnID, nil // already there; idempotent
 	}
 	// moveTaskPosition requires swimlane_id on 1.2.54 (omitting it fails
 	// with -32602 "Wrong number of arguments"). The task's current swimlane
 	// is preserved.
-	return c.call(ctx, "moveTaskPosition", map[string]interface{}{
+	if err := c.call(ctx, "moveTaskPosition", map[string]interface{}{
 		"project_id":  t.ProjectID,
 		"task_id":     taskID,
 		"column_id":   colID,
 		"position":    1,
 		"swimlane_id": t.SwimlaneID,
-	}, nil)
+	}, nil); err != nil {
+		return 0, err
+	}
+	return colID, nil
 }
 
 // AddComment posts a comment on a task. It backs the workflow-side
