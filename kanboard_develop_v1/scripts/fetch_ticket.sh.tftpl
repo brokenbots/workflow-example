@@ -44,12 +44,12 @@ rpc() {
         "$KANBOARD_URL"
 }
 
-task=$(rpc getTask "{\"task_id\":$task_id}") || {
+task=$(rpc getTask "{\"task_id\":$task_id}" | jq -c ".result // empty") || {
     echo "Kanboard task not found: $task_id" >&2
     exit 1
 }
 tags=$(rpc getTaskTags "{\"project_id\":$(printf '%s' "$task" | jq -r '.project_id'),\"task_id\":$task_id}")
-comments=$(rpc getAllComments "{\"task_id\":$task_id}")
+comments=$(rpc getAllComments "{\"task_id\":$task_id}" | jq -c ".result // []")
 
 jq -n --argjson task "$task" --argjson tags "$tags" --argjson comments "$comments" \
     '{task: $task, tags: $tags, comments: $comments}' > "$run_dir/ticket.json"
