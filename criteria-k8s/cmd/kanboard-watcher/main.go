@@ -282,7 +282,12 @@ func (w *watcher) poll(ctx context.Context) error {
 			// internal-reproduced label). Treating it as a workflows-group
 			// member made Resolve fail closed (ErrUnknownWorkflow) and the
 			// watcher never fired any bypass-tagged task.
-			if tag == w.triggerTag || tag == "internal-reproduced" {
+			if tag == w.triggerTag || tag == "internal-reproduced" ||
+				tag == "Bug" || tag == "Feature" {
+				// Classification tags the workflows themselves set (Bug /
+				// Feature via set_classification_label) are routing signals
+				// too: without the exemption the bypass path's own tag
+				// write makes the next poll fail closed.
 				continue
 			}
 			tagGroups[tag] = w.workflowsTagGroup
