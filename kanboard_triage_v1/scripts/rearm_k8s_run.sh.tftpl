@@ -1,0 +1,40 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+# Ready-for-development re-arm: re-attach the run-arming tag so the
+# development route fires automatically once the task lands in the ready
+# column. Ported from linear_triage_v1's rearm_k8s_run.sh.tftpl. Kanboard's
+# setTaskTags has REPLACE semantics, so the fresh tag set is read from the
+# API (not from ticket.json — setTaskTags in set_classification_label may
+# have rewritten tags earlier in this run) and merged with the arming tag.
+project_id=$(jq -r '.task.project_id' "$run_dir/ticket.json")
+
+rpc() {
+    curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg m "$1" --argjson p "$2" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+        "$KANBOARD_URL"
+}
+
+current=$(rpc getTaskTags "{\"project_id\":$project_id,\"task_id\":$task_id}")
+# getTaskTags returns the raw result [{name}]; unwrap .result before mapping.
+current_tags=$(printf '%s' "$current" | jq -c '.result')
+
+if printf '%s' "$current_tags" | jq -e --arg wanted "$criteria_value_3" 'map(.name) | index($wanted)' >/dev/null; then
+    echo "task already carries $criteria_value_3; no re-arm write needed"
+    exit 0
+fi
+
+tags=$(printf '%s' "$current_tags" | jq -c --arg arm "$criteria_value_3" 'map(.name) + [$arm] | unique')
+
+tag_params=$(jq -n --argjson project_id "$project_id" --arg tag "$criteria_value_3" '{project_id:$project_id,tag:$tag}')
+rpc createTag "$tag_params" >/dev/null
+rpc setTaskTags "{\"project_id\":$project_id,\"task_id\":$task_id,\"tags\":$tags}" | jq -e '.result == true' >/dev/null
+
+echo "task re-armed with $criteria_value_3"

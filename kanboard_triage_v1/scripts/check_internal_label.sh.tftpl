@@ -1,0 +1,20 @@
+#!/bin/sh
+# Deterministic triage bypass gate (internal-reproduced tag). Reads the
+# fetched ticket.json and prints "skip_triage" when the task carries the
+# internal-reproduced tag, "run_triage" otherwise. Exit 0 in both cases —
+# the tag is a routing signal, not an error condition.
+#
+# Ported from linear_triage_v1's check_internal_label.sh.tftpl: Linear's
+# .data.issue.labels.nodes[] becomes the Kanboard envelope's .tags[].name.
+# The printf-not-echo rule carries over verbatim: the router compares
+# output.stdout verbatim, and echo's trailing newline breaks the equality.
+set -eu
+
+TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
+
+if jq -e --arg wanted "internal-reproduced" \
+    '.tags[]? | select(.name == $wanted)' "$TICKET_JSON" > /dev/null 2>&1; then
+    printf '%s' "skip_triage"
+else
+    printf '%s' "run_triage"
+fi

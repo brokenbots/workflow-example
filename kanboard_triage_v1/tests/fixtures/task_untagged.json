@@ -1,0 +1,28 @@
+{
+  "task": {
+    "id": 100,
+    "title": "Broken gate on empty payload",
+    "description": "Steps to reproduce:\n1. Start the runner with an empty payload\n2. Send SIGTERM during startup\n\nObserved: the gate crashes with a nil map read. Expected: the gate rejects the payload with a typed error.",
+    "project_id": 1,
+    "column_id": 5,
+    "swimlane_id": 1,
+    "owner_id": 0,
+    "date_creation": 1790000000,
+    "date_modification": 1790000100
+  },
+  "tags": [],
+  "comments": [
+    {
+      "id": 1,
+      "task_id": 100,
+      "user_id": 2,
+      "comment": "Reproduced on build 2024.1: runner log shows `panic: assignment to entry in nil map` right after the payload handshake."
+    },
+    {
+      "id": 2,
+      "task_id": 100,
+      "user_id": 3,
+      "comment": "Second occurrence after the 2024.2 upgrade; same signature. Attaching run id rr-4821."
+    }
+  ]
+}

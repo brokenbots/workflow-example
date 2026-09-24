@@ -1,0 +1,224 @@
+variable "ticket_id" {
+    description = "Kanboard task identifier to process (e.g. \"KB-10\", as the watcher stamps it; a bare task id \"10\" is also accepted). Doubles as the run's slug: every artifact lives under <intake_root>/<ticket_id>/ and <triage_root>/<ticket_id/>."
+    type        = string
+}
+
+variable "max_agent_visits" {
+    description = "Maximum attempts for the QA-review agent gate."
+    type        = number
+    default     = 2
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for every agent in the composed workflow. Empty preserves each agent's configured URL."
+    type        = string
+    default     = ""
+}
+
+// Defaults to "" rather than being required: it is referenced from adapter
+// config, which must be resolvable at compile time. A required variable leaves
+// it unknown and the compile fails. Always pass it at apply time.
+variable "repo_dir" {
+    description = "Absolute path of the repository's primary working tree. Passed through to qa_triage_v1, which runs all repo operations itself. Empty runs in the process working directory."
+    type        = string
+    default     = ""
+}
+
+// Deliberately OUTSIDE the repository under test, same discipline as
+// qa_triage_v1's triage_root: triage artifacts (ticket JSON, rendered bug
+// report, confirmed workstream, review notes) must never land in the repo's
+// working tree.
+variable "intake_root" {
+    description = "Absolute path under which per-ticket working directories are created (<intake_root>/<ticket_id>/). Must be OUTSIDE the repository under test, and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+variable "kanboard_review_column" {
+    description = "Name of the Kanboard board column the task is moved to whenever the run ends awaiting a human: unusable ticket, invalid finding, ambiguous triage, or a crashed/failed subworkflow. Resolved by name against the task's project (must exist there — e.g. the watcher's review column \"Review\"); an unknown name fails the run loudly."
+    type        = string
+    default     = "Review"
+}
+
+// The ready-for-development terminal of this workflow: set when the finding is
+// confirmed — the internal-reproduced bypass, or a QA verdict the reviewer
+// routed as valid with a published workstream. Reuses the same
+// set_review_state script as the review move, so resolution semantics are
+// identical: resolved by name against the task's project board, unknown name
+// fails loudly.
+variable "kanboard_ready_column" {
+    description = "Name of the Kanboard board column set when the triage finding is confirmed and the task is ready for development. Resolved by name against the task's project; an unknown name fails the step loudly and routes the run to the review column."
+    type        = string
+    default     = "Ready"
+}
+
+variable "kanboard_bug_tag" {
+    description = "Kanboard tag applied when the internal-reproduced bypass confirms the task as a bug. Created on the task's project when missing; the conflicting feature tag is removed and routing continues."
+    type        = string
+    default     = "Bug"
+}
+
+// The development route's arming tag (CRI-240 semantics): the watcher's
+// trigger tag (k8s-run) gates every k8s run, so a confirmed finding must
+// carry it when the task lands in the ready column or the development
+// workflow never fires. Re-attached on the ready_for_development terminal
+// path only — the review path stays manual, the human is the signal. Written
+// as a merge over the task's current tags; created on the project when
+// missing.
+variable "kanboard_run_tag" {
+    description = "Kanboard tag re-attached when the triage finding is confirmed, arming the development route (the watcher's trigger tag). Written as a merge — the task's existing tags are preserved."
+    type        = string
+    default     = "k8s-run"
+}
+
+variable "kanboard_feature_tag" {
+    description = "Kanboard tag removed when the bug tag is applied, so the task never carries a conflicting classification."
+    type        = string
+    default     = "Feature"
+}
+
+// ── Kanboard API ─────────────────────────────────────────────────────────────
+
+variable "kanboard_url" {
+    description = "Kanboard JSON-RPC endpoint (jsonrpc.php, subpath included). All Kanboard I/O goes through it with the app token."
+    type        = string
+    secret      = true
+}
+
+variable "kanboard_app_token" {
+    type   = string
+    secret = true
+}
+
+// ── qa_triage_v1 pass-throughs ───────────────────────────────────────────────
+// Kept in sync with qa_triage_v1/variables.chcl. See that file for the full
+// rationale on each.
+
+variable "triage_root" {
+    description = "qa_triage_v1: root for triage worktrees and the evidence directory. Must be OUTSIDE the repository under test."
+    type        = string
+    default     = "/tmp/criteria-triage"
+}
+
+variable "design_intent_file" {
+    description = "qa_triage_v1: optional absolute path to a markdown file recording deliberate design decisions not documented in the repository. Consulted by the verdict gate. Empty means no such file."
+    type        = string
+    default     = ""
+}
+
+variable "repro_workflow_dir" {
+    description = "qa_triage_v1: optional absolute path to a reproduction workflow supplied with the bug report, executed first and unmodified against every ref under test. Empty means the investigator constructs a reproduction from the report alone."
+    type        = string
+    default     = ""
+}
+
+variable "test_refs" {
+    description = "qa_triage_v1: which refs to test: \"main\", \"stable\", or \"both\" (default). \"both\" is strongly preferred — the delta between refs distinguishes a live bug from a regression from an already-fixed report."
+    type        = string
+    default     = "both"
+}
+
+variable "main_ref" {
+    description = "qa_triage_v1: ref treated as mainline. Fetched before resolution so the tested SHA is the remote's, not a stale local ref."
+    type        = string
+    default     = "origin/main"
+}
+
+variable "stable_ref" {
+    description = "qa_triage_v1: ref treated as latest stable. Empty (the default) resolves to the highest non-prerelease semver tag reachable in the repo."
+    type        = string
+    default     = ""
+}
+
+variable "build_cmd" {
+    description = "qa_triage_v1: command that builds the project inside a triage worktree, run before any reproduction attempt. Empty skips the build step — set this for any compiled project (e.g. 'make build')."
+    type        = string
+    default     = ""
+}
+
+variable "test_cmd" {
+    description = "qa_triage_v1: command that runs the project's test suite inside a triage worktree, used to establish that the tree is otherwise healthy. Empty skips it."
+    type        = string
+    default     = ""
+}
+
+// ── Agent configs ────────────────────────────────────────────────────────────
+
+// Triage reviewer: routes the completed triage run. Deliberately a DIFFERENT
+// model family from qa_triage_v1's writer agents — the value of a review gate
+// is that it does not share the writer's blind spots.
+variable "triage_reviewer" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 20)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "deepseek-v4.1-flash:cloud"
+        max_turns = 20
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Investigator and supervisor are qa_triage_v1's agent configs, passed through
+// unchanged. The block shapes must stay in sync with qa_triage_v1/variables.chcl.
+variable "investigator" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 40)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "glm-5.3-flash:cloud"
+        max_turns = 40
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+variable "supervisor" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 30)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "deepseek-v4.1-flash:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

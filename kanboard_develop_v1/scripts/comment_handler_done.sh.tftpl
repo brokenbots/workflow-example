@@ -1,0 +1,20 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+curl -sS -f \
+    -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg m 'createComment' \
+        --arg body "**Workstream complete.** The implementation handler finished and merged its PR: $criteria_value_3" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:$task_id|tonumber,user_id:0,content:$body}}')" \
+    "$KANBOARD_URL" \
+    | jq -e '.result == true' >/dev/null
+
+echo "comment posted"

@@ -1,0 +1,38 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+# QA persists every human escalation before returning it. Prefer that complete
+# verdict and reasoning over any stale review note (same precedence chain as
+# the Linear original).
+notes="$criteria_value_3/$criteria_value_2/evidence/triage-report.md"
+if [ ! -s "$notes" ]; then
+    notes="$run_dir/review-notes.md"
+fi
+if [ ! -s "$notes" ]; then
+    notes="$criteria_value_3/$criteria_value_2/evidence/summary.md"
+fi
+if [ ! -s "$notes" ]; then
+    echo "needs-human verdict has no persisted reasoning" >&2
+    exit 1
+fi
+
+curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg m 'createComment' \
+        --argjson p "$(jq -n --argjson task_id "$task_id" \
+            --arg content "**Automated QA triage needs a human decision.** Verdict: $criteria_value_4. Triage evidence: $criteria_value_3/$criteria_value_2/evidence/.
+
+$(cat "$notes")" '{task_id:$task_id,user_id:0,content:$content}')" \
+        '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+    "$KANBOARD_URL" \
+    | jq -e '.result == true' >/dev/null
+
+echo "comment posted"

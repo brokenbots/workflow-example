@@ -1,0 +1,53 @@
+#!/bin/sh
+# Fetch a Kanboard task and its comment history into ticket.json.
+# Ported from linear_triage_v1's fetch_ticket.sh.tftpl: the Linear GraphQL
+# issue(id:) lookup becomes Kanboard's getTask + getTaskTags + getAllComments.
+#
+# ticket_id here is the Kanboard TASK ID (a bare integer, e.g. "10"); the
+# KB- prefix is added by the watcher's Identifier() and stripped here so
+# filesystem paths stay plain digits. Output envelope shape is kept analogous
+# to the Linear fetch: {"task": {...}, "tags": [...], "comments": [...]} so
+# downstream scripts read .task.* instead of .data.issue.*.
+set -euo pipefail
+command -v curl jq >/dev/null
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+
+# Accept both "10" and "KB-10" (the watcher's Identifier form).
+case "$ticket_id" in
+    ''|*[!A-Za-z0-9-]*)
+        echo "ticket_id fails identifier validation: '$ticket_id'" >&2
+        exit 1
+        ;;
+esac
+task_id="${ticket_id#KB-}"
+case "$task_id" in
+    ''|*[!0-9]*|*[0-9]*[!0-9]*)
+        echo "ticket_id is not a Kanboard task id: '$ticket_id'" >&2
+        exit 1
+        ;;
+esac
+
+run_dir="$intake_root/$ticket_id"
+if [ ! -d "$run_dir/workstreams" ]; then
+    mkdir -p "$run_dir/workstreams"
+fi
+
+rpc() {
+    curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg m "$1" --argjson p "$2" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+        "$KANBOARD_URL"
+}
+
+task=$(rpc getTask "{\"task_id\":$task_id}") || {
+    echo "Kanboard task not found: $task_id" >&2
+    exit 1
+}
+tags=$(rpc getTaskTags "{\"project_id\":$(printf '%s' "$task" | jq -r '.project_id'),\"task_id\":$task_id}")
+comments=$(rpc getAllComments "{\"task_id\":$task_id}")
+
+jq -n --argjson task "$task" --argjson tags "$tags" --argjson comments "$comments" \
+    '{task: $task, tags: $tags, comments: $comments}' > "$run_dir/ticket.json"
+
+printf '%s' "fetched KB-$task_id: $(printf '%s' "$task" | jq -r '.title') [column: $(printf '%s' "$task" | jq -r '.column_id')]"

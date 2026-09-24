@@ -1,0 +1,35 @@
+// All of this workflow's own work — Kanboard API calls, file guards — happens
+// under intake_root. Nothing here touches the repository directly;
+// workstream_handler_v1 manages its own environment and adapter set as a
+// subworkflow. No agent adapters exist at this level: the confirmed-workstream
+// write/reuse gate is deterministic shell, and the handler brings its own
+// developer/coordinator/reviewer agents.
+environment "remote" "develop" {
+    // Per-scope sessions: each scope gets its own adapter pod, torn down at
+    // scope exit. Requires the run data dir wiring (CRI-128).
+    per_scope_sessions = true
+    working_directory = var.intake_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address = "0.0.0.0:7778"
+    accept_token = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
+    accept_digest_from = "lockfile"
+}
+
+// Deterministic steps. Also carries the Kanboard credential: every Kanboard
+// step runs curl against $KANBOARD_URL (jsonrpc.php) with the app token via
+// HTTP basic auth as user "jsonrpc".
+//
+// KANBOARD_APP_TOKEN and KANBOARD_URL are resolved from the host environment
+// and injected into this adapter's command environment through the secret
+// channel. They are never interpolated into step input.
+adapter "shell" "develop" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.3"
+    environment = remote.develop
+    secrets {
+        KANBOARD_APP_TOKEN = var.kanboard_app_token
+        KANBOARD_URL       = var.kanboard_url
+    }
+}

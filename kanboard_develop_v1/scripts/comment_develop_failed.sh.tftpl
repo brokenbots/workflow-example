@@ -1,0 +1,27 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+if [ -n "$criteria_value_3" ]; then
+    body="**Automated development did not start.** The confirmed workstream could not be produced or the work-state move failed. Workstream: $criteria_value_3. Moving the ticket to $criteria_value_4 for a human. The run record carries the failing step and its error."
+else
+    body="**Automated development did not start.** The confirmed workstream could not be produced or the work-state move failed. Workstream: (none). Moving the ticket to $criteria_value_4 for a human. The run record carries the failing step and its error."
+fi
+
+curl -sS -f \
+    -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg m 'createComment' \
+        --arg body "$body" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:$task_id|tonumber,user_id:0,content:$body}}')" \
+    "$KANBOARD_URL" \
+    | jq -e '.result == true' >/dev/null
+
+echo "comment posted"

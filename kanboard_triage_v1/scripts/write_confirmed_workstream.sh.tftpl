@@ -1,0 +1,48 @@
+#!/bin/sh
+# Assemble the workstream for an internal-reproduced bug directly from the
+# task. The reproduction is already documented (run IDs, error signatures,
+# builds, mechanism) — regenerating it via QA triage duplicates work the task
+# already did. Exit criteria: the workstream file exists and is non-empty; the
+# development it enables treats it as the plan.
+#
+# Ported from linear_triage_v1's write_confirmed_workstream.sh.tftpl: the
+# Linear .data.issue envelope becomes the Kanboard {task, tags, comments}
+# envelope — the hollow-workstream defect class cannot recur here because the
+# field paths are pinned to the new envelope from the start.
+set -eu
+
+TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
+WORKSTREAM="{{ .intake_root }}/{{ .ticket_id }}/workstreams/{{ .ticket_id }}.md"
+
+mkdir -p "$(dirname "$WORKSTREAM")"
+
+TITLE=$(jq -r '.task.title // empty' "$TICKET_JSON")
+DESC=$(jq -r '.task.description // empty' "$TICKET_JSON")
+
+{
+    echo "# Workstream: $TITLE"
+    echo
+    echo "Source: Kanboard task KB-$(jq -r '.task.id' "$TICKET_JSON")"
+    echo
+    echo "## Problem (documented reproduction)"
+    echo
+    echo "$DESC"
+    echo
+    echo "## Task comments (evidence history)"
+    echo
+    jq -r '.comments[]? | "### comment\n\n" + .comment + "\n"' "$TICKET_JSON"
+    echo "## Required behavior"
+    echo
+    echo "Implement the fix described above. The reproduction in the task"
+    echo "is authoritative: preserve the observed error signatures and verify"
+    echo "the fix against the documented mechanism. Add or update tests that"
+    echo "exercise the failing path."
+} > "$WORKSTREAM"
+
+# Guard: non-empty workstream or the bypass failed
+if [ ! -s "$WORKSTREAM" ]; then
+    echo "workstream file is empty" >&2
+    exit 1
+fi
+
+echo "workstream written: $WORKSTREAM"

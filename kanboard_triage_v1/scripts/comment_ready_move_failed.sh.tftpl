@@ -1,0 +1,28 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+notes="$run_dir/review-notes.md"
+[ -s "$notes" ] || printf '(no review notes recorded)\n' > "$notes"
+
+curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg m 'createComment' \
+        --argjson p "$(jq -n --argjson task_id "$task_id" \
+            --arg content "**Automated QA triage completed** (verdict: $criteria_value_3, workstream: $criteria_value_4) but moving the task to \"$criteria_value_5\" failed. Moving to review for a human decision.
+
+Reviewer notes:
+$(cat "$notes")" '{task_id:$task_id,user_id:0,content:$content}')" \
+        '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+    "$KANBOARD_URL" \
+    | jq -e '.result == true' >/dev/null
+
+echo "comment posted"

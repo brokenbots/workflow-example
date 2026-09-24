@@ -1,0 +1,45 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -euo pipefail
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
+: "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+run_dir="$criteria_value_1/$criteria_value_2"
+task_id="${criteria_value_2#KB-}"
+
+# Move the task to a named board column. Ported from linear_triage_v1's
+# set_review_state.sh.tftpl: Linear's workflowStates name->id resolution +
+# issueUpdate becomes getColumns name->id resolution + moveTaskPosition.
+# The move is idempotent (no-op when the task is already in the column).
+# An unknown column name fails loudly rather than silently leaving the task
+# unmoved — same fail-loud contract as the Linear original.
+: "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set}"
+project_id=$(jq -r '.task.project_id' "$run_dir/ticket.json")
+
+rpc() {
+    curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg m "$1" --argjson p "$2" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+        "$KANBOARD_URL"
+}
+
+task=$(rpc getTask "{\"task_id\":$task_id}")
+current_col=$(printf '%s' "$task" | jq -r '.column_id')
+
+cols=$(rpc getColumns "{\"project_id\":$project_id}")
+target_col=$(printf '%s' "$cols" | jq -r --arg name "$criteria_value_3" 'map(select(.title == $name)) | .[0].id // empty')
+
+if [ -z "$target_col" ]; then
+    echo "Kanboard column '$criteria_value_3' not found on project $project_id" >&2
+    exit 1
+fi
+
+if [ "$target_col" = "$current_col" ]; then
+    echo "task already in column '$criteria_value_3'"
+    exit 0
+fi
+
+rpc moveTaskPosition "{\"project_id\":$project_id,\"task_id\":$task_id,\"column_id\":$target_col,\"position\":1}" \
+    | jq -e '.result == true' >/dev/null
+
+echo "task moved to $criteria_value_3"
