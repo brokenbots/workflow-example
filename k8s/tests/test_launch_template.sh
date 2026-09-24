@@ -23,40 +23,40 @@ fail() {
     exit 1
 }
 
-printf '%s' "$manifest" | grep -q 'image: localhost:5000/linear-intake-remote:dev' || \
+grep -q <<< "$manifest" 'image: localhost:5000/linear-intake-remote:dev' || \
     fail "template does not reference remote-mode image"
 
-printf '%s' "$manifest" | grep -q 'localhost:5000/linear-intake-k8s:dev' && \
+grep -q <<< "$manifest" 'localhost:5000/linear-intake-k8s:dev' && \
     fail "template still references the old sandbox-era image"
 
-printf '%s' "$manifest" | grep -qi 'seccompProfile' && \
+grep -q <<< "$manifest"i 'seccompProfile' && \
     fail "template contains a seccompProfile setting"
 
-printf '%s' "$manifest" | grep -qi 'privileged: true' && \
+grep -q <<< "$manifest"i 'privileged: true' && \
     fail "template requests a privileged container"
 
-printf '%s' "$manifest" | grep -q 'security-opt' && \
+grep -q <<< "$manifest" 'security-opt' && \
     fail "template contains a --security-opt reference"
 
-printf '%s' "$manifest" | grep -q 'kubernetes.io/arch: amd64' || \
+grep -q <<< "$manifest" 'kubernetes.io/arch: amd64' || \
     fail "template missing amd64 nodeSelector"
 
-printf '%s' "$manifest" | grep -q 'key: catch' || \
+grep -q <<< "$manifest" 'key: catch' || \
     fail "template missing catch-node toleration"
 
-printf '%s' "$manifest" | grep -q 'claimName: criteria-data' || \
+grep -q <<< "$manifest" 'claimName: criteria-data' || \
     fail "template missing /data PVC mount"
 
-printf '%s' "$manifest" | grep -q 'claimName: criteria-repo' || \
+grep -q <<< "$manifest" 'claimName: criteria-repo' || \
     fail "template missing /repo PVC mount"
 
-printf '%s' "$manifest" | grep -q 'mountPath: /data' || \
+grep -q <<< "$manifest" 'mountPath: /data' || \
     fail "template missing /data volumeMount"
 
-printf '%s' "$manifest" | grep -q 'mountPath: /repo' || \
+grep -q <<< "$manifest" 'mountPath: /repo' || \
     fail "template missing /repo volumeMount"
 
-printf '%s' "$manifest" | grep -q 'runAsNonRoot: true' || \
+grep -q <<< "$manifest" 'runAsNonRoot: true' || \
     fail "template does not request a non-root securityContext"
 
 echo "PASS: rendered k8s Job template meets CRI-110 requirements"
