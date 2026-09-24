@@ -36,6 +36,10 @@ var (
 	// digest-verified image_reference resolves one.
 	adapterRegistry = flag.String("adapter-registry", getenv(jobbuilder.EnvAdapterRegistry, jobbuilder.DefaultAdapterRegistry), "Adapter registry host for fallback adapter image references")
 	adapterTag      = flag.String("adapter-tag", getenv(jobbuilder.EnvAdapterTag, jobbuilder.DefaultAdapterTag), "Default tag for adapter image references the operator composes")
+	// Node arch for child Job/pod templates (runner + per-scope adapters):
+	// a cluster property, so it is operator config (env CRITERIA_JOB_ARCH,
+	// Helm operator.jobArch), never per-workflow state.
+	jobArch = flag.String("job-arch", getenv(jobbuilder.EnvJobArch, jobbuilder.JobArchDefault), "kubernetes.io/arch nodeSelector value stamped on child Job/pod templates (cluster property)")
 	dataPVC         = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
@@ -134,6 +138,7 @@ func main() {
 			CriteriaBaseImage: *criteriaBaseImage,
 			AdapterRegistry:   *adapterRegistry,
 			AdapterTag:        *adapterTag,
+			JobArch:           *jobArch,
 		},
 		Queue: queue,
 	}

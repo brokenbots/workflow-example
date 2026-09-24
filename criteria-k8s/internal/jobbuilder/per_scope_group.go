@@ -114,7 +114,7 @@ func BuildPerScopeAdapterPodGroup(run *criteriav1.CriteriaRun, defaults Defaults
 		},
 		Spec: corev1.PodSpec{
 			NodeSelector: map[string]string{
-				"kubernetes.io/arch": "amd64",
+				"kubernetes.io/arch": jobNodeArch(defaults),
 			},
 			Tolerations: []corev1.Toleration{
 				{

@@ -226,7 +226,7 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleRunner
 
-	job := buildJobBase(run, TargetNamespace(run), jobName, labels)
+	job := buildJobBase(run, defaults, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
 	// Source-mode runs that need the ticket repository (e.g. linear_develop_v1
 	// drives git fetch/worktree/pr steps against var.repo_dir) get the same
