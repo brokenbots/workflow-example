@@ -374,3 +374,50 @@ func TestDefaultRepoURLFallback(t *testing.T) {
 	require.Len(t, tw.runs(t), 1)
 	assert.Equal(t, "brokenbots/workflow-example", runs[0].Spec.RepoURL)
 }
+
+func TestExtractRepoURLPrefersRepoTag(t *testing.T) {
+	validate := func(string) bool { return true }
+	cases := []struct {
+		name string
+		task kanboard.Task
+		def  string
+		want string
+	}{
+		{
+			name: "repo tag wins over description reference and default",
+			task: kanboard.Task{
+				Title:       "fix something in brokenbots/criteria",
+				Description: "Repo: https://github.com/brokenbots/criteria",
+				Tags:        []string{"k8s-run", "repo:brokenbots/workflow-example"},
+			},
+			def:  "brokenbots/default-repo",
+			want: "brokenbots/workflow-example",
+		},
+		{
+			name: "repo tag with short form",
+			task: kanboard.Task{
+				Title:       "no repo mentioned",
+				Description: "nothing",
+				Tags:        []string{"repo:brokenbots/workflow-example"},
+			},
+			want: "brokenbots/workflow-example",
+		},
+		{
+			name: "no repo tag falls back to description",
+			task: kanboard.Task{
+				Title:       "t",
+				Description: "Repo: https://github.com/brokenbots/criteria",
+				Tags:        []string{"k8s-run"},
+			},
+			want: "brokenbots/criteria",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractRepoURL(tc.task, tc.def, validate)
+			if got != tc.want {
+				t.Fatalf("extractRepoURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

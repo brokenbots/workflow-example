@@ -547,10 +547,30 @@ func copyStringMap(m map[string]string) map[string]string {
 	return out
 }
 
-// extractRepoURL finds a GitHub repo reference in the task title/description,
-// mirroring linear.ExtractRepoURL. Kanboard tasks carry repo URLs in their
-// description; defaultRepoURL is the fallback.
+// repoTagPrefix marks the tag that binds a task to a repository: a
+// "repo:<owner>/<name>" tag is the per-ticket repo binding (the Kanboard
+// analogue of the Linear repo-label fallback) and wins over any repo
+// reference found in the title/description and over the configured
+// default. Without it a ticket's description text decides the repo, which
+// mis-scoped KB-1 to the engine repo when its work belonged to
+// workflow-example.
+const repoTagPrefix = "repo:"
+
+// extractRepoURL binds the task to a repository: an explicit
+// "repo:<owner>/<name>" tag wins; otherwise the GitHub repo reference in
+// the task title/description; then defaultRepoURL.
 func extractRepoURL(task kanboard.Task, defaultRepoURL string, validate func(string) bool) string {
+	for _, tag := range task.Tags {
+		if rest, ok := strings.CutPrefix(tag, repoTagPrefix); ok {
+			m := repoPattern.FindStringSubmatch(rest)
+			if m != nil {
+				return m[1]
+			}
+			if validate == nil || validate(strings.TrimPrefix(tag, repoTagPrefix)) {
+				return strings.TrimPrefix(tag, repoTagPrefix)
+			}
+		}
+	}
 	candidate := task.Title + "\n" + task.Description
 	if m := repoPattern.FindStringSubmatch(candidate); m != nil {
 		return m[1]
