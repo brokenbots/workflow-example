@@ -48,13 +48,13 @@ var (
 	// without OpenBao CSI; set true to restore the pre-KB-3 delivery on an
 	// OpenBao-equipped cluster.
 	legacySecretVolumes = flag.Bool("legacy-secret-volumes", getBool(jobbuilder.EnvLegacySecretVolumes, false), "Mount the built-in linear-spc/copilot-spc CSI secret volumes on runs without a stamped workflow (requires the OpenBao Secrets Store CSI driver)")
-	dataPVC         = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
-	providerBaseURL = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
-	castleAddr      = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
-	castleToken     = getenv("CASTLE_TOKEN", "")
-	debugEventsFile = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
-	retentionPeriod = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
-	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
+	dataPVC             = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
+	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
+	castleAddr          = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
+	castleToken         = getenv("CASTLE_TOKEN", "")
+	debugEventsFile     = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
+	retentionPeriod     = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
+	sweepInterval       = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	// CRI-144: reap adapter pods and legacy adapter Jobs whose owning
 	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
@@ -138,15 +138,15 @@ func main() {
 			Deployment: *operatorDeployment,
 		},
 		Defaults: jobbuilder.Defaults{
-			Image:             *defaultImage,
-			DataPVC:           *dataPVC,
-			ProviderBaseURL:   *providerBaseURL,
-			CastleAddr:        *castleAddr,
-			DebugEventsFile:   *debugEventsFile,
-			CriteriaBaseImage: *criteriaBaseImage,
-			AdapterRegistry:   *adapterRegistry,
-			AdapterTag:        *adapterTag,
-			JobArch:           *jobArch,
+			Image:               *defaultImage,
+			DataPVC:             *dataPVC,
+			ProviderBaseURL:     *providerBaseURL,
+			CastleAddr:          *castleAddr,
+			DebugEventsFile:     *debugEventsFile,
+			CriteriaBaseImage:   *criteriaBaseImage,
+			AdapterRegistry:     *adapterRegistry,
+			AdapterTag:          *adapterTag,
+			JobArch:             *jobArch,
 			LegacySecretVolumes: *legacySecretVolumes,
 		},
 		Queue: queue,
