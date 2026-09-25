@@ -48,7 +48,10 @@ task=$(rpc getTask "{\"task_id\":$task_id}" | jq -c ".result // empty") || {
     echo "Kanboard task not found: $task_id" >&2
     exit 1
 }
-tags=$(rpc getTaskTags "{\"project_id\":$(printf '%s' "$task" | jq -r '.project_id'),\"task_id\":$task_id}")
+# getTaskTags takes ONLY task_id (project_id too fails with -32602) and
+# returns a map {tag_link_id: tag_name}; normalize to [{name}] so downstream
+# scripts read a stable .tags[].name shape.
+tags=$(rpc getTaskTags "{\"task_id\":$task_id}" | jq -c '[.result[]] | map({name: .})')
 comments=$(rpc getAllComments "{\"task_id\":$task_id}" | jq -c ".result // []")
 
 jq -n --argjson task "$task" --argjson tags "$tags" --argjson comments "$comments" \
