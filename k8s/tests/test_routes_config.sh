@@ -633,6 +633,37 @@ else:
             failures.append("shipped example: ticket-cleanup-url linear-api-key mountPath must be"
                             " /home/criteria/linear-secrets (the runner's file: OriginRef path)")
 
+# KB-11 smoke regression: the kanboard dual-source objects carried no pin
+# assertions here while their ref stayed at 308315c (the #94 re-pin) after
+# the develop tree's getTaskTags fix (#106) landed — the develop route kept
+# fetching the pre-fix tree and the run captured the -32602 "Too many
+# arguments" error body as ticket.json's tags. Both objects now pin the
+# current main tree carrying the #106 fix; the assertions below mirror the
+# linear-triage/linear-develop pin assertions so the next subtree change
+# fails here until its re-pin lands in the same change.
+for kb_name, kb_subtree, kb_class, kb_pin in (
+        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "b5ee6e69f45d821ac03901dc89c687f8942234ad"),
+        ("kanboard-develop-url", "kanboard_develop_v1", None, "b5ee6e69f45d821ac03901dc89c687f8942234ad"),
+):
+    kb_wf = base[LIB].get(kb_name)
+    if not isinstance(kb_wf, dict):
+        failures.append(f"shipped example: workflowLibrary missing the {kb_name} object (dual-source coexistence)")
+        continue
+    if not str(kb_wf.get("url", "")).startswith(
+            f"git::https://github.com/brokenbots/workflow-example.git//{kb_subtree}?ref={kb_pin}"):
+        failures.append(f"shipped example: {kb_name} must point at the {kb_subtree} subtree pinned to"
+                        " the current main commit carrying the #106 getTaskTags fix (KB-11 smoke:"
+                        " the stale 308315c pin kept the pre-#106 fetch_ticket live)")
+    if not FULL_SHA.match(kb_wf.get("ref") or ""):
+        failures.append(f"shipped example: {kb_name} ref must be a pinned 40-hex commit SHA (D7)")
+    if kb_wf.get("ref") != kb_pin:
+        failures.append(f"shipped example: {kb_name} ref must pin the re-pin commit {kb_pin[:7]}"
+                        " (any kanboard_* subtree change must re-pin in the same change)")
+    if kb_wf.get("class") != kb_class:
+        failures.append(f"shipped example: {kb_name} class = {kb_wf.get('class')}, want {kb_class!r}")
+    if "image" in kb_wf:
+        failures.append(f"shipped example: {kb_name} must be url-only (no process image)")
+
 # ------------------------------------------------------------ schema checks
 schema = json.load(open(schema_path, encoding="utf-8"))
 try:

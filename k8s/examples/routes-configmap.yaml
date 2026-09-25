@@ -50,7 +50,22 @@
 # default branch head exactly like the pinless linear-intake-url object.
 # Any change to either subtree must re-pin its object's 'ref' to the new
 # resolved commit SHA — ADR-0005 D7 enforces the pin fail-closed at
-# admission. The 'Ready for Development' state must exist on the CRI team
+# admission.
+#
+# KB-11 smoke (castle v11 e2e validation) proved the re-pin rule on the
+# kanboard dual-source objects: both kanboard-*-url objects still pinned
+# 308315c (the #94 classification-readfile re-pin) after the develop tree's
+# getTaskTags fix (#106) landed, so the kanboard-develop route kept
+# fetching the PRE-#106 tree whose fetch_ticket passed project_id
+# alongside task_id — real Kanboard rejects it with -32602 "Too many
+# arguments" and the raw error body was stored as ticket.json's tags. The
+# merged fix never executed until both objects were re-pinned to main
+# (b5ee6e69f45d821ac03901dc89c687f8942234ad, the current tree carrying the
+# #106 fix). The subtree pins live and die with the rule below: any change
+# to kanboard_triage_v1, kanboard_develop_v1, or the workstream_handler_v1
+# sibling they lock must re-pin both objects in the same change, and
+# k8s/tests/test_routes_config.sh pins the expected SHAs.
+# The 'Ready for Development' state must exist on the CRI team
 # before any triage run reaches that terminal:
 # k8s/create-ready-for-development-state.sh creates it idempotently via the
 # Linear API (type=unstarted — the work is refined but not begun), and the
@@ -335,8 +350,8 @@ data:
         },
         "kanboard-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=308315c8774596183bdc1955bbf4b6759b72fefb",
-          "ref": "308315c8774596183bdc1955bbf4b6759b72fefb",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=b5ee6e69f45d821ac03901dc89c687f8942234ad",
+          "ref": "b5ee6e69f45d821ac03901dc89c687f8942234ad",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -390,8 +405,8 @@ data:
         },
         "kanboard-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=308315c8774596183bdc1955bbf4b6759b72fefb",
-          "ref": "308315c8774596183bdc1955bbf4b6759b72fefb",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=b5ee6e69f45d821ac03901dc89c687f8942234ad",
+          "ref": "b5ee6e69f45d821ac03901dc89c687f8942234ad",
           "namespace": "criteria-jobs",
           "volumes": [
             {
