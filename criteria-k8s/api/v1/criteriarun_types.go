@@ -150,16 +150,19 @@ type RunWorkflow struct {
 
 // RunWorkflowVolume is a storage volume stamped from the routes ConfigMap.
 type RunWorkflowVolume struct {
-	Name      string            `json:"name"`
-	Kind      string            `json:"kind"`
-	MountPath string            `json:"mountPath"`
-	SubPath   string            `json:"subPath,omitempty"`
-	ReadOnly  bool              `json:"readOnly,omitempty"`
-	Claim     string            `json:"claim,omitempty"`
-	Server    string            `json:"server,omitempty"`
-	Path      string            `json:"path,omitempty"`
-	SizeLimit string            `json:"sizeLimit,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	MountPath string `json:"mountPath"`
+	SubPath   string `json:"subPath,omitempty"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+	Claim     string `json:"claim,omitempty"`
+	Server    string `json:"server,omitempty"`
+	Path      string `json:"path,omitempty"`
+	SizeLimit string `json:"sizeLimit,omitempty"`
+	// SecretName is the k8s-secret kind's backing Secret: the name of a
+	// Secret in the run's namespace mounted as files at mountPath (KB-7).
+	SecretName string            `json:"secretName,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
 }
 
 // RunWorkflowSecret is a secret reference stamped from the routes ConfigMap.

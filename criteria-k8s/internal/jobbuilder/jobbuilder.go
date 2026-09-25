@@ -369,9 +369,11 @@ func RunnerJobImage(runnerJob *batchv1.Job) string {
 // Two modes branch here (CRI-231):
 //   - Image mode (spec.workflowSource nil): the baked-tree path — the
 //     repo-clone init container plus the runner.sh workflow image, unchanged.
-//   - Source mode (spec.workflowSource set): no repo-clone; the runner
-//     executes on the base/provided image and fetches/applies the declared
-//     workflow source at run time.
+//   - Source mode (spec.workflowSource set): the runner executes on the
+//     base/provided image and fetches/applies the declared workflow source
+//     at run time. The per-ticket repo-clone init container rides along
+//     only when the run declares a repo-under-test (spec.repoUrl set);
+//     repo-less runs start with no init container (KB-7).
 func BuildRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 	ticket := run.Spec.TicketID
 	jobName := JobName(run)

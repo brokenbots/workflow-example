@@ -47,6 +47,13 @@ const (
 	VolumePVC = "pvc"
 	VolumeNFS = "nfs"
 	VolumeTmp = "tmp"
+	// VolumeK8sSecret mounts a plain Kubernetes Secret (same namespace as
+	// the run) as files at mountPath (KB-7): token-file surfaces the runner
+	// scripts read (e.g. /home/criteria/secrets/workflow_github_token) can
+	// be served by a namespace Secret instead of a pre-populated PVC.
+	// Distinct from the Secret entries: those render through the Secrets
+	// Store CSI driver + OpenBao, while k8s-secret mounts a native Secret.
+	VolumeK8sSecret = "k8s-secret"
 )
 
 // TagMatch semantics for a route's tag subset.
@@ -105,16 +112,17 @@ type Workflow struct {
 
 // Volume is a storage volume of kind pvc, nfs, or tmp.
 type Volume struct {
-	Name      string            `json:"name"`
-	Kind      string            `json:"kind"`
-	MountPath string            `json:"mountPath"`
-	SubPath   string            `json:"subPath,omitempty"`
-	ReadOnly  bool              `json:"readOnly,omitempty"`
-	Claim     string            `json:"claim,omitempty"`
-	Server    string            `json:"server,omitempty"`
-	Path      string            `json:"path,omitempty"`
-	SizeLimit string            `json:"sizeLimit,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Name       string            `json:"name"`
+	Kind       string            `json:"kind"`
+	MountPath  string            `json:"mountPath"`
+	SubPath    string            `json:"subPath,omitempty"`
+	ReadOnly   bool              `json:"readOnly,omitempty"`
+	Claim      string            `json:"claim,omitempty"`
+	Server     string            `json:"server,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	SizeLimit  string            `json:"sizeLimit,omitempty"`
+	SecretName string            `json:"secretName,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
 }
 
 // Secret is a secret reference (SecretProviderClass name, OpenBao via the
@@ -331,9 +339,10 @@ func validateWorkflow(name string, wf Workflow) error {
 	return nil
 }
 
-// validateVolume enforces the pvc/nfs/tmp shapes: a pvc carries a claim, an
-// nfs carries server+path, and tmp carries only a sizeLimit; sibling-kind
-// fields must stay unset.
+// validateVolume enforces the pvc/nfs/tmp/k8s-secret shapes: a pvc carries
+// a claim, an nfs carries server+path, tmp carries only a sizeLimit, and a
+// k8s-secret carries the namespace Secret name; sibling-kind fields must
+// stay unset.
 func validateVolume(v Volume) error {
 	if !labelRe.MatchString(v.Name) {
 		return fmt.Errorf("name %q is not a DNS-1123 label", v.Name)
@@ -349,22 +358,29 @@ func validateVolume(v Volume) error {
 		if v.Claim == "" {
 			return fmt.Errorf("kind=pvc requires a claim")
 		}
-		if v.Server != "" || v.Path != "" || v.SizeLimit != "" {
-			return fmt.Errorf("kind=pvc must not declare server, path, or sizeLimit")
+		if v.Server != "" || v.Path != "" || v.SizeLimit != "" || v.SecretName != "" {
+			return fmt.Errorf("kind=pvc must not declare server, path, sizeLimit, or secretName")
 		}
 	case VolumeNFS:
 		if v.Server == "" || v.Path == "" {
 			return fmt.Errorf("kind=nfs requires server and path")
 		}
-		if v.Claim != "" || v.SizeLimit != "" {
-			return fmt.Errorf("kind=nfs must not declare claim or sizeLimit")
+		if v.Claim != "" || v.SizeLimit != "" || v.SecretName != "" {
+			return fmt.Errorf("kind=nfs must not declare claim, sizeLimit, or secretName")
 		}
 	case VolumeTmp:
-		if v.Claim != "" || v.Server != "" || v.Path != "" {
-			return fmt.Errorf("kind=tmp must not declare claim, server, or path")
+		if v.Claim != "" || v.Server != "" || v.Path != "" || v.SecretName != "" {
+			return fmt.Errorf("kind=tmp must not declare claim, server, path, or secretName")
+		}
+	case VolumeK8sSecret:
+		if v.SecretName == "" {
+			return fmt.Errorf("kind=k8s-secret requires a secretName")
+		}
+		if v.Claim != "" || v.Server != "" || v.Path != "" || v.SizeLimit != "" {
+			return fmt.Errorf("kind=k8s-secret must not declare claim, server, path, or sizeLimit")
 		}
 	default:
-		return fmt.Errorf("kind must be %q, %q, or %q, got %q", VolumePVC, VolumeNFS, VolumeTmp, v.Kind)
+		return fmt.Errorf("kind must be %q, %q, %q, or %q, got %q", VolumePVC, VolumeNFS, VolumeTmp, VolumeK8sSecret, v.Kind)
 	}
 	return nil
 }
