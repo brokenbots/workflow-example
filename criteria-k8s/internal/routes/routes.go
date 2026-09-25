@@ -110,7 +110,7 @@ type Workflow struct {
 	AdapterImages map[string]string `json:"adapterImages,omitempty"`
 }
 
-// Volume is a storage volume of kind pvc, nfs, or tmp.
+// Volume is a storage volume of kind pvc, nfs, tmp, or k8s-secret.
 type Volume struct {
 	Name       string            `json:"name"`
 	Kind       string            `json:"kind"`

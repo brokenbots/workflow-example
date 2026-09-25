@@ -95,6 +95,66 @@ func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 	assert.True(t, volNames["data"], "engine run state lives on the shared data PVC (CRITERIA_HOME)")
 }
 
+// KB-7 regression: a source-mode run with no repo-under-test (empty
+// spec.repoUrl) previously could not start at all — the unconditional
+// repo-clone init container fails closed without a workflow_github_token
+// secret file AND REPO_URL. A repo-less run (self-contained scan, fan-out
+// without a repo-under-test) must start with no repo-clone init container
+// and reach its first step: the runner container carries the inline
+// fetch/apply script and the data volume, with REPO_URL unset.
+func TestSourceModeWithoutRepoUrlSkipsRepoClone(t *testing.T) {
+	run := urlRun("kb-7-repo-less", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//self_scan_v1",
+	}, "")
+	run.Spec.RepoURL = "" // the run declares no repo-under-test
+
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+		Image:             "localhost:5000/linear-intake-remote:dev",
+		CriteriaBaseImage: "localhost:5000/criteria-base:abc123",
+		DataPVC:           "criteria-data",
+	})
+
+	podSpec := job.Spec.Template.Spec
+	assert.Empty(t, podSpec.InitContainers,
+		"a source-mode run without a repo-under-test must start with no repo-clone init container (KB-7)")
+
+	runner := podSpec.Containers[0]
+	assert.Equal(t, "workflow-runner", runner.Name, "the run still reaches its first step: the runner is built")
+	assert.Equal(t, "", envValue(runner.Env, "REPO_URL"), "REPO_URL must be absent for a repo-less run")
+	assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//self_scan_v1", envValue(runner.Env, "WORKFLOW_URL"))
+	assert.Contains(t, runner.Command[2], "apply \"$workflow_url\"",
+		"the inline fetch/apply runner script is intact")
+	volNames := make(map[string]bool)
+	for _, v := range podSpec.Volumes {
+		volNames[v.Name] = true
+	}
+	assert.True(t, volNames["data"], "engine run state still lives on the shared data PVC")
+}
+
+// KB-7: a source-mode run WITH a repo-under-test keeps the per-ticket
+// repo-clone init container — the linear_develop_v1 git steps consume the
+// /data/intake/<TICKET>/repo the clone populates (the runner script bridges
+// it into --var repo_dir). The clone script's fail-closed error signatures
+// from the original reproduction are preserved verbatim.
+func TestSourceModeWithRepoUrlKeepsRepoClone(t *testing.T) {
+	run := urlRun("kb-7-repo-bearing", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1",
+	}, "")
+
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	init := job.Spec.Template.Spec.InitContainers
+	require.Len(t, init, 1, "a repo-bearing source-mode run keeps the per-ticket clone")
+	assert.Equal(t, "repo-clone", init[0].Name)
+	script := init[0].Command[2]
+	assert.Contains(t, script, "WORKFLOW_GITHUB_TOKEN is required via /home/criteria/secrets/workflow_github_token",
+		"the documented fail-closed token error signature is preserved")
+	assert.Contains(t, script, "REPO_URL is required",
+		"the documented fail-closed REPO_URL error signature is preserved")
+	assert.Equal(t, "https://github.com/brokenbots/workflow-example.git", envValue(init[0].Env, "REPO_URL"))
+}
+
 // CRI-303: the source-mode engine's run state (CRI-125 step checkpoints, run
 // metadata, the workflow cache) must live on the shared data PVC so a
 // runner-container restart (OnFailure restart policy) resumes the in-flight

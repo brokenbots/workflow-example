@@ -826,6 +826,28 @@ const routesJSONClassTriage = `{
   ]
 }`
 
+// KB-7: a workflow may declare a k8s-secret volume so a plain namespace
+// Secret mounts as files (e.g. /home/criteria/secrets/workflow_github_token)
+// without a pre-populated PVC. The watcher must stamp it through verbatim.
+const routesJSONK8sSecretVolume = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs",
+      "env": {"WORKFLOW_GITHUB_TOKEN": "/home/criteria/secrets/workflow_github_token"},
+      "volumes": [
+        {"name": "tokens", "kind": "k8s-secret", "secretName": "github-tokens", "mountPath": "/home/criteria/secrets", "readOnly": true}
+      ]
+    }
+  },
+  "routes": [
+    {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner", "states": ["Triage"]}
+  ]
+}`
+
 const routesJSONClassUnknown = `{
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "Routes",
@@ -1206,6 +1228,25 @@ func TestPollStampsWorkflowClass(t *testing.T) {
 		assert.Empty(t, tw.runs(t), "routes validation must reject an unknown class")
 		assert.True(t, tw.logs.contains("class must be"), "the routes loader logs the rejected class")
 	})
+}
+
+// KB-7: a spec-declared k8s-secret volume is stamped onto the run so the
+// jobbuilder renders it as a native Secret volume (no pre-populated PVC).
+func TestPollStampsK8sSecretVolume(t *testing.T) {
+	tw := newTestWatcher(t, routesJSONK8sSecretVolume)
+	tw.linearS.setIssues(issue("i-21", "KB-7", gateLabel()))
+	tw.pollOnce(t)
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	wf := runs[0].Spec.Workflow
+	require.NotNil(t, wf)
+	require.Len(t, wf.Volumes, 1)
+	vol := wf.Volumes[0]
+	assert.Equal(t, "k8s-secret", vol.Kind)
+	assert.Equal(t, "github-tokens", vol.SecretName)
+	assert.Equal(t, "/home/criteria/secrets", vol.MountPath)
+	assert.True(t, vol.ReadOnly)
+	assert.Empty(t, vol.Claim, "a k8s-secret volume never carries a claim")
 }
 
 // CRI-218: per-route trigger states with a [Triage] default.

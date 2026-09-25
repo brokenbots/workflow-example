@@ -212,6 +212,27 @@ const chainRoutesJSON = `{
   ]
 }`
 
+// KB-7: the workflow declares a k8s-secret volume (a plain namespace Secret
+// mounted as files) instead of a pre-populated PVC for token files.
+const kbK8sSecretRoutesJSON = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "kanboard-intake": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs",
+      "env": {"WORKFLOW_GITHUB_TOKEN": "/home/criteria/secrets/workflow_github_token"},
+      "volumes": [
+        {"name": "tokens", "kind": "k8s-secret", "secretName": "github-tokens", "mountPath": "/home/criteria/secrets", "readOnly": true}
+      ]
+    }
+  },
+  "routes": [
+    {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]}
+  ]
+}`
+
 type testWatcher struct {
 	w      *watcher
 	kbS    *kbServer
@@ -426,6 +447,27 @@ func TestTriageRouteStampsTriageClass(t *testing.T) {
 	require.NotNil(t, runs[0].Spec.Workflow)
 	assert.Equal(t, "kanboard-triage-wf", runs[0].Spec.Workflow.Name)
 	assert.Equal(t, criteriav1.RunClassTriage, runs[0].Spec.Workflow.Class)
+}
+
+// KB-7: a spec-declared k8s-secret volume is stamped onto the run so the
+// jobbuilder renders it as a native Secret volume (no pre-populated PVC).
+func TestPollStampsK8sSecretVolume(t *testing.T) {
+	tw := newTestWatcher(t, kbK8sSecretRoutesJSON)
+	tw.kbS.addTask(21, 5, "k8s-run")
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	wf := runs[0].Spec.Workflow
+	require.NotNil(t, wf)
+	require.Len(t, wf.Volumes, 1)
+	vol := wf.Volumes[0]
+	assert.Equal(t, "k8s-secret", vol.Kind)
+	assert.Equal(t, "github-tokens", vol.SecretName)
+	assert.Equal(t, "/home/criteria/secrets", vol.MountPath)
+	assert.True(t, vol.ReadOnly)
+	assert.Empty(t, vol.Claim, "a k8s-secret volume never carries a claim")
 }
 
 // KB-9 regression: a triage run succeeded and the triage workflow's
