@@ -73,11 +73,11 @@ NOSPACE_RE = re.compile(r"^\S+$")
 MOUNT_RE = re.compile(r"^/")
 
 WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages"}
-VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "env"}
+VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states"}
 TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "routes"}
-VOLUME_KINDS = ("pvc", "nfs", "tmp")
+VOLUME_KINDS = ("pvc", "nfs", "tmp", "k8s-secret")
 WORKFLOW_TYPES = ("url", "image")
 WORKFLOW_CLASSES = ("dev", "triage")
 
@@ -158,7 +158,7 @@ def validate_volume(volume, where, errs):
         errs.append(f"{where}.name {name!r} is not a DNS-1123 label")
     kind = volume.get("kind")
     if "kind" in volume and kind not in VOLUME_KINDS:
-        errs.append(f"{where}.kind {kind!r} must be one of pvc, nfs, tmp")
+        errs.append(f"{where}.kind {kind!r} must be one of pvc, nfs, tmp, k8s-secret")
     mount = volume.get("mountPath")
     if "mountPath" in volume and (not isinstance(mount, str) or MOUNT_RE.match(mount) is None):
         errs.append(f"{where}.mountPath {mount!r} must be an absolute path")
@@ -166,7 +166,7 @@ def validate_volume(volume, where, errs):
         errs.append(f"{where}.subPath must be a non-empty string")
     if "readOnly" in volume and not isinstance(volume["readOnly"], bool):
         errs.append(f"{where}.readOnly must be a boolean")
-    for key in ("claim", "server", "path", "sizeLimit"):
+    for key in ("claim", "server", "path", "sizeLimit", "secretName"):
         if key in volume and (not isinstance(volume[key], str) or not volume[key]):
             errs.append(f"{where}.{key} must be a non-empty string")
     if "env" in volume:
@@ -174,20 +174,29 @@ def validate_volume(volume, where, errs):
     if kind == "pvc":
         if "claim" not in volume:
             errs.append(f"{where}: pvc volume requires claim")
-        for key in ("server", "path", "sizeLimit"):
+        for key in ("server", "path", "sizeLimit", "secretName"):
             if key in volume:
                 errs.append(f"{where}: pvc volume must not declare {key}")
     elif kind == "nfs":
         for key in ("server", "path"):
             if key not in volume:
                 errs.append(f"{where}: nfs volume requires {key}")
-        for key in ("claim", "sizeLimit"):
+        for key in ("claim", "sizeLimit", "secretName"):
             if key in volume:
                 errs.append(f"{where}: nfs volume must not declare {key}")
     elif kind == "tmp":
-        for key in ("claim", "server", "path"):
+        for key in ("claim", "server", "path", "secretName"):
             if key in volume:
                 errs.append(f"{where}: tmp volume must not declare {key}")
+    elif kind == "k8s-secret":
+        # KB-7: a k8s-secret volume mounts a plain namespace Secret as
+        # files at mountPath (e.g. /home/criteria/secrets); secretName is
+        # its only backing field.
+        if "secretName" not in volume:
+            errs.append(f"{where}: k8s-secret volume requires secretName")
+        for key in ("claim", "server", "path", "sizeLimit"):
+            if key in volume:
+                errs.append(f"{where}: k8s-secret volume must not declare {key}")
 
 
 def validate_workflow(name, workflow, where, errs):
@@ -370,6 +379,10 @@ positive = [
         d[LIB][BAKED]["volumes"][0].update(kind="nfs", server="nfs.internal", path="/export/data")))),
     ("volume-read-only", mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(readOnly=True))),
     ("volume-subpath", mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(subPath="intake"))),
+    ("k8s-secret-volume", mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
+        2, {"name": "wf-tokens", "kind": "k8s-secret", "secretName": "github-tokens",
+            "mountPath": "/home/criteria/secrets", "readOnly": True,
+            "env": {"WORKFLOW_GITHUB_TOKEN": "/home/criteria/secrets/workflow_github_token"}}))),
     ("workflow-level-env", mutate(lambda d: d[LIB][BAKED].update(env={"ALLOW_DIRTY": "false"}))),
     ("workflow-adapter-images-override", mutate(lambda d: d[LIB][BAKED].update(
         adapterImages={"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
@@ -390,6 +403,12 @@ negative = [
     ("nfs-volume-without-path", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
         2, {"name": "wf-cache", "kind": "nfs", "server": "nfs.internal", "mountPath": "/mnt/workflow-cache", "readOnly": True}))),
     ("pvc-volume-with-sizelimit", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(sizeLimit="8Gi"))),
+    ("k8s-secret-volume-without-secretname", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
+        2, {"name": "wf-tokens", "kind": "k8s-secret", "mountPath": "/home/criteria/secrets", "readOnly": True}))),
+    ("k8s-secret-volume-with-claim", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
+        2, {"name": "wf-tokens", "kind": "k8s-secret", "secretName": "github-tokens", "claim": "criteria-data",
+            "mountPath": "/home/criteria/secrets", "readOnly": True}))),
+    ("pvc-volume-with-secretname", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(secretName="github-tokens"))),
     ("volume-unknown-kind", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(kind="hostPath"))),
     ("volume-relative-mountpath", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(mountPath="data"))),
     ("volume-unknown-field", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].update(hostPath="/srv"))),
