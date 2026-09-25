@@ -59,6 +59,7 @@ var (
 	defaultRepoURL    = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when the Kanboard task does not reference one")
 	routesFile        = flag.String("routes-file", getenv("CRITERIA_ROUTES_FILE", routes.DefaultFile), "Routes payload file (mounted from the criteria-routes ConfigMap); re-read every poll")
 	workflowsTagGroup = flag.String("kanboard-workflows-tag-group", getenv("KANBOARD_WORKFLOWS_TAG_GROUP", "workflows"), "Tag group whose tags name a workflow overriding the route's project default (empty disables overrides)")
+	routingTags       = flag.String("kanboard-routing-tags", getenv("KANBOARD_ROUTING_TAGS", ""), "Comma-separated task tags that are routing signals (e.g. component tags), never workflow-override candidates; they join the built-in exemption filter (empty disables the extra exemptions)")
 )
 
 func main() {
@@ -123,6 +124,7 @@ func main() {
 		defaultRepoURL:    *defaultRepoURL,
 		routesFile:        *routesFile,
 		workflowsTagGroup: *workflowsTagGroup,
+		routingTags:       parseTagList(*routingTags),
 		repoValidator:     linear.DefaultRepoValidator(nil, githubToken, ""),
 		log:               logger,
 	}
@@ -157,6 +159,19 @@ func parseInt(s string, fallback int) int {
 	return v
 }
 
+// parseTagList splits a comma-separated tag list into its entries,
+// trimming whitespace and dropping empty entries ("criteria, operator,"
+// -> [criteria operator]).
+func parseTagList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if tag := strings.TrimSpace(part); tag != "" {
+			out = append(out, tag)
+		}
+	}
+	return out
+}
+
 type watcher struct {
 	client            client.Client
 	kb                *kanboard.Client
@@ -173,8 +188,15 @@ type watcher struct {
 	defaultRepoURL    string
 	routesFile        string
 	workflowsTagGroup string
-	repoValidator     func(string) bool
-	projectID         int
+	// routingTags holds the KANBOARD_ROUTING_TAGS entries (comma-separated
+	// env): tags that are board routing metadata (e.g. component tags like
+	// criteria, operator) and must never become workflow-override
+	// candidates. Two such tags on an armed ticket used to fail route
+	// resolution closed with ErrAmbiguousWorkflow, re-failing the task on
+	// every poll (KB-8).
+	routingTags   []string
+	repoValidator func(string) bool
+	projectID     int
 	// lastRuns records, per ticket, the runs index entry seen at the
 	// previous poll, so reconciliation only acts on changes (the CRI-252
 	// change-driven discipline). The run identity is part of the record:
@@ -285,19 +307,7 @@ func (w *watcher) poll(ctx context.Context) error {
 		// ungrouped tags as overrides.
 		tagGroups := map[string]string{}
 		for _, tag := range task.Tags {
-			// Routing-signal tags never name a workflow: the trigger gate
-			// tag, and internal-reproduced — the triage bypass signal the
-			// kanboard_triage_v1 gate reads (Kanboard analogue of the Linear
-			// internal-reproduced label). Treating it as a workflows-group
-			// member made Resolve fail closed (ErrUnknownWorkflow) and the
-			// watcher never fired any bypass-tagged task.
-			if tag == w.triggerTag || tag == "internal-reproduced" ||
-				tag == "Bug" || tag == "Feature" ||
-				strings.HasPrefix(tag, repoTagPrefix) {
-				// Classification tags the workflows themselves set (Bug /
-				// Feature via set_classification_label) are routing signals
-				// too: without the exemption the bypass path's own tag
-				// write makes the next poll fail closed.
+			if w.isRoutingSignal(tag) {
 				continue
 			}
 			tagGroups[tag] = w.workflowsTagGroup
@@ -334,6 +344,31 @@ func (w *watcher) poll(ctx context.Context) error {
 		w.log.Info("created CriteriaRun", "ticket", ticketID, "name", run.Name, "repoUrl", repoURL, "workflow", sel.Name)
 	}
 	return nil
+}
+
+// isRoutingSignal reports whether a task tag is routing metadata the
+// watcher or the workflows themselves consume, and must therefore never
+// become a workflow-override candidate:
+//   - triggerTag: the cluster-compute gate tag (k8s-run);
+//   - internal-reproduced: the triage bypass signal kanboard_triage_v1
+//     reads (Kanboard analogue of the Linear internal-reproduced label);
+//   - Bug / Feature: classification tags the workflows set via
+//     set_classification_label — without the exemption the bypass path's
+//     own tag write makes the next poll fail closed;
+//   - repo:<owner>/<name>: the per-ticket repo binding;
+//   - the KANBOARD_ROUTING_TAGS entries: board component tags (criteria,
+//     operator) that carry no workflow meaning (KB-8).
+//
+// Anything else joins the workflows tag group, so a tag that genuinely
+// names a workflow still overrides the route default — and two of those
+// still fail closed on ambiguity (ErrAmbiguousWorkflow).
+func (w *watcher) isRoutingSignal(tag string) bool {
+	if tag == w.triggerTag || tag == "internal-reproduced" ||
+		tag == "Bug" || tag == "Feature" ||
+		strings.HasPrefix(tag, repoTagPrefix) {
+		return true
+	}
+	return slices.Contains(w.routingTags, tag)
 }
 
 // indexRunPhases lists CriteriaRuns created by this watcher (source=kanboard)

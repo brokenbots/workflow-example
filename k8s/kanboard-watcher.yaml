@@ -53,7 +53,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: watcher
-          image: localhost:5000/criteria-k8s:kanboard-watcher-7
+          image: localhost:5000/criteria-k8s:kanboard-watcher-8
           imagePullPolicy: IfNotPresent
           command: ["/kanboard-watcher"]
           env:
@@ -69,6 +69,14 @@ spec:
               value: "k8s-run"
             - name: KANBOARD_WORKFLOWS_TAG_GROUP
               value: "workflows"
+            # Component/routing tags are board routing metadata, not
+            # workflow names: they join the watcher's exemption filter so
+            # route resolution never treats them as workflow-override
+            # candidates (KB-8 — two such tags on an armed ticket used to
+            # fail closed with ErrAmbiguousWorkflow every poll). Extend
+            # this list via config, no recompile needed.
+            - name: KANBOARD_ROUTING_TAGS
+              value: "criteria,operator"
             - name: POLL_INTERVAL
               value: "60s"
             - name: CRITERIA_IMAGE
