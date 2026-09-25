@@ -971,16 +971,17 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		out.Volumes = make([]criteriav1.RunWorkflowVolume, 0, len(wf.Volumes))
 		for _, v := range wf.Volumes {
 			out.Volumes = append(out.Volumes, criteriav1.RunWorkflowVolume{
-				Name:      v.Name,
-				Kind:      v.Kind,
-				MountPath: v.MountPath,
-				SubPath:   v.SubPath,
-				ReadOnly:  v.ReadOnly,
-				Claim:     v.Claim,
-				Server:    v.Server,
-				Path:      v.Path,
-				SizeLimit: v.SizeLimit,
-				Env:       copyStringMap(v.Env),
+				Name:       v.Name,
+				Kind:       v.Kind,
+				MountPath:  v.MountPath,
+				SubPath:    v.SubPath,
+				ReadOnly:   v.ReadOnly,
+				Claim:      v.Claim,
+				Server:     v.Server,
+				Path:       v.Path,
+				SizeLimit:  v.SizeLimit,
+				SecretName: v.SecretName,
+				Env:        copyStringMap(v.Env),
 			})
 		}
 	}

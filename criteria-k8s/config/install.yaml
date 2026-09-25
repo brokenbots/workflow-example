@@ -152,6 +152,7 @@ spec:
                               - pvc
                               - nfs
                               - tmp
+                              - k8s-secret
                           mountPath:
                             type: string
                           subPath:
@@ -165,6 +166,8 @@ spec:
                           path:
                             type: string
                           sizeLimit:
+                            type: string
+                          secretName:
                             type: string
                           env:
                             type: object

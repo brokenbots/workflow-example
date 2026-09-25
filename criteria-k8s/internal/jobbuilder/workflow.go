@@ -319,7 +319,12 @@ func (p *workflowPlan) podVolumes(dataPVC string, includeData bool) []corev1.Vol
 	return volumes
 }
 
-// workflowVolume renders one declared volume by kind: pvc, nfs, or tmp.
+// workflowVolume renders one declared volume by kind: pvc, nfs, tmp, or
+// k8s-secret. A k8s-secret declaration (KB-7) renders a native secret
+// volume: the namespace Secret's keys become files at mountPath, so
+// token-file surfaces (e.g. /home/criteria/secrets/workflow_github_token)
+// can be served without a pre-populated PVC. CSI-declared secrets render
+// separately (podVolumes); a k8s-secret volume never touches that channel.
 func workflowVolume(vol criteriav1.RunWorkflowVolume) corev1.Volume {
 	src := corev1.VolumeSource{}
 	switch vol.Kind {
@@ -348,6 +353,8 @@ func workflowVolume(vol criteriav1.RunWorkflowVolume) corev1.Volume {
 				src.EmptyDir.SizeLimit = &q
 			}
 		}
+	case routes.VolumeK8sSecret:
+		src.Secret = &corev1.SecretVolumeSource{SecretName: vol.SecretName}
 	}
 	return corev1.Volume{Name: workflowPodVolumeName(vol), VolumeSource: src}
 }

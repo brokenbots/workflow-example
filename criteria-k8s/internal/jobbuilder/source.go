@@ -206,12 +206,19 @@ fi
 `
 
 // buildSourceRunnerJob constructs the runner Job for a spec.workflowSource
-// run. There is no repo-clone init container: the base image ships no gh
-// and the workflow source is content, so a fetched workflow that needs the
-// ticket repository clones it itself. The workflow object's declared
-// volumes, secrets, and env still render through the plan, so url+image
-// runs of a workflow-library object carry the same storage surface as their
-// image-mode counterparts.
+// run. Runs that declare a repo-under-test (spec.repoUrl set) get the
+// per-ticket repo-clone init container; runs that declare none — a
+// self-contained scan, a fan-out without a repo-under-test — start with no
+// init container at all (KB-7): the clone script fails closed unless a
+// workflow token file exists AND REPO_URL is set, so an unconditional clone
+// blocked every repo-less run before its first step. The base image ships no
+// gh and the workflow source is content, so a fetched workflow that needs
+// the ticket repository clones it itself; the init container exists to
+// pre-populate the /data/intake/<TICKET>/repo path the runner script bridges
+// into var.repo_dir for repo-bearing workflows (linear_develop_v1). The
+// workflow object's declared volumes, secrets, and env still render through
+// the plan, so url+image runs of a workflow-library object carry the same
+// storage surface as their image-mode counterparts.
 func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batchv1.Job {
 	jobName := JobName(run)
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
@@ -235,10 +242,14 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 	// runner starts. Image-mode clones use the baked image (gh + git); source
 	// mode clones on the base image, which carries git but no gh — clone with
 	// plain git and a token-inited credential store instead of gh.
-	// Workflows that never touch the repo (triage, intake) ignore repo_dir.
-	job.Spec.Template.Spec.InitContainers = []corev1.Container{
-		sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan, defaults.LegacySecretVolumes),
+	// Workflows that never touch the repo (triage, intake, self-contained
+	// scans) ignore repo_dir, and a run with no repoUrl declares exactly
+	// that: skip the clone so the run can start at all (KB-7).
+	var initContainers []corev1.Container
+	if run.Spec.RepoURL != "" {
+		initContainers = append(initContainers, sourceRepoCloneContainer(run, sourceModeImage(run, defaults), plan, defaults.LegacySecretVolumes))
 	}
+	job.Spec.Template.Spec.InitContainers = initContainers
 	job.Spec.Template.Spec.Containers = []corev1.Container{
 		sourceRunnerContainer(run, sourceModeImage(run, defaults), providerBaseURL, maxVisits, defaults, plan),
 	}

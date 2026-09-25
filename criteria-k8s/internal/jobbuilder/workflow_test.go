@@ -9,6 +9,7 @@ package jobbuilder_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -254,6 +255,64 @@ func TestWorkflowVolumeEnvsReachAdapterEnvironments(t *testing.T) {
 
 	clone := jobbuilder.BuildRunnerJob(run, defaults).Spec.Template.Spec.InitContainers[0]
 	assert.Equal(t, "/data/.criteria/runs", envValue(clone.Env, "CRITERIA_RUN_DIR_ROOT"))
+}
+
+// KB-7: a k8s-secret volume declaration renders as a native Secret volume
+// in every environment the workflow builds, mounts at the declared
+// mountPath, anchors the volume env, and never triggers the PVC-only host
+// affinity (a Secret is namespace-local, not node-local).
+func TestWorkflowK8sSecretVolumeRendersNativeSecretVolume(t *testing.T) {
+	wf := &criteriav1.RunWorkflow{
+		Name:      "repo-less-scan-v1",
+		Type:      "image",
+		Namespace: "wf-jobs",
+		Env:       map[string]string{"WORKFLOW_GITHUB_TOKEN": "/home/criteria/secrets/workflow_github_token"},
+		Volumes: []criteriav1.RunWorkflowVolume{
+			{Name: "tokens", Kind: "k8s-secret", SecretName: "github-tokens",
+				MountPath: "/home/criteria/secrets", ReadOnly: true},
+		},
+	}
+	run := workflowRun("kb-7-secret", wf)
+	defaults := jobbuilder.Defaults{DataPVC: "criteria-data"}
+
+	runner := jobbuilder.BuildRunnerJob(run, defaults)
+	runnerSpec := runner.Spec.Template.Spec
+	vol := findVolume(t, runnerSpec.Volumes, "tokens")
+	require.NotNil(t, vol.Secret, "k8s-secret must render a native SecretVolumeSource, not a PVC")
+	assert.Equal(t, "github-tokens", vol.Secret.SecretName)
+	mount := findMount(t, runnerSpec.Containers[0].VolumeMounts, "tokens")
+	assert.Equal(t, "/home/criteria/secrets", mount.MountPath)
+	assert.True(t, mount.ReadOnly)
+	assert.Equal(t, "/home/criteria/secrets/workflow_github_token",
+		envValue(runnerSpec.Containers[0].Env, "WORKFLOW_GITHUB_TOKEN"))
+
+	// Adapter jobs and per-scope pods carry the same native volume.
+	adapter := jobbuilder.BuildAdapterJob(run, defaults, "shell")
+	adapterSpec := adapter.Spec.Template.Spec
+	assert.Equal(t, "github-tokens",
+		findVolume(t, adapterSpec.Volumes, "tokens").Secret.SecretName)
+	assert.Equal(t, "/home/criteria/secrets",
+		findMount(t, adapterSpec.Containers[0].VolumeMounts, "tokens").MountPath)
+
+	pod := perScopePod(t, run)
+	assert.Equal(t, "github-tokens",
+		findVolume(t, pod.Spec.Volumes, "tokens").Secret.SecretName)
+	assert.Equal(t, "/home/criteria/secrets",
+		findMount(t, pod.Spec.Containers[0].VolumeMounts, "tokens").MountPath)
+
+	// The clone init container mounts the declaration too, so the clone
+	// script can read the token files it serves (repo-bearing run here).
+	clone := jobbuilder.BuildRunnerJob(run, defaults).Spec.Template.Spec.InitContainers[0]
+	assert.Equal(t, "repo-clone", clone.Name)
+	assert.Equal(t, "/home/criteria/secrets", findMount(t, clone.VolumeMounts, "tokens").MountPath)
+
+	// Host affinity is PVC-only: the pod labels carry no affinity key and
+	// the pod spec carries no nodeAffinity for the secret volume.
+	for key := range runner.Spec.Template.Labels {
+		assert.NotEqual(t, "affinity-tokens", strings.TrimPrefix(key, jobbuilder.LabelHostAffinityPrefix),
+			"a k8s-secret volume must not become a host-affinity group")
+	}
+	assert.Nil(t, runnerSpec.Affinity, "a workflow with no PVC declaration carries no affinity")
 }
 
 func TestWorkflowWithoutVolumeDeclarationsMountsNone(t *testing.T) {

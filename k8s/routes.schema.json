@@ -185,7 +185,7 @@
     },
     "volume": {
       "type": "object",
-      "description": "A storage volume of kind pvc, nfs, or tmp, mounted into the workflow's runner at mountPath.",
+      "description": "A storage volume of kind pvc, nfs, tmp, or k8s-secret, mounted into the workflow's runner at mountPath.",
       "additionalProperties": false,
       "required": [
         "name",
@@ -197,11 +197,12 @@
           "$ref": "#/definitions/label"
         },
         "kind": {
-          "description": "Volume backing kind: pvc (PersistentVolumeClaim), nfs (network share), or tmp (emptyDir scratch).",
+          "description": "Volume backing kind: pvc (PersistentVolumeClaim), nfs (network share), tmp (emptyDir scratch), or k8s-secret (a plain namespace Secret mounted as files).",
           "enum": [
             "pvc",
             "nfs",
-            "tmp"
+            "tmp",
+            "k8s-secret"
           ]
         },
         "mountPath": {
@@ -236,6 +237,11 @@
         "sizeLimit": {
           "type": "string",
           "description": "tmp kind: Kubernetes quantity sizing the emptyDir (e.g. 8Gi).",
+          "minLength": 1
+        },
+        "secretName": {
+          "type": "string",
+          "description": "k8s-secret kind: name of the Secret (same namespace as the workflow) mounted as files at mountPath.",
           "minLength": 1
         },
         "env": {
@@ -275,6 +281,11 @@
                   "required": [
                     "sizeLimit"
                   ]
+                },
+                {
+                  "required": [
+                    "secretName"
+                  ]
                 }
               ]
             }
@@ -306,6 +317,11 @@
                 {
                   "required": [
                     "sizeLimit"
+                  ]
+                },
+                {
+                  "required": [
+                    "secretName"
                   ]
                 }
               ]
@@ -339,6 +355,52 @@
                 {
                   "required": [
                     "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "secretName"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "k8s-secret"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "secretName"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "claim"
+                  ]
+                },
+                {
+                  "required": [
+                    "server"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "sizeLimit"
                   ]
                 }
               ]

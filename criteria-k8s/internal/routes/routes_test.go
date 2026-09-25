@@ -639,6 +639,26 @@ func TestValidateNegative(t *testing.T) {
 			"must not declare claim",
 		},
 		{
+			"k8s-secret volume without secretName",
+			func(p *Payload) {
+				p.WorkflowLibrary["wf-default"] = Workflow{
+					Type: TypeImage, Image: "i", Namespace: "n",
+					Volumes: []Volume{{Name: "v", Kind: VolumeK8sSecret, MountPath: "/v"}},
+				}
+			},
+			"requires a secretName",
+		},
+		{
+			"k8s-secret volume with claim",
+			func(p *Payload) {
+				p.WorkflowLibrary["wf-default"] = Workflow{
+					Type: TypeImage, Image: "i", Namespace: "n",
+					Volumes: []Volume{{Name: "v", Kind: VolumeK8sSecret, MountPath: "/v", SecretName: "s", Claim: "c"}},
+				}
+			},
+			"must not declare claim",
+		},
+		{
 			"secret without provider class",
 			func(p *Payload) {
 				p.WorkflowLibrary["wf-default"] = Workflow{
@@ -696,6 +716,25 @@ func TestValidateNegative(t *testing.T) {
 				t.Fatalf("err = %v, want substring %q", err, tc.wantSub)
 			}
 		})
+	}
+}
+
+// KB-7: a k8s-secret volume mounts a plain namespace Secret as files, e.g.
+// to serve /home/criteria/secrets/workflow_github_token without a
+// pre-populated PVC. secretName is required and the sibling-kind fields are
+// rejected.
+func TestValidateK8sSecretVolume(t *testing.T) {
+	p := validPayload()
+	p.WorkflowLibrary["wf-k8s-secret"] = Workflow{
+		Type: TypeImage, Image: "i", Namespace: "n",
+		Volumes: []Volume{{
+			Name: "tokens", Kind: VolumeK8sSecret, MountPath: "/home/criteria/secrets",
+			SecretName: "github-tokens",
+			Env:        map[string]string{"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"},
+		}},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("Validate(k8s-secret volume) failed: %v", err)
 	}
 }
 
