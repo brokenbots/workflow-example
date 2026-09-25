@@ -23,7 +23,13 @@ set -euo pipefail
 #      handler -> done comment -> done column | failure comments -> review
 #      column), with CRI-275's bookkeeping-failure edges ending in the
 #      failed terminal;
-#   5. the linear_* source trees are untouched.
+#   5. fetch_ticket requests task_id-only getTaskTags against a mock Kanboard
+#      API and stores the {task, tags, comments} envelope with tags
+#      normalized to the [{name}] shape the fixtures pin — real Kanboard
+#      rejects extra params with -32602 "Invalid params: Too many arguments",
+#      and the pre-fix port sent project_id and stored that error body as
+#      ticket.json's tags (KB-10 smoke regression);
+#   6. the linear_* source trees are untouched.
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$TREE_ROOT/.." && pwd)"
@@ -332,7 +338,153 @@ else
     ok "title-less ticket fails loudly"
 fi
 
-# ── 4. Sibling trees untouched ───────────────────────────────────────────────
+# ── 4. fetch_ticket envelope against a mock Kanboard API ─────────────────────
+
+# Regression (KB-10 smoke run): the port's fetch passed project_id alongside
+# task_id to getTaskTags. Real Kanboard takes ONLY task_id — the extra
+# project_id fails with -32602 "Invalid params: Too many arguments", and the
+# raw RPC error body was stored as ticket.json's tags (the smoke run's
+# operator ticket carried the error blob instead of the task's tags). The
+# mock emulates the real API exactly: params beyond task_id return the real
+# -32602 error body, and a correct call serves the {tag_link_id: name} map
+# the real API returns. fetch_ticket must request task_id only, and store
+# tags normalized to the [{name}] shape the fixtures pin.
+
+command -v node >/dev/null 2>&1 \
+    || { echo "FAIL: node not found (mock Kanboard server)" >&2; exit 1; }
+
+export KANBOARD_APP_TOKEN="mock-token"
+
+FETCH_DIR="$TMP/fetch-intake"
+FETCH_RUN_DIR="$FETCH_DIR/$SLUG"
+mkdir -p "$FETCH_RUN_DIR"
+
+MOCK="$TMP/mock_kanboard_fetch.js"
+cat > "$MOCK" <<'JS'
+const http = require("http");
+const fs = require("fs");
+const [cfgFile, logFile, tasksFile] = process.argv.slice(2);
+
+const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => {
+        body += c;
+    });
+    req.on("end", () => {
+        const rpc = JSON.parse(body || "{}");
+        const method = rpc.method || "";
+        const params = rpc.params || {};
+        const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+        const tasks = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
+        let resp;
+        if (method === "getTask") {
+            resp = { result: tasks.task };
+        } else if (method === "getAllComments") {
+            resp = { result: tasks.comments };
+        } else if (method === "getTaskTags") {
+            // Record the exact request params: the regression asserts the
+            // script sends {"task_id": N} and nothing else.
+            fs.appendFileSync(logFile, JSON.stringify(params) + "\n");
+            if (cfg.force_tags_error) {
+                resp = { error: { code: -32602, message: "Invalid params", data: "Too many arguments" } };
+            } else if (Object.keys(params).length !== 1 || !("task_id" in params)) {
+                // Real Kanboard: extra params fail with HTTP 200 + JSON-RPC error.
+                resp = { error: { code: -32602, message: "Invalid params", data: "Too many arguments" } };
+            } else {
+                // Real Kanboard shape: {tag_link_id: tag_name} map.
+                resp = { result: Object.fromEntries(tasks.tags.map((t, i) => [String(1000 + i), t.name])) };
+            }
+        } else {
+            resp = { error: { code: -32601, message: "unexpected method: " + method } };
+        }
+        const data = JSON.stringify(resp);
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
+        res.end(data);
+    });
+});
+server.listen(0, "127.0.0.1", () => { console.log(server.address().port); });
+JS
+
+FETCH_CFG="$TMP/fetch_mock_config.json"
+FETCH_LOG="$TMP/fetch_rpc_params.jsonl"
+TASKS_FILE="$TMP/fetch_tasks.json"
+MOCK_LOG="$TMP/fetch_mock.log"
+
+# Seed the mock's task/tag/comment state from the fixture envelope: getTask
+# serves .task, getTaskTags serves the fixture tags as the real {tag_link_id:
+# name} map, getAllComments serves .comments.
+jq '{task: .task, tags: .tags, comments: (.comments // [])}' \
+    "$TREE_ROOT/tests/fixtures/task_ready.json" > "$TASKS_FILE"
+jq -n '{force_tags_error: false}' > "$FETCH_CFG"
+
+node "$MOCK" "$FETCH_CFG" "$FETCH_LOG" "$TASKS_FILE" > "$MOCK_LOG" 2>&1 &
+MOCK_PID=$!
+trap 'kill "$MOCK_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
+
+PORT=""
+tries=0
+until [ -n "$PORT" ] || [ "$tries" -ge 50 ]; do
+    PORT="$(head -n1 "$MOCK_LOG" 2>/dev/null || true)"
+    tries=$((tries + 1))
+    [ -n "$PORT" ] || sleep 0.1
+done
+if [ -z "$PORT" ]; then
+    echo "FAIL: mock Kanboard server did not start: $(cat "$MOCK_LOG")" >&2
+    exit 1
+fi
+KANBOARD_URL="http://127.0.0.1:$PORT"
+export KANBOARD_URL
+
+# Render mimics templatefile for the shellquoted variables.
+fetch_script="$TMP/fetch_ticket.sh"
+sed -e "s@{{ .intake_root | shellquote }}@$(shquote "$FETCH_DIR")@g" \
+    -e "s@{{ .ticket_id | shellquote }}@$(shquote "$SLUG")@g" \
+    "$TREE_ROOT/scripts/fetch_ticket.sh.tftpl" > "$fetch_script"
+chmod +x "$fetch_script"
+
+rm -f "$FETCH_LOG"
+if out="$("$fetch_script")"; then
+    require_equal "$out" \
+        "fetched KB-140: Deploy job races the cache warm step [column: 6]" \
+        "fetch_ticket fetches and reports the task"
+else
+    fail "fetch_ticket failed: ${out:-<no output>}"
+fi
+
+# The getTaskTags request must carry task_id and nothing else: the extra
+# project_id the pre-fix port sent is what real Kanboard rejects with
+# -32602.
+require_equal "$(cat "$FETCH_LOG")" '{"task_id":140}' \
+    "getTaskTags is called with task_id only (no project_id: real Kanboard fails it with -32602)"
+
+# The stored envelope must carry the task, the tags normalized to the
+# [{name}] shape the fixtures pin, and the comment history.
+ticket="$FETCH_RUN_DIR/ticket.json"
+require_equal "$(jq -c '.tags' "$ticket")" \
+    "$(jq -c '[.tags[]]' "$TREE_ROOT/tests/fixtures/task_ready.json")" \
+    "ticket.json tags are normalized to the [{name}] envelope shape"
+require_equal "$(jq -c '.task | {id, title, column_id}' "$ticket")" \
+    '{"id":140,"title":"Deploy job races the cache warm step","column_id":6}' \
+    "ticket.json carries the fetched task"
+require_equal "$(jq -c '[.comments[].id]' "$ticket")" \
+    "$(jq -c '[.comments[].id]' "$TREE_ROOT/tests/fixtures/task_ready.json")" \
+    "ticket.json carries the comment history"
+
+# An RPC error body must fail the fetch loudly, never be stored as tags —
+# the exact defect the smoke run observed (the -32602 error blob stored as
+# ticket.json's tags, the run reporting success).
+jq -n '{force_tags_error: true}' > "$FETCH_CFG"
+rm -f "$ticket"
+if "$fetch_script" >/dev/null 2>&1; then
+    fail "an RPC error body must fail the fetch, not be stored as tags"
+else
+    ok "an RPC error body fails loudly (no error blob stored as tags)"
+fi
+[ ! -s "$ticket" ] \
+    && ok "a failed fetch writes no ticket.json" \
+    || fail "a failed fetch must not write ticket.json"
+
+# ── 5. Sibling trees untouched ───────────────────────────────────────────────
 
 untouched="$(git -C "$REPO_ROOT" status --porcelain -- linear_intake_v1 linear_triage_v1 linear_develop_v1 qa_triage_v1 workstream_handler_v1)"
 if [ -z "$untouched" ]; then
