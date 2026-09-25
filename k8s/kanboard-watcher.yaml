@@ -19,6 +19,10 @@ spec:
         secretPath: criteria/data/linear
         secretKey: kanboard_app_token
         filePermission: 0444
+      - objectName: kanboard_url
+        secretPath: criteria/data/linear
+        secretKey: kanboard_url
+        filePermission: 0444
 ---
 apiVersion: apps/v1
 kind: Deployment
