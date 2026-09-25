@@ -670,3 +670,90 @@ func TestExtractRepoURLPrefersRepoTag(t *testing.T) {
 		})
 	}
 }
+
+// KB-8: component/routing tags (criteria, operator) are board routing
+// metadata, never workflow-override candidates. An armed Backlog task
+// carrying both tags must resolve the route's default workflow and fire
+// exactly one CriteriaRun — the live failure was ErrAmbiguousWorkflow on
+// every poll, never firing.
+func TestRoutingTagsExemptComponentTagsFromOverride(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.w.routingTags = []string{"criteria", "operator"}
+	tw.kbS.addTask(30, 5, "k8s-run", "internal-reproduced",
+		"repo:brokenbots/workflow-example", "criteria", "operator")
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1, "armed task with two routing tags fires exactly one CriteriaRun")
+	assert.Equal(t, "KB-30", runs[0].Spec.TicketID)
+	assert.Equal(t, "brokenbots/workflow-example", runs[0].Spec.RepoURL)
+	require.NotNil(t, runs[0].Spec.Workflow)
+	assert.Equal(t, "kanboard-triage-wf", runs[0].Spec.Workflow.Name,
+		"route default workflow, never a component tag name")
+	assert.Equal(t, criteriav1.RunClassTriage, runs[0].Spec.Workflow.Class)
+
+	// A settled run's ticket must not re-fire: the live bug re-failed the
+	// task on every poll, so exactly-one must hold across polls.
+	tw.setRunPhase(t, "KB-30", criteriav1.PhaseRunning)
+	tw.pollOnce(t)
+	assert.Len(t, tw.runs(t), 1, "live run blocks a second run across polls")
+}
+
+// One component tag alone on an armed ticket used to become a bogus
+// override name and fail closed with ErrUnknownWorkflow; with the routing
+// exemption it resolves the route's default workflow too.
+func TestSingleRoutingTagArmFires(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.w.routingTags = []string{"criteria", "operator"}
+	tw.kbS.addTask(31, 5, "k8s-run", "internal-reproduced", "criteria")
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	require.NotNil(t, runs[0].Spec.Workflow)
+	assert.Equal(t, "kanboard-triage-wf", runs[0].Spec.Workflow.Name)
+}
+
+// Fail-closed semantics survive the routing-tag exemption: two tags that
+// genuinely name workflows in the configured tag group are still an
+// ambiguous override pair and must refuse to fire (KB-8 keeps the
+// negative path).
+func TestGenuineOverrideAmbiguityStillFailsClosed(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.w.routingTags = []string{"criteria", "operator"}
+	tw.kbS.addTask(32, 5, "k8s-run", "kanboard-triage-wf", "kanboard-develop-wf")
+
+	tw.pollOnce(t)
+
+	assert.Empty(t, tw.runs(t), "two genuine workflow-override tags refuse to fire")
+	assert.True(t, tw.logs.contains("route lookup failed closed"),
+		"ambiguity is logged as a fail-closed routing failure")
+	assert.True(t, tw.logs.contains("multiple workflow labels in the workflows label group"),
+		"the ambiguity error names the conflicting tags")
+}
+
+// Without KANBOARD_ROUTING_TAGS configured the component tags keep the
+// pre-fix fail-closed posture: a lone component tag is a bogus override
+// name (ErrUnknownWorkflow) and must not fire. This pins the exemption to
+// the configuration, not to a hardcoded list in the watcher.
+func TestUnconfiguredComponentTagStillFailsClosed(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.w.routingTags = nil
+	tw.kbS.addTask(33, 5, "k8s-run", "criteria")
+
+	tw.pollOnce(t)
+
+	assert.Empty(t, tw.runs(t), "component tag stays an override candidate without the env")
+	assert.True(t, tw.logs.contains("workflow is not present in the routes workflowLibrary"),
+		"the bogus override name fails closed with ErrUnknownWorkflow")
+}
+
+func TestParseTagList(t *testing.T) {
+	assert.Equal(t, []string{"criteria", "operator"}, parseTagList("criteria,operator"))
+	assert.Equal(t, []string{"criteria", "operator"}, parseTagList(" criteria , operator ,"))
+	assert.Equal(t, []string{"criteria"}, parseTagList("criteria"))
+	assert.Empty(t, parseTagList(""), "empty env disables the extra exemptions")
+	assert.Empty(t, parseTagList(" , "), "whitespace-only entries are dropped")
+}
