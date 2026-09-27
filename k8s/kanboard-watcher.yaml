@@ -60,6 +60,26 @@ spec:
           image: localhost:5000/criteria-k8s:kanboard-watcher-8
           imagePullPolicy: IfNotPresent
           command: ["/kanboard-watcher"]
+          # Health endpoints served by the watcher (KB-22): /readyz fails
+          # once polls stop succeeding (stall detection), /livez fails only
+          # when polls stop completing at all (wedge outside the deadline).
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 30
+            failureThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 2
           env:
             - name: NAMESPACE
               value: "criteria-jobs"
@@ -83,6 +103,13 @@ spec:
               value: "criteria,operator"
             - name: POLL_INTERVAL
               value: "60s"
+            # Per-poll deadline (KB-22): a blocking call inside poll() used
+            # to wedge the loop silently for hours while the pod read
+            # Running 1/1. The deadline aborts a hung poll into a logged
+            # error, and the readiness/liveness probes below turn a
+            # persistent stall into a visible unready/restart signal.
+            - name: POLL_TIMEOUT
+              value: "300s"
             - name: CRITERIA_IMAGE
               value: "localhost:5000/linear-intake-remote:dev"
             - name: PROVIDER_BASE_URL
