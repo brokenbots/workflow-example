@@ -199,7 +199,13 @@ step "reprovision_branch_scope" {
             value  = data.internal.branch_scope_retries.value + 1
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "branch scope reprovision step failed before the branch re-run (KB-24)"
+        }
+    }
 }
 
 // KB-24: the reprovision budget is spent with nothing to show for it. Fail
@@ -217,7 +223,13 @@ step "exhausted_branch_scope" {
             value  = "branch scope reprovision budget exhausted (${var.max_branch_scope_retries} retries) without a reported reason (KB-24)"
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "branch scope reprovision exhaustion step failed while failing the run (KB-24)"
+        }
+    }
 }
 
 // ── PR state check ────────────────────────────────────────────────────────────
@@ -455,11 +467,17 @@ switch "route_pr_reviewer_loop" {
     }
     // No verdict at all: the child never concluded (adapter crashed, provider
     // unreachable, quota exhausted) or died with a reported reason. A reported
-    // reason is not necessarily a lost session, but a reviewer loop that dies
-    // repeatedly is a sick scope either way — KB-24: re-provision the reviewer
+    // reason is a genuine child failure rather than a lost session — fail with
+    // the true reason instead of burning the reprovision budget on re-running
+    // a review that legitimately failed. An empty reason means the child never
+    // concluded for an unreported cause: KB-24 re-provisions the reviewer
     // scope (fresh rotate + re-dial, bounded by the retry budget) before
     // re-running the review. On budget exhaustion fail with a typed reason
     // instead of hanging on the dead session.
+    match {
+        condition = data.internal.failure_reason.value != ""
+        next      = state.failed
+    }
     match {
         condition = data.internal.reviewer_scope_retries.value < var.max_reviewer_scope_retries
         next      = step.reprovision_reviewer_scope
@@ -485,7 +503,13 @@ step "reprovision_reviewer_scope" {
             value  = data.internal.reviewer_scope_retries.value + 1
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "reviewer scope reprovision step failed before the review re-run (KB-24)"
+        }
+    }
 }
 
 // KB-24: the reprovision budget is spent without a review verdict. Fail with
@@ -504,7 +528,13 @@ step "exhausted_reviewer_scope" {
             value  = "reviewer scope reprovision budget exhausted (${var.max_reviewer_scope_retries} retries) without a review verdict (KB-24)"
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "reviewer scope reprovision exhaustion step failed while failing the run (KB-24)"
+        }
+    }
 }
 
 // ── Merge ─────────────────────────────────────────────────────────────────────

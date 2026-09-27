@@ -38,14 +38,21 @@ criteria compile "${TREE_ROOT}/workflows/pr_reviewer_loop" --format json --out "
 echo "==> Checking the reviewer verdict routes keep their order..."
 jq -e '
   .switches[] | select(.name == "route_pr_reviewer_loop") |
-  ([.conditions[].next] | join(",")) == "merge_pr,triage_pr_feedback,triage_pr_feedback,reprovision_reviewer_scope"
+  ([.conditions[].next] | join(",")) == "merge_pr,triage_pr_feedback,triage_pr_feedback,failed,reprovision_reviewer_scope"
   and .default_next == "exhausted_reviewer_scope"
 ' "${COMPILE_OUT}" >/dev/null
 
 echo "==> Checking the reviewer reprovision match is bounded by the retry budget..."
 jq -e '
   .switches[] | select(.name == "route_pr_reviewer_loop") |
-  .conditions[3].match == "data.internal.reviewer_scope_retries.value < var.max_reviewer_scope_retries"
+  .conditions[4].match == "data.internal.reviewer_scope_retries.value < var.max_reviewer_scope_retries"
+' "${COMPILE_OUT}" >/dev/null
+
+echo "==> Checking a reported reviewer failure reason fails the run (true reason preserved)..."
+jq -e '
+  .switches[] | select(.name == "route_pr_reviewer_loop") |
+  .conditions[3].match == "data.internal.failure_reason.value != \"\""
+  and .conditions[3].next == "failed"
 ' "${COMPILE_OUT}" >/dev/null
 
 echo "==> Checking the reviewer reprovision step re-enters the reviewer loop..."
@@ -103,6 +110,12 @@ grep -F 'value  = data.internal.branch_scope_retries.value + 1' main.chcl >/dev/
 echo "==> Checking budget exhaustion writes a typed failure reason..."
 grep -F 'value  = "reviewer scope reprovision budget exhausted (${var.max_reviewer_scope_retries} retries) without a review verdict (KB-24)"' main.chcl >/dev/null
 grep -F 'value  = "branch scope reprovision budget exhausted (${var.max_branch_scope_retries} retries) without a reported reason (KB-24)"' main.chcl >/dev/null
+
+echo "==> Checking helper step failures carry typed reasons for the parent..."
+grep -F 'value  = "reviewer scope reprovision step failed before the review re-run (KB-24)"' main.chcl >/dev/null
+grep -F 'value  = "reviewer scope reprovision exhaustion step failed while failing the run (KB-24)"' main.chcl >/dev/null
+grep -F 'value  = "branch scope reprovision step failed before the branch re-run (KB-24)"' main.chcl >/dev/null
+grep -F 'value  = "branch scope reprovision exhaustion step failed while failing the run (KB-24)"' main.chcl >/dev/null
 
 echo "==> Checking a concluded review round renews the reviewer budget..."
 grep -F 'value  = 0' main.chcl >/dev/null
