@@ -93,11 +93,12 @@ type Observation struct {
 	// Terminal is the terminal run event, when one has been observed.
 	Terminal *Terminal
 	// LastProgress is the newest step-progress event timestamp the
-	// observation has consumed (any lifecycle event except heartbeats,
-	// adapter chatter and terminal envelopes; KB-24). Zero when no
-	// step-progress event has been observed (yet): the controller then
-	// stamps its own baseline so the stall watchdog's clock starts with the
-	// first authoritative observation.
+	// observation has consumed (lifecycle envelopes, plus the copilot
+	// adapter's agent-activity AdapterEvents — see progressFromEnvelope;
+	// heartbeats, terminal envelopes and non-activity adapter chatter never
+	// count; KB-24). Zero when no step-progress event has been observed
+	// (yet): the controller then stamps its own baseline so the stall
+	// watchdog's clock starts with the first authoritative observation.
 	LastProgress time.Time
 }
 
@@ -438,11 +439,27 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 
 // progressFromEnvelope reports whether an envelope is a step-progress event
 // for the stall watchdog (KB-24): the run made visible progress when any of
-// these arrives. Heartbeats and adapter chatter never count — a wedged step
-// emits only heartbeats (and the adapter's internal error loop surfaces as
-// AdapterEvents), which is exactly the signature the watchdog must detect.
-// Terminal envelopes are likewise excluded: a terminal run needs no
-// watchdog.
+// these arrives. Heartbeats and terminal envelopes never count — a wedged
+// step emits only heartbeats, which is exactly the signature the watchdog
+// must detect (the CRI-271 incident's wedge chatter — "remote shim accept
+// failed", "no persisted scope instance record" — is engine slog output that
+// never enters the envelope stream). Terminal envelopes are likewise
+// excluded: a terminal run needs no watchdog.
+//
+// AdapterEvents count only for a fixed activity allowlist
+// (adapterEventActivityKind): the copilot adapter (pinned v0.5.8) drops log
+// lines (WS15/WS03), so a healthy turn ships ALL of its agent activity as
+// structured AdapterEvents — agent.message deltas, tool invocations/results,
+// permission requests and the finalize receipt — and a step that emits none
+// of those while its session is wedged produces nothing but heartbeats.
+// Counting every AdapterEvent would let crash/respawn chatter and scope
+// provisioning bookkeeping hold the watchdog open, so unknown or non-activity
+// kinds default to excluded; extend the allowlist deliberately per adapter
+// emission (see adapterEventActivityKind for the current evidence).
+// Corroborating the window: on healthy copilot turns (CRI-277 notes) the
+// worst observed gap between activity events is 217s and gate-held permission
+// waits run ~10m — both far inside the 30m default stall window, so activity
+// progress and step-timeout budgets (e.g. 60m copilot turns) cannot contradict.
 func progressFromEnvelope(env *v1.Envelope) bool {
 	switch env.GetPayload().(type) {
 	case *v1.Envelope_RunStarted,
@@ -464,6 +481,43 @@ func progressFromEnvelope(env *v1.Envelope) bool {
 		*v1.Envelope_StepIterationCompleted,
 		*v1.Envelope_ScopeIterCursorSet,
 		*v1.Envelope_WatchReady:
+		return true
+	case *v1.Envelope_AdapterEvent:
+		return adapterEventActivityKind(env.GetAdapterEvent().GetKind())
+	default:
+		return false
+	}
+}
+
+// adapterEventActivityKind reports whether an AdapterEvent kind is genuine
+// agent activity that must refresh the stall watchdog's progress baseline
+// (KB-24). The allowlist is the copilot adapter's emission surface (v0.5.8
+// sources: copilot_turn.go, copilot_outcome.go, copilot_permission.go) plus
+// the engine host's shared tool-call loader, and the kinds a wedge or a
+// crash loop can produce are deliberately absent:
+//
+//   - agent.message / tool.invocation / tool.result / limit.reached:
+//     the turn state machine's per-event traffic — continuous on healthy
+//     turns (worst CRI-277 gap 217s), absent once the agent session is dead.
+//   - permission.request: the model asking for permission; gate-held waits
+//     run ~10m on healthy turns (CRI-277).
+//   - outcome.finalized: the model's successful submit_outcome call.
+//
+// Excluded on purpose: adapter lifecycle kinds (scope provisioning
+// bookkeeping, not step work), outcome.failure (the finalize-failed verdict,
+// immediately followed by the step's own StepOutcome), session.crash and
+// session.respawned (host crash handling — a respawn loop must not read as
+// progress), permission.denied and step.outcome.unknown (malformed-payload
+// and unknown-outcome bookkeeping), and every unknown kind (future chatter
+// kinds must not hold the watchdog open by default).
+func adapterEventActivityKind(kind string) bool {
+	switch kind {
+	case "agent.message",
+		"tool.invocation",
+		"tool.result",
+		"permission.request",
+		"limit.reached",
+		"outcome.finalized":
 		return true
 	default:
 		return false

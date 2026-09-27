@@ -211,6 +211,40 @@ func TestStallWatchdogBaselinePreservedOnHeartbeatOnlyStream(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
 
+// A healthy long copilot step must not be failed (KB-24 review B): the
+// turn entered 40m ago — inside its 60m budget — and its in-step stream
+// (agent.message deltas, tool round-trips, permission gates, heartbeats; no
+// StepLog, no StepOutcome) folded to a LastProgress 25m old. The watchdog
+// clock measures time since the newest activity event, not step duration,
+// so the run keeps running and the stamp refreshes; the stream→baseline
+// mapping itself is covered by the castle classifier tests
+// (TestObserveHealthyCopilotStreamLongerThanWindowKeepsFreshProgress).
+func TestStallWatchdogSparesHealthyLongCopilotStep(t *testing.T) {
+	lastActivity := time.Now().UTC().Add(-25 * time.Minute).Truncate(time.Second)
+	r, run, cl := stalledRunFixture(t, "kb-24-healthy-copilot", true, &castle.Observation{
+		RunID:        "castle-run-24",
+		LastProgress: lastActivity,
+	}, 30*time.Minute)
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Second, res.RequeueAfter,
+		"a running run keeps polling on the poll interval while the watchdog is enabled")
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseRunning, updated.Status.Phase,
+		"a 40m-old copilot step with fresh agent activity must not be failed on step duration")
+	require.NotNil(t, updated.Status.LastStepProgress)
+	assert.True(t, updated.Status.LastStepProgress.Time.Equal(lastActivity))
+	_, ok := conditionFor(updated.Status, controller.ConditionStallWatchdog)
+	assert.False(t, ok, "a healthy long copilot step must not carry the StallWatchdog condition")
+
+	var runnerJob batchv1.Job
+	err = cl.Get(context.Background(), types.NamespacedName{Name: jobbuilder.RunnerJobName(run), Namespace: run.Namespace}, &runnerJob)
+	require.NoError(t, err, "the healthy runner Job must not be deleted")
+}
+
 // A zero stall window disables the watchdog entirely: no stamping and no
 // failure, and a non-per-scope run gets no poll either (the pre-KB-24
 // requeue behavior).

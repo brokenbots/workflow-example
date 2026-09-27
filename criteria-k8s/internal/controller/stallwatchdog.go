@@ -30,8 +30,10 @@ const ConditionStallWatchdog = "StallWatchdog"
 // (KB-24).
 //
 // Progress is the newest step-progress event in the run's castle stream
-// (any lifecycle event except heartbeats, adapter chatter and terminal
-// envelopes). A run with no step-progress event yet gets a baseline stamp
+// (lifecycle envelopes plus the copilot adapter's agent-activity
+// AdapterEvents — see castle.progressFromEnvelope; heartbeats, terminal
+// envelopes and non-activity adapter chatter never count). A run with no
+// step-progress event yet gets a baseline stamp
 // of "now" on its first authoritative observation, so its watchdog clock
 // starts when the controller first sees the run. A stalled run (older than
 // the stall window while still Running) gets Phase=Failed plus a

@@ -56,11 +56,18 @@ var (
 	retentionPeriod     = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
 	sweepInterval       = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	// KB-24: the stall watchdog's step-progress window. A Running run whose
-	// castle stream shows no step progress (any lifecycle event except
-	// heartbeats, adapter chatter and terminal envelopes) for this long is
-	// failed with a StallWatchdog condition so CriteriaRun reflects Failed
-	// instead of hanging in Running (the CRI-271 wedge signature). 0
-	// disables the watchdog.
+	// castle stream shows no step progress (lifecycle envelopes plus the
+	// copilot adapter's agent-activity AdapterEvents; heartbeats, terminal
+	// envelopes and non-activity adapter chatter never count) for this long
+	// is failed with a StallWatchdog condition so CriteriaRun reflects
+	// Failed instead of hanging in Running (the CRI-271 wedge signature).
+	// The clock measures time since the newest activity event, not step
+	// duration: healthy copilot turns emit agent events continuously (worst
+	// observed CRI-277 gap 217s, gate-held permission waits ~10m), both far
+	// inside this window, so shipped step budgets above it (60m copilot
+	// develop/review turns, 3600s pr_review/branch_triage_agent) remain
+	// reachable while a wedged session that emits only heartbeats trips the
+	// watchdog. 0 disables the watchdog.
 	stallWindow = flag.Duration("stall-window", getDuration("CRITERIA_STALL_WINDOW", 30*time.Minute), "Fail a run whose castle stream shows no step progress for this long (KB-24; 0 disables)")
 	// CRI-144: reap adapter pods and legacy adapter Jobs whose owning
 	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers

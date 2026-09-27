@@ -77,8 +77,15 @@ operator:
   legacySecretVolumes: false
   # Stall watchdog (KB-24): a Running run whose castle stream shows no step
   # progress for this long is failed with a StallWatchdog condition so
-  # CriteriaRun reflects Failed instead of hanging in Running. "0s"
-  # disables the watchdog. Durations use Go time.ParseDuration units.
+  # CriteriaRun reflects Failed instead of hanging in Running. Progress is
+  # agent-activity aware (lifecycle envelopes plus the copilot adapter's
+  # AdapterEvents; heartbeats and adapter bookkeeping chatter never count),
+  # so the clock measures time since the newest activity event, not step
+  # duration: healthy copilot turns emit agent events continuously (worst
+  # observed gap 217s, gate-held permission waits ~10m), far inside this
+  # window, while shipped step budgets above it (60m copilot develop/review
+  # turns) stay reachable. "0s" disables the watchdog. Durations use Go
+  # time.ParseDuration units.
   stallWindow: 30m
   resources:
     requests:
