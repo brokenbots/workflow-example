@@ -63,6 +63,13 @@ spec:
           # Health endpoints served by the watcher (KB-22): /readyz fails
           # once polls stop succeeding (stall detection), /livez fails only
           # when polls stop completing at all (wedge outside the deadline).
+          # During startup /livez reports "no poll has completed since
+          # startup" until the first poll finishes, so the startupProbe
+          # below gives the startup path its full budget: project
+          # resolution and the first poll are each bounded by POLL_TIMEOUT,
+          # and the startup budget (periodSeconds * failureThreshold =
+          # 700s) exceeds twice POLL_TIMEOUT before regular liveness
+          # applies. A slow-but-healthy startup must never be restarted.
           ports:
             - name: health
               containerPort: 8081
@@ -73,11 +80,24 @@ spec:
               port: health
             periodSeconds: 30
             failureThreshold: 1
+          # Startup grace (KB-22): until this probe succeeds, readiness and
+          # liveness are disabled. Budget 10s * 70 = 700s > 2 * POLL_TIMEOUT
+          # (300s), covering the worst case: a deadline-bound project
+          # resolution plus a deadline-bound first poll.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: health
+            periodSeconds: 10
+            failureThreshold: 70
+          # Runs only after the startupProbe succeeds, when the first poll
+          # has completed: /livez then fails only when polls stop
+          # completing (wedge outside the per-poll deadline) — slow but
+          # completing polls stay under the app-side stall threshold.
           livenessProbe:
             httpGet:
               path: /livez
               port: health
-            initialDelaySeconds: 30
             periodSeconds: 60
             failureThreshold: 2
           env:
@@ -106,8 +126,10 @@ spec:
             # Per-poll deadline (KB-22): a blocking call inside poll() used
             # to wedge the loop silently for hours while the pod read
             # Running 1/1. The deadline aborts a hung poll into a logged
-            # error, and the readiness/liveness probes below turn a
-            # persistent stall into a visible unready/restart signal.
+            # error, and the readiness/liveness probes turn a persistent
+            # stall into a visible unready/restart signal. The startupProbe
+            # above budgets 2 * this value for startup before liveness
+            # applies.
             - name: POLL_TIMEOUT
               value: "300s"
             - name: CRITERIA_IMAGE

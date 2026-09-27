@@ -5,7 +5,10 @@ set -euo pipefail
 # watchdog health endpoints so a poll stall renders the pod unready instead
 # of a silent Running 1/1. Asserts the readiness/liveness probes point at
 # /readyz + /livez on the health port, that the port matches the binary's
-# default health address, and that the per-poll deadline env is configured.
+# default health address, that the per-poll deadline env is configured, and
+# that the startup probe budget exceeds POLL_TIMEOUT so a slow-but-healthy
+# startup is never restart-looped while its work is still inside its
+# deadline.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="$REPO_ROOT/k8s/kanboard-watcher.yaml"
@@ -14,6 +17,27 @@ WATCHER_SRC="$REPO_ROOT/criteria-k8s/cmd/kanboard-watcher/main.go"
 fail() {
     echo "FAIL: $1" >&2
     exit 1
+}
+
+# duration_to_seconds converts a Go duration string ("300s", "5m", "1h")
+# into whole seconds for the budget arithmetic below.
+duration_to_seconds() {
+    local d="$1" n u
+    d=${d//\"/}
+    n=$(sed -n 's/^\([0-9][0-9]*\)[smh]$/\1/p' <<<"$d")
+    [ -n "$n" ] || { echo ""; return; }
+    u=$(sed -n 's/^[0-9][0-9]*\([smh]\)$/\1/p' <<<"$d")
+    case "$u" in
+        s) echo "$n" ;;
+        m) echo "$((n * 60))" ;;
+        h) echo "$((n * 3600))" ;;
+        *) echo "" ;;
+    esac
+}
+
+# probe_value extracts a numeric key's value from a probe block.
+probe_value() {
+    sed -n "s/^.*$1: \([0-9][0-9]*\)$/\1/p" <<<"$2" | head -1
 }
 
 [ -f "$MANIFEST" ] || fail "k8s/kanboard-watcher.yaml is missing"
@@ -52,5 +76,31 @@ grep -q 'defaultHealthAddr.*":8081"' "$WATCHER_SRC" || \
 # And the binary must keep running polls under the per-poll deadline.
 grep -q 'pollWithDeadline' "$WATCHER_SRC" || \
     fail "watcher no longer runs polls under the per-poll deadline (KB-22)"
+
+# Startup budget (KB-22): until the startupProbe succeeds, readiness and
+# liveness are disabled, and /livez reports "no poll has completed since
+# startup" until the first poll finishes. The startup budget must exceed
+# the worst-case bounded startup work — POLL_TIMEOUT for project
+# resolution plus POLL_TIMEOUT for the first poll — or a slow-but-healthy
+# startup would be restart-looped under exactly the degraded-upstream
+# condition this workstream targets.
+poll_timeout=$(duration_to_seconds "$(awk '/name: POLL_TIMEOUT/{getline; print $2}' <<<"$manifest")")
+[ -n "$poll_timeout" ] || fail "POLL_TIMEOUT value is missing or unparseable"
+
+startup_block=$(grep -A7 'startupProbe:' <<<"$manifest")
+startup_period=$(probe_value 'periodSeconds' "$startup_block")
+startup_threshold=$(probe_value 'failureThreshold' "$startup_block")
+[ -n "$startup_period" ] && [ -n "$startup_threshold" ] || \
+    fail "startupProbe must configure periodSeconds and failureThreshold"
+startup_budget=$((startup_period * startup_threshold))
+if [ "$startup_budget" -le "$((2 * poll_timeout))" ]; then
+    fail "startupProbe budget ${startup_budget}s must exceed 2 * POLL_TIMEOUT ($((2 * poll_timeout))s): a deadline-bound startup plus first poll would be restart-looped"
+fi
+
+# The regular liveness fuse (post-startup wedge catcher) must stay wired.
+live_period=$(probe_value 'periodSeconds' "$live_block")
+live_threshold=$(probe_value 'failureThreshold' "$live_block")
+[ -n "$live_period" ] && [ -n "$live_threshold" ] || \
+    fail "livenessProbe must configure periodSeconds and failureThreshold"
 
 echo "OK: kanboard-watcher watchdog wiring (KB-22)"

@@ -115,6 +115,9 @@ func newKbServer(t *testing.T) *kbServer {
 		case "getVersion":
 			resp["result"] = "1.2.54"
 		case "getAllProjects":
+			if s.block != nil {
+				<-s.block
+			}
 			resp["result"] = []interface{}{s.project}
 		case "getProjectById":
 			resp["result"] = s.project
@@ -598,8 +601,10 @@ func TestBrokenRoutesFailClosed(t *testing.T) {
 	tw := newTestWatcher(t, "{not-json")
 	tw.kbS.addTask(16, 5, "k8s-run")
 
-	tw.pollOnce(t)
+	err := tw.w.poll(context.Background())
 
+	require.Error(t, err, "a broken routes payload must fail the poll so the watchdog sees the outage")
+	assert.Contains(t, err.Error(), "load routes payload")
 	assert.Empty(t, tw.runs(t), "no runs when the routes payload cannot be loaded")
 }
 
@@ -886,4 +891,43 @@ func TestParseDurationFallback(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, parseDuration("garbage", 5*time.Minute), "unparseable input takes the fallback")
 	assert.Equal(t, 5*time.Minute, parseDuration("0", 5*time.Minute), "non-positive input takes the fallback")
 	assert.Equal(t, 5*time.Minute, parseDuration("", 5*time.Minute), "empty input takes the fallback")
+}
+
+// KB-22: run()'s startup project resolution is bounded by the same
+// per-poll deadline as a poll. A hung getAllProjects (the fake server
+// holds the response) must abort run() at the deadline instead of hanging
+// before the loop ever starts.
+func TestRunStartupDeadlineAbortsHungStartup(t *testing.T) {
+	tw := newTestWatcher(t, testRoutesJSON)
+	tw.w.pollTimeout = 50 * time.Millisecond
+	tw.kbS.block = make(chan struct{})
+	release := sync.OnceFunc(func() { close(tw.kbS.block) })
+	defer release()
+
+	err := tw.w.run(context.Background())
+
+	require.Error(t, err, "the wedged startup resolution must be aborted")
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"deadline error expected, got: %v", err)
+	assert.Contains(t, err.Error(), "resolve kanboard project")
+}
+
+// A routes payload that fails to load must fail the poll (KB-22): a nil
+// here would count as a successful poll and keep the pod Ready through a
+// persistent routes outage while it does nothing.
+func TestRoutesLoadFailureFailsThePoll(t *testing.T) {
+	tw := newTestWatcher(t, testRoutesJSON)
+	tw.w.routesFile = filepath.Join(t.TempDir(), "missing.json")
+	tw.w.pollTimeout = 5 * time.Second
+
+	err := tw.w.pollWithDeadline(context.Background())
+
+	require.Error(t, err, "a routes outage must fail the poll")
+	assert.Contains(t, err.Error(), "load routes payload")
+
+	ok, reason := tw.w.ready()
+	assert.False(t, ok, "a failed poll is not a successful poll")
+	assert.Contains(t, reason, "no successful poll since startup")
+	ok, _ = tw.w.live()
+	assert.True(t, ok, "the poll loop completed the poll, so the process is live")
 }

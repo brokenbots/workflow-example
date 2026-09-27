@@ -236,8 +236,8 @@ func (w *watcher) run(ctx context.Context) error {
 	// (KB-22): a wedged FindProjectID would otherwise hang before the loop
 	// starts, with no deadline to surface it.
 	startupCtx, cancel := context.WithTimeout(ctx, w.pollTimeout)
-	defer cancel()
 	projectID, err := w.kb.FindProjectID(startupCtx, w.projectName)
+	cancel()
 	if err != nil {
 		return fmt.Errorf("resolve kanboard project: %w", err)
 	}
@@ -385,7 +385,10 @@ func (w *watcher) serveHealth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: w.healthMux()}
+	srv := &http.Server{
+		Handler:           w.healthMux(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -409,7 +412,9 @@ func (w *watcher) poll(ctx context.Context) error {
 	routesPayload, err := routes.LoadFile(w.routesFile)
 	if err != nil {
 		w.log.Error(err, "loading routes payload; failing closed and skipping poll", "routesFile", w.routesFile)
-		return nil
+		// Failing the poll (KB-22): a nil here would count as a successful
+		// poll and keep the pod Ready through a persistent routes outage.
+		return fmt.Errorf("load routes payload: %w", err)
 	}
 	// Dual-source scoping (mirrors the linear watcher): query only the
 	// watched project's routes' columns, so linear state names never reach
