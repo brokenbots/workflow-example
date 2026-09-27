@@ -78,7 +78,17 @@ step "resolve_pr_number" {
             value  = output.stdout
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "PR number resolution failed (KB-24)"
+        }
+    }
 }
 
 // ── PR status check ───────────────────────────────────────────────────────────
@@ -110,8 +120,27 @@ step "check_pr_status" {
             target = data.internal.review_result.value
             value  = startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : "")
         }
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: an unrecognized status line still reaches state.failed
+            // via route_pr_status's default arm. Give that route a non-empty
+            // reason so the parent fails the run with the actual status
+            // output instead of misclassifying it as a lost scope session.
+            // Recognized statuses reset the reason (empty on success paths).
+            value  = startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") || startswith(output.stdout, "status:ready") || startswith(output.stdout, "status:threads_open") || startswith(output.stdout, "status:changes_requested") || startswith(output.stdout, "status:pending") || startswith(output.stdout, "status:checks_failed") ? "" : "unrecognized PR status output: ${output.stdout}"
+        }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "PR status check failed (KB-24)"
+        }
+    }
 }
 
 switch "route_pr_status" {
@@ -242,8 +271,11 @@ step "pr_review" {
             target = data.internal._failure_reason.value
             // The engine classified a response but not its outcome name, so
             // the session was live; a reported reason (if any) travels to the
-            // parent as failure_reason.
-            value  = try(output.reason, "malformed reviewer response (no valid outcome)")
+            // parent as failure_reason. submit_outcome reason is optional and
+            // the copilot adapter reports it as an empty string when the
+            // agent supplies none, so try(...) alone would still pass ""
+            // through: guard the empty case explicitly.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "malformed reviewer response (no valid outcome)"
         }
         write {
             target = data.internal._review_attempts.value
@@ -289,7 +321,17 @@ step "post_approval" {
         })
     }
     outcome "success" { next = state.approved }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "posting the approval review failed (KB-24)"
+        }
+    }
 }
 
 step "post_changes_requested" {
@@ -302,7 +344,17 @@ step "post_changes_requested" {
         })
     }
     outcome "success" { next = state.changes_requested }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "posting the changes-requested review failed (KB-24)"
+        }
+    }
 }
 
 // ── Terminal states ───────────────────────────────────────────────────────────

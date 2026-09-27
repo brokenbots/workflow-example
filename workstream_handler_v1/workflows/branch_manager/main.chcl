@@ -56,7 +56,17 @@ step "resolve_branch" {
             value  = output.stdout
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "branch resolution failed (KB-24)"
+        }
+    }
 }
 
 // ── Isolated worktree setup ───────────────────────────────────────────────────
@@ -88,6 +98,12 @@ step "setup_worktree" {
         write {
             target = data.internal.triage_context.value
             value  = output.stdout
+        }
+        write {
+            target = data.internal.failure_reason.value
+            // KB-24: this terminal route is reachable from a live session, so
+            // it must never look like a lost scope session to the parent.
+            value  = "worktree setup failed (KB-24)"
         }
     }
 }
@@ -273,8 +289,13 @@ step "branch_triage_agent" {
             target = data.internal.failure_reason.value
             // The agent decided to escalate — the session was live. The
             // reported reason travels to the parent, which fails the run with
-            // it instead of re-provisioning.
-            value  = try(output.reason, "")
+            // it instead of re-provisioning. submit_outcome reason is optional
+            // and the copilot adapter reports it as an empty string when the
+            // agent supplies none, so try(...) alone would still pass ""
+            // through: guard the empty case explicitly. An empty
+            // failure_reason reaching the parent means engine-synthesized
+            // session loss, nothing else.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "branch triage agent escalated to a human without a reason"
         }
     }
     outcome "failed" {
@@ -283,7 +304,7 @@ step "branch_triage_agent" {
             target = data.internal.failure_reason.value
             // Agent-decided failure: the session was live, so this must never
             // look like a lost scope session to the parent.
-            value  = try(output.reason, "triage agent reported failure without a reason")
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "triage agent reported failure without a reason"
         }
     }
     // "failure" is the copilot adapter's built-in outcome when the provider is
