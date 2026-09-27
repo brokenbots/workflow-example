@@ -584,19 +584,78 @@ func (tw *testWatcher) setRunFinalStateByName(t *testing.T, name, finalState str
 // ended in its failure terminal, so the run read Succeeded while the
 // workflow's verdict was failure (observed live on KB-17, run
 // kb-17-1790397477: comment_handler_failed logged outcome=failure, but the
-// run CR read Succeeded and the watcher moved the ticket to Done). A
-// Succeeded run carrying the failed verdict must reconcile the ticket into
-// the Review column instead of stamping Done over the failure.
+// run CR read Succeeded). A Done stamp that predates the verdict — applied
+// by a poll that saw the Job-derived Succeeded phase before the verdict was
+// observable — must be repaired into the Review column, not left in Done.
 func TestDevSucceededWithFailedVerdictMovesTaskToReview(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
-	tw.kbS.addTask(24, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.kbS.addTask(24, 8, "k8s-run", "internal-reproduced") // Done: stamped before the verdict landed
 	tw.addRun(t, "kb-24-0000000001", "KB-24", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
 	tw.setRunFinalStateByName(t, "kb-24-0000000001", "failed")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 6, tw.kbS.taskColumn(24),
-		"a Succeeded run with a failed workflow verdict moves the ticket to Review, not Done")
+		"a Succeeded run with a failed workflow verdict repairs a Done stamp into Review, not Done")
+}
+
+// KB-23 ordering regression (review R1): the phase can settle before the
+// verdict is observable. The controller persists the Job-derived Succeeded
+// phase with no FinalState whenever the castle observation is inconclusive,
+// so an earlier poll stamps Done off the empty legacy verdict; when the
+// awaiting_human verdict lands on a later poll the ticket must be
+// reconciled out of Done into Review — abstaining there would leave the
+// ticket parked in Done forever (pre-fix probe: column 8 before and after
+// the verdict arrived, identical to the KB-17 symptom).
+func TestDevSucceededLateVerdictRepairsDoneToReview(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(27, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.addRun(t, "kb-27-0000000001", "KB-27", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+
+	// First poll: the verdict is not stamped yet, so the legacy empty path
+	// stamps Done off the Job-derived Succeeded phase.
+	tw.pollOnce(t)
+	assert.Equal(t, 8, tw.kbS.taskColumn(27),
+		"the pre-verdict poll stamps Done off the Job-derived Succeeded phase")
+
+	// Second poll: the castle observation landed the awaiting_human
+	// verdict; the stale Done stamp must be repaired into Review.
+	tw.setRunFinalStateByName(t, "kb-27-0000000001", "awaiting_human")
+	tw.pollOnce(t)
+	assert.Equal(t, 6, tw.kbS.taskColumn(27),
+		"the late awaiting_human verdict reconciles the ticket out of Done into Review")
+}
+
+// KB-23 mirror (review R1): a non-Done column is left untouched by a
+// non-handler_complete verdict — the ticket in the develop route's trigger
+// column Ready must stay put so the firing loop can re-fire, and the run
+// actually firing from Ready is what proves the loop survived the repair.
+func TestDevSucceededAwaitingHumanKeepsReadyForRefire(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(28, 9, "k8s-run", "internal-reproduced") // Ready: the develop route's trigger column
+	tw.addRun(t, "kb-28-0000000001", "KB-28", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-28-0000000001", "awaiting_human")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 9, tw.kbS.taskColumn(28),
+		"an awaiting_human verdict leaves a non-Done column untouched (re-fire path)")
+	require.Len(t, tw.runs(t), 2, "the develop route still fires from Ready after the verdict is observed")
+}
+
+// An unrecognized terminal value (a future terminal this watcher predates)
+// must not silently stamp Done: the watcher abstains and leaves the column
+// untouched.
+func TestDevSucceededUnknownVerdictLeavesColumn(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(29, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.addRun(t, "kb-29-0000000001", "KB-29", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-29-0000000001", "cancelled")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 7, tw.kbS.taskColumn(29),
+		"an unrecognized terminal state leaves the column untouched instead of stamping Done")
 }
 
 // KB-23 companion: an awaiting_human verdict handed the ticket to a human

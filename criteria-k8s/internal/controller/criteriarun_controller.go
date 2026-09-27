@@ -305,7 +305,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// per-scope reconcile below is skipped, so no adapter pod is touched
 		// off a history we could not see. The Job-derived phase is still
 		// persisted and the queue still releases so the run cannot stall its
-		// repo queue; the observation is retried via the requeue below.
+		// repo queue; the observation is retried via the requeue below. The
+		// Job-derived phase carries no FinalState, so a poll inside this
+		// window can stamp Done off an empty verdict before the terminal is
+		// observable; the kanboard watcher repairs that stale stamp into the
+		// review column once the verdict lands (KB-23).
 		logger.Error(obsErr, "observing run lifecycle from castle; continuing with Job-derived status only", "criteriarun", run.Name)
 	}
 

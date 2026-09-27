@@ -39,8 +39,9 @@ import (
 // not its end: the triage workflow's re-arm path moves the ticket into the
 // develop route's trigger column and the watcher leaves that move in place
 // (KB-9). A dev-class success is judged by the workflow verdict stamped on
-// the run (KB-23): a failed verdict reconciles the ticket into the review
-// column, an awaiting_human verdict leaves it where the workflow parked it.
+// the run (KB-23): a failed/awaiting_human verdict repairs a Done stamp
+// into the review column and otherwise leaves the ticket where the
+// workflow's own bookkeeping put it.
 const (
 	defaultPollInterval = 60 * time.Second
 	defaultPollTimeout  = 5 * time.Minute
@@ -55,8 +56,9 @@ const (
 	// bookkeeping intact; failed is the workflow's failure verdict. The
 	// triage workflow ends in awaiting_human/ready_for_development but is
 	// excluded from the verdict branch by its class.
-	finalStateFailed        = "failed"
-	finalStateAwaitingHuman = "awaiting_human"
+	finalStateHandlerComplete = "handler_complete"
+	finalStateFailed          = "failed"
+	finalStateAwaitingHuman   = "awaiting_human"
 )
 
 var (
@@ -670,13 +672,17 @@ type runPhases struct {
 // terminal, so the Succeeded phase alone masks a failure verdict (observed
 // live on KB-17, run kb-17-1790397477: the workflow's verdict was failure —
 // comment_handler_failed logged outcome=failure — but the run read
-// Succeeded and the watcher moved the ticket to Done). A "failed" verdict
-// reconciles the ticket into the review column; an "awaiting_human" verdict
-// left the ticket in review on the workflow's own bookkeeping (set_review_state
-// ran before the terminal), so the column is left untouched rather than
-// stamped Done over it; "handler_complete" delivered the work and stamps
-// Done as before. An empty verdict is the legacy path (record-derived
-// terminal or castle observation disabled) and keeps the old Done stamp.
+// Succeeded and the watcher moved the ticket to Done). A "failed" or
+// "awaiting_human" verdict means the work is not complete — the develop
+// workflow's failure path parks the ticket in review (set_review_state ran
+// before the terminal) — so a Done stamp that predates the verdict is
+// repaired into the review column, and any other column is left untouched:
+// Review is the workflow's own parking spot, and Ready is the route's
+// re-fire trigger after a fetch failure. "handler_complete" delivered the
+// work and stamps Done as before; an empty verdict is the legacy path
+// (record-derived terminal or castle observation disabled) and keeps the
+// old Done stamp; any other terminal value is left untouched until the
+// watcher learns it.
 //
 // reconcileTaskColumn returns the task's new Kanboard column id and whether
 // the column changed. The caller updates its in-memory task copy so the
@@ -692,18 +698,27 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 		// the phase — the runner job exits 0 even when the workflow ended
 		// in its failure terminal.
 		switch ph.latestFinalState {
-		case finalStateFailed:
+		case finalStateFailed, finalStateAwaitingHuman:
+			// The work is not complete. A Done stamp that predates the
+			// verdict — applied by a poll that saw the Job-derived
+			// Succeeded phase while the castle observation had not yet
+			// landed the terminal state — must be repaired into the
+			// review column; every other column reflects the workflow's
+			// own bookkeeping or the route's re-fire trigger and is left
+			// untouched.
+			if task.ColumnName != doneColumnName {
+				return task.ColumnID, false
+			}
 			target = reviewColumnName
-		case finalStateAwaitingHuman:
-			// The workflow parked the ticket in review itself
-			// (set_review_state ran before the terminal); stamping Done
-			// over that would reconcile the ticket out from under the
-			// human handoff.
-			return task.ColumnID, false
-		default:
+		case finalStateHandlerComplete, "":
 			// handler_complete delivered the work; empty is the legacy
 			// record-derived/castle-less path. Keep the Done stamp.
 			target = doneColumnName
+		default:
+			// An unrecognized terminal value (a future terminal this
+			// watcher predates): abstain rather than silently stamp Done
+			// over a verdict the watcher does not understand.
+			return task.ColumnID, false
 		}
 	case criteriav1.PhaseFailed:
 		target = reviewColumnName
