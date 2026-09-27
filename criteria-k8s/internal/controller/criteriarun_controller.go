@@ -514,6 +514,15 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 			update.Status.Phase = criteriav1.PhaseFailed
 		}
 		update.Status.PRNumber = obs.Terminal.PRNumber
+		// Stamp the workflow's own verdict (KB-23): the engine exits 0 even
+		// when the workflow ended in its failure terminal, so the phase
+		// alone cannot carry the verdict. The envelope's final_state does.
+		// Guard on non-empty: a later pass that only saw the run record
+		// (which has no final_state column) must not blank a stamped
+		// verdict; re-stamping the same value converges.
+		if obs.Terminal.FinalState != "" {
+			update.Status.FinalState = obs.Terminal.FinalState
+		}
 	}
 	return obs, nil
 }

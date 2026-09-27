@@ -273,6 +273,16 @@ spec:
                     terminal outcome (the run record's terminal status
                     and/or RunCompleted/RunFailed envelopes). Gates terminal
                     requeue completion.
+                finalState:
+                  type: string
+                  description: >-
+                    The workflow's own verdict: the terminal state name the
+                    workflow ended in (RunCompleted.final_state), stamped
+                    from the castle terminal envelope. "failed" is the
+                    failure verdict, "handler_complete" delivered the work,
+                    and "awaiting_human" handed the ticket to a human. Empty
+                    when the terminal came from the castle run record or
+                    castle observation is disabled.
                 observedGeneration:
                   type: integer
                   format: int64
