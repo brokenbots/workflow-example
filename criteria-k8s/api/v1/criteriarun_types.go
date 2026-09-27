@@ -253,6 +253,19 @@ type CriteriaRunStatus struct {
 	// so completion is gated on this marker, not on those fields.
 	CastleTerminalObserved bool `json:"castleTerminalObserved,omitempty"`
 
+	// FinalState is the workflow's own verdict: the terminal state name the
+	// workflow ended in (RunCompleted.final_state), stamped from the castle
+	// terminal envelope. It is the only verdict carrier the phase can
+	// disagree with: the engine exits 0 even when the workflow ended in its
+	// failure terminal (KB-23), so a Job- or envelope-success-derived
+	// Succeeded phase can mask a failed workflow verdict. "failed" is the
+	// failure verdict, "handler_complete" delivered the work, and
+	// "awaiting_human" handed the ticket to a human with the bookkeeping
+	// intact. Empty when the terminal came from the castle run record
+	// (which carries no final_state column) or when castle observation is
+	// disabled. Not part of the terminal-completion gate.
+	FinalState string `json:"finalState,omitempty"`
+
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 

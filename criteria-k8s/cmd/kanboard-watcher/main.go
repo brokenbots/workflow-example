@@ -38,7 +38,10 @@ import (
 // doneColumnName. A succeeded triage-class run is the middle of the chain,
 // not its end: the triage workflow's re-arm path moves the ticket into the
 // develop route's trigger column and the watcher leaves that move in place
-// (KB-9).
+// (KB-9). A dev-class success is judged by the workflow verdict stamped on
+// the run (KB-23): a failed/awaiting_human verdict repairs a Done stamp
+// into the review column and otherwise leaves the ticket where the
+// workflow's own bookkeeping put it.
 const (
 	defaultPollInterval = 60 * time.Second
 	defaultPollTimeout  = 5 * time.Minute
@@ -46,6 +49,16 @@ const (
 	workColumnName      = "Work in progress"
 	reviewColumnName    = "Review"
 	doneColumnName      = "Done"
+
+	// Workflow terminal state names (RunCompleted.final_state) the watcher
+	// judges a dev-class success by (KB-23). handler_complete delivered
+	// the work; awaiting_human handed the ticket to a human with the
+	// bookkeeping intact; failed is the workflow's failure verdict. The
+	// triage workflow ends in awaiting_human/ready_for_development but is
+	// excluded from the verdict branch by its class.
+	finalStateHandlerComplete = "handler_complete"
+	finalStateFailed          = "failed"
+	finalStateAwaitingHuman   = "awaiting_human"
 )
 
 var (
@@ -592,10 +605,11 @@ func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, err
 	out := make(map[string]runPhases, len(groups))
 	for ticket, g := range groups {
 		ph := runPhases{
-			active:      g.active,
-			latestPhase: g.latest.Status.Phase,
-			latestRun:   g.latest.Name,
-			anyRun:      true,
+			active:           g.active,
+			latestPhase:      g.latest.Status.Phase,
+			latestRun:        g.latest.Name,
+			latestFinalState: g.latest.Status.FinalState,
+			anyRun:           true,
 		}
 		if g.latest.Spec.Workflow != nil {
 			ph.latestClass = g.latest.Spec.Workflow.Class
@@ -623,16 +637,22 @@ type runPhases struct {
 	// The class decides whether a Succeeded phase stamps Done (KB-9); the
 	// identity lets the reconcile gate tell two settled runs apart when
 	// both read Succeeded.
-	latestRun   string
-	latestClass string
-	anyRun      bool
+	latestRun string
+	// latestFinalState is the latest run's stamped workflow verdict (the
+	// workflow's terminal state name, KB-23). The engine exits 0 even when
+	// the workflow ended in its failure terminal, so a Succeeded phase can
+	// mask a failed verdict; the verdict decides where a dev-class success
+	// lands. Empty for record-derived terminals and castle-less runs.
+	latestFinalState string
+	latestClass      string
+	anyRun           bool
 }
 
 // reconcileTaskColumn moves the Kanboard task between board columns as its
 // latest run progresses — the Kanboard analogue of the Linear watcher's
 // automation labels:
 //   - run in flight        -> task to the work column
-//   - dev run Succeeded    -> task to the done column
+//   - dev run Succeeded    -> task per the workflow verdict (KB-23)
 //   - triage run Succeeded -> column untouched (KB-9)
 //   - run Failed           -> task to the review column (human)
 //
@@ -647,6 +667,23 @@ type runPhases struct {
 // it. Only a dev-class success stamps Done — or a legacy run predating
 // class stamping (empty class), which ran the old terminal flow.
 //
+// A dev-class success is judged by the workflow's own verdict, not the
+// phase: the engine exits 0 even when the workflow ends in its failure
+// terminal, so the Succeeded phase alone masks a failure verdict (observed
+// live on KB-17, run kb-17-1790397477: the workflow's verdict was failure —
+// comment_handler_failed logged outcome=failure — but the run read
+// Succeeded and the watcher moved the ticket to Done). A "failed" or
+// "awaiting_human" verdict means the work is not complete — the develop
+// workflow's failure path parks the ticket in review (set_review_state ran
+// before the terminal) — so a Done stamp that predates the verdict is
+// repaired into the review column, and any other column is left untouched:
+// Review is the workflow's own parking spot, and Ready is the route's
+// re-fire trigger after a fetch failure. "handler_complete" delivered the
+// work and stamps Done as before; an empty verdict is the legacy path
+// (record-derived terminal or castle observation disabled) and keeps the
+// old Done stamp; any other terminal value is left untouched until the
+// watcher learns it.
+//
 // reconcileTaskColumn returns the task's new Kanboard column id and whether
 // the column changed. The caller updates its in-memory task copy so the
 // firing loop sees the post-reconciliation column.
@@ -657,7 +694,32 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 		if ph.latestClass == criteriav1.RunClassTriage {
 			return task.ColumnID, false
 		}
-		target = doneColumnName
+		// KB-23: judge a dev-class success by the workflow's verdict, not
+		// the phase — the runner job exits 0 even when the workflow ended
+		// in its failure terminal.
+		switch ph.latestFinalState {
+		case finalStateFailed, finalStateAwaitingHuman:
+			// The work is not complete. A Done stamp that predates the
+			// verdict — applied by a poll that saw the Job-derived
+			// Succeeded phase while the castle observation had not yet
+			// landed the terminal state — must be repaired into the
+			// review column; every other column reflects the workflow's
+			// own bookkeeping or the route's re-fire trigger and is left
+			// untouched.
+			if task.ColumnName != doneColumnName {
+				return task.ColumnID, false
+			}
+			target = reviewColumnName
+		case finalStateHandlerComplete, "":
+			// handler_complete delivered the work; empty is the legacy
+			// record-derived/castle-less path. Keep the Done stamp.
+			target = doneColumnName
+		default:
+			// An unrecognized terminal value (a future terminal this
+			// watcher predates): abstain rather than silently stamp Done
+			// over a verdict the watcher does not understand.
+			return task.ColumnID, false
+		}
 	case criteriav1.PhaseFailed:
 		target = reviewColumnName
 	default:
