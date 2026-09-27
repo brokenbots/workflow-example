@@ -144,7 +144,7 @@ Keep notes concise. Do not include approval/denial language — only findings, e
 2. Enumerate changed files and inspect diffs.
 3. Map changes to plan items; note gaps.
 4. Deep-read critical paths (handlers, adapters, security boundaries, storage).
-5. Run tests, builds, and `make` targets as needed to confirm claims (pre-authorized).
+5. Validate claims read-only: judge from the diff and test files; where justified build once and exercise the built binary. Running tests, CI gates, or CI polls is denied by your tool policy and outside your charter (the gate already ran).
 6. Validate test intent using the rubric; challenge weak tests even when green.
 7. Record every finding with an explicit severity: blocking findings get acceptance criteria, non-blocking findings get a note.
 8. Identify any `[ARCH-REVIEW]` items requiring coordination beyond executor remediation.

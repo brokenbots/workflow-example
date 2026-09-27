@@ -324,18 +324,22 @@ step "review" {
         // build (the one allowed execution: build once, then run the binary)
         "shell:make build",
         "shell:go build",         "shell:go build *",      "shell:go build */*",      "shell:go build */*/*",
-        // run the built binary against a fixture
-        "shell:./bin/*",          "shell:./bin/*/*",
-        "shell:./build/*",        "shell:./build/*/*",
-        "shell:./*",              "shell:./*/*",
+        "shell:go build */*/*/*",
+        // run the built binary against a fixture (bin/build dirs; CWD binaries
+        // built by "go build" land as "./<name>"). Repo scripts like
+        // ./scripts/ci.sh stay denied — only built binaries are runnable.
+        "shell:./bin/*",          "shell:./bin/*/*",       "shell:./bin/*/*/*",
+        "shell:./build/*",        "shell:./build/*/*",     "shell:./build/*/*/*",
+        "shell:./*",
         // reads, fixture inspection, log tailing
-        "shell:cat *",            "shell:cat */*",         "shell:cat */*/*",
+        "shell:cat *",            "shell:cat */*",         "shell:cat */*/*",         "shell:cat */*/*/*",
         "shell:head *",           "shell:head */*",
         "shell:tail *",           "shell:tail */*",
         "shell:grep *",           "shell:grep */*",        "shell:grep */*/*",
         "shell:rg *",             "shell:rg */*",
         "shell:ls",               "shell:ls *",            "shell:ls */*",
-        "shell:wc *",             "shell:diff *",          "shell:jq *",
+        "shell:wc *",             "shell:diff *",          "shell:diff */*",
+        "shell:jq *",             "shell:jq */*",
     ]
 
     input {
