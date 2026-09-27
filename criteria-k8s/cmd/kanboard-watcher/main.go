@@ -5,10 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
@@ -38,6 +41,8 @@ import (
 // (KB-9).
 const (
 	defaultPollInterval = 60 * time.Second
+	defaultPollTimeout  = 5 * time.Minute
+	defaultHealthAddr   = ":8081"
 	workColumnName      = "Work in progress"
 	reviewColumnName    = "Review"
 	doneColumnName      = "Done"
@@ -49,7 +54,9 @@ var (
 	kanboardToken     = flag.String("kanboard-token", getenv("KANBOARD_APP_TOKEN", ""), "Kanboard app API token (also read from /secrets/kanboard_app_token)")
 	projectName       = flag.String("kanboard-project-name", getenv("KANBOARD_PROJECT_NAME", "Kanboard Tickets"), "Kanboard project to watch")
 	triggerTag        = flag.String("kanboard-trigger-tag", getenv("KANBOARD_TRIGGER_TAG", "k8s-run"), "Require this tag on the task before triggering a run; empty means any task matching a route triggers")
-	pollInterval      = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s")), "How often to poll Kanboard")
+	pollInterval      = flag.Duration("poll-interval", parseDuration(getenv("POLL_INTERVAL", "60s"), defaultPollInterval), "How often to poll Kanboard")
+	pollTimeout       = flag.Duration("poll-timeout", parseDuration(getenv("POLL_TIMEOUT", "5m"), defaultPollTimeout), "Deadline for one poll cycle; a hung poll is aborted and logged, and the health endpoints report the stall (KB-22)")
+	healthAddr        = flag.String("health-addr", getenv("HEALTH_ADDR", defaultHealthAddr), "Health endpoint listen address serving /readyz and /livez (empty disables the server)")
 	image             = flag.String("image", getenv("CRITERIA_IMAGE", "localhost:5000/linear-intake-remote:dev"), "Default Criteria workflow image")
 	providerBaseURL   = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	maxAgentVisits    = flag.Int("max-agent-visits", parseInt(getenv("MAX_AGENT_VISITS", "2"), 2), "Default max agent visits")
@@ -115,6 +122,8 @@ func main() {
 		projectName:       *projectName,
 		triggerTag:        *triggerTag,
 		pollInterval:      *pollInterval,
+		pollTimeout:       *pollTimeout,
+		healthAddr:        *healthAddr,
 		image:             *image,
 		providerBaseURL:   *providerBaseURL,
 		maxAgentVisits:    *maxAgentVisits,
@@ -143,10 +152,10 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func parseDuration(s string) time.Duration {
+func parseDuration(s string, fallback time.Duration) time.Duration {
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
-		return defaultPollInterval
+		return fallback
 	}
 	return d
 }
@@ -173,12 +182,24 @@ func parseTagList(s string) []string {
 }
 
 type watcher struct {
-	client            client.Client
-	kb                *kanboard.Client
-	namespace         string
-	projectName       string
-	triggerTag        string
-	pollInterval      time.Duration
+	client       client.Client
+	kb           *kanboard.Client
+	namespace    string
+	projectName  string
+	triggerTag   string
+	pollInterval time.Duration
+	// pollTimeout bounds one poll cycle (KB-22): every blocking call inside
+	// poll runs under this deadline, so a hung Kanboard RPC or k8s call
+	// surfaces as an error instead of wedging the loop silently (the
+	// 2026-09-26 incident saw the loop stall ~8.5h with no error and no log
+	// line).
+	pollTimeout time.Duration
+	// healthAddr is the /readyz + /livez listener address for the pod's
+	// readiness/liveness probes (KB-22); empty disables the server.
+	healthAddr string
+	// watchdog records poll outcomes; the health endpoints translate its
+	// state into probe results.
+	watchdog          pollWatchdog
 	image             string
 	providerBaseURL   string
 	maxAgentVisits    int
@@ -208,16 +229,28 @@ type watcher struct {
 }
 
 func (w *watcher) run(ctx context.Context) error {
-	projectID, err := w.kb.FindProjectID(ctx, w.projectName)
+	if w.pollTimeout <= 0 {
+		w.pollTimeout = defaultPollTimeout
+	}
+	// The startup project resolution runs under the same deadline as a poll
+	// (KB-22): a wedged FindProjectID would otherwise hang before the loop
+	// starts, with no deadline to surface it.
+	startupCtx, cancel := context.WithTimeout(ctx, w.pollTimeout)
+	defer cancel()
+	projectID, err := w.kb.FindProjectID(startupCtx, w.projectName)
 	if err != nil {
 		return fmt.Errorf("resolve kanboard project: %w", err)
 	}
 	w.projectID = projectID
-	w.log.Info("watching kanboard project", "project", w.projectName, "projectID", projectID, "interval", w.pollInterval)
+	w.log.Info("watching kanboard project", "project", w.projectName, "projectID", projectID, "interval", w.pollInterval, "pollTimeout", w.pollTimeout)
+
+	if err := w.serveHealth(ctx); err != nil {
+		return fmt.Errorf("start health server: %w", err)
+	}
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
-	if err := w.poll(ctx); err != nil {
+	if err := w.pollWithDeadline(ctx); err != nil {
 		w.log.Error(err, "poll failed")
 	}
 	for {
@@ -225,11 +258,147 @@ func (w *watcher) run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := w.poll(ctx); err != nil {
+			if err := w.pollWithDeadline(ctx); err != nil {
 				w.log.Error(err, "poll failed")
 			}
 		}
 	}
+}
+
+// pollWatchdog records poll-loop outcomes for the health endpoints (KB-22).
+// The zero value is ready for use. Readiness tracks the last *successful*
+// poll: once polls stop succeeding — a persistent outage, or a poll killed
+// by the per-poll deadline — the pod reports unready after stallThreshold,
+// which turns a silent wedge into a visible, unready pod. Liveness tracks
+// the last *completed* poll: polls that keep timing out keep the process
+// live but unready.
+type pollWatchdog struct {
+	mu              sync.Mutex
+	lastPollFinish  time.Time
+	lastPollSuccess time.Time
+}
+
+func (pw *pollWatchdog) record(err error) {
+	now := time.Now()
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	pw.lastPollFinish = now
+	if err == nil {
+		pw.lastPollSuccess = now
+	}
+}
+
+func (pw *pollWatchdog) ready(now time.Time, threshold time.Duration) (bool, string) {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	switch {
+	case pw.lastPollSuccess.IsZero():
+		return false, "no successful poll since startup"
+	case now.Sub(pw.lastPollSuccess) > threshold:
+		return false, fmt.Sprintf("last successful poll %s ago exceeds %s",
+			now.Sub(pw.lastPollSuccess).Round(time.Second), threshold)
+	}
+	return true, ""
+}
+
+func (pw *pollWatchdog) live(now time.Time, threshold time.Duration) (bool, string) {
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	switch {
+	case pw.lastPollFinish.IsZero():
+		return false, "no poll has completed since startup"
+	case now.Sub(pw.lastPollFinish) > threshold:
+		return false, fmt.Sprintf("last completed poll %s ago exceeds %s",
+			now.Sub(pw.lastPollFinish).Round(time.Second), threshold)
+	}
+	return true, ""
+}
+
+// stallThreshold is how long the health endpoints tolerate a stretch
+// without a successful poll (readiness) or without any completed poll
+// (liveness). It covers one full worst-case poll cycle — interval plus the
+// whole poll deadline — and adds another deadline-length of slack, so a run
+// of slow-but-completing polls never flaps the probes.
+func (w *watcher) stallThreshold() time.Duration {
+	return w.pollInterval + 2*w.pollTimeout
+}
+
+// pollWithDeadline runs one poll under the per-poll deadline (KB-22): the
+// observed wedge was a poll() with no deadline blocking ~8.5h while the pod
+// read Running 1/1. Every blocking call inside poll honors its context, so
+// an expired deadline aborts the hung call and surfaces it as an error; the
+// watchdog then reports the stall via /readyz.
+func (w *watcher) pollWithDeadline(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, w.pollTimeout)
+	defer cancel()
+	err := w.poll(ctx)
+	w.watchdog.record(err)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("poll did not complete within %s: %w", w.pollTimeout, err)
+	}
+	return err
+}
+
+// ready is the /readyz probe: the watcher does its job only while polls
+// keep succeeding (KB-22).
+func (w *watcher) ready() (bool, string) {
+	return w.watchdog.ready(time.Now(), w.stallThreshold())
+}
+
+// live is the /livez probe: the poll loop must keep completing polls. A
+// loop wedged outside the per-poll deadline (or before the first poll)
+// fails it and the kubelet restarts the pod — the same remedy the
+// 2026-09-26 incident needed a manual rollout for.
+func (w *watcher) live() (bool, string) {
+	return w.watchdog.live(time.Now(), w.stallThreshold())
+}
+
+// healthMux builds the probe endpoints: 200 "ok" when healthy, 503 with
+// the stall reason otherwise.
+func (w *watcher) healthMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", healthProbe(w.ready))
+	mux.HandleFunc("/livez", healthProbe(w.live))
+	return mux
+}
+
+func healthProbe(fn func() (bool, string)) http.HandlerFunc {
+	return func(rw http.ResponseWriter, _ *http.Request) {
+		ok, reason := fn()
+		if !ok {
+			http.Error(rw, reason, http.StatusServiceUnavailable)
+			return
+		}
+		rw.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(rw, "ok\n")
+	}
+}
+
+// serveHealth runs the readiness/liveness endpoints for the pod's probes
+// (KB-22); an empty healthAddr disables the server.
+func (w *watcher) serveHealth(ctx context.Context) error {
+	if w.healthAddr == "" {
+		w.log.Info("health server disabled: no listen address configured")
+		return nil
+	}
+	ln, err := net.Listen("tcp", w.healthAddr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: w.healthMux()}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		if serveErr := srv.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			w.log.Error(serveErr, "health server failed", "addr", w.healthAddr)
+		}
+	}()
+	w.log.Info("health server listening", "addr", w.healthAddr)
+	return nil
 }
 
 // poll mirrors the linear watcher's structure: routes fail closed, one
