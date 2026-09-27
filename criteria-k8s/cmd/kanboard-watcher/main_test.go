@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -70,7 +72,10 @@ type kbServer struct {
 	columns map[int][]map[string]interface{}
 	project map[string]interface{}
 	created []string // CriteriaRun ticket ids (asserted via k8s client instead)
-	ts      *httptest.Server
+	// block, when non-nil, hangs the getAllTasks response until it is
+	// closed — the KB-22 reproduction hook for a poll-blocking upstream.
+	block chan struct{}
+	ts    *httptest.Server
 }
 
 func newKbServer(t *testing.T) *kbServer {
@@ -116,6 +121,9 @@ func newKbServer(t *testing.T) *kbServer {
 		case "getColumns":
 			resp["result"] = s.columns[intParam("project_id")]
 		case "getAllTasks":
+			if s.block != nil {
+				<-s.block
+			}
 			pid := intParam("project_id")
 			tasks := []interface{}{}
 			for _, task := range s.tasks {
@@ -756,4 +764,126 @@ func TestParseTagList(t *testing.T) {
 	assert.Equal(t, []string{"criteria"}, parseTagList("criteria"))
 	assert.Empty(t, parseTagList(""), "empty env disables the extra exemptions")
 	assert.Empty(t, parseTagList(" , "), "whitespace-only entries are dropped")
+}
+
+// KB-22: the observed wedge was a poll() with no per-poll deadline blocking
+// ~8.5h while the pod read Running 1/1. With the fake Kanboard server
+// holding the getAllTasks response, a poll without the deadline would hang
+// this test until the go-test timeout; pollWithDeadline must abort it at
+// the configured deadline and surface the documented error signature.
+func TestPollDeadlineAbortsHungPoll(t *testing.T) {
+	tw := newTestWatcher(t, testRoutesJSON)
+	tw.w.pollTimeout = 50 * time.Millisecond
+	tw.kbS.addTask(40, 5, "k8s-run")
+	tw.kbS.block = make(chan struct{})
+	// release unblocks the hung getAllTasks handler; idempotent because the
+	// httptest server cleanup must never wait on a still-blocked handler.
+	release := sync.OnceFunc(func() { close(tw.kbS.block) })
+	defer release()
+
+	err := tw.w.pollWithDeadline(context.Background())
+
+	require.Error(t, err, "the hung poll must be aborted by the deadline")
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"deadline error expected, got: %v", err)
+	assert.Contains(t, err.Error(), "poll did not complete within 50ms",
+		"the deadline error carries the per-poll deadline signature")
+
+	// The aborted poll counts as finished-but-unsuccessful: the process is
+	// still live, but readiness has nothing to show yet.
+	var zero time.Time
+	tw.w.watchdog.mu.Lock()
+	lastSuccess, lastFinish := tw.w.watchdog.lastPollSuccess, tw.w.watchdog.lastPollFinish
+	tw.w.watchdog.mu.Unlock()
+	assert.True(t, lastSuccess.Equal(zero), "an aborted poll is not a successful poll")
+	assert.False(t, lastFinish.Equal(zero), "an aborted poll still counts as completed")
+
+	ok, reason := tw.w.ready()
+	assert.False(t, ok)
+	assert.Contains(t, reason, "no successful poll since startup")
+	ok, _ = tw.w.live()
+	assert.True(t, ok, "the poll loop completed the poll, so the process is live")
+
+	// With the hang released, the next poll succeeds and readiness flips.
+	release()
+	require.NoError(t, tw.w.pollWithDeadline(context.Background()))
+	ok, reason = tw.w.ready()
+	assert.True(t, ok, "a successful poll makes the watcher ready")
+	assert.Empty(t, reason)
+	ok, _ = tw.w.live()
+	assert.True(t, ok)
+}
+
+// KB-22: the watchdog must render a persistent stall unready — the health
+// endpoints are what the pod's readiness/liveness probes call, and a hung
+// (now deadline-aborted) poll or a failing Kanboard flips them to 503.
+func TestHealthEndpointsReportStall(t *testing.T) {
+	tw := newTestWatcher(t, testRoutesJSON)
+	srv := httptest.NewServer(tw.w.healthMux())
+	t.Cleanup(srv.Close)
+
+	get := func(path string) (int, string) {
+		resp, err := srv.Client().Get(srv.URL + path)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return resp.StatusCode, string(body)
+	}
+
+	// No poll yet: the watcher cannot claim to be watching anything.
+	code, body := get("/readyz")
+	assert.Equal(t, http.StatusServiceUnavailable, code)
+	assert.Contains(t, body, "no successful poll since startup")
+	code, _ = get("/livez")
+	assert.Equal(t, http.StatusServiceUnavailable, code, "no poll has completed either")
+
+	// A successful poll readies the watcher (pollWithDeadline is the path
+	// run() feeds the watchdog through).
+	tw.w.pollTimeout = 5 * time.Second
+	require.NoError(t, tw.w.pollWithDeadline(context.Background()))
+	code, body = get("/readyz")
+	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "ok\n", body)
+	code, _ = get("/livez")
+	assert.Equal(t, http.StatusOK, code)
+
+	// A stalled poll loop (successes stopped) un-readies the watcher while
+	// the loop keeps finishing polls, so the process stays live.
+	threshold := tw.w.stallThreshold()
+	tw.w.watchdog.mu.Lock()
+	tw.w.watchdog.lastPollSuccess = time.Now().Add(-threshold - time.Minute)
+	tw.w.watchdog.mu.Unlock()
+	code, body = get("/readyz")
+	assert.Equal(t, http.StatusServiceUnavailable, code)
+	assert.Contains(t, body, "last successful poll")
+	code, _ = get("/livez")
+	assert.Equal(t, http.StatusOK, code)
+
+	// A loop wedged outside the per-poll deadline stops finishing polls
+	// entirely: liveness fails and the kubelet restarts the pod.
+	tw.w.watchdog.mu.Lock()
+	tw.w.watchdog.lastPollFinish = time.Now().Add(-threshold - time.Minute)
+	tw.w.watchdog.mu.Unlock()
+	code, body = get("/livez")
+	assert.Equal(t, http.StatusServiceUnavailable, code)
+	assert.Contains(t, body, "last completed poll")
+}
+
+// The stall threshold must exceed the worst-case gap between two poll
+// completions (interval plus the whole in-flight poll), with slack, so
+// slow-but-completing polls never flap the probes.
+func TestStallThresholdCoversWorstCaseCycle(t *testing.T) {
+	tw := newTestWatcher(t, testRoutesJSON)
+	tw.w.pollInterval = time.Minute
+	tw.w.pollTimeout = 5 * time.Minute
+	assert.Equal(t, 11*time.Minute, tw.w.stallThreshold())
+}
+
+func TestParseDurationFallback(t *testing.T) {
+	assert.Equal(t, time.Minute, parseDuration("60s", time.Minute))
+	assert.Equal(t, 5*time.Minute, parseDuration("5m", time.Minute))
+	assert.Equal(t, 5*time.Minute, parseDuration("garbage", 5*time.Minute), "unparseable input takes the fallback")
+	assert.Equal(t, 5*time.Minute, parseDuration("0", 5*time.Minute), "non-positive input takes the fallback")
+	assert.Equal(t, 5*time.Minute, parseDuration("", 5*time.Minute), "empty input takes the fallback")
 }
