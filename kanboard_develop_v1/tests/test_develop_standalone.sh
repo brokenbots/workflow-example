@@ -211,8 +211,8 @@ fi
 # asserted on the workflow source and the comment script.
 if grep -q 'value  = coalesce(try(subworkflow.failure_reason, ""), "")' "$TREE_ROOT/main.chcl" \
     && grep -q 'criteria_value_5 = data.internal.handler_error.value' "$TREE_ROOT/main.chcl" \
-    && grep -q 'Handler failure reason: $criteria_value_5' "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" \
-    && grep -q 'if \[ -n "$criteria_value_5" \]' "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl"; then
+    && grep -q "Handler failure reason: \$criteria_value_5" "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" \
+    && grep -q "if \[ -n \"\$criteria_value_5\" \]" "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl"; then
     ok "handler failure reason threaded into the parking comment"
 else
     fail "handler failure reason not threaded into the parking comment wiring"
