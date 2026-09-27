@@ -67,6 +67,9 @@ grep -q 'name: criteria-data' "$CHART/values.yaml" || fail "values.yaml missing 
 grep -q 'size: 10Gi' "$CHART/values.yaml" || fail "values.yaml missing PVC size"
 grep -q 'retentionPeriod: 168h' "$CHART/values.yaml" || fail "values.yaml missing retention period"
 grep -q 'retentionInterval: 1h' "$CHART/values.yaml" || fail "values.yaml missing retention interval"
+# KB-24: the operator's stall watchdog window (0 disables the watchdog) is
+# configurable without editing templates.
+grep -q 'stallWindow: 30m' "$CHART/values.yaml" || fail "values.yaml missing operator stall window"
 grep -q 'providerBaseUrl:' "$CHART/values.yaml" || fail "values.yaml missing provider base URL"
 grep -q 'linearProjectName:' "$CHART/values.yaml" || fail "values.yaml missing Linear project"
 # CRI-218 removed watcher.linearTriageState: trigger states are per-route.
@@ -152,6 +155,11 @@ cmp -s <(clusterrole_rules "$REPO_ROOT/criteria-k8s/config/rbac/role.yaml") \
 grep -q 'name: RETENTION_PERIOD' "$RENDERED" || fail "operator deployment missing RETENTION_PERIOD"
 grep -q 'value: "168h"' "$RENDERED" || fail "operator RETENTION_PERIOD default is not 168h"
 grep -q 'name: RETENTION_INTERVAL' "$RENDERED" || fail "operator deployment missing RETENTION_INTERVAL"
+# KB-24: the stall watchdog window is threaded into the operator env with the
+# documented 30m default.
+grep -q 'name: CRITERIA_STALL_WINDOW' "$RENDERED" || fail "operator deployment missing CRITERIA_STALL_WINDOW"
+awk '/name: CRITERIA_STALL_WINDOW/{getline; if ($0 !~ /value: "30m"/) exit 1}' "$RENDERED" \
+    || fail "operator CRITERIA_STALL_WINDOW default is not 30m"
 grep -q 'name: DEFAULT_CRITERIA_IMAGE' "$RENDERED" || fail "operator deployment missing DEFAULT_CRITERIA_IMAGE"
 grep -q 'name: CRITERIA_JOB_ARCH' "$RENDERED" || fail "operator deployment missing CRITERIA_JOB_ARCH"
 # KB-3: the built-in legacy secret volumes are opt-in; the default renders
@@ -235,6 +243,7 @@ check_override() { # description set-expr pattern
 
 check_override "operator image tag override" "images.operator.tag=1.2.3" 'image: "localhost:5000/criteria-k8s:1.2.3"'
 check_override "retention period override" "operator.retentionPeriod=48h" 'value: "48h"'
+check_override "stall window override" "operator.stallWindow=45m" 'value: "45m"'
 check_override "poll interval override" "watcher.pollInterval=30s" 'value: "30s"'
 check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'

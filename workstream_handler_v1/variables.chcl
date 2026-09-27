@@ -105,6 +105,23 @@ variable "max_review_visits" {
     default     = 5
 }
 
+// KB-24: a lost adapter scope session surfaces as a reviewer step that never
+// concludes (the remote shim keeps failing to accept the dead scope's
+// connections). When the reviewer subworkflow dies without a verdict, the
+// handler re-provisions the scope — a fresh rotate + re-dial — at most this
+// many times before failing the run with a typed reason.
+variable "max_reviewer_scope_retries" {
+    description = "Maximum reviewer-scope re-provisions (fresh rotate + re-dial) after a reviewer-loop session loss."
+    type        = number
+    default     = 2
+}
+
+variable "max_branch_scope_retries" {
+    description = "Maximum branch-scope re-provisions (fresh rotate + re-dial) after a branch_manager session loss."
+    type        = number
+    default     = 2
+}
+
 variable "linear_api_key" {
     type   = string
     secret = true

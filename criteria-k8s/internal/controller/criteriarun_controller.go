@@ -60,6 +60,11 @@ type CriteriaRunReconciler struct {
 	EnvProbe OperatorEnvProbe
 	Defaults jobbuilder.Defaults
 	Queue    *RunQueue
+	// StallWindow is the step-progress window of the stall watchdog
+	// (KB-24): a Running run whose castle stream shows no step progress for
+	// this long is failed with a StallWatchdog condition (CRITERIA_STALL_WINDOW,
+	// default 30m). Zero disables the watchdog.
+	StallWindow time.Duration
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -142,7 +147,10 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
 			}
 		}
-		if castleTerminalObserved(&update.Status) {
+		// A watchdog-failed run's engine is gone: castle will never record a
+		// terminal for it, so the terminal-completion polling must stop
+		// instead of looping forever (KB-24).
+		if castleTerminalObserved(&update.Status) || stallWatchdogFired(&update.Status) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
@@ -313,6 +321,15 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		logger.Error(obsErr, "observing run lifecycle from castle; continuing with Job-derived status only", "criteriarun", run.Name)
 	}
 
+	// KB-24: stamp step progress and fail a run that stops making any. The
+	// watchdog runs only on an authoritative observation; when it fires the
+	// run is failed (child Jobs + per-scope adapter pods deleted, phase and
+	// condition stamped, queue released) and this pass returns instead of
+	// continuing into the normal convergence below.
+	if obsErr == nil && obs.RunID != "" && r.applyStallWatchdog(&run, update, obs, logger) {
+		return r.failRunStalled(ctx, &run, update, logger)
+	}
+
 	if !statusEqual(&run.Status, &update.Status) {
 		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
 		if err := r.Status().Update(ctx, update); err != nil {
@@ -354,15 +371,24 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	//   status above is already persisted, so the error must not abort the
 	//   pass);
 	//   - per-scope runs keep polling until every scope is released;
+	//   - a run with an active (non-terminal) Job polls too when the stall
+	//   watchdog is enabled: it needs periodic reconciles, and a wedged Job
+	//   emits no watch events while it hangs — the CRI-271 signature (a
+	//   zero stall window disables the watchdog and with it this poll);
 	//   - a terminal run keeps polling until castle has recorded the
-	//   terminal outcome, unless castle is disabled.
+	//   terminal outcome, unless castle is disabled — or the run was failed
+	//   by the stall watchdog, whose engine is gone and whose castle record
+	//   will never reach a terminal.
 	if obsErr != nil {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 	if run.Spec.PerScopeSessions && (activeAdapters > 0 || !isTerminalPhase(phase)) {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
-	if isTerminalPhase(phase) && !castleTerminalObserved(&update.Status) && !(r.Castle == nil || r.Castle.Disabled()) {
+	if !isTerminalPhase(phase) && r.StallWindow > 0 && !(r.Castle == nil || r.Castle.Disabled()) {
+		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+	}
+	if isTerminalPhase(phase) && !castleTerminalObserved(&update.Status) && !stallWatchdogFired(&update.Status) && !(r.Castle == nil || r.Castle.Disabled()) {
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
 	}
 

@@ -50,6 +50,16 @@ data "internal" "_review_repair_context" {
     value = ""
 }
 
+// KB-24: typed reason from the attempt that failed. Empty means the failure
+// was engine-synthesized (timeout / crash / lost scope session — no output
+// object exists), which routes to state.failed so the parent re-provisions
+// the scope; non-empty means the session was live and the in-place repair
+// retry applies.
+data "internal" "_failure_reason" {
+    type  = string
+    value = ""
+}
+
 // ── PR number resolution ──────────────────────────────────────────────────────
 // Accept a full PR URL (e.g. https://github.com/org/repo/pull/42, or a
 // multi-line string that contains such a URL) or fall back to the current branch.
@@ -68,7 +78,17 @@ step "resolve_pr_number" {
             value  = output.stdout
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "PR number resolution failed (KB-24)"
+        }
+    }
 }
 
 // ── PR status check ───────────────────────────────────────────────────────────
@@ -100,8 +120,27 @@ step "check_pr_status" {
             target = data.internal.review_result.value
             value  = startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : "")
         }
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: an unrecognized status line still reaches state.failed
+            // via route_pr_status's default arm. Give that route a non-empty
+            // reason so the parent fails the run with the actual status
+            // output instead of misclassifying it as a lost scope session.
+            // Recognized statuses reset the reason (empty on success paths).
+            value  = startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") || startswith(output.stdout, "status:ready") || startswith(output.stdout, "status:threads_open") || startswith(output.stdout, "status:changes_requested") || startswith(output.stdout, "status:pending") || startswith(output.stdout, "status:checks_failed") ? "" : "unrecognized PR status output: ${output.stdout}"
+        }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "PR status check failed (KB-24)"
+        }
+    }
 }
 
 switch "route_pr_status" {
@@ -164,6 +203,10 @@ step "pr_review" {
     target      = adapter.copilot.pr_reviewer
     allow_tools = ["*"]
     max_visits  = var.max_review_visits
+    // KB-24: bound each attempt so a lost scope session (the remote shim keeps
+    // failing to accept the dead scope's connections) becomes a failure
+    // outcome instead of a step that never concludes.
+    timeout = "3600s"
 
     input {
                 prompt = templatefile("./agents/review_pr.md.tftpl", {
@@ -207,16 +250,33 @@ step "pr_review" {
     outcome "failure" {
         next = switch.route_review_retry
         write {
+            target = data.internal._failure_reason.value
+            // try(): an engine-synthesized failure (timeout / crash / lost
+            // scope session) exposes no output object at all — an empty
+            // reason marks the scope loss for the retry switch.
+            value  = try(output.reason, "")
+        }
+        write {
             target = data.internal._review_attempts.value
             value  = data.internal._review_attempts.value + 1
         }
         write {
             target = data.internal._review_repair_context.value
-            value  = "The previous reviewer attempt reported failure: ${output.reason}\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
+            value  = "The previous reviewer attempt reported failure: ${try(output.reason, "no reason reported")}\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
         }
     }
     outcome "default" {
         next = switch.route_review_retry
+        write {
+            target = data.internal._failure_reason.value
+            // The engine classified a response but not its outcome name, so
+            // the session was live; a reported reason (if any) travels to the
+            // parent as failure_reason. submit_outcome reason is optional and
+            // the copilot adapter reports it as an empty string when the
+            // agent supplies none, so try(...) alone would still pass ""
+            // through: guard the empty case explicitly.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "malformed reviewer response (no valid outcome)"
+        }
         write {
             target = data.internal._review_attempts.value
             value  = data.internal._review_attempts.value + 1
@@ -228,12 +288,20 @@ step "pr_review" {
     }
 }
 
-// Bounded retry decision for reviewer failures. The counter is incremented by
-// the pr_review failure/default outcomes before this switch is evaluated, so
-// the condition enforces: attempts < max_review_visits => one more try,
-// otherwise fail the run. This keeps the loop finite and makes the existing
-// max_visits budget the hard ceiling.
+// Bounded retry decision for reviewer failures. The failure reason (written by
+// the pr_review failure/default outcomes before this switch is evaluated)
+// gates the retry: an engine-synthesized failure — empty reason — is a lost
+// scope session, so an in-place retry would dial the same dead session; it
+// fails the run and the parent re-provisions the scope instead (KB-24). For
+// live-session failures the counter (also incremented before this switch)
+// enforces: attempts < max_review_visits => one more try, otherwise fail the
+// run. This keeps the loop finite and makes the existing max_visits budget
+// the hard ceiling.
 switch "route_review_retry" {
+    match {
+        condition = data.internal._failure_reason.value == ""
+        next      = state.failed
+    }
     match {
         condition = data.internal._review_attempts.value < var.max_review_visits
         next      = step.pr_review
@@ -253,7 +321,17 @@ step "post_approval" {
         })
     }
     outcome "success" { next = state.approved }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "posting the approval review failed (KB-24)"
+        }
+    }
 }
 
 step "post_changes_requested" {
@@ -266,7 +344,17 @@ step "post_changes_requested" {
         })
     }
     outcome "success" { next = state.changes_requested }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "posting the changes-requested review failed (KB-24)"
+        }
+    }
 }
 
 // ── Terminal states ───────────────────────────────────────────────────────────
@@ -301,4 +389,11 @@ output "review_result" {
 output "status_output" {
     type  = string
     value = data.internal._status_output.value
+}
+
+// KB-24: typed failure reason from the last attempt; empty on success paths.
+// The parent re-provisions the scope when this is empty on failure.
+output "failure_reason" {
+    type  = string
+    value = data.internal._failure_reason.value
 }

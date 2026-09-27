@@ -92,6 +92,14 @@ type Observation struct {
 	Lifecycle []events.LifecycleEvent
 	// Terminal is the terminal run event, when one has been observed.
 	Terminal *Terminal
+	// LastProgress is the newest step-progress event timestamp the
+	// observation has consumed (lifecycle envelopes, plus the copilot
+	// adapter's agent-activity AdapterEvents — see progressFromEnvelope;
+	// heartbeats, terminal envelopes and non-activity adapter chatter never
+	// count; KB-24). Zero when no step-progress event has been observed
+	// (yet): the controller then stamps its own baseline so the stall
+	// watchdog's clock starts with the first authoritative observation.
+	LastProgress time.Time
 }
 
 // RunSource is the controller-facing observation surface. *Client implements
@@ -117,6 +125,10 @@ type Client struct {
 	scopes    map[string]map[string]string // runID -> scopeInstanceID -> provisioned adapter
 	lifecycle map[string][]events.LifecycleEvent
 	terminals map[string]*Terminal
+	// progress tracks the newest step-progress event timestamp per run
+	// (KB-24): the stall watchdog's baseline. Retained like cursors so a
+	// controller restart's full drain replay recomputes it from history.
+	progress map[string]time.Time
 }
 
 // New builds a castle observation client. A nil httpClient uses
@@ -135,6 +147,7 @@ func New(cfg Config, httpClient *http.Client) *Client {
 		scopes:    map[string]map[string]string{},
 		lifecycle: map[string][]events.LifecycleEvent{},
 		terminals: map[string]*Terminal{},
+		progress:  map[string]time.Time{},
 	}
 }
 
@@ -170,12 +183,13 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	}
 	obs.RunID = runID
 
-	terminal, lifecycle, err := c.drain(ctx, runID)
+	terminal, lifecycle, lastProgress, err := c.drain(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("draining castle events for run %s: %w", runID, err)
 	}
 	obs.Lifecycle = lifecycle
 	obs.Terminal = terminal
+	obs.LastProgress = lastProgress
 
 	// The run record is authoritative for its terminal status and pr_url:
 	// terminal envelopes carry neither, so enrich from GetRun (and fall back
@@ -363,13 +377,15 @@ func (c *Client) findRunForCriteria(ctx context.Context, criteriaID string) (*v1
 
 // drain incrementally fetches run events from the last consumed sequence and
 // folds them into the accumulated per-run state. It returns the terminal
-// event seen so far and the full accumulated lifecycle history.
-func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.LifecycleEvent, error) {
+// event seen so far, the full accumulated lifecycle history, and the newest
+// step-progress event timestamp consumed so far (KB-24).
+func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.LifecycleEvent, time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	since := c.cursors[runID]
 	terminal := c.terminals[runID]
+	lastProgress := c.progress[runID]
 
 	for page := 0; page < maxEventPages; page++ {
 		resp, err := c.runs.ListRunEvents(ctx, connect.NewRequest(&v1.ListRunEventsRequest{
@@ -378,9 +394,16 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 			Limit:    int32(defaultPageSize),
 		}))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, time.Time{}, err
 		}
 		for _, env := range resp.Msg.GetEvents() {
+			if progressFromEnvelope(env) {
+				if ts := env.GetTs(); ts != nil {
+					if t := ts.AsTime(); t.After(lastProgress) {
+						lastProgress = t
+					}
+				}
+			}
 			if t := terminalFromEnvelope(env); t != nil {
 				terminal = t
 				c.terminals[runID] = t
@@ -404,11 +427,101 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 		}
 	}
 	c.cursors[runID] = since
+	if lastProgress.After(c.progress[runID]) {
+		c.progress[runID] = lastProgress
+	}
 
 	history := c.lifecycle[runID]
 	out := make([]events.LifecycleEvent, len(history))
 	copy(out, history)
-	return terminal, out, nil
+	return terminal, out, lastProgress, nil
+}
+
+// progressFromEnvelope reports whether an envelope is a step-progress event
+// for the stall watchdog (KB-24): the run made visible progress when any of
+// these arrives. Heartbeats and terminal envelopes never count — a wedged
+// step emits only heartbeats, which is exactly the signature the watchdog
+// must detect (the CRI-271 incident's wedge chatter — "remote shim accept
+// failed", "no persisted scope instance record" — is engine slog output that
+// never enters the envelope stream). Terminal envelopes are likewise
+// excluded: a terminal run needs no watchdog.
+//
+// AdapterEvents count only for a fixed activity allowlist
+// (adapterEventActivityKind): the copilot adapter (pinned v0.5.8) drops log
+// lines (WS15/WS03), so a healthy turn ships ALL of its agent activity as
+// structured AdapterEvents — agent.message deltas, tool invocations/results,
+// permission requests and the finalize receipt — and a step that emits none
+// of those while its session is wedged produces nothing but heartbeats.
+// Counting every AdapterEvent would let crash/respawn chatter and scope
+// provisioning bookkeeping hold the watchdog open, so unknown or non-activity
+// kinds default to excluded; extend the allowlist deliberately per adapter
+// emission (see adapterEventActivityKind for the current evidence).
+// Corroborating the window: on healthy copilot turns (CRI-277 notes) the
+// worst observed gap between activity events is 217s and gate-held permission
+// waits run ~10m — both far inside the 30m default stall window, so activity
+// progress and step-timeout budgets (e.g. 60m copilot turns) cannot contradict.
+func progressFromEnvelope(env *v1.Envelope) bool {
+	switch env.GetPayload().(type) {
+	case *v1.Envelope_RunStarted,
+		*v1.Envelope_StepEntered,
+		*v1.Envelope_StepOutcome,
+		*v1.Envelope_StepTransition,
+		*v1.Envelope_StepLog,
+		*v1.Envelope_StepResumed,
+		*v1.Envelope_StepOutputCaptured,
+		*v1.Envelope_VariableSet,
+		*v1.Envelope_WaitEntered,
+		*v1.Envelope_WaitResumed,
+		*v1.Envelope_ApprovalRequested,
+		*v1.Envelope_ApprovalDecision,
+		*v1.Envelope_BranchEvaluated,
+		*v1.Envelope_ForEachEntered,
+		*v1.Envelope_StepIterationStarted,
+		*v1.Envelope_StepIterationItem,
+		*v1.Envelope_StepIterationCompleted,
+		*v1.Envelope_ScopeIterCursorSet,
+		*v1.Envelope_WatchReady:
+		return true
+	case *v1.Envelope_AdapterEvent:
+		return adapterEventActivityKind(env.GetAdapterEvent().GetKind())
+	default:
+		return false
+	}
+}
+
+// adapterEventActivityKind reports whether an AdapterEvent kind is genuine
+// agent activity that must refresh the stall watchdog's progress baseline
+// (KB-24). The allowlist is the copilot adapter's emission surface (v0.5.8
+// sources: copilot_turn.go, copilot_outcome.go, copilot_permission.go) plus
+// the engine host's shared tool-call loader, and the kinds a wedge or a
+// crash loop can produce are deliberately absent:
+//
+//   - agent.message / tool.invocation / tool.result / limit.reached:
+//     the turn state machine's per-event traffic — continuous on healthy
+//     turns (worst CRI-277 gap 217s), absent once the agent session is dead.
+//   - permission.request: the model asking for permission; gate-held waits
+//     run ~10m on healthy turns (CRI-277).
+//   - outcome.finalized: the model's successful submit_outcome call.
+//
+// Excluded on purpose: adapter lifecycle kinds (scope provisioning
+// bookkeeping, not step work), outcome.failure (the finalize-failed verdict,
+// immediately followed by the step's own StepOutcome), session.crash and
+// session.respawned (host crash handling — a respawn loop must not read as
+// progress), permission.denied and step.outcome.unknown (malformed-payload
+// and unknown-outcome bookkeeping), and every unknown kind (future chatter
+// kinds must not hold the watchdog open by default).
+func adapterEventActivityKind(kind string) bool {
+	switch kind {
+	case "agent.message",
+		"tool.invocation",
+		"tool.result",
+		"permission.request",
+		"limit.reached",
+		"outcome.finalized":
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveReleaseAdapter normalizes the engine's release-event adapter

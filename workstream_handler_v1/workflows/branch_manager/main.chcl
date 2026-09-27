@@ -30,6 +30,15 @@ data "internal" "stash_report" {
     value = ""
 }
 
+// KB-24: typed reason from the outcome that ended the run. Empty means the
+// failure was engine-synthesized (timeout / crash / lost scope session — no
+// output object exists), which the parent treats as a lost session and
+// re-provisions the scope.
+data "internal" "failure_reason" {
+    type  = string
+    value = ""
+}
+
 // ── Branch name resolution ────────────────────────────────────────────────────
 
 step "resolve_branch" {
@@ -47,7 +56,17 @@ step "resolve_branch" {
             value  = output.stdout
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            // KB-24: a live deterministic failure must never reach the parent
+            // with an empty reason — an empty value is reserved for
+            // engine-synthesized session loss and would trigger a pointless
+            // scope re-provision.
+            value  = "branch resolution failed (KB-24)"
+        }
+    }
 }
 
 // ── Isolated worktree setup ───────────────────────────────────────────────────
@@ -79,6 +98,12 @@ step "setup_worktree" {
         write {
             target = data.internal.triage_context.value
             value  = output.stdout
+        }
+        write {
+            target = data.internal.failure_reason.value
+            // KB-24: this terminal route is reachable from a live session, so
+            // it must never look like a lost scope session to the parent.
+            value  = "worktree setup failed (KB-24)"
         }
     }
 }
@@ -244,6 +269,10 @@ step "branch_triage_agent" {
     target      = adapter.copilot.branch_repair
     allow_tools = ["*"]
     max_visits  = var.max_repair_visits
+    // KB-24: bound the attempt so a lost scope session (the remote shim keeps
+    // failing to accept the dead scope's connections) becomes a failure
+    // outcome instead of a step that never concludes.
+    timeout = "3600s"
 
     input {
                 prompt = templatefile("./agents/repair_branch.md.tftpl", {
@@ -253,14 +282,64 @@ step "branch_triage_agent" {
                 })
     }
 
-    outcome "success"     { next = state.done }
-    outcome "needs_human" { next = state.needs_human }
-    outcome "failed"      { next = state.failed }
+    outcome "success" { next = state.done }
+    outcome "needs_human" {
+        next = state.needs_human
+        write {
+            target = data.internal.failure_reason.value
+            // The agent decided to escalate — the session was live. The
+            // reported reason travels to the parent, which fails the run with
+            // it instead of re-provisioning. submit_outcome reason is optional
+            // and the copilot adapter reports it as an empty string when the
+            // agent supplies none, so try(...) alone would still pass ""
+            // through: guard the empty case explicitly. An empty
+            // failure_reason reaching the parent means engine-synthesized
+            // session loss, nothing else.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "branch triage agent escalated to a human without a reason"
+        }
+    }
+    outcome "failed" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            // Agent-decided failure: the session was live, so this must never
+            // look like a lost scope session to the parent.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "triage agent reported failure without a reason"
+        }
+    }
     // "failure" is the copilot adapter's built-in outcome when the provider is
-    // unreachable or the session crashes — treat it as needs_human since the
-    // branch is in an unresolved state that requires manual intervention.
-    outcome "failure"     { next = state.needs_human }
-    outcome "default"     { next = state.needs_human }
+    // unreachable or the session crashes. KB-24: try() distinguishes the
+    // engine-synthesized case (no output object → empty reason → the parent
+    // re-provisions the scope) from a live-session response carrying a reason.
+    outcome "failure" {
+        next = switch.route_triage_scope_loss
+        write {
+            target = data.internal.failure_reason.value
+            value  = try(output.reason, "")
+        }
+    }
+    outcome "default" {
+        next = switch.route_triage_scope_loss
+        write {
+            target = data.internal.failure_reason.value
+            // The engine classified a response but not its outcome name, so
+            // the session was live; never leave this empty.
+            value  = try(output.reason, "malformed triage agent response (no valid outcome)")
+        }
+    }
+}
+
+// KB-24: route the triage agent's scope-loss signal. An empty reason is an
+// engine-synthesized failure (lost session) — surface it to the parent as a
+// scope loss so it can re-provision; anything else is a real result.
+switch "route_triage_scope_loss" {
+    match {
+        condition = data.internal.failure_reason.value != ""
+        next      = state.failed
+    }
+    default {
+        next = state.needs_human
+    }
 }
 
 // ── Restore stashed work ──────────────────────────────────────────────────────
@@ -326,4 +405,11 @@ output "base_branch" {
 output "stash_report" {
     type  = string
     value = data.internal.stash_report.value
+}
+
+// KB-24: typed failure reason for the parent's scope-loss routing. Empty on
+// every non-failure path (success resets it).
+output "failure_reason" {
+    type  = string
+    value = data.internal.failure_reason.value
 }

@@ -68,6 +68,14 @@ data "internal" "pr_url" {
     value = ""
 }
 
+// KB-24: typed failure reason surfaced by the handler subworkflow. Empty
+// means the handler died without reporting one. Passed to the failure
+// comment so the parked issue carries the actionable reason.
+data "internal" "handler_error" {
+    type  = string
+    value = ""
+}
+
 // ── Subworkflow ──────────────────────────────────────────────────────────────
 // The only cross-tree dependency of this workflow: a sibling directory,
 // referenced by relative path and locked recursively by
@@ -219,7 +227,15 @@ step "run_handler" {
             value  = subworkflow.pr_url
         }
     }
-    outcome "failure" { next = step.comment_handler_failed }
+    outcome "failure" {
+        next = step.comment_handler_failed
+        // KB-24: capture the handler's typed failure reason (empty when the
+        // handler died without reporting one) for the failure comment.
+        write {
+            target = data.internal.handler_error.value
+            value  = coalesce(try(subworkflow.failure_reason, ""), "")
+        }
+    }
 }
 
 // ── Linear writes ────────────────────────────────────────────────────────────
@@ -273,6 +289,7 @@ step "comment_handler_failed" {
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.workstream_file.value
             criteria_value_4 = var.linear_review_state
+            criteria_value_5 = data.internal.handler_error.value
         })
     }
     outcome "success" { next = step.set_review_state }

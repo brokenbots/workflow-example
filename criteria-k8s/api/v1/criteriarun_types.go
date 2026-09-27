@@ -266,6 +266,20 @@ type CriteriaRunStatus struct {
 	// disabled. Not part of the terminal-completion gate.
 	FinalState string `json:"finalState,omitempty"`
 
+	// LastStepProgress is the timestamp of the newest step-progress event in
+	// the run's castle event stream (lifecycle envelopes, plus the copilot
+	// adapter's agent-activity AdapterEvents — agent.message deltas, tool
+	// invocations/results, permission requests, the finalize receipt —;
+	// heartbeats, terminal envelopes and non-activity adapter chatter never
+	// count), stamped by the stall watchdog (KB-24). It is the watchdog's
+	// baseline: when the operator observes no step progress for the stall
+	// window (CRITERIA_STALL_WINDOW, default 30m) while the run's phase is
+	// still Running, the run is failed with a StallWatchdog condition so
+	// CriteriaRun reflects Failed instead of hanging in Running (the CRI-271
+	// wedge signature: a reviewer-loop step stuck emitting only heartbeats
+	// forever).
+	LastStepProgress *metav1.Time `json:"lastStepProgress,omitempty"`
+
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
@@ -443,6 +457,11 @@ func (in *CriteriaRunSpec) DeepCopy() *CriteriaRunSpec {
 // DeepCopyInto for CriteriaRunStatus.
 func (in *CriteriaRunStatus) DeepCopyInto(out *CriteriaRunStatus) {
 	*out = *in
+	if in.LastStepProgress != nil {
+		in, out := &in.LastStepProgress, &out.LastStepProgress
+		*out = new(metav1.Time)
+		**out = **in
+	}
 	if in.Queue != nil {
 		in, out := &in.Queue, &out.Queue
 		*out = new(CriteriaRunQueueStatus)

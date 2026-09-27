@@ -45,6 +45,27 @@ data "internal" "review_status_output" {
     value = ""
 }
 
+// KB-24: typed failure reason surfaced by this tree or its subworkflows.
+// Empty means the failure was engine-synthesized (timeout / crash / lost
+// adapter-scope session) — the signal the scope-reprovision routes act on.
+data "internal" "failure_reason" {
+    type  = string
+    value = ""
+}
+
+// KB-24: bounded re-provision budgets for lost scope sessions. The reviewer
+// counter resets on every successful review round so each round gets a full
+// budget.
+data "internal" "reviewer_scope_retries" {
+    type  = number
+    value = 0
+}
+
+data "internal" "branch_scope_retries" {
+    type  = number
+    value = 0
+}
+
 subworkflow "branch_manager" {
     source = "./workflows/branch_manager"
     input = {
@@ -132,7 +153,83 @@ step "run_branch_manager" {
             value  = subworkflow.stash_report
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = switch.route_branch_scope_reprovision
+        write {
+            target = data.internal.failure_reason.value
+            // try(): a scope that lost its session exposes no outputs at all.
+            // Empty means engine-synthesized (timeout / crash / lost session)
+            // — the reprovision route re-provisions the scope (fresh rotate +
+            // re-dial) instead of failing on the dead session.
+            value  = try(subworkflow.failure_reason, "")
+        }
+    }
+}
+
+// KB-24: route the branch_manager failure. A reported reason is a genuine
+// failure (agent-decided escalation), so fail with it; an empty reason is a
+// lost scope session, so re-provision (fresh rotate + re-dial), bounded by
+// the branch scope retry budget.
+switch "route_branch_scope_reprovision" {
+    match {
+        condition = data.internal.failure_reason.value != ""
+        next      = state.failed
+    }
+    match {
+        condition = data.internal.branch_scope_retries.value < var.max_branch_scope_retries
+        next      = step.reprovision_branch_scope
+    }
+    default { next = step.exhausted_branch_scope }
+}
+
+// KB-24: bookkeeping step that gives the fresh coordinator scope a live
+// session before the coordinator subworkflow is re-entered (the subworkflow's
+// copilot scope is provisioned anew on its next invocation — fresh rotate +
+// re-dial).
+step "reprovision_branch_scope" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'branch scope lost its session — re-provisioning scope (fresh rotate + re-dial)'"
+    }
+    outcome "success" {
+        next = step.run_branch_manager
+        write {
+            target = data.internal.branch_scope_retries.value
+            value  = data.internal.branch_scope_retries.value + 1
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "branch scope reprovision step failed before the branch re-run (KB-24)"
+        }
+    }
+}
+
+// KB-24: the reprovision budget is spent with nothing to show for it. Fail
+// with a typed reason so the parent's failure path carries actionable text.
+step "exhausted_branch_scope" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'branch scope reprovision budget exhausted — failing the run'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "branch scope reprovision budget exhausted (${var.max_branch_scope_retries} retries) without a reported reason (KB-24)"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "branch scope reprovision exhaustion step failed while failing the run (KB-24)"
+        }
+    }
 }
 
 // ── PR state check ────────────────────────────────────────────────────────────
@@ -324,6 +421,12 @@ step "run_pr_reviewer_loop" {
             target = data.internal.review_status_output.value
             value  = subworkflow.status_output
         }
+        // KB-24: a concluded review round renews the scope-reprovision budget
+        // for the next round (re-review after developer changes starts fresh).
+        write {
+            target = data.internal.reviewer_scope_retries.value
+            value  = 0
+        }
     }
     outcome "failure" {
         next = switch.route_pr_reviewer_loop
@@ -335,6 +438,14 @@ step "run_pr_reviewer_loop" {
         write {
             target = data.internal.review_status_output.value
             value  = try(subworkflow.status_output, "")
+        }
+        write {
+            target = data.internal.failure_reason.value
+            // try(): a scope that lost its session exposes no outputs at all.
+            // Empty means engine-synthesized (timeout / crash / lost session)
+            // — the reprovision route re-provisions the scope (fresh rotate +
+            // re-dial) instead of failing on the dead session.
+            value  = try(subworkflow.failure_reason, "")
         }
     }
 }
@@ -354,14 +465,75 @@ switch "route_pr_reviewer_loop" {
         condition = try(steps.run_pr_reviewer_loop.review_result, "") == "checks_failed"
         next      = step.triage_pr_feedback
     }
-    // Any other value means the reviewer never returned a verdict at all — the
-    // adapter crashed, the provider was unreachable, or its quota was exhausted.
-    // That is not review feedback, so there is nothing for the coordinator to
-    // triage: sending it there produces a no_work cycle that pushes and re-runs
-    // the reviewer, burning a full review each pass on a condition that cannot
-    // clear until the underlying problem is fixed. Fail fast and loudly instead.
+    // No verdict at all: the child never concluded (adapter crashed, provider
+    // unreachable, quota exhausted) or died with a reported reason. A reported
+    // reason is a genuine child failure rather than a lost session — fail with
+    // the true reason instead of burning the reprovision budget on re-running
+    // a review that legitimately failed. An empty reason means the child never
+    // concluded for an unreported cause: KB-24 re-provisions the reviewer
+    // scope (fresh rotate + re-dial, bounded by the retry budget) before
+    // re-running the review. On budget exhaustion fail with a typed reason
+    // instead of hanging on the dead session.
+    match {
+        condition = data.internal.failure_reason.value != ""
+        next      = state.failed
+    }
+    match {
+        condition = data.internal.reviewer_scope_retries.value < var.max_reviewer_scope_retries
+        next      = step.reprovision_reviewer_scope
+    }
     default {
+        next = step.exhausted_reviewer_scope
+    }
+}
+
+// KB-24: bookkeeping step that gives the fresh reviewer scope a live session
+// before the reviewer subworkflow is re-entered (the subworkflow's adapters
+// are provisioned anew on its next invocation — fresh rotate + re-dial).
+step "reprovision_reviewer_scope" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'reviewer scope lost its session — re-provisioning scope (fresh rotate + re-dial)'"
+    }
+    outcome "success" {
+        next = step.run_pr_reviewer_loop
+        write {
+            target = data.internal.reviewer_scope_retries.value
+            value  = data.internal.reviewer_scope_retries.value + 1
+        }
+    }
+    outcome "failure" {
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "reviewer scope reprovision step failed before the review re-run (KB-24)"
+        }
+    }
+}
+
+// KB-24: the reprovision budget is spent without a review verdict. Fail with
+// a typed reason so the parent's failure path (comment + Review column)
+// carries actionable text.
+step "exhausted_reviewer_scope" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'reviewer scope reprovision budget exhausted — failing the run'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "reviewer scope reprovision budget exhausted (${var.max_reviewer_scope_retries} retries) without a review verdict (KB-24)"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "reviewer scope reprovision exhaustion step failed while failing the run (KB-24)"
+        }
     }
 }
 
@@ -530,4 +702,11 @@ output "branch" {
 output "pr_url" {
     type  = string
     value = data.internal.pr_url.value
+}
+
+// KB-24: typed failure reason for the parent tree's failure comment. Empty on
+// every non-failure path.
+output "failure_reason" {
+    type  = string
+    value = data.internal.failure_reason.value
 }
