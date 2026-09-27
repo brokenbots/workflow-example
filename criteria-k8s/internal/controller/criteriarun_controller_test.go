@@ -875,6 +875,179 @@ func TestReconcileCorrectsStaleSucceededPhaseToCastleFailed(t *testing.T) {
 	assert.True(t, corrected.Status.CastleTerminalObserved)
 }
 
+// KB-23: the workflow verdict rides the terminal envelope's final_state
+// (RunCompleted.final_state). The engine exits 0 even when the workflow
+// ended in its failure terminal, so the phase alone cannot carry the
+// verdict — the stamp does, and the watcher judges a dev-class success by
+// it. A success envelope carrying handler_complete stamps the verdict
+// alongside the Succeeded phase.
+func TestReconcileCastleTerminalStampsFinalState(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-141",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-141"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-141", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID: "castle-run-1",
+		Terminal: &castle.Terminal{
+			Success:    true,
+			FinalState: "handler_complete",
+		},
+	}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
+	assert.Equal(t, "handler_complete", updated.Status.FinalState,
+		"the workflow verdict from the terminal envelope is stamped on the status")
+	assert.True(t, updated.Status.CastleTerminalObserved)
+}
+
+// KB-23: the failure verdict stamps too, alongside the Failed phase — the
+// workflow ended in its failure terminal even though the runner pod exited
+// 0.
+func TestReconcileCastleTerminalStampsFailedFinalState(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-142",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-142"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-142", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID: "castle-run-1",
+		Terminal: &castle.Terminal{
+			Success:    false,
+			FinalState: "failed",
+		},
+	}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseFailed, updated.Status.Phase)
+	assert.Equal(t, "failed", updated.Status.FinalState)
+	assert.True(t, updated.Status.CastleTerminalObserved)
+}
+
+// KB-23: a later castle pass that only saw the run record (which carries
+// no final_state column) must not blank a verdict a previous pass stamped
+// from the terminal envelope; re-derivation converges on the stamped
+// verdict.
+func TestReconcileRecordOnlyTerminalPassKeepsStampedFinalState(t *testing.T) {
+	scheme := newScheme(t)
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "cri-143",
+			Namespace:  "default",
+			UID:        types.UID("run-uid"),
+			Finalizers: []string{"criteriarun.criteria.brokenbots.dev/finalizer"},
+		},
+		Spec: criteriav1.CriteriaRunSpec{TicketID: "CRI-143"},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-143", Namespace: "default"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(run).
+		WithObjects(run, job).
+		Build()
+
+	castleStub := &fakeCastle{observation: &castle.Observation{
+		RunID: "castle-run-1",
+		Terminal: &castle.Terminal{
+			Success:    true,
+			FinalState: "handler_complete",
+		},
+	}}
+	r := &controller.CriteriaRunReconciler{
+		Client: cl,
+		Scheme: scheme,
+		Castle: castleStub,
+		Queue:  controller.NewRunQueue(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	// The next pass observes only the bare run record terminal: no envelope,
+	// no final_state. The stamped verdict must survive it.
+	castleStub.observation = &castle.Observation{
+		RunID:    "castle-run-1",
+		Terminal: castleTerminal(true),
+	}
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var settled criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &settled))
+	assert.Equal(t, "handler_complete", settled.Status.FinalState,
+		"a record-only terminal pass must not blank a stamped verdict")
+	assert.Equal(t, criteriav1.PhaseSucceeded, settled.Status.Phase)
+}
+
 // A Job-terminal CriteriaRun whose runner agent deregistered (the runner pod
 // is gone, as for runs that predate castle's dual-write) can never produce a
 // castle terminal: discovery conclusively finds no run (ErrRunNotFound), so

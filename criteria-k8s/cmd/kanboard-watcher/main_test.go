@@ -570,6 +570,66 @@ func TestFailedTriageRunMovesTaskToReview(t *testing.T) {
 	assert.Equal(t, 6, tw.kbS.taskColumn(23), "failed triage run moves task to Review")
 }
 
+// setRunFinalStateByName stamps the workflow verdict (Status.FinalState,
+// KB-23) on a pre-created run — the way the controller's castle observation
+// leaves the run after the workflow's terminal state reached the operator.
+func (tw *testWatcher) setRunFinalStateByName(t *testing.T, name, finalState string) {
+	t.Helper()
+	run := tw.runByName(t, name)
+	run.Status.FinalState = finalState
+	require.NoError(t, tw.client.Status().Update(context.Background(), run))
+}
+
+// KB-23 regression: the runner job exits 0 even when the develop workflow
+// ended in its failure terminal, so the run read Succeeded while the
+// workflow's verdict was failure (observed live on KB-17, run
+// kb-17-1790397477: comment_handler_failed logged outcome=failure, but the
+// run CR read Succeeded and the watcher moved the ticket to Done). A
+// Succeeded run carrying the failed verdict must reconcile the ticket into
+// the Review column instead of stamping Done over the failure.
+func TestDevSucceededWithFailedVerdictMovesTaskToReview(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(24, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.addRun(t, "kb-24-0000000001", "KB-24", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-24-0000000001", "failed")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 6, tw.kbS.taskColumn(24),
+		"a Succeeded run with a failed workflow verdict moves the ticket to Review, not Done")
+}
+
+// KB-23 companion: an awaiting_human verdict handed the ticket to a human
+// with the workflow's own bookkeeping (set_review_state) already applied —
+// the ticket sits in Review and must not be reconciled out from under that
+// handoff by a Done stamp.
+func TestDevSucceededWithAwaitingHumanVerdictLeavesColumn(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(25, 6, "k8s-run", "internal-reproduced") // Review: parked by set_review_state
+	tw.addRun(t, "kb-25-0000000001", "KB-25", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-25-0000000001", "awaiting_human")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 6, tw.kbS.taskColumn(25),
+		"an awaiting_human verdict leaves the ticket where the workflow parked it")
+}
+
+// KB-23 companion: a handler_complete verdict delivered the work and keeps
+// the Done stamp — the verdict only reroutes the failure and human-handoff
+// paths.
+func TestDevSucceededWithHandlerCompleteVerdictStampsDone(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(26, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.addRun(t, "kb-26-0000000001", "KB-26", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-26-0000000001", "handler_complete")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 8, tw.kbS.taskColumn(26),
+		"a handler_complete verdict keeps the Done stamp")
+}
+
 // runNewer picks a ticket's most recent run by creation time with the name
 // as the deterministic tiebreak.
 func TestRunNewer(t *testing.T) {
