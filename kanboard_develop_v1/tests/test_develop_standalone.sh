@@ -84,8 +84,9 @@ fi
 # No runtime dependency on the sibling trees: no path into either anywhere
 # (prose mentions in comments are fine; structural embedding is already
 # guarded by the compiled-graph grep below).
-if grep -rn -e "linear_intake_v1/" -e "linear_triage_v1/" -e "linear_develop_v1/" \
-    --include="*.chcl" --include="*.sh.tftpl" --include="*.md.tftpl" "$TREE_ROOT"; then
+if find "$TREE_ROOT" -type f \
+    \( -name '*.chcl' -o -name '*.sh.tftpl' -o -name '*.md.tftpl' \) -print0 \
+    | xargs -0 -r grep -l -e "linear_intake_v1/" -e "linear_triage_v1/" -e "linear_develop_v1/"; then
     fail "develop tree references a linear_* tree's files — trees must be independently runnable"
 else
     ok "no file path into any linear_* tree"
@@ -211,11 +212,106 @@ fi
 # asserted on the workflow source and the comment script.
 if grep -q 'value  = coalesce(try(subworkflow.failure_reason, ""), "")' "$TREE_ROOT/main.chcl" \
     && grep -q 'criteria_value_5 = data.internal.handler_error.value' "$TREE_ROOT/main.chcl" \
-    && grep -q "Handler failure reason: \$criteria_value_5" "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" \
-    && grep -q "if \[ -n \"\$criteria_value_5\" \]" "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl"; then
+    && grep -q "Handler failure reason: \$criteria_value_5" "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl"; then
     ok "handler failure reason threaded into the parking comment"
 else
     fail "handler failure reason not threaded into the parking comment wiring"
+fi
+
+# KB-24: every shell step's templatefile(...) input keys must be rendered by
+# the referenced script, and every $criteria_value_N a script body references
+# must have a render line in its header. Scripts run under set -euo pipefail,
+# so an unbound body reference (the KB-24 parking-comment reason is empty on
+# most handler failures) aborts the step before it posts anything and
+# main.chcl routes the run to state.failed. Scan both directions.
+bind_issues=0
+for tpl in "$TREE_ROOT"/scripts/*.sh.tftpl; do
+    for n in $(grep -oE '[$][{]?criteria_value_[0-9]+' "$tpl" | grep -oE '[0-9]+' | sort -u); do
+        if ! grep -qE "^criteria_value_${n}=[{][{] [.]?criteria_value_${n}" "$tpl"; then
+            fail "$(basename "$tpl") references \$criteria_value_$n but renders no {{ .criteria_value_$n }} binding"
+            bind_issues=$((bind_issues + 1))
+        fi
+    done
+done
+sed -n '/templatefile(/,/^[[:space:]]*\}[)][[:space:]]*$/p' "$TREE_ROOT/main.chcl" \
+    | sed -n 's/.*templatefile("\([^"]*\)".*/PATH \1/p; s/^[[:space:]]*\(criteria_value_[0-9][0-9]*\)[[:space:]]*= .*/KEY \1/p' \
+    > "$TMP/tpl_keys.raw"
+tpl_rel=""
+key_render_issues=0
+while read -r kind value; do
+    case "$kind" in
+        PATH) tpl_rel="$value" ;;
+        KEY)
+            if [ -n "$tpl_rel" ] \
+                && ! grep -qE "^${value}=[{][{] [.]?${value}" "$TREE_ROOT/$tpl_rel"; then
+                fail "$tpl_rel receives $value but renders no {{ .$value }} binding"
+                key_render_issues=$((key_render_issues + 1))
+            fi
+            ;;
+    esac
+done < "$TMP/tpl_keys.raw"
+if [ "$bind_issues" -eq 0 ] && [ "$key_render_issues" -eq 0 ]; then
+    ok "every templatefile input key is rendered by its target script"
+else
+    fail "templatefile input keys and script render bindings out of sync"
+fi
+
+# KB-24: execute the rendered handler-failure comment end-to-end. The engine
+# binds criteria_value_N through the template header only and the script runs
+# under set -euo pipefail, so a body reference without a render line aborts
+# before anything is posted; and the createComment payload must actually carry
+# the task id and the body (a jq -n call that forgets an --arg posts an empty
+# payload). Exercise both with a stub curl.
+STUBBIN="$TMP/stubbin"
+mkdir -p "$STUBBIN"
+cat > "$STUBBIN/curl" <<'EOF'
+#!/bin/bash
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-d" ] && [ "$#" -ge 2 ]; then
+        printf '%s' "$2" > "$E2E_CAPTURE/payload.json"
+        shift 2
+        continue
+    fi
+    shift
+done
+printf '{"result": true}'
+EOF
+chmod +x "$STUBBIN/curl"
+
+# Render the template the engine way: bind the criteria_value_N header lines,
+# leave the body untouched (its $refs resolve at runtime from the header).
+render_failed_comment() {
+    local reason="$1"
+    sed -e "s,{{ .criteria_value_1 | shellquote }},'/tmp',g" \
+        -e "s,{{ .criteria_value_2 | shellquote }},'KB-24',g" \
+        -e "s,{{ .criteria_value_3 | shellquote }},'workstream',g" \
+        -e "s,{{ .criteria_value_4 | shellquote }},'Review',g" \
+        -e "s,{{ .criteria_value_5 | shellquote }},'${reason}',g" \
+        "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" > "$TMP/failed_comment_case.sh"
+}
+
+run_failed_comment() {
+    render_failed_comment "$1"
+    rm -f "$TMP/payload.json"
+    KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+        E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" \
+        bash "$TMP/failed_comment_case.sh" >/dev/null 2>&1
+}
+
+if run_failed_comment "" && jq -e \
+    '.params.task_id == 24 and (.params.content | contains("The implementation handler failed."))' \
+    "$TMP/payload.json" >/dev/null 2>&1 \
+    && ! grep -q "Handler failure reason" "$TMP/payload.json"; then
+    ok "handler-failure comment posts with empty reason (no suffix, task carried)"
+else
+    fail "handler-failure comment aborted or payload wrong with empty criteria_value_5"
+fi
+
+if run_failed_comment "some reason" \
+    && jq -r '.params.content' "$TMP/payload.json" 2>/dev/null | grep -q "Handler failure reason: some reason\."; then
+    ok "handler-failure comment appends the failure reason when set"
+else
+    fail "handler-failure comment did not append the failure reason"
 fi
 
 # Develop edge wiring: success and failure paths, matching the intake

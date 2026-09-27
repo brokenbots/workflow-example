@@ -2,6 +2,7 @@ criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 criteria_value_3={{ .criteria_value_3 | shellquote }}
 criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
 set -euo pipefail
 : "${LINEAR_API_KEY:?LINEAR_API_KEY is not set -- export it before criteria apply}"
 run_dir="$criteria_value_1/$criteria_value_2"
