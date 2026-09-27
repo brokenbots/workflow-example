@@ -55,6 +55,13 @@ var (
 	debugEventsFile     = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
 	retentionPeriod     = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
 	sweepInterval       = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
+	// KB-24: the stall watchdog's step-progress window. A Running run whose
+	// castle stream shows no step progress (any lifecycle event except
+	// heartbeats, adapter chatter and terminal envelopes) for this long is
+	// failed with a StallWatchdog condition so CriteriaRun reflects Failed
+	// instead of hanging in Running (the CRI-271 wedge signature). 0
+	// disables the watchdog.
+	stallWindow = flag.Duration("stall-window", getDuration("CRITERIA_STALL_WINDOW", 30*time.Minute), "Fail a run whose castle stream shows no step progress for this long (KB-24; 0 disables)")
 	// CRI-144: reap adapter pods and legacy adapter Jobs whose owning
 	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
@@ -150,6 +157,9 @@ func main() {
 			LegacySecretVolumes: *legacySecretVolumes,
 		},
 		Queue: queue,
+		// KB-24: the stall watchdog fails a Running run whose castle stream
+		// stops showing step progress, so the watcher can refire it.
+		StallWindow: *stallWindow,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "setting up CriteriaRun reconciler")

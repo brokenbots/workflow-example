@@ -75,6 +75,11 @@ operator:
   # Store CSI driver; set true only on an OpenBao-equipped cluster that
   # still runs workflow-less runs.
   legacySecretVolumes: false
+  # Stall watchdog (KB-24): a Running run whose castle stream shows no step
+  # progress for this long is failed with a StallWatchdog condition so
+  # CriteriaRun reflects Failed instead of hanging in Running. "0s"
+  # disables the watchdog. Durations use Go time.ParseDuration units.
+  stallWindow: 30m
   resources:
     requests:
       memory: 128Mi

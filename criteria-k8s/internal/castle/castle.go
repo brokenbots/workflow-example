@@ -92,6 +92,13 @@ type Observation struct {
 	Lifecycle []events.LifecycleEvent
 	// Terminal is the terminal run event, when one has been observed.
 	Terminal *Terminal
+	// LastProgress is the newest step-progress event timestamp the
+	// observation has consumed (any lifecycle event except heartbeats,
+	// adapter chatter and terminal envelopes; KB-24). Zero when no
+	// step-progress event has been observed (yet): the controller then
+	// stamps its own baseline so the stall watchdog's clock starts with the
+	// first authoritative observation.
+	LastProgress time.Time
 }
 
 // RunSource is the controller-facing observation surface. *Client implements
@@ -117,6 +124,10 @@ type Client struct {
 	scopes    map[string]map[string]string // runID -> scopeInstanceID -> provisioned adapter
 	lifecycle map[string][]events.LifecycleEvent
 	terminals map[string]*Terminal
+	// progress tracks the newest step-progress event timestamp per run
+	// (KB-24): the stall watchdog's baseline. Retained like cursors so a
+	// controller restart's full drain replay recomputes it from history.
+	progress map[string]time.Time
 }
 
 // New builds a castle observation client. A nil httpClient uses
@@ -135,6 +146,7 @@ func New(cfg Config, httpClient *http.Client) *Client {
 		scopes:    map[string]map[string]string{},
 		lifecycle: map[string][]events.LifecycleEvent{},
 		terminals: map[string]*Terminal{},
+		progress:  map[string]time.Time{},
 	}
 }
 
@@ -170,12 +182,13 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	}
 	obs.RunID = runID
 
-	terminal, lifecycle, err := c.drain(ctx, runID)
+	terminal, lifecycle, lastProgress, err := c.drain(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("draining castle events for run %s: %w", runID, err)
 	}
 	obs.Lifecycle = lifecycle
 	obs.Terminal = terminal
+	obs.LastProgress = lastProgress
 
 	// The run record is authoritative for its terminal status and pr_url:
 	// terminal envelopes carry neither, so enrich from GetRun (and fall back
@@ -363,13 +376,15 @@ func (c *Client) findRunForCriteria(ctx context.Context, criteriaID string) (*v1
 
 // drain incrementally fetches run events from the last consumed sequence and
 // folds them into the accumulated per-run state. It returns the terminal
-// event seen so far and the full accumulated lifecycle history.
-func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.LifecycleEvent, error) {
+// event seen so far, the full accumulated lifecycle history, and the newest
+// step-progress event timestamp consumed so far (KB-24).
+func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.LifecycleEvent, time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	since := c.cursors[runID]
 	terminal := c.terminals[runID]
+	lastProgress := c.progress[runID]
 
 	for page := 0; page < maxEventPages; page++ {
 		resp, err := c.runs.ListRunEvents(ctx, connect.NewRequest(&v1.ListRunEventsRequest{
@@ -378,9 +393,16 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 			Limit:    int32(defaultPageSize),
 		}))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, time.Time{}, err
 		}
 		for _, env := range resp.Msg.GetEvents() {
+			if progressFromEnvelope(env) {
+				if ts := env.GetTs(); ts != nil {
+					if t := ts.AsTime(); t.After(lastProgress) {
+						lastProgress = t
+					}
+				}
+			}
 			if t := terminalFromEnvelope(env); t != nil {
 				terminal = t
 				c.terminals[runID] = t
@@ -404,11 +426,48 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 		}
 	}
 	c.cursors[runID] = since
+	if lastProgress.After(c.progress[runID]) {
+		c.progress[runID] = lastProgress
+	}
 
 	history := c.lifecycle[runID]
 	out := make([]events.LifecycleEvent, len(history))
 	copy(out, history)
-	return terminal, out, nil
+	return terminal, out, lastProgress, nil
+}
+
+// progressFromEnvelope reports whether an envelope is a step-progress event
+// for the stall watchdog (KB-24): the run made visible progress when any of
+// these arrives. Heartbeats and adapter chatter never count — a wedged step
+// emits only heartbeats (and the adapter's internal error loop surfaces as
+// AdapterEvents), which is exactly the signature the watchdog must detect.
+// Terminal envelopes are likewise excluded: a terminal run needs no
+// watchdog.
+func progressFromEnvelope(env *v1.Envelope) bool {
+	switch env.GetPayload().(type) {
+	case *v1.Envelope_RunStarted,
+		*v1.Envelope_StepEntered,
+		*v1.Envelope_StepOutcome,
+		*v1.Envelope_StepTransition,
+		*v1.Envelope_StepLog,
+		*v1.Envelope_StepResumed,
+		*v1.Envelope_StepOutputCaptured,
+		*v1.Envelope_VariableSet,
+		*v1.Envelope_WaitEntered,
+		*v1.Envelope_WaitResumed,
+		*v1.Envelope_ApprovalRequested,
+		*v1.Envelope_ApprovalDecision,
+		*v1.Envelope_BranchEvaluated,
+		*v1.Envelope_ForEachEntered,
+		*v1.Envelope_StepIterationStarted,
+		*v1.Envelope_StepIterationItem,
+		*v1.Envelope_StepIterationCompleted,
+		*v1.Envelope_ScopeIterCursorSet,
+		*v1.Envelope_WatchReady:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveReleaseAdapter normalizes the engine's release-event adapter

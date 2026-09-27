@@ -86,6 +86,11 @@ spec:
             # the OpenBao Secrets Store CSI driver cannot mount them.
             - name: CRITERIA_LEGACY_SECRET_VOLUMES
               value: {{ .Values.operator.legacySecretVolumes | quote }}
+            # KB-24: stall watchdog window — a Running run whose castle
+            # stream shows no step progress for this long is failed so the
+            # watcher can refire it (0s disables the watchdog).
+            - name: CRITERIA_STALL_WINDOW
+              value: {{ .Values.operator.stallWindow | quote }}
           {{- include "criteria-k8s.restrictedContainer" . | nindent 10 }}
           volumeMounts:
             - name: criteria-data
