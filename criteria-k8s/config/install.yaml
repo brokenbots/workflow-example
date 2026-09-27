@@ -296,6 +296,23 @@ spec:
                     and "awaiting_human" handed the ticket to a human. Empty
                     when the terminal came from the castle run record or
                     castle observation is disabled.
+                lastStepProgress:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Timestamp of the newest step-progress event in the run's
+                    castle event stream, stamped by the stall watchdog
+                    (KB-24): lifecycle envelopes count, as do the copilot
+                    adapter's agent-activity AdapterEvents (agent.message,
+                    tool.invocation, tool.result, permission.request,
+                    limit.reached, outcome.finalized); heartbeats,
+                    terminal envelopes and non-activity adapter chatter do
+                    not. Baseline of the stall watchdog: when the operator
+                    observes no step progress for the stall window
+                    (CRITERIA_STALL_WINDOW, default 30m) while the run is
+                    still Running, the run is failed with a StallWatchdog
+                    condition so CriteriaRun reflects Failed instead of
+                    hanging in Running.
                 observedGeneration:
                   type: integer
                   format: int64
