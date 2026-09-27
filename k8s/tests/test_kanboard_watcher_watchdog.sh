@@ -90,8 +90,9 @@ poll_timeout=$(duration_to_seconds "$(awk '/name: POLL_TIMEOUT/{getline; print $
 startup_block=$(grep -A7 'startupProbe:' <<<"$manifest")
 startup_period=$(probe_value 'periodSeconds' "$startup_block")
 startup_threshold=$(probe_value 'failureThreshold' "$startup_block")
-[ -n "$startup_period" ] && [ -n "$startup_threshold" ] || \
+if [ -z "$startup_period" ] || [ -z "$startup_threshold" ]; then
     fail "startupProbe must configure periodSeconds and failureThreshold"
+fi
 startup_budget=$((startup_period * startup_threshold))
 if [ "$startup_budget" -le "$((2 * poll_timeout))" ]; then
     fail "startupProbe budget ${startup_budget}s must exceed 2 * POLL_TIMEOUT ($((2 * poll_timeout))s): a deadline-bound startup plus first poll would be restart-looped"
@@ -100,7 +101,8 @@ fi
 # The regular liveness fuse (post-startup wedge catcher) must stay wired.
 live_period=$(probe_value 'periodSeconds' "$live_block")
 live_threshold=$(probe_value 'failureThreshold' "$live_block")
-[ -n "$live_period" ] && [ -n "$live_threshold" ] || \
+if [ -z "$live_period" ] || [ -z "$live_threshold" ]; then
     fail "livenessProbe must configure periodSeconds and failureThreshold"
+fi
 
 echo "OK: kanboard-watcher watchdog wiring (KB-22)"
