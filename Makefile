@@ -185,6 +185,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_example_manifest.sh
 	@echo "Running criteria-k8s Helm chart regression test..."
 	./k8s/tests/test_criteria_k8s_chart.sh
+	@echo "Running kanboard-watcher watchdog wiring regression test (KB-22)..."
+	./k8s/tests/test_kanboard_watcher_watchdog.sh
 	@echo "Running routes ConfigMap schema regression test (CRI-216)..."
 	./k8s/tests/test_routes_config.sh
 	@echo "Running Ready for Development Linear state script regression test (CRI-241)..."
@@ -221,6 +223,7 @@ lint: lint-criteria-k8s
 		k8s/tests/test_secrets_store_csi.sh \
 		k8s/tests/test_example_manifest.sh \
 		k8s/tests/test_criteria_k8s_chart.sh \
+		k8s/tests/test_kanboard_watcher_watchdog.sh \
 		k8s/tests/test_routes_config.sh \
 		k8s/create-ready-for-development-state.sh \
 		k8s/tests/test_create_ready_state.sh \
