@@ -50,6 +50,16 @@ data "internal" "_review_repair_context" {
     value = ""
 }
 
+// KB-24: typed reason from the attempt that failed. Empty means the failure
+// was engine-synthesized (timeout / crash / lost scope session — no output
+// object exists), which routes to state.failed so the parent re-provisions
+// the scope; non-empty means the session was live and the in-place repair
+// retry applies.
+data "internal" "_failure_reason" {
+    type  = string
+    value = ""
+}
+
 // ── PR number resolution ──────────────────────────────────────────────────────
 // Accept a full PR URL (e.g. https://github.com/org/repo/pull/42, or a
 // multi-line string that contains such a URL) or fall back to the current branch.
@@ -164,6 +174,10 @@ step "pr_review" {
     target      = adapter.copilot.pr_reviewer
     allow_tools = ["*"]
     max_visits  = var.max_review_visits
+    // KB-24: bound each attempt so a lost scope session (the remote shim keeps
+    // failing to accept the dead scope's connections) becomes a failure
+    // outcome instead of a step that never concludes.
+    timeout = "3600s"
 
     input {
                 prompt = templatefile("./agents/review_pr.md.tftpl", {
@@ -207,16 +221,30 @@ step "pr_review" {
     outcome "failure" {
         next = switch.route_review_retry
         write {
+            target = data.internal._failure_reason.value
+            // try(): an engine-synthesized failure (timeout / crash / lost
+            // scope session) exposes no output object at all — an empty
+            // reason marks the scope loss for the retry switch.
+            value  = try(output.reason, "")
+        }
+        write {
             target = data.internal._review_attempts.value
             value  = data.internal._review_attempts.value + 1
         }
         write {
             target = data.internal._review_repair_context.value
-            value  = "The previous reviewer attempt reported failure: ${output.reason}\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
+            value  = "The previous reviewer attempt reported failure: ${try(output.reason, "no reason reported")}\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
         }
     }
     outcome "default" {
         next = switch.route_review_retry
+        write {
+            target = data.internal._failure_reason.value
+            // The engine classified a response but not its outcome name, so
+            // the session was live; a reported reason (if any) travels to the
+            // parent as failure_reason.
+            value  = try(output.reason, "malformed reviewer response (no valid outcome)")
+        }
         write {
             target = data.internal._review_attempts.value
             value  = data.internal._review_attempts.value + 1
@@ -228,12 +256,20 @@ step "pr_review" {
     }
 }
 
-// Bounded retry decision for reviewer failures. The counter is incremented by
-// the pr_review failure/default outcomes before this switch is evaluated, so
-// the condition enforces: attempts < max_review_visits => one more try,
-// otherwise fail the run. This keeps the loop finite and makes the existing
-// max_visits budget the hard ceiling.
+// Bounded retry decision for reviewer failures. The failure reason (written by
+// the pr_review failure/default outcomes before this switch is evaluated)
+// gates the retry: an engine-synthesized failure — empty reason — is a lost
+// scope session, so an in-place retry would dial the same dead session; it
+// fails the run and the parent re-provisions the scope instead (KB-24). For
+// live-session failures the counter (also incremented before this switch)
+// enforces: attempts < max_review_visits => one more try, otherwise fail the
+// run. This keeps the loop finite and makes the existing max_visits budget
+// the hard ceiling.
 switch "route_review_retry" {
+    match {
+        condition = data.internal._failure_reason.value == ""
+        next      = state.failed
+    }
     match {
         condition = data.internal._review_attempts.value < var.max_review_visits
         next      = step.pr_review
@@ -301,4 +337,11 @@ output "review_result" {
 output "status_output" {
     type  = string
     value = data.internal._status_output.value
+}
+
+// KB-24: typed failure reason from the last attempt; empty on success paths.
+// The parent re-provisions the scope when this is empty on failure.
+output "failure_reason" {
+    type  = string
+    value = data.internal._failure_reason.value
 }
