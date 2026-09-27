@@ -205,6 +205,19 @@ else
     fail "reviewer_github_token missing from the handler wiring — the handler would review with the author identity"
 fi
 
+# KB-24: the handler's typed failure reason is captured on failure and passed
+# to the parking comment (criteria_value_5), which appends it when non-empty.
+# Write bindings are not serialized into the compiled graph, so this is
+# asserted on the workflow source and the comment script.
+if grep -q 'value  = coalesce(try(subworkflow.failure_reason, ""), "")' "$TREE_ROOT/main.chcl" \
+    && grep -q 'criteria_value_5 = data.internal.handler_error.value' "$TREE_ROOT/main.chcl" \
+    && grep -q 'Handler failure reason: $criteria_value_5' "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" \
+    && grep -q 'if \[ -n "$criteria_value_5" \]' "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl"; then
+    ok "handler failure reason threaded into the parking comment"
+else
+    fail "handler failure reason not threaded into the parking comment wiring"
+fi
+
 # Develop edge wiring: success and failure paths, matching the intake
 # develop path's shape.
 assert_edge() {

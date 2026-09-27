@@ -8,6 +8,11 @@ run_dir="$criteria_value_1/$criteria_value_2"
 issue_id=$(jq -r '.data.issue.id' "$run_dir/ticket.json")
 
 body="**The implementation handler failed.** Workstream: $criteria_value_3. Moving the ticket to $criteria_value_4 for a human. The handler's reviewer loop could not conclude (no reviewer verdict, or the bounded fix cycle did not converge), or an infrastructure step inside the handler failed. The handler's run record carries the step-level error."
+# KB-24: the handler now reports a typed failure reason (empty when it died
+# without one) — surface it on the parked issue for the human.
+if [ -n "$criteria_value_5" ]; then
+    body="$body Handler failure reason: $criteria_value_5."
+fi
 
 curl -sS -f \
     -H "Authorization: $LINEAR_API_KEY" \
