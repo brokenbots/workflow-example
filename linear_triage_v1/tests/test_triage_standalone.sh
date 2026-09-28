@@ -498,6 +498,45 @@ for marker in "${develop_markers[@]}"; do
     fi
 done
 
+# ── 8. triage reviewer charter: review is judgment, not execution (CRI-260) ──
+
+# The triage reviewer judges artifacts (evidence chain, report quality,
+# routing); it must never run tests, test runners, or CI — the pipeline
+# already executed, and the reviewer only reads its results.
+triage_reviewer="$TREE_ROOT/agents/triage_reviewer.md"
+
+if grep -q "Role charter: review is judgment, not execution" "$triage_reviewer"; then
+    ok "triage_reviewer charter section present (CRI-260)"
+else
+    fail "triage_reviewer.md is missing the CRI-260 role charter section"
+fi
+
+if grep -q "judgment layer" "$triage_reviewer"; then
+    ok "triage_reviewer charter names the division of labor (judgment layer)"
+else
+    fail "triage_reviewer.md does not state the judgment-layer division of labor"
+fi
+
+if grep -qF "not \`make test\`, not \`make ci\`" "$triage_reviewer"; then
+    ok "triage_reviewer charter prohibits test/CI execution by name"
+else
+    fail "triage_reviewer.md charter does not name the prohibited test/CI commands"
+fi
+
+if grep -q "You explicitly do NOT run tests" "$triage_reviewer"; then
+    ok "triage_reviewer charter explicitly rules out test execution"
+else
+    fail "triage_reviewer.md charter does not rule out test execution"
+fi
+
+for legacy in "Run \`make test\`" "Run \`make ci\`" "gh pr checks <number>"; do
+    if grep -qF "${legacy}" "$triage_reviewer"; then
+        fail "triage_reviewer.md still instructs execution: '${legacy}' (CRI-260)"
+    else
+        ok "triage_reviewer.md has no execution instruction '${legacy}'"
+    fi
+done
+
 if [ "$FAILED" -gt 0 ]; then
     echo "FAILED: $FAILED assertion(s)" >&2
     exit 1

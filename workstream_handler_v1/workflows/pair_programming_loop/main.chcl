@@ -301,7 +301,46 @@ step "review" {
     // failure state and the caller's park-for-human path takes over.
     timeout = "60m"
 
-    allow_tools = ["*"]
+    // CRI-260: reviewer tool policy — deny-by-default. Anything not listed
+    // below is refused, so test/CI execution is denied deterministically:
+    // no "shell:make *" beyond the build target (make ci, make test, make
+    // validate all fail to match), no "shell:gh *" (gh pr checks, gh run
+    // watch), and no test-runner patterns (go test, npm test). The gate is
+    // the only execution authority (see agents/reviewer.md role charter).
+    // File reads go through the read kinds; shell reads are fallbacks.
+    // Note: glob matching cannot express deny-lists, so a compound command
+    // whose first segment is allowed and whose rest contains a denied
+    // command (e.g. "git status && make ci") would still match — reviewers
+    // are additionally instructed by charter not to chain commands.
+    allow_tools = [
+        "read",
+        // git reads (read-only subcommands only; no add/commit/push/checkout)
+        "shell:git status",       "shell:git status *",
+        "shell:git diff",         "shell:git diff *",      "shell:git diff */*",      "shell:git diff */*/*",
+        "shell:git log",          "shell:git log *",       "shell:git log */*",
+        "shell:git show",         "shell:git show *",      "shell:git show */*",
+        "shell:git rev-parse",    "shell:git rev-parse *",
+        "shell:git branch",       "shell:git branch *",
+        // build (the one allowed execution: build once, then run the binary)
+        "shell:make build",
+        "shell:go build",         "shell:go build *",      "shell:go build */*",      "shell:go build */*/*",
+        "shell:go build */*/*/*",
+        // run the built binary against a fixture (bin/build dirs; CWD binaries
+        // built by "go build" land as "./<name>"). Repo scripts like
+        // ./scripts/ci.sh stay denied — only built binaries are runnable.
+        "shell:./bin/*",          "shell:./bin/*/*",       "shell:./bin/*/*/*",
+        "shell:./build/*",        "shell:./build/*/*",     "shell:./build/*/*/*",
+        "shell:./*",
+        // reads, fixture inspection, log tailing
+        "shell:cat *",            "shell:cat */*",         "shell:cat */*/*",         "shell:cat */*/*/*",
+        "shell:head *",           "shell:head */*",
+        "shell:tail *",           "shell:tail */*",
+        "shell:grep *",           "shell:grep */*",        "shell:grep */*/*",
+        "shell:rg *",             "shell:rg */*",
+        "shell:ls",               "shell:ls *",            "shell:ls */*",
+        "shell:wc *",             "shell:diff *",          "shell:diff */*",
+        "shell:jq *",             "shell:jq */*",
+    ]
 
     input {
         prompt = templatefile("./agents/review_developer_update.md.tftpl", {
