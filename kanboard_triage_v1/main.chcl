@@ -178,6 +178,13 @@ step "write_confirmed_workstream" {
             target = data.internal.workstream_file.value
             value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"
         }
+        // The bypass skips run_qa_triage, so this is the only verdict write on
+        // the internal-reproduced path; the evidence comments (e.g.
+        // comment_ready_move_failed) render it.
+        write {
+            target = data.internal.verdict.value
+            value  = "internal_reproduced"
+        }
     }
     outcome "failure" { next = step.comment_triage_failed }
 }

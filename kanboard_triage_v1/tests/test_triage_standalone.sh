@@ -611,6 +611,45 @@ else
     fail "ready-move-failed comment failed"
 fi
 
+# Internal-reproduced bypass (KB-42 repro): on this path the graph reaches
+# comment_ready_move_failed without running run_qa_triage, so the verdict
+# token comes from the graph write (write_confirmed_workstream), not a QA
+# verdict. The evidence comment must carry that token and never the empty
+# "verdict: ," sentinel, and the compiled graph must reach the comment from
+# route_internal_label with run_qa_triage absent from every path.
+if run_comment_script comment_ready_move_failed.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "internal_reproduced" 4 "workstreams/KB-99.md" 5 "Ready for development" \
+    && check_posted_comment '.params.task_id == 99' \
+        "(verdict: internal_reproduced" "workstreams/KB-99.md" \
+    && ! comments | tail -n1 | jq -r '.params.content' | grep -qF -- "verdict: ,"; then
+    ok "bypass ready-move-failed comment carries an internal-reproduced verdict, no empty sentinel"
+else
+    fail "bypass ready-move-failed comment failed"
+fi
+
+declare -A bypass_seen
+bypass_seen["route_internal_label"]=1
+bypass_frontier=("route_internal_label")
+while [ "${#bypass_frontier[@]}" -gt 0 ]; do
+    bypass_next=()
+    for node in "${bypass_frontier[@]}"; do
+        while IFS=$'\t' read -r from to; do
+            [ "$from" = "$node" ] || continue
+            [ -n "$to" ] || continue
+            [ "$to" = "run_qa_triage" ] && continue
+            [ "${bypass_seen[$to]+set}" = "set" ] && continue
+            bypass_seen["$to"]=1
+            bypass_next+=("$to")
+        done < "$TMP/edges.tsv"
+    done
+    bypass_frontier=("${bypass_next[@]}")
+done
+if [ "${bypass_seen[comment_ready_move_failed]+set}" = "set" ]; then
+    ok "comment_ready_move_failed reachable from route_internal_label without run_qa_triage"
+else
+    fail "bypass does not reach comment_ready_move_failed from route_internal_label without run_qa_triage"
+fi
+
 if run_comment_script comment_rearm_failed.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
     3 "reproduced" 4 "workstreams/KB-99.md" 5 "$RUN_TAG" \
     && check_posted_comment '.params.task_id == 99' \
