@@ -122,6 +122,16 @@ variable "max_branch_scope_retries" {
     default     = 2
 }
 
+// KB-49: bounded in-run retries for a PR step that completed without a PR
+// URL (create_pr succeeded empty, or the stored PR URL came back empty).
+// Each retry re-invokes create_pr, whose reuse branch fetches an existing
+// OPEN PR by URL, so a flaky gh call self-heals before the run fails loudly.
+variable "max_pr_url_retries" {
+    description = "KB-49: budget of retries for a PR step that completed without a PR URL. Exhaustion fails the run loudly at the PR step."
+    type        = number
+    default     = 2
+}
+
 variable "linear_api_key" {
     type   = string
     secret = true

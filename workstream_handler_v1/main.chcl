@@ -20,6 +20,15 @@ data "internal" "pr_url" {
     value = ""
 }
 
+// KB-49: count of PR-step retries for a create_pr/store_pr_url result that
+// carried no PR URL. The PR guard spends this budget before failing the run
+// loudly at the PR step; the counter resets never — the budget covers the
+// whole handler run.
+data "internal" "pr_url_retries" {
+    type  = number
+    value = 0
+}
+
 // Note from branch_manager describing any uncommitted work it stashed for a
 // rebase and restored to the tree. Surfaced to the developer so they know the
 // tree was dirty on arrival and can commit/discard accordingly.
@@ -290,19 +299,62 @@ step "backoff_pr" {
 
 // Fetch and store the PR URL. Kept separate from check_pr so that
 // steps.check_pr.stdout remains readable by route_pr_action.
+// KB-49: the command must not mask a failed gh call as success — capture the
+// view result directly so a gh failure fails the step, and let the route
+// guard below reject an empty URL loudly.
 step "store_pr_url" {
     target = adapter.shell.sh
     input {
-        command = "gh pr view \"$(git branch --show-current)\" --json url --jq '.url' | tr -d '\\n'"
+        command = "set -o pipefail; pr_url=$(gh pr view \"$(git branch --show-current)\" --json url --jq '.url') && printf '%s' \"$pr_url\" | tr -d '\\n'"
     }
     outcome "success" {
-        next = switch.route_pr_action
+        next = switch.route_stored_pr
         write {
             target = data.internal.pr_url.value
             value  = output.stdout
         }
     }
     outcome "failure" { next = state.failed }
+}
+
+// KB-49: the PR step completed without a PR URL. Retry create_pr a bounded
+// number of times — its reuse branch fetches an existing OPEN PR by URL, so a
+// flaky gh call or a PR created late self-heals here — and keep the run OFF
+// every review/reconcile path until data.internal.pr_url is non-empty.
+switch "route_stored_pr" {
+    match {
+        condition = data.internal.pr_url.value != ""
+        next      = switch.route_pr_action
+    }
+    match {
+        condition = data.internal.pr_url_retries.value < var.max_pr_url_retries
+        next      = step.retry_store_pr_url
+    }
+    default { next = step.fail_missing_pr_url }
+}
+
+// KB-49: bookkeeping step that re-views the branch for its existing PR before
+// failing the run. Bounded by the same pr_url retry budget as create_pr.
+step "retry_store_pr_url" {
+    target  = adapter.shell.sh
+    timeout = "30s"
+    input {
+        command = "echo 'PR step completed without a pr_url (KB-49) — retrying the PR URL resolution (bounded)'"
+    }
+    outcome "success" {
+        next = step.store_pr_url
+        write {
+            target = data.internal.pr_url_retries.value
+            value  = data.internal.pr_url_retries.value + 1
+        }
+    }
+    outcome "failure" {
+        next = step.fail_missing_pr_url
+        write {
+            target = data.internal.pr_url_retries.value
+            value  = data.internal.pr_url_retries.value + 1
+        }
+    }
 }
 
 // Re-read check_pr.stdout (still in scope) to choose the action now that
@@ -359,7 +411,8 @@ step "sync_head_branch" {
 }
 
 // Create a PR from the current branch; idempotent — reuses existing PR if present.
-
+// KB-49: both outcomes route through the PR guard — a run may leave this step
+// for review/reconcile only when data.internal.pr_url actually holds a URL.
 step "create_pr" {
     target = adapter.shell.sh
     input {
@@ -371,13 +424,84 @@ step "create_pr" {
     }
     timeout = "60s"
     outcome "success" {
-        next = switch.route_reviewer_creds
+        next = switch.route_created_pr
         write {
             target = data.internal.pr_url.value
             value  = output.stdout
         }
     }
-    outcome "failure" { next = state.failed }
+    outcome "failure" { next = switch.route_created_pr }
+}
+
+// KB-49: the PR step reported success with an empty pr_url (or failed
+// outright). It must never continue to review/reconcile as success: spend the
+// bounded retry budget — create_pr's reuse branch recovers a PR that was
+// created late or missed by a flaky gh call — then fail loudly at the PR step,
+// naming the missing pr_url.
+switch "route_created_pr" {
+    match {
+        condition = data.internal.pr_url.value != ""
+        next      = switch.route_reviewer_creds
+    }
+    match {
+        condition = data.internal.pr_url_retries.value < var.max_pr_url_retries
+        next      = step.retry_create_pr
+    }
+    default { next = step.fail_missing_pr_url }
+}
+
+// KB-49: bookkeeping step that gives create_pr a bounded second (and third)
+// chance before the loud failure. Failing here also spends the budget so a
+// persistently failing create_pr cannot loop on the retry step.
+step "retry_create_pr" {
+    target  = adapter.shell.sh
+    timeout = "30s"
+    input {
+        command = "echo 'PR step did not produce a pr_url (KB-49) — retrying create_pr (bounded)'"
+    }
+    outcome "success" {
+        next = step.create_pr
+        write {
+            target = data.internal.pr_url_retries.value
+            value  = data.internal.pr_url_retries.value + 1
+        }
+    }
+    outcome "failure" {
+        next = step.fail_missing_pr_url
+        write {
+            target = data.internal.pr_url_retries.value
+            value  = data.internal.pr_url_retries.value + 1
+        }
+    }
+}
+
+// KB-49: the bounded retries could not produce a PR URL. Fail the run loudly
+// AT THE PR STEP instead of walking into the reviewer loop and merge
+// bookkeeping as if a PR existed (observed: commits pushed, handler reported
+// success with pr_url set to the empty string, run continued into review
+// steps; the operator-only refire with a fresh create was the only recovery).
+// The typed reason names the missing pr_url so the parent tree's failure
+// comment and the run record carry something actionable.
+step "fail_missing_pr_url" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'pr_url_missing=true (KB-49) — the PR step completed without a PR URL; failing the run loudly instead of continuing to review/reconcile'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "KB-49: the PR step completed with an empty pr_url (${var.max_pr_url_retries} retries exhausted) — failing loudly at the PR step instead of continuing to review/reconcile without a PR"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "KB-49: the PR step completed with an empty pr_url (retry bookkeeping failed) — failing loudly at the PR step instead of continuing to review/reconcile without a PR"
+        }
+    }
 }
 
 // ── PR review loop ────────────────────────────────────────────────────────────

@@ -217,11 +217,14 @@ step "set_work_state" {
 // covers the reviewer loop not concluding (the reviewer never returned a
 // verdict, or the bounded fix cycle did not converge) and every
 // infrastructure failure inside it — exactly the cases a human must see.
+// KB-49: a handler success WITHOUT a PR URL does not count as success — the
+// route guard beneath the success outcome sends it down the failure-comment
+// path with a typed reason instead of the done-path bookkeeping.
 step "run_handler" {
     target = subworkflow.handler
 
     outcome "success" {
-        next = step.comment_handler_done
+        next = switch.route_handler_pr
         write {
             target = data.internal.pr_url.value
             value  = subworkflow.pr_url
@@ -234,6 +237,46 @@ step "run_handler" {
         write {
             target = data.internal.handler_error.value
             value  = coalesce(try(subworkflow.failure_reason, ""), "")
+        }
+    }
+}
+
+// KB-49: a handler success with an empty pr_url (commits pushed, no PR) must
+// never reach the done-path comment/state bookkeeping — the ticket would be
+// marked done over work that was never merged under a PR that does not exist.
+// Route it through the failure path instead: a typed handler_error goes into
+// the handoff comment and the ticket is parked for a human with an accurate
+// story.
+switch "route_handler_pr" {
+    match {
+        condition = data.internal.pr_url.value != ""
+        next      = step.comment_handler_done
+    }
+    default { next = step.flag_missing_pr_url }
+}
+
+// KB-49: records the empty-pr_url success as why the run is being failed.
+// The write carries the reason into comment_handler_failed's handoff comment
+// (it reuses the handler_error channel: same review-state parking, an
+// accurate comment, and a run record a human can act on).
+step "flag_missing_pr_url" {
+    target  = adapter.shell.develop
+    timeout = "10s"
+    input {
+        command = "echo 'handler reported success with an empty pr_url (KB-49) — failing the run loudly instead of continuing to done/review bookkeeping'"
+    }
+    outcome "success" {
+        next = step.comment_handler_failed
+        write {
+            target = data.internal.handler_error.value
+            value  = "KB-49: the handler reported success with an empty pr_url while the workstream demands a PR — failing the run at the PR guard (commits on the branch may be unmerged; create/reopen the PR before re-running)"
+        }
+    }
+    outcome "failure" {
+        next = step.comment_handler_failed
+        write {
+            target = data.internal.handler_error.value
+            value  = "KB-49: the handler reported success with an empty pr_url while the workstream demands a PR — failing the run at the PR guard (commits on the branch may be unmerged; create/reopen the PR before re-running)"
         }
     }
 }
