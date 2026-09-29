@@ -258,12 +258,17 @@ else
     fail "templatefile input keys and script render bindings out of sync"
 fi
 
-# KB-24: execute the rendered handler-failure comment end-to-end. The engine
+# KB-24/KB-51: execute the rendered handler-failure comment end-to-end. The engine
 # binds criteria_value_N through the template header only and the script runs
 # under set -euo pipefail, so a body reference without a render line aborts
 # before anything is posted; and the createComment payload must actually carry
 # the task id and the body (a jq -n call that forgets an --arg posts an empty
 # payload). Exercise both with a stub curl.
+#
+# KB-51: the stub must speak the real Kanboard contract — createComment
+# resolves to the new comment_id (a number), and E2E_STUB_ERROR (when set)
+# replaces the body with a JSON-RPC error object to exercise the loud-failure
+# path.
 STUBBIN="$TMP/stubbin"
 mkdir -p "$STUBBIN"
 cat > "$STUBBIN/curl" <<'EOF'
@@ -276,7 +281,16 @@ while [ "$#" -gt 0 ]; do
     fi
     shift
 done
-printf '{"result": true}'
+if [ -n "${E2E_STUB_ERROR:-}" ]; then
+    printf '{"error":{"code":1,"message":"stub forced error"}}'
+    exit 0
+fi
+    # jq -n emits pretty JSON, so match the method regardless of formatting.
+    if [ "$(jq -r '.method // empty' "$E2E_CAPTURE/payload.json" 2>/dev/null)" = "createComment" ]; then
+        printf '{"result": 101}'
+    else
+        printf '{"result": true}'
+    fi
 EOF
 chmod +x "$STUBBIN/curl"
 
@@ -314,6 +328,142 @@ if run_failed_comment "some reason" \
     ok "handler-failure comment appends the failure reason when set"
 else
     fail "handler-failure comment did not append the failure reason"
+fi
+
+# KB-51: every develop comment script must post a createComment whose params
+# carry the numeric task id, user_id 0 and a non-empty body, and treat the
+# numeric comment_id response as success (a `.result == true` check read every
+# successful post as a step failure — comments landed while runs reported
+# failure). Each script runs rendered the engine way; the done-comment must
+# additionally carry the full evidence trail: verdict, workstream path, PR url
+# and the commit range, per the acceptance criteria.
+render_comment_case() {
+    local tpl="$1"
+    shift
+    local out="$TMP/case_comment.sh"
+    cp "$TREE_ROOT/scripts/$tpl" "$out"
+    local i=1
+    local v quoted
+    for v in "$@"; do
+        # Engine shellquote semantics: single-quote the value, escape any
+        # embedded single quotes.
+        quoted="'${v//\'/\'\\\'\'}'"
+        sed -i "s,{{ .criteria_value_$i | shellquote }},${quoted},g" "$out"
+        i=$((i + 1))
+    done
+    printf '%s\n' "$out"
+}
+
+run_comment_case() {
+    # $1=expected rc (0 on success, nonzero when the stub answers an error),
+    # $2..=render args; assert the posted payload shape.
+    local expect_rc="$1"
+    shift
+    render_comment_case "$@"
+    rm -f "$TMP/payload.json"
+    if [ "$expect_rc" = "0" ]; then
+        KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+            E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" \
+            bash "$TMP/case_comment.sh" >/dev/null 2>&1
+        return $?
+    fi
+    # Loud failure: the stub answers a JSON-RPC error body; the script must
+    # exit non-zero.
+    KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+        E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" E2E_STUB_ERROR=1 \
+        bash "$TMP/case_comment.sh" >/dev/null 2>&1
+    [ $? -ne 0 ]
+}
+
+check_payload() {
+    # $1=jq filter evaluated against the posted payload, plus content grep
+    # tokens passed as $2.. (all must be substrings of .params.content).
+    local probe="$1"
+    shift
+    if ! jq -e "$probe" "$TMP/payload.json" >/dev/null 2>&1; then
+        return 1
+    fi
+    local token
+    for token in "$@"; do
+        jq -r '.params.content' "$TMP/payload.json" 2>/dev/null | grep -qF -- "$token" || return 1
+    done
+    return 0
+}
+
+# started (published workstream reused):
+if run_comment_case 0 comment_handler_started.sh.tftpl /tmp KB-24 "workstreams/KB-24.md" reused \
+    && check_payload '.params.task_id == 24 and .params.user_id == 0 and (.params.content | length > 0)' \
+        "started on the triaged ticket" "workstreams/KB-24.md" "reused untouched"; then
+    ok "started comment posts task+body and reads the numeric id as success (reused path)"
+else
+    fail "started comment failed on the reused path"
+fi
+
+# started (workstream reconstructed): the written variant flips the wording.
+if run_comment_case 0 comment_handler_started.sh.tftpl /tmp KB-24 "workstreams/KB-24.md" written \
+    && check_payload '.params.task_id == 24' "reconstructed from the ticket"; then
+    ok "started comment says the workstream was reconstructed when nothing was reused"
+else
+    fail "started comment failed on the written path"
+fi
+
+# done: the evidence comment must carry verdict, workstream path, PR url and
+# the commit range base..run-branch.
+if run_comment_case 0 comment_handler_done.sh.tftpl /tmp KB-24 approved \
+    "workstreams/KB-24.md" "https://example.org/org/repo/pull/9" "kb-51-9f24c1a" main \
+    && check_payload '.params.task_id == 24' \
+        "**Workstream complete." "Review verdict: approved" "Workstream path: workstreams/KB-24.md" \
+        "PR: https://example.org/org/repo/pull/9" "Commit range: main..kb-51-9f24c1a"; then
+    ok "done comment carries verdict, workstream path, PR url and commit range"
+else
+    fail "done comment misses part of the evidence trail"
+fi
+
+# done without a run branch: the commit-range sentence must be absent instead
+# of printing an empty range.
+if run_comment_case 0 comment_handler_done.sh.tftpl /tmp KB-24 approved \
+    "workstreams/KB-24.md" "https://example.org/org/repo/pull/9" "" main \
+    && check_payload '.params.task_id == 24' "Review verdict: approved" \
+    && ! jq -r '.params.content' "$TMP/payload.json" 2>/dev/null | grep -q "Commit range"; then
+    ok "done comment omits the commit range when no run branch exists"
+else
+    fail "done comment printed an empty commit range or lost verdict evidence"
+fi
+
+# develop-failed: carries the workstream context when assembly produced one.
+if run_comment_case 0 comment_develop_failed.sh.tftpl /tmp KB-24 "workstreams/KB-24.md" Review \
+    && check_payload '.params.task_id == 24' "Automated development did not start" "workstreams/KB-24.md"; then
+    ok "develop-failed comment posts with the workstream path"
+else
+    fail "develop-failed comment failed"
+fi
+
+# develop-failed with no workstream: body says (none) instead of an empty path.
+if run_comment_case 0 comment_develop_failed.sh.tftpl /tmp KB-24 "" Review \
+    && check_payload '.params.task_id == 24' "Workstream: (none)."; then
+    ok "develop-failed comment marks a missing workstream explicitly"
+else
+    fail "develop-failed comment did not mark the missing workstream"
+fi
+
+# done-move-failed keeps the accurate bookkeeping wording.
+if run_comment_case 0 comment_done_move_failed.sh.tftpl /tmp KB-24 \
+    "https://example.org/org/repo/pull/9" Done Review \
+    && check_payload '.params.task_id == 24' \
+        "**The implementation PR merged** (https://example.org/org/repo/pull/9)" \
+        "**but moving the ticket to \"Done\" failed.**"; then
+    ok "done-move-failed comment reports the merged PR and the failed move"
+else
+    fail "done-move-failed comment failed"
+fi
+
+# Loud failure: a JSON-RPC error body must fail the step (CRI-275 semantics —
+# a comment that did not land must not read as success).
+if run_comment_case x comment_handler_done.sh.tftpl /tmp KB-24 approved \
+    "workstreams/KB-24.md" "https://example.org/org/repo/pull/9" "kb-51-9f24c1a" main; then
+    ok "comment script fails loudly on a JSON-RPC error response"
+else
+    fail "comment script did not fail on a JSON-RPC error response"
 fi
 
 # Develop edge wiring: success and failure paths, matching the intake
