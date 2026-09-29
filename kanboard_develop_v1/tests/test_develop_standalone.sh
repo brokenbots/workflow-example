@@ -29,7 +29,14 @@ set -euo pipefail
 #      rejects extra params with -32602 "Invalid params: Too many arguments",
 #      and the pre-fix port sent project_id and stored that error body as
 #      ticket.json's tags (KB-10 smoke regression);
-#   6. the linear_* source trees are untouched.
+#   6. the linear_* source trees are untouched;
+#   7. every comment script posts a createComment carrying the numeric task
+#      id, user_id 0 and a non-empty body; the done-comment carries the full
+#      evidence trail (verdict, workstream path, PR url, commit range) per
+#      KB-51's acceptance, and the old `.result == true` success check on
+#      createComment (KB-51) is treated as dead: Kanboard resolves the call
+#      to a numeric comment_id, so the scripts must treat a numeric result
+#      as success and a JSON-RPC error body as loud failure.
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$TREE_ROOT/.." && pwd)"
