@@ -36,7 +36,13 @@ set -euo pipefail
 #      KB-51's acceptance, and the old `.result == true` success check on
 #      createComment (KB-51) is treated as dead: Kanboard resolves the call
 #      to a numeric comment_id, so the scripts must treat a numeric result
-#      as success and a JSON-RPC error body as loud failure.
+#      as success and a JSON-RPC error body as loud failure. The wiring that
+#      supplies the evidence fields is asserted block-scoped on the source:
+#      run_handler's success outcome copies subworkflow.review_result and
+#      subworkflow.branch into their internal channels and
+#      comment_handler_done spends them as criteria_value_3..7 (the
+#      reviewer-loop output itself is pinned in workstream_handler_v1's
+#      tests, where CI runs it).
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$TREE_ROOT/.." && pwd)"
@@ -225,6 +231,49 @@ if grep -q 'value  = coalesce(try(subworkflow.failure_reason, ""), "")' "$TREE_R
     ok "handler failure reason threaded into the parking comment"
 else
     fail "handler failure reason not threaded into the parking comment wiring"
+fi
+
+# KB-51: the run's evidence thread. run_handler's success outcome copies the
+# handler subworkflow's branch and verdict into the internal channels, and
+# comment_handler_done spends them (verdict=3, workstream path=4, PR url=5,
+# branch=6, base branch=7) on the closing comment. Write bindings are not
+# serialized into the compiled graph and criteria compile does not validate
+# subworkflow.<output> names, so this is asserted on the workflow source,
+# scoped to the owning step block — a match elsewhere must not satisfy it.
+run_handler_block="$(sed -n '/^step "run_handler" {/,/^}/p' "$TREE_ROOT/main.chcl")"
+run_handler_success="$(printf '%s' "$run_handler_block" \
+    | sed -n '/outcome "success" {/,/outcome "failure"/p')"
+done_block="$(sed -n '/^step "comment_handler_done" {/,/^}/p' "$TREE_ROOT/main.chcl")"
+
+if printf '%s' "$run_handler_success" \
+        | grep -A1 'target = data.internal.branch.value' \
+        | grep -q 'value  = subworkflow.branch'; then
+    ok "run_handler success copies subworkflow.branch into data.internal.branch"
+else
+    fail "run_handler does not copy the handler branch into data.internal.branch — the done comment's commit range would be empty"
+fi
+
+if printf '%s' "$run_handler_success" \
+        | grep -A1 'target = data.internal.review_result.value' \
+        | grep -q 'value  = subworkflow.review_result'; then
+    ok "run_handler success copies subworkflow.review_result into data.internal.review_result"
+else
+    fail "run_handler does not copy the handler verdict into data.internal.review_result — the done comment's verdict would be empty"
+fi
+
+if printf '%s' "$done_block" \
+        | grep -q 'criteria_value_3 = data.internal.review_result.value' \
+    && printf '%s' "$done_block" \
+        | grep -q 'criteria_value_4 = data.internal.workstream_file.value' \
+    && printf '%s' "$done_block" \
+        | grep -q 'criteria_value_5 = data.internal.pr_url.value' \
+    && printf '%s' "$done_block" \
+        | grep -q 'criteria_value_6 = data.internal.branch.value' \
+    && printf '%s' "$done_block" \
+        | grep -q 'criteria_value_7 = var.base_branch'; then
+    ok "comment_handler_done binds verdict, workstream path, PR url, branch and base branch"
+else
+    fail "comment_handler_done's evidence bindings incomplete — the closing comment would not carry the verdict, workstream path, PR url and commit range"
 fi
 
 # KB-24: every shell step's templatefile(...) input keys must be rendered by
