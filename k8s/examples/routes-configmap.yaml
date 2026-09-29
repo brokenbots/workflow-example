@@ -405,8 +405,8 @@ data:
         },
         "kanboard-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=b5ee6e69f45d821ac03901dc89c687f8942234ad",
-          "ref": "b5ee6e69f45d821ac03901dc89c687f8942234ad",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=08acdde0d1d6a26f92d26b2c8673196fee30c98f",
+          "ref": "08acdde0d1d6a26f92d26b2c8673196fee30c98f",
           "namespace": "criteria-jobs",
           "volumes": [
             {
