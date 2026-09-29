@@ -834,3 +834,12 @@ output "failure_reason" {
     type  = string
     value = data.internal.failure_reason.value
 }
+
+// KB-51: the reviewer loop's verdict of the final review round ("approved"
+// on the merged path; empty when the run failed before any review round
+// concluded). Additive, consumed by kanboard_develop_v1's closing evidence
+// comment so a develop run posts its verdict on the ticket.
+output "review_result" {
+    type  = string
+    value = data.internal.review_result.value
+}

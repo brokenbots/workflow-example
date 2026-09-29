@@ -33,6 +33,9 @@ curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
 $(cat "$notes")" '{task_id:$task_id,user_id:0,content:$content}')" \
         '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
     "$KANBOARD_URL" \
-    | jq -e '.result == true' >/dev/null
+    | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
+# KB-51: createComment resolves to the new comment_id (a number), never boolean
+# true; a `.result == true` check marked every successful post as a step failure.
+# The error body of a failed RPC carries no result at all.
 
 echo "comment posted"
