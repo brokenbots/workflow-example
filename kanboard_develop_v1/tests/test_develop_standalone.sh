@@ -75,7 +75,7 @@ ok "criteria validate passes standalone"
 # into workstream_handler_v1 (pre-existing, informational, shared with
 # linear_intake_v1 — a write that re-reads its own step-entry snapshot).
 if grep '^Warning:' "$TMP/validate.err" | grep "kanboard_develop_v1" >/dev/null 2>&1; then
-    grep '^Warning:' "$TMP/validate.err" grep "kanboard_develop_v1" >&2
+    grep '^Warning:' "$TMP/validate.err" | grep "kanboard_develop_v1" >&2
     fail "validation reports warnings originating in the develop tree"
 else
     ok "develop tree contributes no validation warnings"
@@ -182,13 +182,15 @@ else
     ok "no triage-path symbols in the compiled graph"
 fi
 
-# No routing switches at all: nothing to classify, nothing to gate on labels.
+# No routing switches except the KB-49 empty-pr_url guard on the handler's
+# success outcome: nothing to classify, nothing to gate on labels.
 switch_count="$(jq -r '.switches | length' "$GRAPH")"
-[ "$switch_count" -eq 0 ] || fail "expected 0 switches (no triage gates), got $switch_count"
+[ "$switch_count" -eq 1 ] || fail "expected exactly 1 switch (the KB-49 pr_url guard), got $switch_count"
 
-# The step set is exactly the develop path — no intake/triage steps.
+# The step set is exactly the develop path plus the KB-49 guard steps — no
+# intake/triage steps.
 step_names="$(jq -r '[.steps[] | .name] | sort | join(" ")' "$GRAPH")"
-expected_steps="comment_develop_failed comment_done_move_failed comment_handler_done comment_handler_failed comment_handler_started ensure_confirmed_workstream fetch_ticket park_after_done_move_failed run_handler set_done_state set_review_state set_work_state"
+expected_steps="comment_develop_failed comment_done_move_failed comment_handler_done comment_handler_failed comment_handler_started ensure_confirmed_workstream fetch_ticket flag_missing_pr_url park_after_done_move_failed run_handler set_done_state set_review_state set_work_state"
 require_equal "$step_names" "$expected_steps" "step set is exactly the develop path"
 
 # The confirmed-workstream gate is deterministic shell — no model tools.
@@ -332,8 +334,9 @@ assert_edge "comment_handler_started" "success" "set_work_state"
 assert_edge "comment_handler_started" "failure" "set_work_state"
 assert_edge "set_work_state" "success" "run_handler"
 assert_edge "set_work_state" "failure" "comment_develop_failed"
-assert_edge "run_handler" "success" "comment_handler_done"
 assert_edge "run_handler" "failure" "comment_handler_failed"
+# KB-49: run_handler success is guarded by the empty-pr_url route, so the
+# direct edge to the done-path comment is replaced by the guard switch.
 # CRI-275: bookkeeping-failure routing. A parking comment or state move that
 # fails ends the run in the failed terminal (success=false), mirroring
 # linear_intake_v1's bookkeeping-failure semantics — including the closing
@@ -593,7 +596,39 @@ fi
     && ok "a failed fetch writes no ticket.json" \
     || fail "a failed fetch must not write ticket.json"
 
-# ── 5. Sibling trees untouched ───────────────────────────────────────────────
+# ── 5. Handler success without a PR fails loudly (KB-49) ────────────────────
+
+# A handler success carries pr_url. A success with an empty pr_url (commits
+# pushed, no PR) must never reach the done-path bookkeeping — the ticket
+# would be parked as done over work that was never merged under a PR that
+# does not exist. The guard switch beneath the success outcome sends it down
+# the failure-comment path with the KB-49 reason instead.
+run_step=$(jq -c '.steps[] | select(.name == "run_handler")' "$GRAPH")
+require_equal "$(printf '%s' "$run_step" | jq -r '.outcomes[] | select(.name == "success").next')" \
+    "route_handler_pr" \
+    "handler success routes through the empty-pr_url guard (KB-49)"
+require_equal "$(printf '%s' "$run_step" | jq -r '.outcomes[] | select(.name == "failure").next')" \
+    "comment_handler_failed" \
+    "handler failure routing is unchanged by the PR guard"
+
+guard_cond="$(jq -c '.switches[] | select(.name == "route_handler_pr")' "$GRAPH")"
+require_equal "$(printf '%s' "$guard_cond" | jq -r '.conditions[0].match + " -> " + .conditions[0].next')" \
+    'data.internal.pr_url.value != "" -> comment_handler_done' \
+    "a non-empty pr_url keeps the done-path comment routing"
+require_equal "$(printf '%s' "$guard_cond" | jq -r '.default_next')" \
+    "flag_missing_pr_url" \
+    "an empty pr_url routes to the KB-49 loud-failure step"
+
+flag_step=$(sed -n '/^step "flag_missing_pr_url" {/,/^}/p' "$TREE_ROOT/main.chcl")
+printf '%s' "$flag_step" | grep -q 'KB-49: the handler reported success with an empty pr_url' \
+    && require_equal "$(printf '%s' "$flag_step" | grep -c 'target = data.internal.handler_error.value')" \
+        "2" \
+        "flag_missing_pr_url records the KB-49 reason on the handler_error channel"
+require_equal "$(printf '%s' "$flag_step" | grep -c 'next = step.comment_handler_failed')" \
+    "2" \
+    "flag_missing_pr_url routes both outcomes to the failure comment path"
+
+# ── 6. Sibling trees untouched ───────────────────────────────────────────────
 
 untouched="$(git -C "$REPO_ROOT" status --porcelain -- linear_intake_v1 linear_triage_v1 linear_develop_v1 qa_triage_v1 workstream_handler_v1)"
 if [ -z "$untouched" ]; then
