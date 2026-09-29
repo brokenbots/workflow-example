@@ -19,7 +19,12 @@ set -euo pipefail
 #      (CRI-240 semantics): the re-arm step is reached only from the
 #      confirmed-finding gates (no awaiting_human path reaches it), its merged
 #      tag write preserves every existing tag against a mock Kanboard API, and
-#      a missing arming tag or failed write fails loudly.
+#      a missing arming tag or failed write fails loudly;
+#   7. every comment script posts a createComment carrying the numeric task
+#      id, user_id 0 and a non-empty verdict-bearing body (KB-51: the triage
+#      comment is the run's evidence trail), and treats the numeric
+#      comment_id response as success while failing loudly on a JSON-RPC
+#      error body.
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$TREE_ROOT/.." && pwd)"
@@ -304,73 +309,88 @@ require_equal "$(predecessors rearm_k8s_run)" "$(printf 'route_ready\nset_confir
 export KANBOARD_APP_TOKEN="mock-token"
 export KANBOARD_URL="$TMP/never-used-endpoint"
 
-MOCK="$TMP/mock_kanboard.py"
-cat > "$MOCK" <<'PY'
-import json
-import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+MOCK="$TMP/mock_kanboard.js"
+cat > "$MOCK" <<'JS'
+// Minimal Kanboard JSON-RPC mock: serves the methods the triage scripts call,
+// records setTaskTags mutations and createComment posts, and lets the test
+// configure per-method outcomes via mock_config.json.
+const http = require('http');
+const fs = require('fs');
+const [cfgFile, mutFile, tasksFile, comFile] = process.argv.slice(2);
 
-CFG_FILE, MUT_FILE, TASKS_FILE = sys.argv[1], sys.argv[2], sys.argv[3]
+const readJson = (f) => {
+    try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return {}; }
+};
+const writeJson = (f, v) => fs.writeFileSync(f, JSON.stringify(v));
 
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def do_POST(self):
-        cfg = json.load(open(CFG_FILE))
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        method = body.get("method", "")
-        params = body.get("params", {})
-        if method == "setTaskTags":
-            with open(MUT_FILE, "a") as f:
-                f.write(json.dumps(params["tags"]) + "\n")
-            if cfg.get("mutation_status", 200) != 200:
-                self.send_response(cfg["mutation_status"])
-                self.end_headers()
-                return
-            # Persist the write so subsequent reads observe it, like the real
-            # Kanboard would.
-            tasks = json.load(open(TASKS_FILE))
-            if cfg.get("mutation_success", True):
-                tasks["tags"] = [{"name": t} for t in params["tags"]]
-                json.dump(tasks, open(TASKS_FILE, "w"))
-            resp = {"result": cfg.get("mutation_success", True)}
-        elif method == "getTaskTags":
-            # Real Kanboard shape: {tag_link_id: tag_name} map.
-            tasks = json.load(open(TASKS_FILE))
-            resp = {"result": {str(1000 + i): t["name"] for i, t in enumerate(tasks["tags"])}}
-        elif method == "createTag":
-            resp = {"result": cfg.get("tag_id", 7)}
-        elif method == "getColumns":
-            resp = {"result": cfg.get("columns", [{"id": 5, "title": "Backlog"},
-                                                   {"id": 6, "title": "Review"},
-                                                   {"id": 7, "title": "Work in progress"},
-                                                   {"id": 8, "title": "Done"}])}
-        elif method == "getTask":
-            tasks = json.load(open(TASKS_FILE))
-            resp = {"result": tasks["task"]}
-        else:
-            resp = {"error": {"code": -32601, "message": "unexpected method: " + method}}
-        data = json.dumps(resp).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-
-server = HTTPServer(("127.0.0.1", 0), Handler)
-print(server.server_address[1], flush=True)
-server.serve_forever()
-PY
+http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(raw); } catch (e) {}
+        const method = body.method || '';
+        const params = body.params || {};
+        const cfg = readJson(cfgFile);
+        const tasks = readJson(tasksFile);
+        let resp;
+        if (method === 'setTaskTags') {
+            fs.appendFileSync(mutFile, JSON.stringify(params.tags) + '\n');
+            if ((cfg.mutation_status || 200) !== 200) {
+                res.writeHead(cfg.mutation_status);
+                res.end();
+                return;
+            }
+            // Persist the write so subsequent reads observe it, like the real
+            // Kanboard would.
+            if (cfg.mutation_success !== false) {
+                tasks.tags = params.tags.map((t) => (typeof t === 'string' ? { name: t } : t));
+                writeJson(tasksFile, tasks);
+            }
+            resp = { result: cfg.mutation_success !== false };
+        } else if (method === 'getTaskTags') {
+            // Real Kanboard shape: {tag_link_id: tag_name} map.
+            resp = { result: Object.fromEntries(tasks.tags.map((t, i) => [String(1000 + i), t.name])) };
+        } else if (method === 'createTag') {
+            resp = { result: cfg.tag_id || 7 };
+        } else if (method === 'getColumns') {
+            resp = { result: cfg.columns || [
+                { id: 5, title: 'Backlog' }, { id: 6, title: 'Review' },
+                { id: 7, title: 'Work in progress' }, { id: 8, title: 'Done' },
+            ] };
+        } else if (method === 'getTask') {
+            resp = { result: tasks.task };
+        } else if (method === 'createComment') {
+            // createComment resolves to the new comment_id (KB-51: a number,
+            // never boolean true), so the comment scripts' success check must
+            // accept a numeric result.
+            if (cfg.comment_error) {
+                resp = { error: { code: 1, message: 'mock comment error' } };
+            } else {
+                const coms = fs.existsSync(comFile)
+                    ? fs.readFileSync(comFile, 'utf8').split('\n').filter(Boolean)
+                    : [];
+                const nextId = 701 + coms.length;
+                fs.appendFileSync(comFile, JSON.stringify({ method, params, id: nextId }) + '\n');
+                resp = { result: nextId };
+            }
+        } else {
+            resp = { error: { code: -32601, message: 'unexpected method: ' + method } };
+        }
+        const data = JSON.stringify(resp);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) });
+        res.end(data);
+    });
+}).listen(0, '127.0.0.1', function () { console.log(this.address().port); });
+JS
 
 MOCK_CFG="$TMP/mock_config.json"
 MUT_FILE="$TMP/mutations.jsonl"
+COM_FILE="$TMP/comments.jsonl"
 MOCK_LOG="$TMP/mock.log"
 TASKS_FILE="$TMP/tasks.json"
 
-python3 "$MOCK" "$MOCK_CFG" "$MUT_FILE" "$TASKS_FILE" >"$MOCK_LOG" 2>&1 &
+node "$MOCK" "$MOCK_CFG" "$MUT_FILE" "$TASKS_FILE" "$COM_FILE" >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 trap 'kill "$MOCK_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
 
@@ -484,6 +504,132 @@ if "$rearm_script" >/dev/null 2>&1; then
 else
     ok "setTaskTags HTTP error fails the re-arm"
 fi
+
+# ── 6b. KB-51: every triage comment script posts the verdict evidence ────────
+#
+# The triage comment scripts are the run's evidence trail (KB-51's triage
+# acceptance: the posted comment body must include the verdict string). Each
+# script runs rendered the engine way against the mock above and must post a
+# createComment whose params carry the numeric task id, user_id 0 and a
+# non-empty body, treating the numeric comment_id response as success. The
+# old `.result == true` check read every successful post as a step failure,
+# so the mock answers with a numeric id on purpose.
+render_comment_script() {
+    local tpl="$1" out="$TMP/comment_case.sh"
+    shift
+    local sed_args=()
+    while [ "$#" -ge 2 ]; do
+        sed_args+=(-e "s@{{ .criteria_value_$1 | shellquote }}@$(shquote "$2")@g")
+        shift 2
+    done
+    sed "${sed_args[@]}" "$TREE_ROOT/scripts/$tpl" > "$out"
+    chmod +x "$out"
+}
+
+run_comment_script() {
+    # $1=template name, $2..=alternating binding numbers and values.
+    local tpl="$1"
+    shift
+    render_comment_script "$tpl" "$@"
+    bash "$TMP/comment_case.sh" >/dev/null 2>&1
+}
+
+comments() { cat "$COM_FILE" 2>/dev/null || true; }
+comment_count() { comments | grep -c . || true; }
+
+check_posted_comment() {
+    # $1=jq filter over the last recorded comment, $2..=tokens that must
+    # appear verbatim in .params.content.
+    local probe="$1"
+    shift
+    local last
+    last="$(comments | tail -n1)"
+    jq -e "$probe" <<<"$last" >/dev/null 2>&1 || return 1
+    local token
+    for token in "$@"; do
+        jq -r '.params.content' <<<"$last" | grep -qF -- "$token" || return 1
+    done
+    return 0
+}
+
+QROOT="$TMP/qa"
+
+# triage-failed with no review notes on disk: the script seeds the fallback
+# note itself and still posts the accurate infrastructure-failure wording.
+rm -f "$run_dir/review-notes.md"
+before="$(comment_count)"
+if run_comment_script comment_triage_failed.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    && check_posted_comment '.params.task_id == 99 and .params.user_id == 0' \
+        "Automated QA triage failed to reach a verdict" "(no review notes recorded)"; then
+    ok "triage-failed comment posts the fallback note and reads a numeric id as success"
+else
+    fail "triage-failed comment failed"
+fi
+require_equal "$(($(comment_count) - before))" "1" "triage-failed posts exactly one comment"
+
+# invalid verdict: the comment body must carry the verdict string.
+if run_comment_script comment_invalid.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "reproduced" 4 "$QROOT" 5 "Review" \
+    && check_posted_comment '.params.task_id == 99' "Verdict: reproduced"; then
+    ok "invalid comment carries the verdict string"
+else
+    fail "invalid comment failed"
+fi
+
+# needs-human: prefers the QA triage report the escalation was persisted to.
+mkdir -p "$QROOT/$SLUG/evidence"
+printf '%s\n' "supervisor notes; verdict reasoning" > "$QROOT/$SLUG/evidence/triage-report.md"
+if run_comment_script comment_needs_human.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "$QROOT" 4 "needs_human_at_verdict" \
+    && check_posted_comment '.params.task_id == 99' \
+        "Verdict: needs_human_at_verdict" "supervisor notes; verdict reasoning"; then
+    ok "needs-human comment carries the verdict and the persisted report"
+else
+    fail "needs-human comment failed"
+fi
+
+# needs-human fallback: without the QA report it falls back to review-notes.md
+# rather than failing.
+rm -f "$QROOT/$SLUG/evidence/triage-report.md"
+printf '%s\n' "fallback review note" > "$run_dir/review-notes.md"
+if run_comment_script comment_needs_human.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "$QROOT" 4 "needs_human_at_verdict" \
+    && check_posted_comment '.params.task_id == 99' \
+        "Verdict: needs_human_at_verdict" "fallback review note"; then
+    ok "needs-human comment falls back to review-notes.md when no QA report exists"
+else
+    fail "needs-human fallback comment failed"
+fi
+
+# ready-move failed and re-arm failed: both keep the verdict evidence.
+if run_comment_script comment_ready_move_failed.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "reproduced" 4 "workstreams/KB-99.md" 5 "Ready for development" \
+    && check_posted_comment '.params.task_id == 99' \
+        "(verdict: reproduced" "workstreams/KB-99.md" "\"Ready for development\" failed"; then
+    ok "ready-move-failed comment carries the verdict and the workstream path"
+else
+    fail "ready-move-failed comment failed"
+fi
+
+if run_comment_script comment_rearm_failed.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "reproduced" 4 "workstreams/KB-99.md" 5 "$RUN_TAG" \
+    && check_posted_comment '.params.task_id == 99' \
+        "(verdict: reproduced" "workstreams/KB-99.md" "\"$RUN_TAG\" tag failed"; then
+    ok "rearm-failed comment carries the verdict and the run tag"
+else
+    fail "rearm-failed comment failed"
+fi
+
+# Loud failure: a JSON-RPC error body must fail the step so a comment that
+# did not land does not read as success.
+jq -n '{comment_error: true}' > "$MOCK_CFG"
+if run_comment_script comment_invalid.sh.tftpl 1 "$TMP/intake" 2 "$SLUG" \
+    3 "reproduced" 4 "$QROOT" 5 "Review"; then
+    fail "comment script must fail on a JSON-RPC error response"
+else
+    ok "comment scripts fail loudly on a JSON-RPC error response"
+fi
+jq -n '{}' > "$MOCK_CFG"
 
 # ── 7. linear_* trees untouched ──────────────────────────────────────────────
 
