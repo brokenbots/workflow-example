@@ -265,6 +265,9 @@ spec:
                     Informational only: castle supplies no pr_url producer
                     today, so the castle path leaves this empty in practice,
                     and the terminal-completion gate does not depend on it.
+                    Empty does gate the kanboard watcher's Done reconcile
+                    (KB-50): a dev-class success only stamps Done when a PR
+                    is recorded on the run.
                 ticketState:
                   type: string
                   description: >-
