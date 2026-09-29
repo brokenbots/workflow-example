@@ -627,6 +627,26 @@ else
     fail "bypass ready-move-failed comment failed"
 fi
 
+# ── KB-42 bypass: the graph itself must publish the verdict ──────────────────
+# Write bindings are not serialized into the compiled graph, so the bypass's
+# verdict write (same source-assertion pattern as the develop suite's
+# run_handler bindings) is asserted on the workflow source, scoped to the
+# owning step block — a match elsewhere must not satisfy it. Without it the
+# internal-reproduced bypass comments render an empty verdict.
+write_confirmed_block="$(sed -n '/^step "write_confirmed_workstream" {/,/^}/p' "$TREE_ROOT/main.chcl")"
+write_success="$(printf '%s' "$write_confirmed_block" | sed -n '/outcome "success" {/,/outcome "failure"/p')"
+
+if printf '%s' "$write_success" \
+        | grep -A1 'target = data.internal.verdict.value' \
+        | grep -q 'value  = "internal_reproduced"' \
+    && printf '%s' "$write_success" \
+        | grep -A1 'target = data.internal.workstream_file.value' \
+        | grep -q 'value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"'; then
+    ok "write_confirmed_workstream success writes the bypass verdict and workstream path"
+else
+    fail "bypass verdict write missing — write_confirmed_workstream's success outcome must set data.internal.verdict.value = \"internal_reproduced\" (and the workstream path) or the KB-42 bypass posts empty verdict comments"
+fi
+
 declare -A bypass_seen
 bypass_seen["route_internal_label"]=1
 bypass_frontier=("route_internal_label")
