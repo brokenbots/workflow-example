@@ -41,7 +41,9 @@ import (
 // (KB-9). A dev-class success is judged by the workflow verdict stamped on
 // the run (KB-23): a failed/awaiting_human verdict repairs a Done stamp
 // into the review column and otherwise leaves the ticket where the
-// workflow's own bookkeeping put it.
+// workflow's own bookkeeping put it. Even a success verdict does not stamp
+// Done on its own (KB-50): Done is the confirmation of delivered work, and
+// the watcher requires a PR recorded on the run before it confirms one.
 const (
 	defaultPollInterval = 60 * time.Second
 	defaultPollTimeout  = 5 * time.Minute
@@ -56,6 +58,9 @@ const (
 	// bookkeeping intact; failed is the workflow's failure verdict. The
 	// triage workflow ends in awaiting_human/ready_for_development but is
 	// excluded from the verdict branch by its class.
+	// KB-50: a judgeable verdict is necessary but no longer sufficient for
+	// the Done move — even handler_complete needs the run to carry a PR,
+	// because a Completed pod is not a succeeded workflow.
 	finalStateHandlerComplete = "handler_complete"
 	finalStateFailed          = "failed"
 	finalStateAwaitingHuman   = "awaiting_human"
@@ -609,6 +614,7 @@ func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, err
 			latestPhase:      g.latest.Status.Phase,
 			latestRun:        g.latest.Name,
 			latestFinalState: g.latest.Status.FinalState,
+			latestPRNumber:   g.latest.Status.PRNumber,
 			anyRun:           true,
 		}
 		if g.latest.Spec.Workflow != nil {
@@ -644,15 +650,21 @@ type runPhases struct {
 	// mask a failed verdict; the verdict decides where a dev-class success
 	// lands. Empty for record-derived terminals and castle-less runs.
 	latestFinalState string
-	latestClass      string
-	anyRun           bool
+	// latestPRNumber is the PR recorded on the latest run (Status.PRNumber,
+	// parsed from the castle run record's pr_url). The dev-class Done move
+	// requires it (KB-50): success without a PR is not delivered work, and
+	// the empty case leaves the ticket where the workflow put it.
+	latestPRNumber string
+	latestClass    string
+	anyRun         bool
 }
 
 // reconcileTaskColumn moves the Kanboard task between board columns as its
 // latest run progresses — the Kanboard analogue of the Linear watcher's
 // automation labels:
 //   - run in flight        -> task to the work column
-//   - dev run Succeeded    -> task per the workflow verdict (KB-23)
+//   - dev run Succeeded    -> task per the workflow verdict; the Done move
+//     requires PR evidence too (KB-23, KB-50)
 //   - triage run Succeeded -> column untouched (KB-9)
 //   - run Failed           -> task to the review column (human)
 //
@@ -664,8 +676,8 @@ type runPhases struct {
 // triage succeeded, the watcher moved the ticket Ready -> Done, and the
 // develop run never fired). The triage workflow owns the column choice on
 // its success path, so the watcher leaves the task where the workflow put
-// it. Only a dev-class success stamps Done — or a legacy run predating
-// class stamping (empty class), which ran the old terminal flow.
+// it. A dev-class success stamps Done only once the run's verdict and PR
+// evidence are verifiable (KB-50).
 //
 // A dev-class success is judged by the workflow's own verdict, not the
 // phase: the engine exits 0 even when the workflow ends in its failure
@@ -678,11 +690,23 @@ type runPhases struct {
 // before the terminal) — so a Done stamp that predates the verdict is
 // repaired into the review column, and any other column is left untouched:
 // Review is the workflow's own parking spot, and Ready is the route's
-// re-fire trigger after a fetch failure. "handler_complete" delivered the
-// work and stamps Done as before; an empty verdict is the legacy path
-// (record-derived terminal or castle observation disabled) and keeps the
-// old Done stamp; any other terminal value is left untouched until the
-// watcher learns it.
+// re-fire trigger after a fetch failure.
+//
+// KB-50: even a "handler_complete" verdict no longer stamps Done on its
+// own — Done requires a PR recorded on the run (Status.PRNumber). A
+// Completed pod is not a succeeded workflow: the runner job exits 0 when
+// the workflow reaches ANY terminal, and the develop workflow's success
+// terminal was reachable without a PR before the KB-49 route guard
+// (create_pr silently produced nothing and run_handler still exited 0).
+// Observed live on KB-40 and KB-39 (2026-09-28): the watcher moved
+// Review -> Done off the Completed pod phase while run_handler had logged
+// outcome=failure — no PR, no evidence comment, main untouched. An empty
+// verdict (the run's terminal not observable yet: castle observation lag,
+// a record-derived terminal, or castle observation disabled) is equally
+// unverified and abstains; the verdict and PR land on a later poll and
+// re-fire this reconcile, and a Done stamp predating a failure verdict is
+// still repaired by the branch above. Any other terminal value is left
+// untouched until the watcher learns it.
 //
 // reconcileTaskColumn returns the task's new Kanboard column id and whether
 // the column changed. The caller updates its in-memory task copy so the
@@ -710,10 +734,35 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 				return task.ColumnID, false
 			}
 			target = reviewColumnName
-		case finalStateHandlerComplete, "":
-			// handler_complete delivered the work; empty is the legacy
-			// record-derived/castle-less path. Keep the Done stamp.
+		case finalStateHandlerComplete:
+			// handler_complete delivered the work — but the Done move
+			// requires PR evidence recorded on the run (KB-50): the
+			// develop workflow's success terminal was reachable without a
+			// PR before the KB-49 route guard, and Done is the watcher's
+			// confirmation of delivered work, not of a completed pod.
+			// Without the PR evidence the column is left where the
+			// workflow's own bookkeeping put it; the PR lands on a later
+			// poll (castle records it on the run) and re-fires this
+			// reconcile.
+			if ph.latestPRNumber == "" {
+				w.log.Info("develop run has no PR recorded on the run; not marking Done",
+					"ticket", task.Identifier(), "run", ph.latestRun)
+				return task.ColumnID, false
+			}
 			target = doneColumnName
+		case "":
+			// KB-50: an empty verdict is an unverified run — the workflow's
+			// terminal has not been observed yet (castle observation lag), or
+			// will not be (record-derived terminal, castle observation
+			// disabled). The Job-derived Succeeded phase is exactly the
+			// signal that masks a failure (the engine exits 0 for any
+			// terminal), so the watcher must not stamp Done off the pod
+			// phase alone; the verdict lands on a later poll and re-fires
+			// this reconcile, and a Done stamp predating a failure verdict
+			// is still repaired by the branch above.
+			w.log.Info("workflow verdict not observable on the run; not marking Done",
+				"ticket", task.Identifier(), "run", ph.latestRun)
+			return task.ColumnID, false
 		default:
 			// An unrecognized terminal value (a future terminal this
 			// watcher predates): abstain rather than silently stamp Done

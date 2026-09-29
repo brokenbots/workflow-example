@@ -420,16 +420,28 @@ func TestColumnReconciliationOnPhaseChange(t *testing.T) {
 	tw.kbS.addTask(13, 5, "k8s-run")
 	tw.pollOnce(t)
 	require.Len(t, tw.runs(t), 1)
+	runName := tw.runs(t)[0].Name
 
 	// Running: task moves to Work in progress.
 	tw.setRunPhase(t, "KB-13", criteriav1.PhaseRunning)
 	tw.pollOnce(t)
 	assert.Equal(t, 7, tw.kbS.taskColumn(13), "running run moves task to work column")
 
-	// Succeeded: task moves to Done.
+	// Succeeded: the verdict is not observable yet, so the watcher abstains
+	// (KB-50) — the Completed pod phase alone is not a succeeded workflow.
 	tw.setRunPhase(t, "KB-13", criteriav1.PhaseSucceeded)
 	tw.pollOnce(t)
-	assert.Equal(t, 8, tw.kbS.taskColumn(13), "succeeded run moves task to Done")
+	assert.Equal(t, 7, tw.kbS.taskColumn(13), "a Succeeded phase without a workflow verdict does not stamp Done")
+
+	// The success verdict without PR evidence still abstains...
+	tw.setRunFinalStateByName(t, runName, "handler_complete")
+	tw.pollOnce(t)
+	assert.Equal(t, 7, tw.kbS.taskColumn(13), "handler_complete without a PR recorded does not stamp Done")
+
+	// ...and with the PR recorded, the run delivers the ticket to Done.
+	tw.setRunPRNumberByName(t, runName, "42")
+	tw.pollOnce(t)
+	assert.Equal(t, 8, tw.kbS.taskColumn(13), "succeeded run with verdict and PR evidence moves task to Done")
 }
 
 func TestFailedRunMovesTaskToReview(t *testing.T) {
@@ -513,10 +525,11 @@ func TestTriageSucceededFiresDevelopFromReady(t *testing.T) {
 
 // Full KB-9 chain: triage succeeded and the ticket is armed in Ready ->
 // the develop route fires within one poll -> the live develop run parks
-// the ticket in the work column -> only the develop run's own success
-// stamps Done. The second Succeeded (develop) must reconcile even though
-// the triage settle already recorded Succeeded — the reconcile gate tracks
-// run identity, not just the phase value.
+// the ticket in the work column -> only the develop run's own success,
+// with the verdict and PR evidence recorded, stamps Done. The second
+// Succeeded (develop) must reconcile even though the triage settle already
+// recorded Succeeded — the reconcile gate tracks run identity, not just
+// the phase value.
 func TestTriageSucceededThenDevelopSucceedsStampsDone(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(21, 9, "k8s-run", "internal-reproduced") // Ready, armed bypass ticket
@@ -538,24 +551,79 @@ func TestTriageSucceededThenDevelopSucceedsStampsDone(t *testing.T) {
 	assert.Equal(t, 7, tw.kbS.taskColumn(21), "live develop run parks the ticket in the work column")
 	assert.Len(t, tw.runs(t), 2, "no duplicate run while the develop run is live")
 
-	// The develop run settles: only now does the ticket stamp Done.
+	// The develop run settles: without a verdict the watcher abstains
+	// (KB-50), the success verdict alone still abstains, and only the
+	// verdict plus PR evidence stamps Done.
 	tw.setRunPhaseByName(t, devName, criteriav1.PhaseSucceeded)
 	tw.pollOnce(t)
+	assert.Equal(t, 7, tw.kbS.taskColumn(21), "a Completed pod alone does not stamp Done (KB-50)")
 
-	assert.Equal(t, 8, tw.kbS.taskColumn(21), "only a dev-class success stamps Done")
+	tw.setRunFinalStateByName(t, devName, "handler_complete")
+	tw.pollOnce(t)
+	assert.Equal(t, 7, tw.kbS.taskColumn(21), "handler_complete without a PR recorded does not stamp Done (KB-50)")
+
+	tw.setRunPRNumberByName(t, devName, "10")
+	tw.pollOnce(t)
+	assert.Equal(t, 8, tw.kbS.taskColumn(21), "only a dev-class success with verdict and PR evidence stamps Done")
 	assert.Len(t, tw.runs(t), 2, "a settled ticket in Done fires nothing (no route on Done)")
 }
 
-// A legacy run predating class stamping (empty spec workflow class) keeps
-// the old terminal flow: success stamps Done.
-func TestLegacyRunWithoutClassStampsDone(t *testing.T) {
+// KB-50: a legacy run predating class stamping (empty spec workflow class)
+// carries no verdict either — the empty-verdict abstain applies, and the
+// watcher must not stamp Done off the Succeeded pod phase alone. The
+// workflow's own bookkeeping owns the Done move.
+func TestLegacyRunWithoutClassDoesNotStampDone(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(22, 9, "k8s-run", "internal-reproduced")
 	tw.addRun(t, "kb-22-0000000001", "KB-22", "", criteriav1.PhaseSucceeded)
 
 	tw.pollOnce(t)
 
-	assert.Equal(t, 8, tw.kbS.taskColumn(22), "pre-CRI-242 runs (empty class) keep the Done stamp")
+	assert.Equal(t, 9, tw.kbS.taskColumn(22),
+		"pre-CRI-242 runs (empty class) with no verdict recorded do not stamp Done (KB-50)")
+}
+
+// The KB-50 gate is evidence-based, not class-gated: a legacy run whose
+// record does carry the verified verdict and a PR still stamps Done.
+func TestLegacyRunWithVerdictAndPRStampsDone(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(31, 9, "k8s-run", "internal-reproduced")
+	tw.addRun(t, "kb-31-0000000001", "KB-31", "", criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-31-0000000001", "handler_complete")
+	tw.setRunPRNumberByName(t, "kb-31-0000000001", "77")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 8, tw.kbS.taskColumn(31),
+		"a legacy run with a verified verdict and PR evidence stamps Done")
+}
+
+// KB-50 acceptance regression: pod Completed + workflow failure + no PR.
+// The develop run's runner Job reached Succeeded — pods complete when the
+// workflow reaches ANY terminal, and the workflow's failure terminal exits
+// 0 — the workflow had parked the ticket in Review, no PR exists, and the
+// failed verdict had not been stamped when the watcher polled. The watcher
+// must not reconcile the ticket to Done (observed live on KB-40, run
+// kb-40-1790625661: Review -> Done at 21:03:01Z off the Completed pod
+// while run_handler had logged outcome=failure, main untouched), neither
+// off the empty verdict nor after the failure verdict lands — Review is
+// the workflow's own parking spot.
+func TestPodCompletedWorkflowFailureNoPRDoesNotReconcileDone(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(32, 6, "k8s-run", "internal-reproduced") // Review: parked by the workflow's failure bookkeeping
+	tw.addRun(t, "kb-32-0000000001", "KB-32", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+
+	// Poll in the KB-40 window: pod Completed, verdict not observable.
+	tw.pollOnce(t)
+	assert.Equal(t, 6, tw.kbS.taskColumn(32),
+		"the Completed pod phase alone must not reconcile Review to Done")
+
+	// Even after the failure verdict lands, Review stays: the repair only
+	// applies to a Done stamp.
+	tw.setRunFinalStateByName(t, "kb-32-0000000001", "failed")
+	tw.pollOnce(t)
+	assert.Equal(t, 6, tw.kbS.taskColumn(32),
+		"the failed verdict leaves the workflow-parked Review ticket untouched")
 }
 
 // A failed triage-class run still parks the ticket in Review for a human —
@@ -580,6 +648,16 @@ func (tw *testWatcher) setRunFinalStateByName(t *testing.T, name, finalState str
 	require.NoError(t, tw.client.Status().Update(context.Background(), run))
 }
 
+// setRunPRNumberByName stamps PR evidence (Status.PRNumber, KB-50) on a
+// pre-created run — the way the controller's castle observation leaves the
+// run when the castle run record carries a pr_url.
+func (tw *testWatcher) setRunPRNumberByName(t *testing.T, name, prNumber string) {
+	t.Helper()
+	run := tw.runByName(t, name)
+	run.Status.PRNumber = prNumber
+	require.NoError(t, tw.client.Status().Update(context.Background(), run))
+}
+
 // KB-23 regression: the runner job exits 0 even when the develop workflow
 // ended in its failure terminal, so the run read Succeeded while the
 // workflow's verdict was failure (observed live on KB-17, run
@@ -599,24 +677,25 @@ func TestDevSucceededWithFailedVerdictMovesTaskToReview(t *testing.T) {
 		"a Succeeded run with a failed workflow verdict repairs a Done stamp into Review, not Done")
 }
 
-// KB-23 ordering regression (review R1): the phase can settle before the
-// verdict is observable. The controller persists the Job-derived Succeeded
-// phase with no FinalState whenever the castle observation is inconclusive,
-// so an earlier poll stamps Done off the empty legacy verdict; when the
-// awaiting_human verdict lands on a later poll the ticket must be
-// reconciled out of Done into Review — abstaining there would leave the
-// ticket parked in Done forever (pre-fix probe: column 8 before and after
-// the verdict arrived, identical to the KB-17 symptom).
+// KB-50 regression over the KB-23 ordering case (review R1): the phase
+// settles before the verdict is observable. The controller persists the
+// Job-derived Succeeded phase with no FinalState whenever the castle
+// observation is inconclusive, and poll of that state must NOT stamp Done
+// off the empty verdict — that stamping is exactly how failed develop runs
+// ended up in Done (KB-39/KB-40). The late verdict still reconciles: a
+// Done stamp predating the verdict — here left behind by a pre-KB-50
+// watcher — is repaired into Review when the awaiting_human verdict lands
+// (abstaining there would park the ticket in Done forever).
 func TestDevSucceededLateVerdictRepairsDoneToReview(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
-	tw.kbS.addTask(27, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.kbS.addTask(27, 8, "k8s-run", "internal-reproduced") // Done: a stale stamp a pre-KB-50 watcher left behind
 	tw.addRun(t, "kb-27-0000000001", "KB-27", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
 
-	// First poll: the verdict is not stamped yet, so the legacy empty path
-	// stamps Done off the Job-derived Succeeded phase.
+	// First poll: the verdict is not stamped yet, so the watcher abstains —
+	// the Completed pod phase alone must not reconcile the ticket.
 	tw.pollOnce(t)
 	assert.Equal(t, 8, tw.kbS.taskColumn(27),
-		"the pre-verdict poll stamps Done off the Job-derived Succeeded phase")
+		"the pre-verdict poll abstains: no Done move, no other move (KB-50)")
 
 	// Second poll: the castle observation landed the awaiting_human
 	// verdict; the stale Done stamp must be repaired into Review.
@@ -676,17 +755,38 @@ func TestDevSucceededWithAwaitingHumanVerdictLeavesColumn(t *testing.T) {
 
 // KB-23 companion: a handler_complete verdict delivered the work and keeps
 // the Done stamp — the verdict only reroutes the failure and human-handoff
-// paths.
+// paths — and since KB-50 the Done move additionally requires the PR the
+// run actually delivered to be recorded on the run.
 func TestDevSucceededWithHandlerCompleteVerdictStampsDone(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(26, 7, "k8s-run", "internal-reproduced") // Work in progress
 	tw.addRun(t, "kb-26-0000000001", "KB-26", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
 	tw.setRunFinalStateByName(t, "kb-26-0000000001", "handler_complete")
+	tw.setRunPRNumberByName(t, "kb-26-0000000001", "113")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 8, tw.kbS.taskColumn(26),
-		"a handler_complete verdict keeps the Done stamp")
+		"a handler_complete verdict with PR evidence keeps the Done stamp")
+}
+
+// KB-50 companion to the handler_complete stamp: the verdict confirmed the
+// run's terminal, but no PR is recorded on the run — the work was not
+// delivered (pre-KB-49 the develop workflow's success terminal was
+// reachable with create_pr having silently produced nothing), so the
+// watcher does not stamp Done and leaves the column to the workflow's own
+// bookkeeping.
+func TestDevSucceededHandlerCompleteWithoutPRDoesNotStampDone(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(30, 7, "k8s-run", "internal-reproduced") // Work in progress
+	tw.addRun(t, "kb-30-0000000001", "KB-30", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-30-0000000001", "handler_complete")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 7, tw.kbS.taskColumn(30),
+		"handler_complete without PR evidence leaves the column untouched")
+	assert.True(t, tw.logs.contains("not marking Done"), "the watcher logs why it abstained")
 }
 
 // runNewer picks a ticket's most recent run by creation time with the name

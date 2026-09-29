@@ -225,6 +225,8 @@ type CriteriaRunStatus struct {
 	// known. Informational only: castle supplies no pr_url producer today
 	// (nothing publishes run.metadata), so the castle path leaves this empty
 	// in practice, and the terminal-completion gate does not depend on it.
+	// Empty does gate the kanboard watcher's Done reconcile (KB-50): a
+	// dev-class success only stamps Done when a PR is recorded on the run.
 	PRNumber string `json:"prNumber,omitempty"`
 
 	// TicketState records the final Linear ticket state (CRI-132 semantics).
