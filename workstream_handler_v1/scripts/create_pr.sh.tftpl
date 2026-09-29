@@ -39,5 +39,15 @@ else
         echo "pr_create_error=$pr_url"
         exit 1
     }
-    printf '%s' "$pr_url" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n'
+    # KB-49: a tool that reports success without producing a pull request URL
+    # is still a failed PR creation — exit loudly with diagnostics instead of
+    # printing an empty pr_url for the workflow to treat as success.
+    created_url=$(printf '%s' "$pr_url" | grep -oE 'https://github\.com/[^/]+/[^/]+/pull/[0-9]+' | head -1 | tr -d '\n') \
+        || created_url=""
+    if [ -z "$created_url" ]; then
+        echo "pr_create_failed=true branch=$branch"
+        echo "pr_create_error=no pull request URL in gh pr create output: $pr_url"
+        exit 1
+    fi
+    printf '%s' "$created_url"
 fi
