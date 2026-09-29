@@ -71,6 +71,21 @@ data "internal" "handler_error" {
     value = ""
 }
 
+// KB-51: the reviewer loop's verdict, captured from the handler subworkflow
+// for the closing evidence comment (every develop run must comment the
+// verdict on the ticket, not just the PR).
+data "internal" "review_result" {
+    type  = string
+    value = ""
+}
+
+// KB-51: the handler's run branch, captured for the closing evidence
+// comment's commit range (<base_branch>..<branch>).
+data "internal" "branch" {
+    type  = string
+    value = ""
+}
+
 // ── Subworkflow ──────────────────────────────────────────────────────────────
 // The only cross-tree dependency of this workflow: a sibling directory,
 // referenced by relative path and locked recursively by
@@ -229,6 +244,17 @@ step "run_handler" {
             target = data.internal.pr_url.value
             value  = subworkflow.pr_url
         }
+        write {
+            target = data.internal.branch.value
+            value  = subworkflow.branch
+        }
+        // KB-51: the compose handler exposes the conclusion of its final
+        // reviewer round ("approved" on the merged path) so the closing
+        // comment can carry the run's verdict on the ticket.
+        write {
+            target = data.internal.review_result.value
+            value  = subworkflow.review_result
+        }
     }
     outcome "failure" {
         next = step.comment_handler_failed
@@ -292,7 +318,14 @@ step "comment_handler_done" {
         command = templatefile("./scripts/comment_handler_done.sh.tftpl", {
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
-            criteria_value_3 = data.internal.pr_url.value
+            // KB-51: the closing comment is the run's evidence trail — it
+            // must carry the review verdict, workstream path, PR url and
+            // commit range (base branch..run branch), not just the PR.
+            criteria_value_3 = data.internal.review_result.value
+            criteria_value_4 = data.internal.workstream_file.value
+            criteria_value_5 = data.internal.pr_url.value
+            criteria_value_6 = data.internal.branch.value
+            criteria_value_7 = var.base_branch
         })
     }
     outcome "success" { next = step.set_done_state }

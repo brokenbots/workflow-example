@@ -23,8 +23,11 @@ curl -sS -f \
         --arg m 'createComment' \
         --arg task_id "$task_id" \
         --arg body "$body" \
-        '{jsonrpc:"2.0",method:$m,params:{task_id:$task_id|tonumber,user_id:0,content:$body}}')" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body}}')" \
     "$KANBOARD_URL" \
-    | jq -e '.result == true' >/dev/null
+    | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
+# KB-51: createComment resolves to the new comment_id (a number), never the
+# boolean true moveTaskPosition-style calls return — a `.result == true`
+# check marked every successful post as a step failure.
 
 echo "comment posted"

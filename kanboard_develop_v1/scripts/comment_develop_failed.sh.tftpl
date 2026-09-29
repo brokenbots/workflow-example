@@ -14,14 +14,20 @@ else
     body="**Automated development did not start.** The confirmed workstream could not be produced or the work-state move failed. Workstream: (none). Moving the ticket to $criteria_value_4 for a human. The run record carries the failing step and its error."
 fi
 
+# KB-51: params must carry both the task id and the body — this jq -n once
+# forgot --arg task_id, so the JSON-RPC request body was empty and the step
+# failed on every Kanboard develop run. createComment resolves to the new
+# comment_id (a number), never boolean true; a `.result == true` check marked
+# even successful posts as step failures.
 curl -sS -f \
     -u "jsonrpc:$KANBOARD_APP_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
         --arg m 'createComment' \
+        --arg task_id "$task_id" \
         --arg body "$body" \
-        '{jsonrpc:"2.0",method:$m,params:{task_id:$task_id|tonumber,user_id:0,content:$body}}')" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body}}')" \
     "$KANBOARD_URL" \
-    | jq -e '.result == true' >/dev/null
+    | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
 
 echo "comment posted"

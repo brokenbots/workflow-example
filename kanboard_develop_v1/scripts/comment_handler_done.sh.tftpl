@@ -1,20 +1,39 @@
+# KB-51: 1=intake_root, 2=ticket_id, 3=review verdict, 4=workstream path,
+# 5=PR url, 6=run branch, 7=base branch (commit range 7..6 in the body).
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+criteria_value_7={{ .criteria_value_7 | shellquote }}
 set -euo pipefail
 : "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
 : "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
 run_dir="$criteria_value_1/$criteria_value_2"
 task_id="${criteria_value_2#KB-}"
 
+# KB-51: the closing comment is the run's evidence trail on the ticket —
+# verdict, workstream path, PR and commit range — and the params must carry
+# both the task id and the body (a jq -n call that forgets --arg task_id
+# posts an empty payload and fails the step on every run).
+body="**Workstream complete.** The implementation handler finished and merged its PR. Review verdict: $criteria_value_3. Workstream path: $criteria_value_4. PR: $criteria_value_5."
+if [ -n "$criteria_value_6" ]; then
+    body="$body Commit range: $criteria_value_7..$criteria_value_6 (the reviewed run branch against the base branch)."
+fi
+
 curl -sS -f \
     -u "jsonrpc:$KANBOARD_APP_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
         --arg m 'createComment' \
-        --arg body "**Workstream complete.** The implementation handler finished and merged its PR: $criteria_value_3" \
-        '{jsonrpc:"2.0",method:$m,params:{task_id:$task_id|tonumber,user_id:0,content:$body}}')" \
+        --arg task_id "$task_id" \
+        --arg body "$body" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body}}')" \
     "$KANBOARD_URL" \
-    | jq -e '.result == true' >/dev/null
+    | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
+# KB-51: createComment resolves to the new comment_id (a number), never the
+# boolean true moveTaskPosition-style calls return — a `.result == true`
+# check marked every successful post as a step failure.
 
 echo "comment posted"
