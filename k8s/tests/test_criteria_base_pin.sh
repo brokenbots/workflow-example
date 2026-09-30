@@ -35,7 +35,14 @@ set -euo pipefail
 # consumer verified live. criteria-base builds the engine, not the SDK, so the
 # additive events.proto does not affect adapter wire v2.
 #
-# To move off b2d0b66, re-audit the emitted adapter event contract, then
+# Re-audited to 77b6e0ed (v0.5.36, 2026-09-30, KB-57 rollout): proto delta vs
+# b2d0b66 is purely ADDITIVE - events.proto oneof arms 38-42 (AgentPromptInjected,
+# CheckpointPointer, RunPaused/RunResumed, ...) plus new messages in
+# criteria.proto/peer.proto/server.proto; zero removed or renumbered fields;
+# adapter wire v2 untouched (criteria-base builds the engine, not the SDK).
+# Castle ingest is envelope-verbatim (no payload-kind switch) - consumer-safe.
+#
+# To move off 77b6e0ed, re-audit the emitted adapter event contract, then
 # update AUDITED_COMMIT here and the equality checks in
 # k8s/tests/test_criteria_base.sh and criteria-base/tests/smoke_test.sh in
 # the same change.
@@ -48,7 +55,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="b2d0b66400b9d07d152df0c6d3069499c76d5ec7"
+AUDITED_COMMIT="77b6e0ed06dd9c025fd03b691c0b7faffa0f2489"
 
 fail() {
     echo "FAIL: $1" >&2
