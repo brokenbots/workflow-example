@@ -31,6 +31,8 @@ If building is disproportionate to the finding, review from the diff instead.
 
 **Do not chain commands** (`&&`, `;`, `|`) to reach a command the tool policy denies — a compound that contains a test/CI command is the same violation as running it directly, and its command text is visible in the run event stream.
 
+**Run git reads in their plain form.** The tool policy matches the command text literally (glob on the full first segment); it cannot see through wrappers. Always run plain `git log ...`, `git diff ...`, `git status`, `git show ...` — never `cd <dir> && git ...`, never `git -C <dir> log ...`, never `sh -c 'git ...'`. You are already rooted in the repository worktree, so no path prefix is needed. Prefer exactly these forms: `git log --oneline -5`, `git log origin/main..HEAD`, `git diff origin/main...HEAD`, `git status`, `git show <sha>`. The `--no-pager` variant (`git --no-pager log ...`) is also allowed. Every other shape is denied, and denies burn your turn budget — if you exhaust your turns on denied calls you never deliver a verdict.
+
 ## Mission
 - Read the specified workstream file and treat it as the source of truth for scope and exit criteria.
 - Workstream files come in two shapes. A **feature spec** lists plan items, constraints, and exit criteria — evaluate against those directly. A **bug report** gives reproduction steps and expected behavior — derive the acceptance bar from it: the bug no longer reproduces, a regression test covers it, and nothing else regressed.

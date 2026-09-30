@@ -314,13 +314,28 @@ step "review" {
     // are additionally instructed by charter not to chain commands.
     allow_tools = [
         "read",
-        // git reads (read-only subcommands only; no add/commit/push/checkout)
+        // git reads (read-only subcommands only; no add/commit/push/checkout).
+        // KB-57: the reviewer model habitually emits the --no-pager form
+        // ("git --no-pager log ...") and CI-hardened agents reach for it on
+        // every turn; bare prefix patterns never matched it, each deny burned
+        // a turn, and the reviewer died "missing finalize" before any verdict
+        // (KB-55 refire loop, kb-57-1790728888 events 1175-1190). Enumerate
+        // the --no-pager form per read-only subcommand so the habit is
+        // permitted without opening a generic "git *" hole (--no-pager push
+        // stays denied: only these exact subcommands may follow --no-pager).
         "shell:git status",       "shell:git status *",
         "shell:git diff",         "shell:git diff *",      "shell:git diff */*",      "shell:git diff */*/*",
         "shell:git log",          "shell:git log *",       "shell:git log */*",
         "shell:git show",         "shell:git show *",      "shell:git show */*",
         "shell:git rev-parse",    "shell:git rev-parse *",
         "shell:git branch",       "shell:git branch *",
+        // KB-57: git --no-pager <read-only subcommand> forms.
+        "shell:git --no-pager status",    "shell:git --no-pager status *",
+        "shell:git --no-pager diff",      "shell:git --no-pager diff *",     "shell:git --no-pager diff */*",     "shell:git --no-pager diff */*/*",
+        "shell:git --no-pager log",       "shell:git --no-pager log *",      "shell:git --no-pager log */*",
+        "shell:git --no-pager show",      "shell:git --no-pager show *",     "shell:git --no-pager show */*",
+        "shell:git --no-pager rev-parse", "shell:git --no-pager rev-parse *",
+        "shell:git --no-pager branch",    "shell:git --no-pager branch *",
         // build (the one allowed execution: build once, then run the binary)
         "shell:make build",
         "shell:go build",         "shell:go build *",      "shell:go build */*",      "shell:go build */*/*",
