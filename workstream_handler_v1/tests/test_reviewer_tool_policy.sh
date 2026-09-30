@@ -88,7 +88,9 @@ for cmd in \
     "gh run watch 1234" \
     "gh run view 1 --log" \
     "bash -c 'make test'" \
-    "sh -c 'make ci'"; do
+    "sh -c 'make ci'" \
+    "git -C /repo log --oneline -5" \
+    "cd /repo && git log --oneline -5"; do
     if allow_matches "${cmd}"; then
         echo "FAIL: review allow_tools permits '${cmd}' (CRI-260 requires deterministic denial)" >&2
         exit 1
@@ -99,6 +101,11 @@ echo "==> Checking allowed charter commands still match..."
 for cmd in \
     "git status" \
     "git status --porcelain=v1" \
+    "git --no-pager log --oneline -12" \
+    "git --no-pager log origin/main..HEAD" \
+    "git --no-pager diff origin/main...HEAD" \
+    "git --no-pager status" \
+    "git --no-pager show abc123" \
     "git diff" \
     "git diff origin/main...HEAD" \
     "git diff HEAD~1 HEAD -- src/main.go" \
