@@ -37,7 +37,7 @@ resp=$(curl -sS -f \
         '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body}}')" \
     "$KANBOARD_URL" 2>>"$diag")
 rc=$?
-echo "curl_rc=$rc response=$resp" >> "$diag" 2>&1
+echo "curl_rc=$rc response_len=${#resp}" >> "$diag" 2>&1
 if [ "$rc" -ne 0 ]; then
     echo "comment post failed (curl_rc=$rc), see $diag" >&2
     exit 1
