@@ -68,6 +68,19 @@ for universal in '*' 'shell' 'shell:*' 'shell*'; do
     fi
 done
 
+echo "==> Checking bash-kind mirror of every read-only shell: pattern (copilot names its command tool bash)..."
+while IFS= read -r pat; do
+    case "$pat" in
+        shell:*) ;;
+        *) continue ;;
+    esac
+    mirror="bash:${pat#shell:}"
+    if ! grep -qxF "${mirror}" "${ALLOWLIST}"; then
+        echo "FAIL: review allow_tools lacks the bash-kind mirror of '${pat}' (CRI-260/KB-57)" >&2
+        exit 1
+    fi
+done <"${ALLOWLIST}"
+
 echo "==> Checking file-read tool kinds are allowed..."
 grep -qE '^(read|read_file)$' "${ALLOWLIST}"
 
