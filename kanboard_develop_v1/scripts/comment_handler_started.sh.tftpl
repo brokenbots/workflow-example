@@ -17,7 +17,17 @@ fi
 # KB-51: params must carry both the task id and the body — this jq -n once
 # forgot --arg task_id, so the JSON-RPC request body was empty and the step
 # failed on every Kanboard develop run.
-curl -sS -f \
+# KB-57: a ~10-60ms failure here historically produced no output_captured (no
+# exec output) and died before any HTTP round trip could be seen. Persist the
+# request/response/rc to the intake dir so the next failure is diagnosable
+# from the run dir without reopening the adapter pod.
+mkdir -p "$run_dir"
+diag="$run_dir/comment_diag.log"
+{
+    echo "=== createComment attempt $(date -u +%FT%TZ)"
+    echo "KANBOARD_URL=[$KANBOARD_URL] task_id=$task_id body_len=${#body}"
+} >> "$diag" 2>&1
+resp=$(curl -sS -f \
     -u "jsonrpc:$KANBOARD_APP_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
@@ -25,8 +35,17 @@ curl -sS -f \
         --arg task_id "$task_id" \
         --arg body "$body" \
         '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body}}')" \
-    "$KANBOARD_URL" \
-    | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
+    "$KANBOARD_URL" 2>>"$diag")
+rc=$?
+echo "curl_rc=$rc response=$resp" >> "$diag" 2>&1
+if [ "$rc" -ne 0 ]; then
+    echo "comment post failed (curl_rc=$rc), see $diag" >&2
+    exit 1
+fi
+printf '%s' "$resp" | jq -e '(.error | not) and (.result | type == "number")' >>"$diag" 2>&1 || {
+    echo "createComment result assert failed, see $diag" >&2
+    exit 1
+}
 # KB-51: createComment resolves to the new comment_id (a number), never the
 # boolean true moveTaskPosition-style calls return — a `.result == true`
 # check marked every successful post as a step failure.
