@@ -41,6 +41,16 @@ have 'git clone' "$DOCKERFILE" || fail "Dockerfile does not clone criteria"
 grep -Eq 'test "\$\(git rev-parse HEAD\)" = "\$\{CRITERIA_COMMIT\}"' "$DOCKERFILE" || \
     fail "Dockerfile build does not fail closed if the checkout is not the pinned commit"
 
+# --- stamp/pin correspondence assert (kb57 closeout lesson) ------------------
+# The Dockerfile must fail the BUILD when CRITERIA_VERSION names a tag that does
+# not point at CRITERIA_COMMIT: a stamp-only bump ships a stale-default-pin
+# engine under a fresh version stamp (the silent-refire trap). Guard the assert
+# statically here; smoke_test.sh exercises the failing build itself.
+have 'STAMP/PIN MISMATCH' "$DOCKERFILE" || \
+    fail "Dockerfile must loudly fail the build when CRITERIA_VERSION tag commit != CRITERIA_COMMIT (stamp/pin pairing)"
+have 'git ls-remote origin "refs/tags/${CRITERIA_VERSION}"' "$DOCKERFILE" || \
+    fail "Dockerfile stamp/pin assert must resolve the tag's commit via git ls-remote origin"
+
 # --- minimal runtime: git + ca-certs only ----------------------------------
 have 'FROM alpine:' "$DOCKERFILE" || fail "runtime stage must build on alpine"
 grep -Eq 'apk add --no-cache ca-certificates git$' "$DOCKERFILE" || \

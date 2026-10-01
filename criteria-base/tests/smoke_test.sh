@@ -35,6 +35,9 @@ pinned_sha="$(awk -F= '/^ARG CRITERIA_COMMIT=/ {print $2}' "$REPO_ROOT/criteria-
 [ "$pinned_sha" = "637eb212655fc0cd84d58e7af3a404b2b94b24cd" ] || \
     fail "criteria-base/Dockerfile pins unexpected commit: $pinned_sha"
 pinned_short="${pinned_sha:0:7}"
+# Stamp paired with the pin for the smoke build (must match a published criteria
+# release tag whose commit IS pinned_sha — the Dockerfile asserts correspondence).
+smoke_version="${CRITERIA_BASE_VERSION:-v0.5.39}"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -57,8 +60,13 @@ head_sha="$(git -C "$src" rev-parse HEAD)"
 
 # Build + publish with a unique tag (the kubelet never re-resolves reused tags).
 tag="$(date +%Y%m%d-%H%M%S)-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nosha)"
-echo "==> Building $IMAGE:$tag"
+echo "==> Building $IMAGE:$tag (stamp AND pin args — the Dockerfile asserts their pairing)"
+# Both build args are passed explicitly: CRITERIA_VERSION is fail-closed REQUIRED,
+# and the Dockerfile's loud assert verifies the tag's commit equals the pin inside
+# this same build (positive-case proof of the stamp/pin correspondence).
 "$CONTAINER_TOOL" build --build-arg TARGETARCH=amd64 \
+    --build-arg CRITERIA_COMMIT="$pinned_sha" \
+    --build-arg CRITERIA_VERSION="$smoke_version" \
     -f "$REPO_ROOT/criteria-base/Dockerfile" -t "$IMAGE:$tag" "$REPO_ROOT/criteria-base/"
 echo "==> Publishing $IMAGE:$tag"
 "$CONTAINER_TOOL" push "$IMAGE:$tag"
@@ -91,8 +99,13 @@ inspect="$("$CONTAINER_TOOL" run --rm --entrypoint /bin/sh \
 printf '%s\n' "$inspect"
 printf '%s\n' "$inspect" | grep -qx "uid=10001" || fail "image does not run as uid 10001"
 printf '%s\n' "$inspect" | grep -qx "criteria-home=/data/criteria" || fail "CRITERIA_HOME is not /data/criteria"
-printf '%s\n' "$inspect" | grep -qE "^criteria-version=.*g$pinned_short\$" || \
-    fail "criteria binary is not from pinned criteria main ($pinned_short): got $(printf '%s' "$inspect" | grep '^criteria-version=')"
+# The binary's version stamp must equal the paired CRITERIA_VERSION build arg
+# exactly (display() prints "v"+semver for release stamps — no git-describe
+# tail since the paired stamp/pin assert landed). Source provenance is proven
+# INSIDE the build by the stamp/pin loud assert (tag commit == pin), so the
+# post-hoc check is exact stamp equality, not a describe-tail heuristic.
+printf '%s\n' "$inspect" | grep -qx "criteria-version=$smoke_version" || \
+    fail "criteria binary stamp $(printf '%s\n' "$inspect" | grep '^criteria-version=') differs from the paired build stamp ($smoke_version)"
 printf '%s\n' "$inspect" | grep -qE '^git=/' || fail "git missing from image"
 printf '%s\n' "$inspect" | grep -qx "ca=present" || fail "ca-certificates missing from image"
 printf '%s\n' "$inspect" | grep -qx "workflows=absent" || fail "image must not ship a baked /workflows tree"
@@ -152,5 +165,20 @@ if out="$("$CONTAINER_TOOL" run --rm --user 10001:10001 --cap-drop=ALL \
 fi
 printf '%s\n' "$out" | grep -q "WORKFLOW_URL is not set" || \
     fail "missing WORKFLOW_URL failure not reported: $out"
+
+echo "==> Verifying fail-closed stamp/pin pairing (kb57 closeout lesson)"
+# A stamp-only bump (tag passed, pin left at the Dockerfile default) must fail
+# the BUILD, not ship an engine whose code lags its version stamp. v0.5.37 is a
+# real published tag pointing at 2dbea893; the Dockerfile currently pins
+# 637eb212 — pass that mismatched pair on purpose and expect the loud failure.
+# (If a future pin bump makes v0.5.37's commit the pin, pick a different
+# wrong-version tag here.)
+if "$CONTAINER_TOOL" build --build-arg TARGETARCH=amd64 \
+    --build-arg CRITERIA_COMMIT="$pinned_sha" \
+    --build-arg CRITERIA_VERSION=v0.5.37 \
+    -f "$REPO_ROOT/criteria-base/Dockerfile" -t "$IMAGE:stamp-pin-negtest" \
+    "$REPO_ROOT/criteria-base/" >/dev/null 2>&1; then
+    fail "stamp/pin mismatch build succeeded — the Dockerfile loud assert is broken"
+fi
 
 echo "PASS: criteria-base image smoke test ($IMAGE:$tag)"
