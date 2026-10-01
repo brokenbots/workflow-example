@@ -117,9 +117,9 @@ func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteri
 // already stamped (a later operator pass must not churn the timestamp).
 func markStallWatchdog(update *criteriav1.CriteriaRun, generation int64, lastProgress time.Time, window time.Duration) {
 	upsertCondition(update, metav1.Condition{
-		Type:               ConditionStallWatchdog,
-		Status:             metav1.ConditionTrue,
-		Reason:             ConditionStallWatchdog,
+		Type:   ConditionStallWatchdog,
+		Status: metav1.ConditionTrue,
+		Reason: ConditionStallWatchdog,
 		Message: fmt.Sprintf("no step progress for %s (last step event %s); the run is failed so the watcher can refire it (KB-24)",
 			window.String(), lastProgress.UTC().Format(time.RFC3339)),
 		ObservedGeneration: generation,
