@@ -1422,8 +1422,8 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 		spec := runs[0].Spec
 		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
 		assert.Equal(t, "url", spec.WorkflowSource.Type)
-		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.URL)
-		assert.Equal(t, "91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.Ref,
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3", spec.WorkflowSource.URL)
+		assert.Equal(t, "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3", spec.WorkflowSource.Ref,
 			"the shipped object pins the current-main commit (CRI-311 loop recovery)")
 		assert.Empty(t, spec.Image, "url-only develop runs execute on the criteria base image: no spec.image")
 	})
@@ -1461,8 +1461,8 @@ func TestPollDevRouteFromShippedConfig(t *testing.T) {
 			"the triage object declares class=triage: the run admits concurrently (read-only against the repo)")
 		require.NotNil(t, spec.WorkflowSource, "url workflow must stamp workflowSource")
 		assert.Equal(t, "url", spec.WorkflowSource.Type)
-		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.URL)
-		assert.Equal(t, "91153bc90b8fb48cec215c2a4cbc425dd11b7821", spec.WorkflowSource.Ref,
+		assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3", spec.WorkflowSource.URL)
+		assert.Equal(t, "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3", spec.WorkflowSource.Ref,
 			"the shipped object pins the current-main commit (CRI-311 loop recovery)")
 		assert.Empty(t, spec.Image, "url-only triage runs execute on the criteria base image: no spec.image")
 	})

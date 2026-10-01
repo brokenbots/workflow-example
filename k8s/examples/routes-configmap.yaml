@@ -189,8 +189,8 @@ data:
         },
         "linear-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821",
-          "ref": "91153bc90b8fb48cec215c2a4cbc425dd11b7821",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
+          "ref": "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
           "namespace": "criteria-jobs",
           "volumes": [
             {
@@ -242,8 +242,8 @@ data:
         },
         "linear-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821",
-          "ref": "91153bc90b8fb48cec215c2a4cbc425dd11b7821",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
+          "ref": "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -350,8 +350,8 @@ data:
         },
         "kanboard-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=8ba1d1b32c7740d510de79bd15531c4b86a89777",
-          "ref": "8ba1d1b32c7740d510de79bd15531c4b86a89777",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
+          "ref": "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -407,8 +407,8 @@ data:
         },
         "kanboard-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=8ba1d1b32c7740d510de79bd15531c4b86a89777",
-          "ref": "8ba1d1b32c7740d510de79bd15531c4b86a89777",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
+          "ref": "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
           "namespace": "criteria-jobs",
           "volumes": [
             {
