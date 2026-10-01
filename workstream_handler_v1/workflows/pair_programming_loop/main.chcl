@@ -312,125 +312,72 @@ step "review" {
     // whose first segment is allowed and whose rest contains a denied
     // command (e.g. "git status && make ci") would still match — reviewers
     // are additionally instructed by charter not to chain commands.
-    allow_tools = [
-        "read",
-        // git reads (read-only subcommands only; no add/commit/push/checkout).
-        // KB-57: the reviewer model habitually emits the --no-pager form
-        // ("git --no-pager log ...") and CI-hardened agents reach for it on
-        // every turn; bare prefix patterns never matched it, each deny burned
-        // a turn, and the reviewer died "missing finalize" before any verdict
-        // (KB-55 refire loop, kb-57-1790728888 events 1175-1190). Enumerate
-        // the --no-pager form per read-only subcommand so the habit is
-        // permitted without opening a generic "git *" hole (--no-pager push
-        // stays denied: only these exact subcommands may follow --no-pager).
-        "shell:git status",       "shell:git status *",
-        "shell:git diff",         "shell:git diff *",      "shell:git diff */*",      "shell:git diff */*/*",
-        "shell:git log",          "shell:git log *",       "shell:git log */*",
-        "shell:git show",         "shell:git show *",      "shell:git show */*",
-        "shell:git rev-parse",    "shell:git rev-parse *",
-        "shell:git branch",       "shell:git branch *",
-        // KB-57: git --no-pager <read-only subcommand> forms.
-        "shell:git --no-pager status",    "shell:git --no-pager status *",
-        "shell:git --no-pager diff",      "shell:git --no-pager diff *",     "shell:git --no-pager diff */*",     "shell:git --no-pager diff */*/*",
-        "shell:git --no-pager log",       "shell:git --no-pager log *",      "shell:git --no-pager log */*",
-        "shell:git --no-pager show",      "shell:git --no-pager show *",     "shell:git --no-pager show */*",
-        "shell:git --no-pager rev-parse", "shell:git --no-pager rev-parse *",
-        "shell:git --no-pager branch",    "shell:git --no-pager branch *",
+    allow_tools = [        "read",
+        // KB-61/57c: complete depth bands for read-only git subcommands,
+        // shell: + bash: forms (copilot names its command tool bash).
+        // No write verbs (add/commit/push/checkout/reset); no wrappers.
+        // KB-55/57: the --no-pager forms the reviewer habitually emits.
+        "shell:git --no-pager status", "shell:git --no-pager status *", "shell:git --no-pager status */**", "shell:git --no-pager status */**/**", "shell:git --no-pager status */**/**/**", "shell:git --no-pager status */**/**/**/**", "shell:git --no-pager status */**/**/**/**/**", "shell:git --no-pager status */**/**/**/**/**/**",
+        "bash:git --no-pager status", "bash:git --no-pager status *", "bash:git --no-pager status */**", "bash:git --no-pager status */**/**", "bash:git --no-pager status */**/**/**", "bash:git --no-pager status */**/**/**/**", "bash:git --no-pager status */**/**/**/**/**", "bash:git --no-pager status */**/**/**/**/**/**",
+        "shell:git --no-pager diff", "shell:git --no-pager diff *", "shell:git --no-pager diff */**", "shell:git --no-pager diff */**/**", "shell:git --no-pager diff */**/**/**", "shell:git --no-pager diff */**/**/**/**", "shell:git --no-pager diff */**/**/**/**/**", "shell:git --no-pager diff */**/**/**/**/**/**",
+        "bash:git --no-pager diff", "bash:git --no-pager diff *", "bash:git --no-pager diff */**", "bash:git --no-pager diff */**/**", "bash:git --no-pager diff */**/**/**", "bash:git --no-pager diff */**/**/**/**", "bash:git --no-pager diff */**/**/**/**/**", "bash:git --no-pager diff */**/**/**/**/**/**",
+        "shell:git --no-pager log", "shell:git --no-pager log *", "shell:git --no-pager log */**", "shell:git --no-pager log */**/**", "shell:git --no-pager log */**/**/**", "shell:git --no-pager log */**/**/**/**", "shell:git --no-pager log */**/**/**/**/**", "shell:git --no-pager log */**/**/**/**/**/**",
+        "bash:git --no-pager log", "bash:git --no-pager log *", "bash:git --no-pager log */**", "bash:git --no-pager log */**/**", "bash:git --no-pager log */**/**/**", "bash:git --no-pager log */**/**/**/**", "bash:git --no-pager log */**/**/**/**/**", "bash:git --no-pager log */**/**/**/**/**/**",
+        "shell:git --no-pager show", "shell:git --no-pager show *", "shell:git --no-pager show */**", "shell:git --no-pager show */**/**", "shell:git --no-pager show */**/**/**", "shell:git --no-pager show */**/**/**/**", "shell:git --no-pager show */**/**/**/**/**", "shell:git --no-pager show */**/**/**/**/**/**",
+        "bash:git --no-pager show", "bash:git --no-pager show *", "bash:git --no-pager show */**", "bash:git --no-pager show */**/**", "bash:git --no-pager show */**/**/**", "bash:git --no-pager show */**/**/**/**", "bash:git --no-pager show */**/**/**/**/**", "bash:git --no-pager show */**/**/**/**/**/**",
+        "shell:git --no-pager rev-parse", "shell:git --no-pager rev-parse *", "shell:git --no-pager rev-parse */**", "shell:git --no-pager rev-parse */**/**", "shell:git --no-pager rev-parse */**/**/**", "shell:git --no-pager rev-parse */**/**/**/**", "shell:git --no-pager rev-parse */**/**/**/**/**", "shell:git --no-pager rev-parse */**/**/**/**/**/**",
+        "bash:git --no-pager rev-parse", "bash:git --no-pager rev-parse *", "bash:git --no-pager rev-parse */**", "bash:git --no-pager rev-parse */**/**", "bash:git --no-pager rev-parse */**/**/**", "bash:git --no-pager rev-parse */**/**/**/**", "bash:git --no-pager rev-parse */**/**/**/**/**", "bash:git --no-pager rev-parse */**/**/**/**/**/**",
+        "shell:git --no-pager branch", "shell:git --no-pager branch *", "shell:git --no-pager branch */**", "shell:git --no-pager branch */**/**", "shell:git --no-pager branch */**/**/**", "shell:git --no-pager branch */**/**/**/**", "shell:git --no-pager branch */**/**/**/**/**", "shell:git --no-pager branch */**/**/**/**/**/**",
+        "bash:git --no-pager branch", "bash:git --no-pager branch *", "bash:git --no-pager branch */**", "bash:git --no-pager branch */**/**", "bash:git --no-pager branch */**/**/**", "bash:git --no-pager branch */**/**/**/**", "bash:git --no-pager branch */**/**/**/**/**", "bash:git --no-pager branch */**/**/**/**/**/**",
+        "shell:git --no-pager ls-remote", "shell:git --no-pager ls-remote *", "shell:git --no-pager ls-remote */**", "shell:git --no-pager ls-remote */**/**", "shell:git --no-pager ls-remote */**/**/**", "shell:git --no-pager ls-remote */**/**/**/**", "shell:git --no-pager ls-remote */**/**/**/**/**", "shell:git --no-pager ls-remote */**/**/**/**/**/**",
+        "bash:git --no-pager ls-remote", "bash:git --no-pager ls-remote *", "bash:git --no-pager ls-remote */**", "bash:git --no-pager ls-remote */**/**", "bash:git --no-pager ls-remote */**/**/**", "bash:git --no-pager ls-remote */**/**/**/**", "bash:git --no-pager ls-remote */**/**/**/**/**", "bash:git --no-pager ls-remote */**/**/**/**/**/**",
+        "shell:git status", "shell:git status *", "shell:git status */**", "shell:git status */**/**", "shell:git status */**/**/**", "shell:git status */**/**/**/**", "shell:git status */**/**/**/**/**", "shell:git status */**/**/**/**/**/**",
+        "shell:git diff", "shell:git diff *", "shell:git diff */**", "shell:git diff */**/**", "shell:git diff */**/**/**", "shell:git diff */**/**/**/**", "shell:git diff */**/**/**/**/**", "shell:git diff */**/**/**/**/**/**",
+        "shell:git log", "shell:git log *", "shell:git log */**", "shell:git log */**/**", "shell:git log */**/**/**", "shell:git log */**/**/**/**", "shell:git log */**/**/**/**/**", "shell:git log */**/**/**/**/**/**",
+        "shell:git show", "shell:git show *", "shell:git show */**", "shell:git show */**/**", "shell:git show */**/**/**", "shell:git show */**/**/**/**", "shell:git show */**/**/**/**/**", "shell:git show */**/**/**/**/**/**",
+        "shell:git rev-parse", "shell:git rev-parse *", "shell:git rev-parse */**", "shell:git rev-parse */**/**", "shell:git rev-parse */**/**/**", "shell:git rev-parse */**/**/**/**", "shell:git rev-parse */**/**/**/**/**", "shell:git rev-parse */**/**/**/**/**/**",
+        "shell:git branch", "shell:git branch *", "shell:git branch */**", "shell:git branch */**/**", "shell:git branch */**/**/**", "shell:git branch */**/**/**/**", "shell:git branch */**/**/**/**/**", "shell:git branch */**/**/**/**/**/**",
+        "shell:git ls-remote", "shell:git ls-remote *", "shell:git ls-remote */**", "shell:git ls-remote */**/**", "shell:git ls-remote */**/**/**", "shell:git ls-remote */**/**/**/**", "shell:git ls-remote */**/**/**/**/**", "shell:git ls-remote */**/**/**/**/**/**",
+        "shell:git remote", "shell:git remote *", "shell:git remote */**", "shell:git remote */**/**", "shell:git remote */**/**/**", "shell:git remote */**/**/**/**", "shell:git remote */**/**/**/**/**", "shell:git remote */**/**/**/**/**/**",
+        "bash:git status", "bash:git status *", "bash:git status */**", "bash:git status */**/**", "bash:git status */**/**/**", "bash:git status */**/**/**/**", "bash:git status */**/**/**/**/**", "bash:git status */**/**/**/**/**/**",
+        "bash:git diff", "bash:git diff *", "bash:git diff */**", "bash:git diff */**/**", "bash:git diff */**/**/**", "bash:git diff */**/**/**/**", "bash:git diff */**/**/**/**/**", "bash:git diff */**/**/**/**/**/**",
+        "bash:git log", "bash:git log *", "bash:git log */**", "bash:git log */**/**", "bash:git log */**/**/**", "bash:git log */**/**/**/**", "bash:git log */**/**/**/**/**", "bash:git log */**/**/**/**/**/**",
+        "bash:git show", "bash:git show *", "bash:git show */**", "bash:git show */**/**", "bash:git show */**/**/**", "bash:git show */**/**/**/**", "bash:git show */**/**/**/**/**", "bash:git show */**/**/**/**/**/**",
+        "bash:git rev-parse", "bash:git rev-parse *", "bash:git rev-parse */**", "bash:git rev-parse */**/**", "bash:git rev-parse */**/**/**", "bash:git rev-parse */**/**/**/**", "bash:git rev-parse */**/**/**/**/**", "bash:git rev-parse */**/**/**/**/**/**",
+        "bash:git branch", "bash:git branch *", "bash:git branch */**", "bash:git branch */**/**", "bash:git branch */**/**/**", "bash:git branch */**/**/**/**", "bash:git branch */**/**/**/**/**", "bash:git branch */**/**/**/**/**/**",
+        "bash:git ls-remote", "bash:git ls-remote *", "bash:git ls-remote */**", "bash:git ls-remote */**/**", "bash:git ls-remote */**/**/**", "bash:git ls-remote */**/**/**/**", "bash:git ls-remote */**/**/**/**/**", "bash:git ls-remote */**/**/**/**/**/**",
+        "bash:git remote", "bash:git remote *", "bash:git remote */**", "bash:git remote */**/**", "bash:git remote */**/**/**", "bash:git remote */**/**/**/**", "bash:git remote */**/**/**/**/**", "bash:git remote */**/**/**/**/**/**",
         // build (the one allowed execution: build once, then run the binary)
-        "shell:make build",
-        "shell:go build",         "shell:go build *",      "shell:go build */*",      "shell:go build */*/*",
-        "shell:go build */*/*/*",
-        // run the built binary against a fixture (bin/build dirs; CWD binaries
-        // built by "go build" land as "./<name>"). Repo scripts like
-        // ./scripts/ci.sh stay denied — only built binaries are runnable.
-        "shell:./bin/*",          "shell:./bin/*/*",       "shell:./bin/*/*/*",
-        "shell:./build/*",        "shell:./build/*/*",     "shell:./build/*/*/*",
+        "shell:make build", "bash:make build",
+        "shell:go build", "shell:go build *", "shell:go build */*", "shell:go build */*/*", "shell:go build */*/*/*", "shell:go build */*/*/*/*",
+        "bash:go build", "bash:go build *", "bash:go build */*", "bash:go build */*/*", "bash:go build */*/*/*", "bash:go build */*/*/*/*",
+        // run the built binary (bin/build dirs) — scripts stay denied
+        "shell:./bin/*", "shell:./bin/*/*", "shell:./bin/*/*/*", "shell:./bin/*/*/*/*",
+        "shell:./build/*", "shell:./build/*/*", "shell:./build/*/*/*", "shell:./build/*/*/*/*",
         "shell:./*",
-        // reads, fixture inspection, log tailing
-        "shell:cat *",            "shell:cat */*",         "shell:cat */*/*",         "shell:cat */*/*/*",
-        "shell:head *",           "shell:head */*",
-        "shell:tail *",           "shell:tail */*",
-        "shell:grep *",           "shell:grep */*",        "shell:grep */*/*",
-        "shell:rg *",             "shell:rg */*",
-        "shell:ls",               "shell:ls *",            "shell:ls */*",
-        "shell:wc *",             "shell:diff *",          "shell:diff */*",
-        "shell:jq *",             "shell:jq */*",
-    //
-    // KB-57: the copilot adapter reports its command tool as "bash", not
-    // "shell" - every shell:-prefixed pattern above can never match a bash-tool
-    // request, so the review step denied every plain read (run 04f87bb8 seq
-    // 704-706, 741-742: plain "git log --oneline -10" denied) and died missing
-    // finalize. Mirror the read-only policy under bash: so the policy matches
-    // the tool kind the copilot adapter actually emits.
-        "bash:git status",
-        "bash:git diff",
-        "bash:git log",
-        "bash:git show",
-        "bash:git rev-parse",
-        "bash:git branch",
-        "bash:git --no-pager status",
-        "bash:git --no-pager diff",
-        "bash:git --no-pager log",
-        "bash:git --no-pager show",
-        "bash:git --no-pager rev-parse",
-        "bash:git --no-pager branch",
-        "bash:make build",
-        "bash:go build",
-        "bash:go build */*/*/*",
-        "bash:./bin/*",
-        "bash:./build/*",
+        "bash:./bin/*", "bash:./bin/*/*", "bash:./bin/*/*/*", "bash:./bin/*/*/*/*",
+        "bash:./build/*", "bash:./build/*/*", "bash:./build/*/*/*", "bash:./build/*/*/*/*",
         "bash:./*",
-        "bash:cat *",
-        "bash:head *",
-        "bash:tail *",
-        "bash:grep *",
-        "bash:rg *",
-        "bash:ls",
-        "bash:wc *",
-        "bash:jq *",
-        "bash:./bin/*/*",
-        "bash:./bin/*/*/*",
-        "bash:./build/*/*",
-        "bash:./build/*/*/*",
-        "bash:cat *",
-        "bash:cat */*",
-        "bash:cat */*/*",
-        "bash:cat */*/*/*",
-        "bash:diff *",
-        "bash:diff */*",
-        "bash:git --no-pager branch *",
-        "bash:git --no-pager diff *",
-        "bash:git --no-pager diff */*",
-        "bash:git --no-pager diff */*/*",
-        "bash:git --no-pager log *",
-        "bash:git --no-pager log */*",
-        "bash:git --no-pager rev-parse *",
-        "bash:git --no-pager show *",
-        "bash:git --no-pager show */*",
-        "bash:git --no-pager status *",
-        "bash:git branch *",
-        "bash:git diff *",
-        "bash:git diff */*",
-        "bash:git diff */*/*",
-        "bash:git log *",
-        "bash:git log */*",
-        "bash:git rev-parse *",
-        "bash:git show *",
-        "bash:git show */*",
-        "bash:git status *",
-        "bash:go build *",
-        "bash:go build */*",
-        "bash:go build */*/*",
-        "bash:grep */*",
-        "bash:grep */*/*",
-        "bash:head */*",
-        "bash:jq */*",
-        "bash:ls *",
-        "bash:ls */*",
-        "bash:tail */*",
-        "bash:rg */*",
-        "bash:rg */*/*",
-    ]
+        // reads, fixture inspection, log tailing
+        "shell:echo", "shell:echo *", "bash:echo", "bash:echo *",
+        "shell:cat", "shell:cat *", "shell:cat */**", "shell:cat */**/**", "shell:cat */**/**/**", "shell:cat */**/**/**/**", "shell:cat */**/**/**/**/**", "shell:cat */**/**/**/**/**/**",
+        "bash:cat", "bash:cat *", "bash:cat */**", "bash:cat */**/**", "bash:cat */**/**/**", "bash:cat */**/**/**/**", "bash:cat */**/**/**/**/**", "bash:cat */**/**/**/**/**/**",
+        "shell:head", "shell:head *", "shell:head */**", "shell:head */**/**", "shell:head */**/**/**", "shell:head */**/**/**/**", "shell:head */**/**/**/**/**", "shell:head */**/**/**/**/**/**",
+        "bash:head", "bash:head *", "bash:head */**", "bash:head */**/**", "bash:head */**/**/**", "bash:head */**/**/**/**", "bash:head */**/**/**/**/**", "bash:head */**/**/**/**/**/**",
+        "shell:tail", "shell:tail *", "shell:tail */**", "shell:tail */**/**", "shell:tail */**/**/**", "shell:tail */**/**/**/**", "shell:tail */**/**/**/**/**", "shell:tail */**/**/**/**/**/**",
+        "bash:tail", "bash:tail *", "bash:tail */**", "bash:tail */**/**", "bash:tail */**/**/**", "bash:tail */**/**/**/**", "bash:tail */**/**/**/**/**", "bash:tail */**/**/**/**/**/**",
+        "shell:grep", "shell:grep *", "shell:grep */**", "shell:grep */**/**", "shell:grep */**/**/**", "shell:grep */**/**/**/**", "shell:grep */**/**/**/**/**", "shell:grep */**/**/**/**/**/**",
+        "bash:grep", "bash:grep *", "bash:grep */**", "bash:grep */**/**", "bash:grep */**/**/**", "bash:grep */**/**/**/**", "bash:grep */**/**/**/**/**", "bash:grep */**/**/**/**/**/**",
+        "shell:rg", "shell:rg *", "shell:rg */**", "shell:rg */**/**", "shell:rg */**/**/**", "shell:rg */**/**/**/**", "shell:rg */**/**/**/**/**", "shell:rg */**/**/**/**/**/**",
+        "bash:rg", "bash:rg *", "bash:rg */**", "bash:rg */**/**", "bash:rg */**/**/**", "bash:rg */**/**/**/**", "bash:rg */**/**/**/**/**", "bash:rg */**/**/**/**/**/**",
+        "shell:ls", "shell:ls *", "shell:ls */**", "shell:ls */**/**", "shell:ls */**/**/**", "shell:ls */**/**/**/**", "shell:ls */**/**/**/**/**", "shell:ls */**/**/**/**/**/**",
+        "bash:ls", "bash:ls *", "bash:ls */**", "bash:ls */**/**", "bash:ls */**/**/**", "bash:ls */**/**/**/**", "bash:ls */**/**/**/**/**", "bash:ls */**/**/**/**/**/**",
+        "shell:wc", "shell:wc *", "shell:wc */**", "shell:wc */**/**", "shell:wc */**/**/**", "shell:wc */**/**/**/**", "shell:wc */**/**/**/**/**", "shell:wc */**/**/**/**/**/**",
+        "bash:wc", "bash:wc *", "bash:wc */**", "bash:wc */**/**", "bash:wc */**/**/**", "bash:wc */**/**/**/**", "bash:wc */**/**/**/**/**", "bash:wc */**/**/**/**/**/**",
+        "shell:diff", "shell:diff *", "shell:diff */**", "shell:diff */**/**", "shell:diff */**/**/**", "shell:diff */**/**/**/**", "shell:diff */**/**/**/**/**", "shell:diff */**/**/**/**/**/**",
+        "bash:diff", "bash:diff *", "bash:diff */**", "bash:diff */**/**", "bash:diff */**/**/**", "bash:diff */**/**/**/**", "bash:diff */**/**/**/**/**", "bash:diff */**/**/**/**/**/**",
+        "shell:jq", "shell:jq *", "shell:jq */**", "shell:jq */**/**", "shell:jq */**/**/**", "shell:jq */**/**/**/**", "shell:jq */**/**/**/**/**", "shell:jq */**/**/**/**/**/**",
+        "bash:jq", "bash:jq *", "bash:jq */**", "bash:jq */**/**", "bash:jq */**/**/**", "bash:jq */**/**/**/**", "bash:jq */**/**/**/**/**", "bash:jq */**/**/**/**/**/**",]
     input {
         prompt = templatefile("./agents/review_developer_update.md.tftpl", {
             reviewer_prompt = data.internal.reviewer_prompt.value

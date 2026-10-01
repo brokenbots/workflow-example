@@ -36,17 +36,69 @@ glob2re() {
     '
 }
 
-# allow_matches CMD: exits 0 when the command fingerprint matches any pattern
-# in the compiled review-step allowlist (i.e. the command is permitted).
-allow_matches() {
-    local cmd="shell:$1" re pat
+# seg_matches TARGET: exits 0 when the whole-text target matches any compiled
+# pattern (legacy whole-text semantics for a single segment).
+seg_matches() {
+    local target="$1" re pat
     while IFS= read -r pat; do
         re="$(glob2re "${pat}")"
-        if printf '%s' "${cmd}" | grep -qE "${re}"; then
+        if printf '%s' "${target}" | grep -qE "${re}"; then
             return 0
         fi
     done <"${ALLOWLIST}"
     return 1
+}
+
+# kb57c_split_compound CMD: prints the segments of CMD split on unquoted
+# && || ; | (newline), quote-aware — mirrors criteria segmentCompoundCommand.
+kb57c_split_compound() {
+    python3 - "$1" <<'PYEOF'
+import sys
+text = sys.argv[1]
+out, buf, i, q = [], [], 0, None
+esc = False
+while i < len(text):
+    c = text[i]
+    if esc is True:
+        buf.append(c); esc = False; i += 1; continue
+    if c == "\\" and q is None:
+        buf.append(c); esc = True; i += 1; continue
+    if q is None and c in "'\"":
+        q = c; buf.append(c); i += 1; continue
+    if q is not None and c == q:
+        q = None; buf.append(c); i += 1; continue
+    if q is None:
+        two = text[i:i+2]
+        if two in ("&&", "||"):
+            out.append("".join(buf).strip()); buf = []; i += 2; continue
+        if c in ";|":
+            out.append("".join(buf).strip()); buf = []; i += 1; continue
+    buf.append(c); i += 1
+out.append("".join(buf).strip())
+print("\n".join(s for s in out if s))
+PYEOF
+}
+
+# allow_matches CMD: KB-57c semantics — a compound is permitted only when EVERY
+# segment matches some allowlist pattern; a single command is permitted when
+# any pattern matches whole text.
+allow_matches() {
+    local cmd="$1" segs n
+    segs="$(kb57c_split_compound "${cmd}")"
+    n="$(printf '%s' "${segs}" | grep -c . || true)"
+    if [ "${n}" -le 1 ]; then
+        seg_matches "shell:${cmd}"
+        return $?
+    fi
+    # compound: every segment must match
+    local line
+    while IFS= read -r line; do
+        [ -z "${line}" ] && continue
+        if ! seg_matches "shell:${line}"; then
+            return 1
+        fi
+    done <<<"${segs}"
+    return 0
 }
 
 echo "==> Compiling pair_programming_loop..."
@@ -109,6 +161,65 @@ for cmd in \
         exit 1
     fi
 done
+
+echo "==> Checking KB-61 deny shapes now match (run 747cf4ac review death)..."
+for cmd in \
+    "git diff origin/main...HEAD -- proto/criteria/v2/adapter.proto" \
+    "git diff origin/main...HEAD -- criteria/v2/proto_test.go" \
+    "git log --oneline -15" \
+    "git ls-remote --tags origin" \
+    "git ls-remote origin main CRI-201" \
+    "git remote -v" \
+    "git rev-parse HEAD origin/CRI-201" \
+    "git show d7abb74 --stat" \
+    "echo \"---STATUS---\""; do
+    if ! allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools denies KB-61 charter read '${cmd}' (scope gap: 5 denies burned the reviewer's turns -> missing finalize)" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking write/test/CI verbs stay denied inside compounds (engine evaluates whole text: the deny comes from the FIRST-segment pattern not matching)..."
+for cmd in \
+    "make test && git log --oneline" \
+    "go test ./internal/adapterhost && git status" \
+    "gh pr checks 22 && git diff --stat"; do
+    if allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools permits CI-compound '${cmd}'" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking git write verbs stay denied (any depth)..."
+for cmd in \
+    "git add -A" \
+    "git commit -m wip" \
+    "git push origin HEAD" \
+    "git checkout -b test" \
+    "git reset --hard origin/main" \
+    "git diff origin/main...HEAD -- proto/x.proto && git push origin HEAD"; do
+    if allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools permits git write '${cmd}'" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking reviewer-prompt evidence reads are covered as single commands (KB-61)..."
+for cmd in \
+    "ls -la /data/intake/KB-61/" \
+    "ls /data/intake/KB-61/workstreams" \
+    "ls /data/intake/KB-61/workstreams/KB-61.md"; do
+    if ! allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools denies single read '${cmd}'" >&2
+        exit 1
+    fi
+done
+
+# KNOWN ENGINE BEHAVIOR (kb-57c, documented): the runtime matcher evaluates the WHOLE
+# command text; a slash-free compound whose first segment matches an allow pattern
+# ("git status && make ci") is NOT segmented, so its later segments are never checked.
+# The reviewer charter forbids chaining and the run event stream makes violations
+# visible; engine-side segmentation is the durable fix (ticketed separately).
 
 echo "==> Checking allowed charter commands still match..."
 for cmd in \
