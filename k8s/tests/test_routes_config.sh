@@ -568,11 +568,11 @@ else:
     if triage_wf.get("type") != "url" or "url" not in triage_wf:
         failures.append("shipped example: linear-triage-url must be a url workflow")
     if not str(triage_wf.get("url", "")).startswith(
-            "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821"):
+            "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3"):
         failures.append("shipped example: linear-triage-url must point at the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery: tree content identical to the 9db68c3 pin)")
     if not FULL_SHA.match(triage_wf.get("ref") or ""):
         failures.append("shipped example: linear-triage-url ref must be a pinned 40-hex commit SHA (D7)")
-    if triage_wf.get("ref") != "91153bc90b8fb48cec215c2a4cbc425dd11b7821":
+    if triage_wf.get("ref") != "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3":
         failures.append("shipped example: linear-triage-url ref must pin the current main commit 91153bc")
     if triage_wf.get("class") != "triage":
         failures.append("shipped example: linear-triage-url must declare class=triage (CRI-242 read-only admission)")
@@ -584,11 +584,11 @@ if not isinstance(develop_wf, dict):
     failures.append("shipped example: workflowLibrary missing the linear-develop-url object")
 else:
     if not str(develop_wf.get("url", "")).startswith(
-            "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=91153bc90b8fb48cec215c2a4cbc425dd11b7821"):
+            "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3"):
         failures.append("shipped example: linear-develop-url must point at the linear_develop_v1 subtree pinned to current main (CRI-311 loop recovery: tree content identical to the 7645feb pin)")
     if not FULL_SHA.match(develop_wf.get("ref") or ""):
         failures.append("shipped example: linear-develop-url ref must be a pinned 40-hex commit SHA (D7)")
-    if develop_wf.get("ref") != "91153bc90b8fb48cec215c2a4cbc425dd11b7821":
+    if develop_wf.get("ref") != "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3":
         failures.append("shipped example: linear-develop-url ref must pin the current main commit 91153bc")
     if "image" in develop_wf:
         failures.append("shipped example: linear-develop-url must be url-only (no process image)")
@@ -642,8 +642,8 @@ else:
 # linear-triage/linear-develop pin assertions so the next subtree change
 # fails here until its re-pin lands in the same change.
 for kb_name, kb_subtree, kb_class, kb_pin in (
-        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "8ba1d1b32c7740d510de79bd15531c4b86a89777"),
-        ("kanboard-develop-url", "kanboard_develop_v1", None, "8ba1d1b32c7740d510de79bd15531c4b86a89777"),
+        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3"),
+        ("kanboard-develop-url", "kanboard_develop_v1", None, "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3"),
 ):
     kb_wf = base[LIB].get(kb_name)
     if not isinstance(kb_wf, dict):
@@ -652,7 +652,7 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
     if not str(kb_wf.get("url", "")).startswith(
             f"git::https://github.com/brokenbots/workflow-example.git//{kb_subtree}?ref={kb_pin}"):
         failures.append(f"shipped example: {kb_name} must point at the {kb_subtree} subtree pinned to"
-                        " the current main commit carrying the #106 getTaskTags fix (KB-11 smoke:"
+                        " the current main HEAD (KB-57c reviewer policy wave; re-pin convention: main HEAD):"
                         " the stale 308315c pin kept the pre-#106 fetch_ticket live)")
     if not FULL_SHA.match(kb_wf.get("ref") or ""):
         failures.append(f"shipped example: {kb_name} ref must be a pinned 40-hex commit SHA (D7)")
