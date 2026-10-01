@@ -44,7 +44,10 @@ const ConditionStallWatchdog = "StallWatchdog"
 // run, no observation error) and only for a run whose phase is still
 // Running; a zero stall window disables it. Castle disabled means no
 // observation, hence an inert watchdog: without the event stream there is
-// no step-progress signal.
+// no step-progress signal. The reconciler additionally spares deliberately
+// idle runs — the run record's paused/stopped operator signals (CRI-208,
+// see castleRunStatusIdle) — where absent progress is the engine's choice,
+// not a wedge.
 func (r *CriteriaRunReconciler) applyStallWatchdog(run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, obs *castle.Observation, logger logr.Logger) bool {
 	if r.StallWindow <= 0 {
 		return false

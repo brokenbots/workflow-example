@@ -39,6 +39,13 @@ var (
 const (
 	// runStatusSucceeded is castle's terminal success status.
 	runStatusSucceeded = "succeeded"
+	// RunStatusPaused and RunStatusStopped are the run-record statuses
+	// carried by an operator pause or stop (CRI-208). They are deliberately
+	// NOT terminal: a paused run waits for its signal, a stopped run waits
+	// to be resumed, and both come back as "running" — the reconciliation
+	// must therefore never derive a completion from them.
+	RunStatusPaused  = "paused"
+	RunStatusStopped = "stopped"
 )
 
 // ErrRunNotFound reports that castle conclusively has no record of the run:
@@ -100,6 +107,16 @@ type Observation struct {
 	// (yet): the controller then stamps its own baseline so the stall
 	// watchdog's clock starts with the first authoritative observation.
 	LastProgress time.Time
+	// RunStatus is the run record's lifecycle status from GetRun (one of
+	// "pending" | "running" | "paused" | "stopped" | "succeeded" | "failed"
+	// | "cancelled"), the carrier of the operator pause/stop signals
+	// (CRI-208). Empty when the record could not be read. Paused and
+	// stopped are reconcile signals, not observations to be trusted as
+	// phases: paused means hold the run's adapter pods in place (the engine
+	// drains them in place and re-provisions nothing), stopped means run
+	// the per-scope teardown, and both may return to "running" — Resume
+	// re-provisions from the provision-event stream alone.
+	RunStatus string
 }
 
 // RunSource is the controller-facing observation surface. *Client implements
@@ -196,18 +213,23 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	// to the record for runs that reached a terminal status without a
 	// terminal envelope, e.g. cancellation). castle run records carry no
 	// final_state column, so no ticket/workflow state comes from here; the
-	// envelope path is the only FinalState source.
+	// envelope path is the only FinalState source. The record's status also
+	// carries the operator pause/stop signals (CRI-208): it is surfaced in
+	// obs.RunStatus whenever the record could be read.
 	resp, err := c.runs.GetRun(ctx, connect.NewRequest(&v1.GetRunRequest{RunId: runID}))
 	if err != nil {
 		if terminal == nil {
 			return nil, fmt.Errorf("getting castle run %s: %w", runID, err)
 		}
 		// Keep the envelope terminal; the record enrichment is best-effort.
-	} else if t := terminalFromRun(resp.Msg); terminal == nil && t != nil {
-		obs.Terminal = t
-	} else if terminal != nil && resp.Msg != nil {
-		if obs.Terminal.PRNumber == "" {
-			obs.Terminal.PRNumber = prNumberFromURL(resp.Msg.GetPrUrl())
+	} else {
+		obs.RunStatus = resp.Msg.GetStatus()
+		if t := terminalFromRun(resp.Msg); terminal == nil && t != nil {
+			obs.Terminal = t
+		} else if terminal != nil && resp.Msg != nil {
+			if obs.Terminal.PRNumber == "" {
+				obs.Terminal.PRNumber = prNumberFromURL(resp.Msg.GetPrUrl())
+			}
 		}
 	}
 
@@ -336,7 +358,8 @@ func (c *Client) findCriteriaID(ctx context.Context, runnerJob string) (string, 
 // can still stamp completion. Discovery that exhausts the page budget with
 // more pages remaining is inconclusive and surfaces as an error: silently
 // reporting "no run" would make the controller converge against an empty
-// history.
+// history. Paused and stopped runs (CRI-208) partition as active here —
+// they are resumable, so a later signal must still discover this run.
 func (c *Client) findRunForCriteria(ctx context.Context, criteriaID string) (*v1.Run, error) {
 	var newestActive, newestTerminal *v1.Run
 	activeRuns := 0
@@ -574,7 +597,8 @@ func isTerminalRunStatus(status string) bool {
 // the run is not terminal. The record contributes only the success/failure
 // verdict (and pr_url, when a producer exists): castle run records carry no
 // final_state column, so FinalState stays empty here and terminal envelopes
-// are the only source for it.
+// are the only source for it. Paused and stopped (CRI-208) are deliberately
+// not terminal — they are operator signals the run comes back from.
 func terminalFromRun(run *v1.Run) *Terminal {
 	if run == nil || !isTerminalRunStatus(run.GetStatus()) {
 		return nil
