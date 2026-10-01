@@ -32,7 +32,7 @@ fail() {
 
 # Pinned criteria main commit built into the image.
 pinned_sha="$(awk -F= '/^ARG CRITERIA_COMMIT=/ {print $2}' "$REPO_ROOT/criteria-base/Dockerfile" | tr -d '[:space:]')"
-[ "$pinned_sha" = "2dbea8934f3918da18114f47e5b5135b6e05229f" ] || \
+[ "$pinned_sha" = "637eb212655fc0cd84d58e7af3a404b2b94b24cd" ] || \
     fail "criteria-base/Dockerfile pins unexpected commit: $pinned_sha"
 pinned_short="${pinned_sha:0:7}"
 

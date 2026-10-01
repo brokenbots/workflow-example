@@ -42,11 +42,20 @@ set -euo pipefail
 # adapter wire v2 untouched (criteria-base builds the engine, not the SDK).
 # Castle ingest is envelope-verbatim (no payload-kind switch) - consumer-safe.
 #
-# Re-audited to 2dbea893 (KB-57c, 2026-10-01, compound permission support):
-# proto delta vs 77b6e0ed is EMPTY - the change is internal/adapterhost policy
-# evaluation only (compound command segmentation in permission matching; no
-# proto, no event contract, no wire change). Castle/operator consumers
-# untouched.
+# Re-audited to 2dbea893 (KB-57c part 1, 2026-10-01, compound permission
+# support): proto delta vs 77b6e0ed is EMPTY - the change is
+# internal/adapterhost policy evaluation only (compound command segmentation
+# in permission matching; no proto, no event contract, no wire change).
+# Castle/operator consumers untouched.
+#
+# Re-audited to 637eb212 (KB-57c parts 2+3, 2026-10-01): proto delta vs
+# 2dbea893 is EMPTY (parts 2+#3 are matcher/override changes in
+# internal/adapterhost: last-decision-wins recovered-denial semantics +
+# slash-permissive trailing-star prefixes; also x/crypto v0.57.0 module-bump
+# chain, osv-clean). This pin MUST pair with the binary stamp at build time:
+# build criteria-base with BOTH CRITERIA_COMMIT=<pin> and
+# CRITERIA_VERSION=<tag of that exact commit> (the 2026-10-01 lesson: a
+# stamp-only bump ships a stale source pin silently).
 #
 # To move off 77b6e0ed, re-audit the emitted adapter event contract, then
 # update AUDITED_COMMIT here and the equality checks in
@@ -61,7 +70,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="2dbea8934f3918da18114f47e5b5135b6e05229f"
+AUDITED_COMMIT="637eb212655fc0cd84d58e7af3a404b2b94b24cd"
 
 fail() {
     echo "FAIL: $1" >&2
