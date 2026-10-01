@@ -358,6 +358,14 @@ step "review" {
         "bash:./bin/*", "bash:./bin/*/*", "bash:./bin/*/*/*", "bash:./bin/*/*/*/*",
         "bash:./build/*", "bash:./build/*/*", "bash:./build/*/*/*", "bash:./build/*/*/*/*",
         "bash:./*",
+        // kb57-wave: evidence-loop reads the reviewer legitimately needs —
+        // denied probes during the CRI-205/206 reviews: find (docs discovery)
+        // and go env (module cache introspection). Suffix-star only: under
+        // the #490 matcher a trailing star is slash-permissive prefix match,
+        // so one entry covers every depth (the per-depth */** bands above are
+        // vestigial and kept only for this wave's stability).
+        "shell:find", "shell:find *", "bash:find", "bash:find *",
+        "shell:go env", "shell:go env *", "bash:go env", "bash:go env *",
         // reads, fixture inspection, log tailing
         "shell:echo", "shell:echo *", "bash:echo", "bash:echo *",
         "shell:cat", "shell:cat *", "shell:cat */**", "shell:cat */**/**", "shell:cat */**/**/**", "shell:cat */**/**/**/**", "shell:cat */**/**/**/**/**", "shell:cat */**/**/**/**/**/**",
