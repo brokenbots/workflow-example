@@ -21,19 +21,25 @@ COMPILE_OUT="$(mktemp)"
 ALLOWLIST="$(mktemp)"
 trap 'rm -f "${COMPILE_OUT}" "${ALLOWLIST}"' EXIT
 
-# glob2re translates a filepath.Match-style pattern (only '*' wildcards are
-# used in the review allowlist) into a POSIX ERE, preserving the engine rule
-# that '*' does not cross '/'. Escapes '.' (the only regex metacharacter the
-# allowlist patterns contain); other metacharacters are not expected here.
+# glob2re translates a policy pattern into a POSIX ERE under the SHIPPED
+# (#490) matcher semantics: a TRAILING bare '*' matches by slash-PERMISSIVE
+# prefix (filepath.Match's '*' cannot cross '/' — that pre-#490 rule broke
+# every slash-bearing segment under per-segment coverage), while interior
+# '*' remain character-level non-slash wildcards against the remainder.
 glob2re() {
-    printf '%s' "$1" | awk '
-        function glob2re(g) {
-            gsub(/\./, "\\.", g)
-            gsub(/\*/, "[^/]*", g)
-            return "^" g "$"
-        }
-        { print glob2re($0) }
-    '
+    case "$1" in
+        *\*)
+            # trailing star: prefix match — escape literals, anchor head only
+            printf '%s' "${1%\*}" | awk '
+                { gsub(/\./, "\\.", $0); gsub(/\*/, "[^/]*", $0); print "^" $0 }
+            '
+            ;;
+        *)
+            printf '%s' "$1" | awk '
+                { gsub(/\./, "\\.", $0); gsub(/\*/, "[^/]*", $0); print "^" $0 "$" }
+            '
+            ;;
+    esac
 }
 
 # seg_matches TARGET: exits 0 when the whole-text target matches any compiled
@@ -175,6 +181,26 @@ for cmd in \
     "echo \"---STATUS---\""; do
     if ! allow_matches "${cmd}"; then
         echo "FAIL: review allow_tools denies KB-61 charter read '${cmd}' (scope gap: 5 denies burned the reviewer's turns -> missing finalize)" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking kb57-wave evidence-loop reads (CRI-205/206 review death run)..."
+for cmd in \
+    "find . -name '*.md' -not -path './.git/*' | head -50" \
+    "find . -name '*.md' -not -path './.git/*'" \
+    "find . -maxdepth 8 -type d" \
+    "go env GOMODCACHE" \
+    "ls /root/go/pkg/mod/github.com/brokenbots/"; do
+    if ! allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools denies evidence-loop read '${cmd}' (denies burned the reviewer's turn -> missing finalize)" >&2
+        exit 1
+    fi
+done
+# 'go' is allowed ONLY as build/env: go test / go vet stay denied
+for cmd in "go test ./..." "go vet ./..."; do
+    if allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools permits non-build go verb '${cmd}'" >&2
         exit 1
     fi
 done
