@@ -626,3 +626,39 @@ func TestObserveRetainsTerminalStateAndResumesCursor(t *testing.T) {
 	assert.Equal(t, uint64(2), server.eventReqs[1].SinceSeq,
 		"post-terminal observation must resume from the retained cursor, not since_seq=0")
 }
+
+// CRI-208: the run record's status is the operator pause/stop carrier. The
+// observation surfaces it verbatim whenever the record could be read, and
+// paused/stopped never derive a terminal — both are states a run returns
+// from ("running" on resume), so no terminal cleanup may fire off them.
+func TestObserveCarriesRunRecordStatus(t *testing.T) {
+	for _, status := range []string{"running", RunStatusPaused, RunStatusStopped} {
+		server := &stubServer{
+			runs: []*v1.Run{{RunId: "run-1", CriteriaId: "crit-42", Status: status}},
+			events: map[string][]*v1.Envelope{
+				"run-1": {provisionEnvelope("run-1", 1, "scope-a", "default")},
+			},
+		}
+		srv := newTestServer(t, server)
+		c := New(Config{Addr: srv.URL}, nil)
+		obs, err := c.Observe(context.Background(), "cri-42", "run-1")
+		require.NoError(t, err)
+		assert.Equal(t, status, obs.RunStatus, "the run record status must reach the observation")
+		assert.Nil(t, obs.Terminal, "run status %q must never derive a terminal", status)
+		srv.Close()
+	}
+}
+
+// The terminal-vocabulary guard behind the CRI-208 signal handling: paused
+// and stopped stay out of isTerminalRunStatus, so terminalFromRun (and with
+// it every terminal-derived cleanup) is unreachable from those records.
+func TestTerminalFromRunExcludesPauseAndStop(t *testing.T) {
+	for _, status := range []string{"pending", "running", RunStatusPaused, RunStatusStopped} {
+		assert.False(t, isTerminalRunStatus(status), "run status %q is not terminal", status)
+		assert.Nil(t, terminalFromRun(&v1.Run{Status: status}), "run status %q must not derive a terminal", status)
+	}
+	for _, status := range []string{runStatusSucceeded, "failed", "cancelled"} {
+		assert.True(t, isTerminalRunStatus(status), "run status %q is terminal", status)
+		assert.NotNil(t, terminalFromRun(&v1.Run{Status: status}), "the terminal record must derive from %q", status)
+	}
+}
