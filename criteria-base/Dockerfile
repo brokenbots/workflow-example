@@ -42,6 +42,20 @@ RUN git -c advice.detachedHead=false checkout --quiet "${CRITERIA_COMMIT}" \
 # must not ship to the cluster at all.
 ARG CRITERIA_VERSION=""
 RUN test -n "${CRITERIA_VERSION}" || { echo "CRITERIA_VERSION is required (the exact criteria release tag, e.g. v0.5.25)"; exit 1; } \
+# STAMP/PIN CORRESPONDENCE (loud build-time assert): CRITERIA_VERSION must be the
+# release tag whose commit IS CRITERIA_COMMIT. A stamp-only bump (tag passed, pin
+# left at the Dockerfile default) ships an image whose binary stamps the new tag
+# while its code is the stale default pin — every engine fix between the two silently
+# missing from the runner while smoke/pin gates stay green. Resolve the tag through
+# the freshly cloned (up-to-date) origin and fail the build on mismatch; a tag that
+# does not exist upstream also fails here instead of producing an ambigously-stamped
+# binary. Requires network at build time (already true for the clone).
+ && tag_commit="$(git ls-remote origin "refs/tags/${CRITERIA_VERSION}" | cut -f1)" \
+ && test -n "$tag_commit" || { echo "CRITERIA_VERSION ${CRITERIA_VERSION}: no such tag on origin — the stamp must name a published criteria release tag"; exit 1; } \
+ && annotated="$(git ls-remote origin "refs/tags/${CRITERIA_VERSION}^{}" | cut -f1)" \
+ && resolved="${annotated:-$tag_commit}" \
+ && test "$resolved" = "${CRITERIA_COMMIT}" \
+   || { echo "STAMP/PIN MISMATCH: tag ${CRITERIA_VERSION} points at ${resolved}, but CRITERIA_COMMIT pins ${CRITERIA_COMMIT}. Pass BOTH build args pointing at the same commit (--build-arg CRITERIA_VERSION=<tag-of-commit> --build-arg CRITERIA_COMMIT=<commit-of-tag>), or re-tag."; exit 1; } \
  && CGO_ENABLED=0 GOARCH="${TARGETARCH}" go build -trimpath \
     -ldflags "-X github.com/brokenbots/criteria/workflow/version.Version=${CRITERIA_VERSION}" \
     -o /out/criteria ./cmd/criteria
