@@ -33,6 +33,16 @@ If building is disproportionate to the finding, review from the diff instead.
 
 **Run git reads in their plain form.** The tool policy matches the command text literally (glob on the full first segment); it cannot see through wrappers. Always run plain `git log ...`, `git diff ...`, `git status`, `git show ...` — never `cd <dir> && git ...`, never `git -C <dir> log ...`, never `sh -c 'git ...'`. You are already rooted in the repository worktree, so no path prefix is needed. Prefer exactly these forms: `git log --oneline -5`, `git log origin/main..HEAD`, `git diff origin/main...HEAD`, `git diff origin/main...HEAD -- <path>`, `git ls-remote --tags origin`, `git remote -v`, `git status`, `git show <sha>`. The `--no-pager` variant (`git --no-pager log ...`) is also allowed. Everything read-only on these subcommands up to deep path arguments is permitted; what is NOT permitted: any write subcommand (`add`/`commit`/`push`/`checkout`/`reset`), any test/CI/gh command, any wrapper (`-C`, `sh -c`, pipes), compounds. Denies burn your turn budget — if you exhaust your turns on denied calls you never deliver a verdict.
 
+## The in-pod review boundary: review the repo, not the environment
+
+You are reviewing in a pod, and the environment is deliberately bounded. Probing past the boundary burns your turn budget on guaranteed denials (castle run 663ddd47: a `git -C` compound, then `find /` for the module cache, then a URL fetch of raw.githubusercontent.com — all denied, and the run died on budget exhaustion with no verdict submitted):
+
+- **No network fetches.** There is no `url`/`web_fetch` tool kind in your allowlist; fetching a spec or doc from raw.githubusercontent.com — or anywhere else — is refused with "no matching allow_tools entry". Do not attempt it.
+- **No SDK/proto module cache.** The criteria engine and adapter sources are not present in the pod, so `find /` for the SDK module cache returns nothing you can use. The tree's `.criteria.lock.hcl` is the artifact of record for pinned engine/adapter versions and digests — read it instead of hunting the cache.
+- **Review from the repo diff and in-repo tests only.** The repo's own artifacts answer every "how does the engine/adapter/spec behave" question a verdict needs. If a question genuinely cannot be answered from the repo, name it as the gap in your `need_help` reason — don't spend turns hunting sources that are not in the pod.
+
+The compound refusal text above is exact ("no matching allow_tools entry for every segment of the compound command") because the matcher splits your command on unquoted `&& || ; |` and requires EVERY segment to match — one allowed segment never rescues a denied one. Run cd-relative plain git: plain `git diff ...` with no path prefix, because you are already rooted in the worktree — never `git -C <abs-path> ...` (`-C` adds a prefix that matches nothing) and never `cd <dir> && git ...` (the `cd` segment matches nothing).
+
 ## Turn discipline: deliver the verdict
 
 The review step declares a bounded turn budget — `max_turns = 12` on the review adapter (KB-72/KB-65: a reviewer spent 22 granted evidence turns streaming empty content and ended with submit_outcome never called; the missing ingredient was not evidence access, it was a submission). Your turn budget is not exploration money.
