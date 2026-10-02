@@ -325,8 +325,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// watchdog runs only on an authoritative observation; when it fires the
 	// run is failed (child Jobs + per-scope adapter pods deleted, phase and
 	// condition stamped, queue released) and this pass returns instead of
-	// continuing into the normal convergence below.
-	if obsErr == nil && obs.RunID != "" && r.applyStallWatchdog(&run, update, obs, logger) {
+	// continuing into the normal convergence below. It is spared for
+	// pausing and stopping runs (CRI-208, castleRunStatusIdle): absent step
+	// progress is the engine's deliberate choice there, and failing the run
+	// would tear down exactly the pods pause must hold.
+	if obsErr == nil && obs.RunID != "" && !castleRunStatusIdle(obs.RunStatus) && r.applyStallWatchdog(&run, update, obs, logger) {
 		return r.failRunStalled(ctx, &run, update, logger)
 	}
 
@@ -339,17 +342,53 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	phase := update.Status.Phase
 
-	// Reconcile per-scope adapter pods from the castle event stream. Only an
-	// authoritative observation (a known castle run, no observation error)
-	// may drive desired state; an unregistered run, a failed observation, or
-	// a disabled source is skipped so live pods are never deleted off an
-	// empty history.
+	// CRI-208 operator signal table — actuation only, never the state path.
+	// The signals ride the castle run record's status (obs.RunStatus, the
+	// same read the terminal derivation uses; nothing is read from state
+	// blobs or the PVC, and nothing is published back):
+	//
+	//   record status      operator actuation
+	//   -------------      ---------------------------------------------------
+	//   paused             hold: per-scope adapter pods are left RUNNING in
+	//                      place (no teardown, no restart — the engine drains
+	//                      the adapters in place), whatever the provision
+	//                      stream says. Castle run id / phase stamping is the
+	//                      only state carried; no pause phase is introduced,
+	//                      so operator-side state never grows.
+	//   stopped            teardown per scope via the EXISTING path
+	//                      (deleteRunAdapterPods) — child Jobs are untouched,
+	//                      the runner is the engine's to manage.
+	//   running            converge from the EXISTING provision-event stream:
+	//                      on resume the engine re-emits provision_wanted from
+	//                      its stored scope state and the reconcile below
+	//                      re-provisions off that stream — no operator-side
+	//                      state reconstruction, no transition detection.
+	//   anything else      unchanged: converge from the provision-event
+	//                      stream (terminal statuses keep the terminal path).
+	//
+	// Paused and stopped are deliberately not terminal: both are run-record
+	// states a run returns from (isTerminalRunStatus/terminalFromRun never
+	// succeed off them), so no terminal cleanup fires on these passes. Hold
+	// and teardown passes keep polling at perScopeRequeueInterval via the
+	// non-terminal phase requeue below, so a later "running" status is
+	// honored on the next pass.
 	activeAdapters := 0
 	if obsErr == nil && obs.RunID != "" {
-		var err error
-		activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
-		if err != nil {
-			return ctrl.Result{}, err
+		switch {
+		case run.Spec.PerScopeSessions && obs.RunStatus == castle.RunStatusPaused:
+			logger.Info("run paused; holding per-scope adapter pods in place (no teardown, no restart)",
+				"run", run.Name)
+		case run.Spec.PerScopeSessions && obs.RunStatus == castle.RunStatusStopped:
+			logger.Info("run stopped; running per-scope teardown", "run", run.Name)
+			if err := r.deleteRunAdapterPods(ctx, &run, logger); err != nil {
+				return ctrl.Result{}, err
+			}
+		default:
+			var err error
+			activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	} else if obsErr == nil && run.Spec.PerScopeSessions {
 		if obs.RunID == "" && (r.Castle == nil || r.Castle.Disabled()) {
@@ -397,6 +436,16 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func isTerminalPhase(phase criteriav1.CriteriaRunPhase) bool {
 	return phase == criteriav1.PhaseSucceeded || phase == criteriav1.PhaseFailed
+}
+
+// castleRunStatusIdle reports whether the castle run record's status marks
+// the run deliberately idle — an operator pause ("paused") or stop
+// ("stopped"), CRI-208. Such a run emits no step progress by design, so the
+// stall watchdog (KB-24) must not read that absence as a wedge: failing the
+// run would tear down exactly the pods pause must hold and kill runner Jobs
+// a later resume is expected to reattach to.
+func castleRunStatusIdle(status string) bool {
+	return status == castle.RunStatusPaused || status == castle.RunStatusStopped
 }
 
 // singleActiveTicketRun returns the name of the live CriteriaRun blocking
