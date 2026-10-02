@@ -642,7 +642,7 @@ else:
 # linear-triage/linear-develop pin assertions so the next subtree change
 # fails here until its re-pin lands in the same change.
 for kb_name, kb_subtree, kb_class, kb_pin in (
-        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "b3b258610d1b1c268c4d9c3784473ccdf4947110"),
+        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "ae84b1f6de20b276a72b7fe0c8161e34635ab329"),
         ("kanboard-develop-url", "kanboard_develop_v1", None, "21bd36d7a39dabc20e2fbdffb889be4a6ced64d7"),
 ):
     kb_wf = base[LIB].get(kb_name)
