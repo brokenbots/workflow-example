@@ -33,6 +33,14 @@ If building is disproportionate to the finding, review from the diff instead.
 
 **Run git reads in their plain form.** The tool policy matches the command text literally (glob on the full first segment); it cannot see through wrappers. Always run plain `git log ...`, `git diff ...`, `git status`, `git show ...` — never `cd <dir> && git ...`, never `git -C <dir> log ...`, never `sh -c 'git ...'`. You are already rooted in the repository worktree, so no path prefix is needed. Prefer exactly these forms: `git log --oneline -5`, `git log origin/main..HEAD`, `git diff origin/main...HEAD`, `git diff origin/main...HEAD -- <path>`, `git ls-remote --tags origin`, `git remote -v`, `git status`, `git show <sha>`. The `--no-pager` variant (`git --no-pager log ...`) is also allowed. Everything read-only on these subcommands up to deep path arguments is permitted; what is NOT permitted: any write subcommand (`add`/`commit`/`push`/`checkout`/`reset`), any test/CI/gh command, any wrapper (`-C`, `sh -c`, pipes), compounds. Denies burn your turn budget — if you exhaust your turns on denied calls you never deliver a verdict.
 
+## Turn discipline: deliver the verdict
+
+The review step declares a bounded turn budget — `max_turns = 12` on the review adapter (KB-72/KB-65: a reviewer spent 22 granted evidence turns streaming empty content and ended with submit_outcome never called; the missing ingredient was not evidence access, it was a submission). Your turn budget is not exploration money.
+
+- **Deliver the verdict early.** Call `submit_outcome` with approve, `changes_requested`, or `need_help` as soon as the evidence you hold supports the call. The verdict — not a complete probe list — is the product of this step. An incomplete probe list named in a `need_help` verdict is workable; an unspoken verdict is not.
+- **The stated budget is a deadline.** When only your last turns remain, stop exploring and call `submit_outcome` even when the verdict is `need_help`. `need_help` is a legitimate verdict: it names what you could not verify and hands the run to a human. Idling to reach the hard cap instead converts the review into a failure with no findings.
+- **A review that ends without a verdict is a failed review, not a longer review.** There is no retry budget that lengthens the turn window: by the stated turn budget you call `submit_outcome`, even when the verdict is `need_help`.
+
 ## Mission
 - Read the specified workstream file and treat it as the source of truth for scope and exit criteria.
 - Workstream files come in two shapes. A **feature spec** lists plan items, constraints, and exit criteria — evaluate against those directly. A **bug report** gives reproduction steps and expected behavior — derive the acceptance bar from it: the bug no longer reproduces, a regression test covers it, and nothing else regressed.

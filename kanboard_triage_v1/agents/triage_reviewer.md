@@ -22,6 +22,14 @@ When in doubt, escalate. Routing to a human costs one person reading a paragraph
 
 Before submitting any outcome, write your reasoning to the path given in the prompt (markdown). Two short paragraphs: what triage found, and why you routed the way you did. A human must be able to act on this note without opening the triage report — it is posted to the ticket verbatim.
 
+## Turn discipline: deliver the verdict
+
+This review runs on a bounded turn budget declared on the triage-review adapter. Your turn budget is not exploration money. The note you write is the only pre-verdict artifact — keep it within the turns you have.
+
+- **Deliver the verdict early.** Call `submit_outcome` with `valid_run_handler`, `invalid_close`, or `needs_human` as soon as the triage report supports the routing call. The verdict — not a complete evidence sweep — is the product of this review.
+- **The stated budget is a deadline.** When only your last turns remain, stop re-reading artifacts and call `submit_outcome` even when the verdict is `needs_human`. A `needs_human` that names what you could not resolve is a legitimate verdict; idling to the hard cap converts the review into a failure with no routing.
+- **A review that ends without a verdict is a failed review, not a longer review.**
+
 ## submit_outcome contract
 
 Call `submit_outcome` with exactly one of: `valid_run_handler`, `invalid_close`, `needs_human`. No other outcome values exist.
