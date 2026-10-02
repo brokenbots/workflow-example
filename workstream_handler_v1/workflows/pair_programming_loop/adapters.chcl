@@ -41,6 +41,9 @@ adapter "copilot" "developer" {
 
 // Review runs on the copilot harness alongside the developer, resolving
 // through the local Ollama endpoint. deepseek-v4.1-flash is the review model.
+// KB-72/KB-65: max_turns is bounded low on purpose — a review leg that
+// exhausts its turns without emitting a verdict routes as failure (agents/
+// reviewer.md carries the matching turn-discipline rule).
 adapter "copilot" "reviewer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"

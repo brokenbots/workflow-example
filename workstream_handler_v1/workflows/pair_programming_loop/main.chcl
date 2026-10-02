@@ -294,6 +294,14 @@ step "ci_gate" {
 step "review" {
     target     = adapter.copilot.reviewer
     max_visits = var.max_agent_visits
+    // KB-72/KB-65: the review adapter declares a bounded turn budget
+    // (var.reviewer.max_turns = 12) — on the cap the adapter exits through
+    // its failure semantics, which route below (need_help/failure/default
+    // -> state.failed), so an unconcluded review parks the run for a human
+    // instead of looping. agents/reviewer.md carries the matching rule:
+    // deliver the verdict inside the budget; by the stated turn budget call
+    // submit_outcome even when the verdict is need_help; a review that ends
+    // without a verdict is a failed review, not a longer review.
     // CRI-275: same turn ceiling as the develop step — a wedged reviewer turn
     // (provider request that never answers) would otherwise hang the run
     // forever. On timeout the step produces no verdict, which falls through

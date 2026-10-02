@@ -100,7 +100,13 @@ variable "developer" {
 variable "reviewer" {
     type = object({
         model            = string
-        max_turns        = optional(number, 30)
+        // KB-72/KB-65 diagnosis: the review leg died with 22 granted
+        // evidence-call turns streaming empty content and never a verdict
+        // (turn.finalize_exhausted). 30 turns is exploration money for a
+        // judge; the review budget is bounded (12-15 per KB-71) so the
+        // adapter's failure routing fires instead. agents/reviewer.md
+        // carries a turn-discipline rule stating this same number.
+        max_turns        = optional(number, 12)
         reasoning_effort = optional(string, "")
         provider = optional(object({
             base_url = optional(string, "")
@@ -110,8 +116,10 @@ variable "reviewer" {
     })
 
     default = {
-        model     = "deepseek-v4.1-flash:cloud"
-        max_turns = 30
+        model = "deepseek-v4.1-flash:cloud"
+        // Bounded per the comment on the type above; must stay in sync with
+        // the turn-discipline rule's stated number in agents/reviewer.md.
+        max_turns = 12
         provider = {
             base_url = "http://localhost:11434/v1"
             wire_api = "responses"
