@@ -82,7 +82,7 @@ function flush() {
         c = substr($0, i, 1)
         if (esc)                  { buf = buf c; esc = 0; i++; continue }
         if (q == "" && c == "\\") { buf = buf c; esc = 1; i++; continue }
-        if (q == "" && (c == "\"" || c == "\x27")) { q = c; buf = buf c; i++; continue }
+        if (q == "" && (c == "\"" || c == "\047")) { q = c; buf = buf c; i++; continue }
         if (q != "" && c == q)    { q = ""; buf = buf c; i++; continue }
         if (q == "") {
             pair = substr($0, i, 2)
