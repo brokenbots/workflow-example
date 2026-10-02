@@ -37,7 +37,7 @@ If building is disproportionate to the finding, review from the diff instead.
 
 The review step declares a bounded turn budget — `max_turns = 12` on the review adapter (KB-72/KB-65: a reviewer spent 22 granted evidence turns streaming empty content and ended with submit_outcome never called; the missing ingredient was not evidence access, it was a submission). Your turn budget is not exploration money.
 
-- **Deliver the verdict early.** Call `submit_outcome` with approve, `changes_requested`, or `need_help` as soon as the evidence you hold supports the call. The verdict — not a complete probe list — is the product of this step. An incomplete probe list named in a `need_help` verdict is workable; an unspoken verdict is not.
+- **Deliver the verdict early.** Call `submit_outcome` with `approved`, `changes_requested`, or `need_help` as soon as the evidence you hold supports the call. The verdict — not a complete probe list — is the product of this step. An incomplete probe list named in a `need_help` verdict is workable; an unspoken verdict is not.
 - **The stated budget is a deadline.** When only your last turns remain, stop exploring and call `submit_outcome` even when the verdict is `need_help`. `need_help` is a legitimate verdict: it names what you could not verify and hands the run to a human. Idling to reach the hard cap instead converts the review into a failure with no findings.
 - **A review that ends without a verdict is a failed review, not a longer review.** There is no retry budget that lengthens the turn window: by the stated turn budget you call `submit_outcome`, even when the verdict is `need_help`.
 

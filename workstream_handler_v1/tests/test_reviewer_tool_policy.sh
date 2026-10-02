@@ -353,6 +353,8 @@ REVIEWER_MD="${HANDLER_DIR}/workflows/pair_programming_loop/agents/reviewer.md"
 grep -q "Turn discipline: deliver the verdict" "${REVIEWER_MD}"
 grep -qF "max_turns = ${REVIEWER_BUDGET}" "${REVIEWER_MD}"
 grep -qF "even when the verdict is \`need_help\`" "${REVIEWER_MD}"
+grep -qF 'Call `submit_outcome` with `approved`, `changes_requested`, or `need_help`' "${REVIEWER_MD}"
+if grep -qF 'with approve,' "${REVIEWER_MD}"; then echo "FAIL: reviewer.md names an invalid outcome token 'approve' (pair-loop step declares 'approved')" >&2; exit 1; fi
 grep -qF "A review that ends without a verdict is a failed review, not a longer review." "${REVIEWER_MD}"
 
 echo "==> Checking KB-72: ported review charters carry the turn-discipline rule..."
