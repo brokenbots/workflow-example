@@ -57,32 +57,42 @@ seg_matches() {
 
 # kb57c_split_compound CMD: prints the segments of CMD split on unquoted
 # && || ; | (newline), quote-aware — mirrors criteria segmentCompoundCommand.
+# awk port of the original python3 implementation: CI runners ship python3,
+# but minimal review/dev pods (Alpine, unprivileged) do not, and the helper
+# otherwise silently degrades to whole-text matching, which makes compound
+# negatives false-positive as permitted. Algorithm is identical to the
+# python source (backslash escape outside quotes only, quote chars carried
+# into the segment, empty segments dropped); commands are treated as one
+# line, matching every caller in this suite.
 kb57c_split_compound() {
-    python3 - "$1" <<'PYEOF'
-import sys
-text = sys.argv[1]
-out, buf, i, q = [], [], 0, None
-esc = False
-while i < len(text):
-    c = text[i]
-    if esc is True:
-        buf.append(c); esc = False; i += 1; continue
-    if c == "\\" and q is None:
-        buf.append(c); esc = True; i += 1; continue
-    if q is None and c in "'\"":
-        q = c; buf.append(c); i += 1; continue
-    if q is not None and c == q:
-        q = None; buf.append(c); i += 1; continue
-    if q is None:
-        two = text[i:i+2]
-        if two in ("&&", "||"):
-            out.append("".join(buf).strip()); buf = []; i += 2; continue
-        if c in ";|":
-            out.append("".join(buf).strip()); buf = []; i += 1; continue
-    buf.append(c); i += 1
-out.append("".join(buf).strip())
-print("\n".join(s for s in out if s))
-PYEOF
+    local cmd="$1"
+    printf '%s\n' "${cmd}" | awk '
+function flush() {
+    gsub(/^[ \t]+|[ \t]+$/, "", buf)
+    if (buf != "") print buf
+    buf = ""
+}
+{
+    n = length($0)
+    q = ""
+    esc = 0
+    buf = ""
+    i = 1
+    while (i <= n) {
+        c = substr($0, i, 1)
+        if (esc)                  { buf = buf c; esc = 0; i++; continue }
+        if (q == "" && c == "\\") { buf = buf c; esc = 1; i++; continue }
+        if (q == "" && (c == "\"" || c == "\x27")) { q = c; buf = buf c; i++; continue }
+        if (q != "" && c == q)    { q = ""; buf = buf c; i++; continue }
+        if (q == "") {
+            pair = substr($0, i, 2)
+            if (pair == "&&" || pair == "||") { flush(); i += 2; continue }
+            if (c == ";" || c == "|")         { flush(); i++; continue }
+        }
+        buf = buf c; i++
+    }
+    flush()
+}'
 }
 
 # allow_matches CMD: KB-57c semantics — a compound is permitted only when EVERY
@@ -201,6 +211,32 @@ done
 for cmd in "go test ./..." "go vet ./..."; do
     if allow_matches "${cmd}"; then
         echo "FAIL: review allow_tools permits non-build go verb '${cmd}'" >&2
+        exit 1
+    fi
+done
+
+# KB-74 (castle run 663ddd47 review-leg detour): the reviewer runs in a pod
+# with no reachable network surface, and the charter now says so. Durable
+# confirmation, fix direction 2: the deny-first allowlist must keep refusing
+# url/web_fetch kinds and fetch verbs — a later grant would make the charter
+# lie, so this also guards the boundary text and the gate from drifting
+# apart. Kinds live as bare entries in the compiled allowlist.
+for kind in 'url' 'web_fetch'; do
+    if grep -qxF "${kind}" "${ALLOWLIST}"; then
+        echo "FAIL: review allow_tools grants URL tool kind '${kind}' (KB-74 in-pod boundary: no network fetches)" >&2
+        exit 1
+    fi
+done
+if grep -qE 'curl|wget' "${ALLOWLIST}"; then
+    echo "FAIL: review allow_tools contains a network-fetch verb entry (KB-74 in-pod boundary: review from the repo only)" >&2
+    exit 1
+fi
+for cmd in \
+    "curl -fsSL https://raw.githubusercontent.com/brokenbots/criteria/main/README.md" \
+    "wget -qO- https://raw.githubusercontent.com/brokenbots/criteria/main/README.md" \
+    "git ls-remote origin main && curl -s https://raw.githubusercontent.com/brokenbots/criteria/main/README.md"; do
+    if allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools permits network fetch '${cmd}' (KB-74: the last review death spent its budget on a denied URL fetch)" >&2
         exit 1
     fi
 done
@@ -378,5 +414,34 @@ if grep -q "unbounded" "${HANDLER_DIR}/workflows/pr_reviewer_loop/agents/pr_revi
     echo "FAIL: pr_reviewer.md claims an unbounded review budget (KB-72)" >&2
     exit 1
 fi
+
+echo "==> Checking KB-74: reviewer charter carries the in-pod review boundary..."
+# KB-74 (castle run 663ddd47): the review leg spent its budget on
+# environment discovery — a git -C compound, find / for the absent SDK
+# module cache, then a denied URL fetch — because the charter never named
+# the boundary. The boundary section must name each unreachable surface,
+# the in-repo alternative (the lock file), and the exact compound refusal,
+# WITHOUT weakening the #125 deny-storm hard rule (asserted below).
+grep -qF "## The in-pod review boundary: review the repo, not the environment" "${REVIEWER_MD}"
+grep -qF "You are reviewing in a pod, and the environment is deliberately bounded" "${REVIEWER_MD}"
+grep -qF "no \`url\`/\`web_fetch\` tool kind in your allowlist" "${REVIEWER_MD}"
+grep -qF 'fetching a spec or doc from raw.githubusercontent.com' "${REVIEWER_MD}"
+grep -qF "**No SDK/proto module cache.**" "${REVIEWER_MD}"
+grep -qF "\`.criteria.lock.hcl\` is the artifact of record" "${REVIEWER_MD}"
+grep -qF "Review from the repo diff and in-repo tests only." "${REVIEWER_MD}"
+grep -qF "name it as the gap in your \`need_help\` reason" "${REVIEWER_MD}"
+grep -qF "no matching allow_tools entry for every segment of the compound command" "${REVIEWER_MD}"
+grep -qF "Run cd-relative plain git" "${REVIEWER_MD}"
+grep -qF "never \`git -C <abs-path>" "${REVIEWER_MD}"
+# No regression of the #125 deny-storm rule, and no instruction that turns
+# a denied surface back into something the reviewer should try.
+grep -qF "Do not chain commands" "${REVIEWER_MD}"
+grep -qF "This is a hard rule, not a style preference." "${REVIEWER_MD}"
+for bad in "run curl" "use curl" "curl -fsSL" "wget -qO-" "use web_fetch"; do
+    if grep -qF "${bad}" "${REVIEWER_MD}"; then
+        echo "FAIL: reviewer.md appears to instruct a network fetch: '${bad}' (KB-74 in-pod boundary: no network fetches)" >&2
+        exit 1
+    fi
+done
 
 echo "==> All checks passed."
