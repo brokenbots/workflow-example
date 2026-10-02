@@ -26,7 +26,7 @@ curl -sS -f \
         --arg m 'createComment' \
         --arg task_id "$task_id" \
         --arg body "$body" \
-        '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body}}')" \
+        '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body},id:1}')" \
     "$KANBOARD_URL" \
     | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
 
