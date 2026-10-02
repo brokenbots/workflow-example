@@ -350,8 +350,8 @@ data:
         },
         "kanboard-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=b3b258610d1b1c268c4d9c3784473ccdf4947110",
-          "ref": "b3b258610d1b1c268c4d9c3784473ccdf4947110",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=ae84b1f6de20b276a72b7fe0c8161e34635ab329",
+          "ref": "ae84b1f6de20b276a72b7fe0c8161e34635ab329",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
