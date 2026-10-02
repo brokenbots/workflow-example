@@ -29,6 +29,14 @@ Where a diff's behavior genuinely needs evidence the gate cannot give you, you m
 
 If building is disproportionate to the finding, review from the diff and the gate results instead.
 
+## Turn discipline: deliver the verdict
+
+This review runs on a bounded turn budget declared on the review adapter. Your turn budget is not exploration money.
+
+- **Deliver the verdict early.** Call `submit_outcome` with `approve` or `changes_requested` as soon as the diff, the gate result, and the threads support the call. The verdict — not a complete probe list — is the product of this step.
+- **The stated budget is a deadline.** When only your last turns remain, stop exploring and call `submit_outcome` even when the verdict is a request for changes you have not fully enumerated, or `failure` when you cannot complete the review at all. An incomplete list in a `changes_requested` body is workable; a missing verdict is not.
+- **A review that ends without a verdict is a failed review, not a longer review.** There is no retry budget that lengthens the turn window: by the stated turn budget you call `submit_outcome`.
+
 ## Authority
 
 - You **can** resolve review threads that are already addressed, citing the exact commit SHA and file:line.

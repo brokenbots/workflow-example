@@ -318,4 +318,65 @@ if grep -q "pre-authorized" "${HANDLER_DIR}/workflows/pair_programming_loop/agen
     exit 1
 fi
 
+echo "==> Checking KB-72: pair-loop reviewer adapter declares a bounded max_turns..."
+# Compile-level: the reviewer adapter must wire the max_turns knob at all
+# (compiled output carries adapter config key NAMES, not values).
+jq -e '.adapters[] | select(.name == "reviewer") | (.config_keys // []) | index("max_turns") != null' "${COMPILE_OUT}" >/dev/null
+
+# Value-level, from the variables source: pin the KB-71 bounded range,
+# reject the pre-KB-72 unbounded 30 default, and keep the stated budget in
+# the agents/reviewer.md turn-discipline rule in sync with the declared
+# number (the charter states the same number the adapter enforces).
+REVIEWER_BUDGET="$(awk '
+    /^variable "reviewer"/ { in_reviewer = 1 }
+    in_reviewer && /^}$/   { in_reviewer = 0; in_default = 0 }
+    in_reviewer && /^    default = \{/ { in_default = 1 }
+    in_reviewer && in_default && /^[[:space:]]*max_turns[[:space:]]*=/ {
+        sub(/^[[:space:]]*max_turns[[:space:]]*=[[:space:]]*/, "");
+        sub(/[^0-9].*$/, "");
+        print;
+        exit;
+    }
+' "${PAIR_DIR}/variables.chcl")"
+if [ -z "${REVIEWER_BUDGET}" ]; then
+    echo "FAIL: pair_programming_loop variables.chcl reviewer default carries no max_turns value (KB-72 turn budget)" >&2
+    exit 1
+fi
+if [ "${REVIEWER_BUDGET}" -lt 12 ] || [ "${REVIEWER_BUDGET}" -gt 15 ]; then
+    echo "FAIL: reviewer max_turns = ${REVIEWER_BUDGET}, outside the KB-71 bounded 12-15 review budget" >&2
+    exit 1
+fi
+echo "   reviewer turn budget: ${REVIEWER_BUDGET} turns (bounded)"
+
+echo "==> Checking KB-72: reviewer charter carries the turn-discipline rule with the stated budget..."
+REVIEWER_MD="${HANDLER_DIR}/workflows/pair_programming_loop/agents/reviewer.md"
+grep -q "Turn discipline: deliver the verdict" "${REVIEWER_MD}"
+grep -qF "max_turns = ${REVIEWER_BUDGET}" "${REVIEWER_MD}"
+grep -qF "even when the verdict is \`need_help\`" "${REVIEWER_MD}"
+grep -qF 'Call `submit_outcome` with `approved`, `changes_requested`, or `need_help`' "${REVIEWER_MD}"
+if grep -qF 'with approve,' "${REVIEWER_MD}"; then echo "FAIL: reviewer.md names an invalid outcome token 'approve' (pair-loop step declares 'approved')" >&2; exit 1; fi
+grep -qF "A review that ends without a verdict is a failed review, not a longer review." "${REVIEWER_MD}"
+
+echo "==> Checking KB-72: ported review charters carry the turn-discipline rule..."
+for ported_md in \
+    "${HANDLER_DIR}/workflows/pr_reviewer_loop/agents/pr_reviewer.md" \
+    "${SCRIPT_DIR}/../../linear_triage_v1/agents/triage_reviewer.md" \
+    "${SCRIPT_DIR}/../../linear_intake_v1/agents/triage_reviewer.md" \
+    "${SCRIPT_DIR}/../../kanboard_triage_v1/agents/triage_reviewer.md"; do
+    grep -q "Turn discipline: deliver the verdict" "${ported_md}" || {
+        echo "FAIL: ${ported_md} lacks the KB-72 turn-discipline rule" >&2
+        exit 1
+    }
+    grep -qF "A review that ends without a verdict is a failed review, not a longer review." "${ported_md}" || {
+        echo "FAIL: ${ported_md} lacks the no-verdict-is-failed-review rule (KB-72)" >&2
+        exit 1
+    }
+done
+# pr_reviewer keeps a bounded budget too: its charter must not claim an
+# unbounded turn window or instruct ignoring the cap.
+if grep -q "unbounded" "${HANDLER_DIR}/workflows/pr_reviewer_loop/agents/pr_reviewer.md"; then
+    echo "FAIL: pr_reviewer.md claims an unbounded review budget (KB-72)" >&2
+    exit 1
+fi
+
 echo "==> All checks passed."
