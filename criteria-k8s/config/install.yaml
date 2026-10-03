@@ -232,6 +232,27 @@ spec:
                     ref:
                       type: string
                       description: Operator-declared expected pin for fetched content (CRI-226).
+                configRef:
+                  type: object
+                  description: >-
+                    Per-repo config ConfigMap pin (KB-103): the watcher
+                    resolves the run's config from the routes configLibrary
+                    and pins the ConfigMap name plus the resourceVersion
+                    observed at stamping time. The operator renders the
+                    run's build/test/ci-gate commands from it (ConfigMap
+                    values outrank the spec fields) and re-verifies the pin
+                    on every reconcile pass: a ConfigMap replaced under an
+                    admitted run fails it with a ConfigRenderDrift
+                    condition (the workflowSource ref-pin symmetry, CRI-226).
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: ConfigMap name (a configLibrary entry name in routes).
+                    resourceVersion:
+                      type: string
+                      description: ResourceVersion observed at stamping time; a later mismatch fails closed.
             status:
               type: object
               properties:
@@ -255,6 +276,31 @@ spec:
                     operator's currently resolved runner image fails the run
                     fast with a BaseImageMismatch condition instead of
                     replaying a stale image through backoff.
+                configRender:
+                  type: object
+                  description: >-
+                    The config the run executes on (KB-103): the
+                    admission-time render of the pinned config ConfigMap
+                    (or the spec fields alone when it does not exist).
+                    Rendered once and never re-derived — config
+                    provenance, like status.baseImage; ConfigMap patches
+                    never switch an in-flight run.
+                  properties:
+                    configMap:
+                      type: string
+                      description: Pinned ConfigMap name; empty when no configRef or it was absent at admission.
+                    resourceVersion:
+                      type: string
+                      description: ConfigMap resourceVersion observed at render time.
+                    buildCmd:
+                      type: string
+                      description: Rendered build command (ConfigMap value outranking the spec field).
+                    testCmd:
+                      type: string
+                      description: Rendered test command.
+                    ciGateCmd:
+                      type: string
+                      description: Rendered CI gate command.
                 ticketState:
                   type: string
                   description: >-
