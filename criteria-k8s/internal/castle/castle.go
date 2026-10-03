@@ -18,8 +18,8 @@ import (
 
 	connect "connectrpc.com/connect"
 
-	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
-	v1connect "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1/criteriav1connect"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
+	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"time"
 )
@@ -77,12 +77,6 @@ type Terminal struct {
 	// carry no final_state column (mapRun never sets it), so on the record
 	// path this stays empty.
 	FinalState string
-	// PRNumber is the pull request number parsed from the castle Run's
-	// pr_url. No castle build populates pr_url today (nothing publishes
-	// run.metadata), so this stays empty in practice; it is informational
-	// enrichment and is never part of the controller's terminal-completion
-	// gate.
-	PRNumber string
 	// Reason is the RunFailed reason, when the run failed.
 	Reason string
 }
@@ -226,10 +220,6 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 		obs.RunStatus = resp.Msg.GetStatus()
 		if t := terminalFromRun(resp.Msg); terminal == nil && t != nil {
 			obs.Terminal = t
-		} else if terminal != nil && resp.Msg != nil {
-			if obs.Terminal.PRNumber == "" {
-				obs.Terminal.PRNumber = prNumberFromURL(resp.Msg.GetPrUrl())
-			}
 		}
 	}
 
@@ -595,38 +585,20 @@ func isTerminalRunStatus(status string) bool {
 
 // terminalFromRun derives a Terminal from a castle Run record, or nil when
 // the run is not terminal. The record contributes only the success/failure
-// verdict (and pr_url, when a producer exists): castle run records carry no
-// final_state column, so FinalState stays empty here and terminal envelopes
-// are the only source for it. Paused and stopped (CRI-208) are deliberately
-// not terminal — they are operator signals the run comes back from.
+// verdict: castle run records carry no final_state column (FinalState stays
+// empty here; terminal envelopes are the only source for it) and no
+// pr_url producer has ever existed (nothing publishes run.metadata, KB-101
+// dropped the operator's speculative GetPrUrl consumption). Paused and
+// stopped (CRI-208) are deliberately not terminal — they are operator
+// signals the run comes back from.
 func terminalFromRun(run *v1.Run) *Terminal {
 	if run == nil || !isTerminalRunStatus(run.GetStatus()) {
 		return nil
 	}
 	return &Terminal{
-		Success:  run.GetStatus() == runStatusSucceeded,
-		PRNumber: prNumberFromURL(run.GetPrUrl()),
-		Reason:   run.GetFailureReason(),
+		Success: run.GetStatus() == runStatusSucceeded,
+		Reason:  run.GetFailureReason(),
 	}
-}
-
-// prNumberFromURL extracts the trailing pull request number from a pr_url
-// (e.g. https://github.com/o/r/pull/42 -> "42").
-func prNumberFromURL(prURL string) string {
-	if prURL == "" {
-		return ""
-	}
-	idx := strings.LastIndexByte(prURL, '/')
-	if idx < 0 || idx == len(prURL)-1 {
-		return ""
-	}
-	num := prURL[idx+1:]
-	for _, r := range num {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	return num
 }
 
 // tokenTransport attaches the criteria bearer token to castle requests.

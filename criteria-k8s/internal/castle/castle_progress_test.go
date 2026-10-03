@@ -19,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 )
 
 // withTs stamps an envelope with a timestamp (castle stores agent-supplied

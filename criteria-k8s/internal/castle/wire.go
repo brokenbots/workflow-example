@@ -1,7 +1,7 @@
 package castle
 
 import (
-	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"google.golang.org/protobuf/types/known/structpb"
 )

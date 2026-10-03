@@ -517,9 +517,10 @@ func (r *CriteriaRunReconciler) deleteRunAdapterPods(ctx context.Context, run *c
 // delivered this run's terminal outcome (CastleTerminalObserved is set by
 // observeCastle whenever the observation carries a castle terminal — the run
 // record's terminal status and/or RunCompleted/RunFailed envelopes). That is
-// the only terminal signal castle actually provides: prNumber/ticketState
-// have no castle producer today, so the completion gate must not depend on
-// them. A recorded marker does not exempt the run from observation: a later
+// the only terminal signal castle actually provides: ticketState has no
+// castle producer today, so the completion gate must not depend on it (the
+// prNumber field went with KB-101 — no castle build ever published pr_url).
+// A recorded marker does not exempt the run from observation: a later
 // pass re-derives the outcome from castle and corrects a recorded phase that
 // disagrees with the run's terminal (a stamp can predate the run's final
 // castle state, e.g. when a previous operator pod wrote it).
@@ -583,16 +584,17 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 		//
 		// The marker is the completion signal: it is the only satisfiable
 		// record that a castle observation delivered the terminal. The
-		// prNumber/ticketState fields are informational only — castle
-		// supplies no pr_url or ticket-state producer today — so they are
-		// enriched when present but never gate completion.
+		// ticketState field is informational only — castle supplies no
+		// ticket-state producer today — so it is enriched when present but
+		// never gates completion (KB-101: prNumber dropped with the
+		// speculative pr_url consumption; no castle build ever published
+		// run.metadata and status.PRNumber was permanently empty).
 		update.Status.CastleTerminalObserved = true
 		if obs.Terminal.Success {
 			update.Status.Phase = criteriav1.PhaseSucceeded
 		} else {
 			update.Status.Phase = criteriav1.PhaseFailed
 		}
-		update.Status.PRNumber = obs.Terminal.PRNumber
 		// Stamp the workflow's own verdict (KB-23): the engine exits 0 even
 		// when the workflow ended in its failure terminal, so the phase
 		// alone cannot carry the verdict. The envelope's final_state does.

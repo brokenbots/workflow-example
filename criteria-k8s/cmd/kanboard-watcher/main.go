@@ -614,7 +614,6 @@ func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, err
 			latestPhase:      g.latest.Status.Phase,
 			latestRun:        g.latest.Name,
 			latestFinalState: g.latest.Status.FinalState,
-			latestPRNumber:   g.latest.Status.PRNumber,
 			anyRun:           true,
 		}
 		if g.latest.Spec.Workflow != nil {
@@ -650,13 +649,8 @@ type runPhases struct {
 	// mask a failed verdict; the verdict decides where a dev-class success
 	// lands. Empty for record-derived terminals and castle-less runs.
 	latestFinalState string
-	// latestPRNumber is the PR recorded on the latest run (Status.PRNumber,
-	// parsed from the castle run record's pr_url). The dev-class Done move
-	// requires it (KB-50): success without a PR is not delivered work, and
-	// the empty case leaves the ticket where the workflow put it.
-	latestPRNumber string
-	latestClass    string
-	anyRun         bool
+	latestClass      string
+	anyRun           bool
 }
 
 // reconcileTaskColumn moves the Kanboard task between board columns as its
@@ -692,21 +686,24 @@ type runPhases struct {
 // Review is the workflow's own parking spot, and Ready is the route's
 // re-fire trigger after a fetch failure.
 //
-// KB-50: even a "handler_complete" verdict no longer stamps Done on its
-// own — Done requires a PR recorded on the run (Status.PRNumber). A
-// Completed pod is not a succeeded workflow: the runner job exits 0 when
-// the workflow reaches ANY terminal, and the develop workflow's success
-// terminal was reachable without a PR before the KB-49 route guard
-// (create_pr silently produced nothing and run_handler still exited 0).
-// Observed live on KB-40 and KB-39 (2026-09-28): the watcher moved
-// Review -> Done off the Completed pod phase while run_handler had logged
-// outcome=failure — no PR, no evidence comment, main untouched. An empty
-// verdict (the run's terminal not observable yet: castle observation lag,
-// a record-derived terminal, or castle observation disabled) is equally
-// unverified and abstains; the verdict and PR land on a later poll and
-// re-fire this reconcile, and a Done stamp predating a failure verdict is
-// still repaired by the branch above. Any other terminal value is left
-// untouched until the watcher learns it.
+// KB-50 + KB-101: even a "handler_complete" verdict stamps Done only with
+// the run's PR evidence — which the workflow delivers itself: since the
+// KB-49 route guard a handler success with an empty pr_url never reaches
+// the done-path bookkeeping (flag_missing_pr_url fails the run loudly), so
+// a handler_complete verdict implies a merged PR. Status.PRNumber is REMOVED
+// (KB-101): it summarized the castle run record's pr_url, no castle build
+// ever published run.metadata, and it was therefore permanently empty —
+// a gate key that can never be set gates nothing. A Completed pod is still
+// not a succeeded workflow: the runner job exits 0 when the workflow
+// reaches ANY terminal. Observed live on KB-40 and KB-39 (2026-09-28): the
+// watcher moved Review -> Done off the Completed pod phase while
+// run_handler had logged outcome=failure — no PR, no evidence comment, main
+// untouched. An empty verdict (the run's terminal not observable yet:
+// castle observation lag, a record-derived terminal, or castle observation
+// disabled) is equally unverified and abstains; the verdict lands on a
+// later poll and re-fires this reconcile, and a Done stamp predating a
+// failure verdict is still repaired by the branch above. Any other terminal
+// value is left untouched until the watcher learns it.
 //
 // reconcileTaskColumn returns the task's new Kanboard column id and whether
 // the column changed. The caller updates its in-memory task copy so the
@@ -735,20 +732,14 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 			}
 			target = reviewColumnName
 		case finalStateHandlerComplete:
-			// handler_complete delivered the work — but the Done move
-			// requires PR evidence recorded on the run (KB-50): the
-			// develop workflow's success terminal was reachable without a
-			// PR before the KB-49 route guard, and Done is the watcher's
-			// confirmation of delivered work, not of a completed pod.
-			// Without the PR evidence the column is left where the
-			// workflow's own bookkeeping put it; the PR lands on a later
-			// poll (castle records it on the run) and re-fires this
-			// reconcile.
-			if ph.latestPRNumber == "" {
-				w.log.Info("develop run has no PR recorded on the run; not marking Done",
-					"ticket", task.Identifier(), "run", ph.latestRun)
-				return task.ColumnID, false
-			}
+			// handler_complete delivered the work — and since the KB-49
+			// route guard the workflow itself refuses a handler success with
+			// an empty pr_url (flag_missing_pr_url fails the run loudly), a
+			// handler_complete verdict implies a merged PR. KB-101 removed
+			// Status.PRNumber (the speculative castle pr_url consumption —
+			// no castle build ever published run.metadata, so the field was
+			// permanently empty and could never gate anything): the verdict
+			// plus the workflow's own KB-49 guard are the PR evidence now.
 			target = doneColumnName
 		case "":
 			// KB-50: an empty verdict is an unverified run — the workflow's

@@ -144,7 +144,6 @@ func TestReconcileMirrorsJobCompletion(t *testing.T) {
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
 	assert.True(t, updated.Status.CastleTerminalObserved, "the terminal marker records castle's verdict")
-	assert.Empty(t, updated.Status.PRNumber)
 	assert.Empty(t, updated.Status.TicketState)
 	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID)
 	assert.Equal(t, "cri-42", castleStub.lastRunnerJob, "observation is keyed on the runner job name")
@@ -195,7 +194,6 @@ func TestReconcileJobTerminalWithoutCastleKeepsPhaseOnly(t *testing.T) {
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
-	assert.Empty(t, updated.Status.PRNumber, "no file reads: PR number only comes from castle")
 	assert.Empty(t, updated.Status.TicketState)
 	assert.Empty(t, updated.Status.CastleRunID)
 }
@@ -478,7 +476,6 @@ func TestReconcileCastleErrorPreservesAdapterPods(t *testing.T) {
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.Equal(t, criteriav1.PhasePending, updated.Status.Phase, "the Job-derived phase persists despite the castle error")
-	assert.Empty(t, updated.Status.PRNumber, "no castle-derived status may be stamped from an unavailable source")
 	assert.Empty(t, updated.Status.TicketState)
 	assert.Empty(t, updated.Status.CastleRunID)
 
@@ -554,7 +551,6 @@ func TestReconcileCastleRunNotRegisteredPreservesAdapterPods(t *testing.T) {
 
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
-	assert.Empty(t, updated.Status.PRNumber)
 	assert.Empty(t, updated.Status.TicketState)
 	assert.Empty(t, updated.Status.CastleRunID)
 }
@@ -634,7 +630,6 @@ func TestReconcileCastleErrorStillStampsJobPhaseAndReleasesQueue(t *testing.T) {
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runA), &updatedA))
 	assert.Equal(t, criteriav1.PhaseFailed, updatedA.Status.Phase, "the Job-derived phase persists despite the castle error")
 	assert.Equal(t, "cri-118-a", updatedA.Status.JobName)
-	assert.Empty(t, updatedA.Status.PRNumber, "no castle-derived status may be stamped from an unavailable source")
 	assert.Empty(t, updatedA.Status.TicketState)
 	assert.Empty(t, updatedA.Status.CastleRunID)
 
@@ -711,7 +706,6 @@ func TestReconcileStopsPollingOnceCastleTerminalLands(t *testing.T) {
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
 	assert.Equal(t, "castle-run-1", updated.Status.CastleRunID, "the run id persists as soon as discovery succeeds")
 	assert.False(t, updated.Status.CastleTerminalObserved)
-	assert.Empty(t, updated.Status.PRNumber)
 	assert.Empty(t, updated.Status.TicketState)
 
 	// Castle's terminal lands between the passes — with only the verdict the
@@ -731,7 +725,6 @@ func TestReconcileStopsPollingOnceCastleTerminalLands(t *testing.T) {
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &stamped))
 	assert.True(t, stamped.Status.CastleTerminalObserved, "the bare castle terminal marks completion")
 	assert.Equal(t, criteriav1.PhaseSucceeded, stamped.Status.Phase)
-	assert.Empty(t, stamped.Status.PRNumber)
 	assert.Empty(t, stamped.Status.TicketState, "castle supplies no pr/ticket-state producer; they stay unset")
 	assert.Equal(t, "castle-run-1", stamped.Status.CastleRunID)
 	assert.Equal(t, "castle-run-1", castleStub.lastKnownID, "the persisted run id short-circuits discovery on the later pass")
@@ -814,7 +807,6 @@ func TestReconcileReDerivesStaleFailedPhaseFromCastleTerminal(t *testing.T) {
 		"the recorded Failed phase must be re-derived from the castle succeeded terminal")
 	assert.True(t, corrected.Status.CastleTerminalObserved)
 	assert.Equal(t, "5af00d01-f837-4080-87e7-db39fe475ce3", corrected.Status.CastleRunID)
-	assert.Empty(t, corrected.Status.PRNumber)
 	assert.Equal(t, "5af00d01-f837-4080-87e7-db39fe475ce3", castleStub.lastKnownID,
 		"re-derivation resumes from the persisted run id, not from discovery")
 	assert.Equal(t, "cri-138-1789212800", castleStub.lastRunnerJob)
