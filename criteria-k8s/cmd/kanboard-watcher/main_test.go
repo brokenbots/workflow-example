@@ -526,6 +526,116 @@ func TestPollStampsRepoConfig(t *testing.T) {
 	})
 }
 
+// testRoutesJSONTagGroup (KB-154): the same fixture with a TAG-GROUP
+// config entry — a second configLibrary entry bound to the ticket tag
+// v0.6.0 (config-only selection: release-branch targeting); the base
+// route carries no configRef so the overlay is observable.
+const testRoutesJSONTagGroup = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "kanboard-intake": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "configLibrary": {
+    "workflow-example": {
+      "buildCmd": "make build && make vet",
+      "ciGateCmd": "make ci && make vuln-scan"
+    },
+    "workflow-example-v060": {
+      "buildCmd": "make build",
+      "baseBranch": "v0.6.0-release",
+      "tags": ["v0.6.0"]
+    },
+    "workflow-example-multi": {
+      "buildCmd": "make build-multi",
+      "baseBranch": "multi-release",
+      "tags": ["v0.6.0", "urgent"]
+    }
+  },
+  "routes": [
+    {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]}
+  ]
+}`
+
+// KB-154: an armed ticket tagged v0.6.0 develops against the tag-group
+// config entry — the overlay stamps the entry (pin + baseBranch + commands)
+// via the configs tag group; an untagged ticket on the same repo keeps the
+// watcher fallback; a tag that maps to no entry fails closed with the
+// reason stamp.
+func TestPollStampsTagGroupConfig(t *testing.T) {
+	t.Run("tag-subset entry stamps the release branch over the flag fallback", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSONTagGroup)
+		tw.w.buildCmd = "flag-build"
+		tw.w.baseBranch = "flag-main"
+		tw.kbS.addTask(26, 5, "k8s-run", "v0.6.0")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		require.NotNil(t, spec.ConfigRef, "a selected tag-group entry stamps spec.configRef")
+		assert.Equal(t, "workflow-example-v060", spec.ConfigRef.Name)
+		assert.Equal(t, "v0.6.0-release", spec.BaseBranch, "the release branch replaces the fallback")
+		assert.Equal(t, "make build", spec.BuildCmd, "the entry's commands ride the same overlay")
+		assert.Empty(t, spec.TestCmd, "no fallback flag set: nothing else to stamp")
+	})
+
+	t.Run("untagged ticket keeps the fallback and never sees the tag-group entry", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSONTagGroup)
+		tw.w.buildCmd = "flag-build"
+		tw.w.baseBranch = "flag-main"
+		tw.kbS.addTask(27, 5, "k8s-run")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		assert.Nil(t, spec.ConfigRef, "no config tag: no pin")
+		assert.Equal(t, "flag-main", spec.BaseBranch, "untagged keeps main (or the flag fallback)")
+		assert.Equal(t, "flag-build", spec.BuildCmd)
+	})
+
+	t.Run("multi-tag entry ignores a single-label subset and fails closed", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSONTagGroup)
+		tw.kbS.addTask(28, 5, "k8s-run", "urgent")
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t),
+			"tagMatch defaults to all: a lone urgent label satisfies nothing, so the configs selection fails closed")
+		assert.True(t, tw.logs.contains("failed closed"), "watcher should log the failure")
+	})
+
+	t.Run("route configRef to a tag-group entry stamps it without any tag", func(t *testing.T) {
+		routeBound := strings.Replace(testRoutesJSONTagGroup,
+			`{"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]}`,
+			`{"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"], "configRef": "workflow-example-v060"}`, 1)
+		if routeBound == testRoutesJSONTagGroup {
+			t.Fatal("fixture rewrite did not apply")
+		}
+		tw := newTestWatcher(t, routeBound)
+		tw.kbS.addTask(29, 5, "k8s-run")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.ConfigRef)
+		assert.Equal(t, "workflow-example-v060", runs[0].Spec.ConfigRef.Name)
+		assert.Equal(t, "v0.6.0-release", runs[0].Spec.BaseBranch)
+	})
+
+	t.Run("configs tag naming nothing stays a workflows-override candidate (fail closed)", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSONTagGroup)
+		// "v9.9.9" maps to neither a workflow nor a config entry: the
+		// imputation leaves it in the workflows group, where the override
+		// fails closed with ErrUnknownWorkflow — the pre-KB-154 behavior
+		// for unknown flat tags is preserved.
+		tw.kbS.addTask(30, 5, "k8s-run", "v9.9.9")
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t))
+		assert.True(t, tw.logs.contains("failed closed"), "watcher should log the failure")
+	})
+}
+
 func TestLiveRunBlocksDuplicateFiring(t *testing.T) {
 	tw := newTestWatcher(t, testRoutesJSON)
 	tw.kbS.addTask(12, 5, "k8s-run")
