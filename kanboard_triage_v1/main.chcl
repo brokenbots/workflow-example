@@ -7,9 +7,9 @@
 // gate (semantics unchanged), then run external QA triage. Every run ends in
 // exactly one of two terminal states, both human-facing:
 //
-//   awaiting_human        — the task is moved to the review column with a
-//                           Kanboard comment carrying the evidence a human
-//                           needs to decide. No re-arm happens on this path:
+//   awaiting_human        — FAILURE ending: the task moves to the review column
+//                           with a Kanboard comment carrying the evidence a human
+//                           needs to decide (success=false): No re-arm happens on this path:
 //                           humans promote review-column tasks by tag +
 //                           column — the human IS the signal (CRI-240
 //                           semantics).
@@ -467,7 +467,7 @@ step "set_ready_state" {
 // in the review state. Step errors surface in the run record.
 state "awaiting_human" {
     terminal = true
-    success  = true
+    success  = false
 }
 
 state "ready_for_development" {

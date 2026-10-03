@@ -605,13 +605,13 @@ state "already_complete" {
     success  = true
 }
 
-// Not a failure. A run that ends by asking a human to decide — unusable
-// ticket, invalid finding, ambiguous triage, handler failure — is a
-// legitimate and useful conclusion: the ticket carries the context and sits
-// in the review state.
+// FAILURE ending (2026-10-02 dave ruling: waiting on a human records
+// success=false — humans are for broken things). The ticket carries the
+// context and sits in the review state; the run record reads failed so a
+// human hand-off is never reported as a successful outcome.
 state "awaiting_human" {
     terminal = true
-    success  = true
+    success  = false
 }
 
 state "ticket_not_found" {

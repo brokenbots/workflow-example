@@ -117,16 +117,16 @@ terminals="$(jq -r '[.states[] | select(.terminal)] | length' "$GRAPH")"
 terminal_names="$(jq -r '[.states[] | select(.terminal) | .name] | sort | join(" ")' "$GRAPH")"
 require_equal "$terminal_names" "awaiting_human failed handler_complete" "terminal states are exactly awaiting_human, failed and handler_complete"
 
-# CRI-275: terminal success flags reflect delivery state. The delivery and
-# handoff terminals stay success (the PR merged, or the ticket was parked
-# In Review with an accurate comment); a bookkeeping failure — a parking
-# comment or a state move that did not land — records the run failed so the
-# watcher raises the dirty label and can refire the ticket.
-for t in handler_complete awaiting_human; do
-    jq -e --arg t "$t" '.states[] | select(.terminal and .name == $t and .success)' "$GRAPH" >/dev/null \
-        || fail "terminal $t must be success=true"
-done
-ok "delivery/handoff terminals are success=true"
+# 2026-10-02 dave ruling: waiting on a human is a FAILURE ending — humans
+# are for broken things. The delivery terminal (handler_complete: PR merged)
+# stays success; every human hand-off and every bookkeeping failure records
+# the run failed so the watcher raises the dirty label and refires.
+jq -e '.states[] | select(.terminal and .name == "handler_complete" and .success)' "$GRAPH" >/dev/null \
+    || fail "terminal handler_complete must be success=true"
+ok "delivery terminal is success=true"
+jq -e '.states[] | select(.terminal and .name == "awaiting_human" and (.success | not))' "$GRAPH" >/dev/null \
+    || fail "terminal awaiting_human must be success=false: a human hand-off is a failure ending"
+ok "human hand-off terminal is success=false"
 jq -e '.states[] | select(.terminal and .name == "failed" and (.success | not))' "$GRAPH" >/dev/null \
     || fail "terminal failed must be success=false: bookkeeping failures must be recorded as run failures"
 ok "bookkeeping-failure terminal is success=false"
