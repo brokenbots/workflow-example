@@ -48,6 +48,14 @@ type CriteriaRunSpec struct {
 	// CIGateCmd is the command used as the implementation CI gate.
 	CIGateCmd string `json:"ciGateCmd,omitempty"`
 
+	// BaseBranch (KB-154) is the release-branch slice of the per-repo
+	// config: the branch the run forks from, validates against, and
+	// opens its PR against ("main" when empty, the jobbuilder default).
+	// The watcher stamps it from the selected configLibrary entry, and
+	// the operator renders the pinned ConfigMap's baseBranch data key
+	// over it exactly like the command fields.
+	BaseBranch string `json:"baseBranch,omitempty"`
+
 	// MaxAgentVisits limits how many times each agent gate may be visited.
 	MaxAgentVisits int `json:"maxAgentVisits,omitempty"`
 
@@ -146,6 +154,11 @@ type RunConfigRender struct {
 
 	// CIGateCmd is the rendered CI gate command.
 	CIGateCmd string `json:"ciGateCmd,omitempty"`
+
+	// BaseBranch (KB-154) is the rendered branch the run forks from,
+	// validates against, and opens its PR against (ConfigMap value
+	// outranking the spec field; empty remains "main" at consumption).
+	BaseBranch string `json:"baseBranch,omitempty"`
 }
 
 // RunWorkflow is a workflow-library object resolved from the routes
