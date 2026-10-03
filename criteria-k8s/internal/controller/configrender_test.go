@@ -125,6 +125,39 @@ func TestReconcileStampsConfigRenderAtAdmission(t *testing.T) {
 	assert.Equal(t, "spec-kept-build", env["BUILD_CMD"])
 }
 
+// A verify-only pass rebuilds a deleted child Job on the RECORDED render,
+// not the watcher's stamp: a run keeps executing its admitted config even
+// when the reconcile falls into rebuild territory.
+func TestReconcileRebuildsJobsOnRecordedRender(t *testing.T) {
+	scheme := newScheme(t)
+	run := newConfigRun("kb103-rebuild", &criteriav1.CriteriaRunConfigRef{Name: repoCM})
+	cl := configRunClient(t, scheme, run, newRepoCM(repoCMStamped))
+	r := newProbeReconciler(cl, scheme, nil)
+
+	reconcileOnce(t, r, run)
+	env := runnerCommandEnv(t, cl, run)
+	require.Equal(t, "make ci && make vuln-scan", env["CI_GATE_CMD"], "the CM value outranks the watcher stamp")
+
+	// A later pass re-verifies the pin (unchanged rv) and rebuilds whatever
+	// child Job is missing — the rebuild must carry the recorded render.
+	var job batchv1.Job
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
+		Name: jobbuilder.RunnerJobName(run), Namespace: run.Namespace,
+	}, &job))
+	require.NoError(t, cl.Delete(context.Background(), &job))
+
+	reconcileOnce(t, r, run)
+
+	rebuilt := runnerCommandEnv(t, cl, run)
+	assert.Equal(t, "make ci && make vuln-scan", rebuilt["CI_GATE_CMD"], "the rebuild threads the recorded render, not the watcher stamp")
+	assert.Equal(t, "make ci-test", rebuilt["TEST_CMD"])
+
+	var after criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &after))
+	require.NotNil(t, after.Status.ConfigRender)
+	assert.Equal(t, repoCMStamped, after.Status.ConfigRender.ResourceVersion, "the verify-only pass never re-derives")
+}
+
 // A run without a config pin behaves exactly as before KB-103: the render
 // (when anything is configured) records the spec fields alone, and the
 // runner env threads them as before.

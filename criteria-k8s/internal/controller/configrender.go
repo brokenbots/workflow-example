@@ -76,6 +76,11 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 		var cm corev1.ConfigMap
 		err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: render.ConfigMap}, &cm)
 		if err == nil && cm.ResourceVersion == render.ResourceVersion {
+			// The pin still holds: the recorded render is what the run keeps
+			// executing on, so the child Jobs built this pass (e.g. one was
+			// deleted and needs re-creation) must be built from it, not from
+			// the watcher's stamp.
+			applyRenderToSpec(&run.Spec, *render)
 			return "", nil
 		}
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -123,15 +128,7 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 	// the run's spec copy so BuildAll's runner env threads them through
 	// (BUILD_CMD/TEST_CMD/CI_GATE_CMD). Never written back to the spec —
 	// the spec keeps the watcher's stamp, the status keeps the provenance.
-	if render.BuildCmd != run.Spec.BuildCmd {
-		run.Spec.BuildCmd = render.BuildCmd
-	}
-	if render.TestCmd != run.Spec.TestCmd {
-		run.Spec.TestCmd = render.TestCmd
-	}
-	if render.CIGateCmd != run.Spec.CIGateCmd {
-		run.Spec.CIGateCmd = render.CIGateCmd
-	}
+	applyRenderToSpec(&run.Spec, *render)
 	logger.Info("recording CriteriaRun config render", "criteriarun", run.Name,
 		"configMap", render.ConfigMap, "resourceVersion", render.ResourceVersion)
 	return "", nil
@@ -177,11 +174,20 @@ func driftMessage(name, recorded, current string) string {
 	return fmt.Sprintf("the config ConfigMap %q was pinned at resourceVersion %q but now reads %q", name, recorded, current)
 }
 
-// specRender reports whether a spec-fields-only render is worth recording:
-// nothing is configured on a pre-KB-103 run (no pin, no commands), so its
-// status stays exactly as before KB-103.
+// hasSpecRender reports whether a spec-fields-only render is worth
+// recording: nothing is configured on a pre-KB-103 run (no pin, no
+// commands), so its status stays exactly as before KB-103.
 func hasSpecRender(spec criteriav1.CriteriaRunSpec) bool {
 	return spec.BuildCmd != "" || spec.TestCmd != "" || spec.CIGateCmd != ""
+}
+
+// applyRenderToSpec forces the recorded render's command values onto the
+// run's spec copy (never persisted) so every pass builds child Jobs on the
+// config the run was admitted under.
+func applyRenderToSpec(spec *criteriav1.CriteriaRunSpec, render criteriav1.RunConfigRender) {
+	spec.BuildCmd = render.BuildCmd
+	spec.TestCmd = render.TestCmd
+	spec.CIGateCmd = render.CIGateCmd
 }
 
 // specFieldsRender renders the spec fields alone (no ConfigMap behind
