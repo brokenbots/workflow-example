@@ -441,9 +441,12 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		// entrypoint bridges them into --var build_cmd/test_cmd/ci_gate_cmd
 		// below (closes the stamped-but-unconsumed gap: these spec fields
 		// were stamped but never consumed by a source-mode runner).
+		// KB-154: the rendered release branch bridges the same way into
+		// --var base_branch; "main" keeps the pre-config default.
 		{Name: "BUILD_CMD", Value: run.Spec.BuildCmd},
 		{Name: "TEST_CMD", Value: run.Spec.TestCmd},
 		{Name: "CI_GATE_CMD", Value: run.Spec.CIGateCmd},
+		{Name: "BASE_BRANCH", Value: baseBranchOrDefault(run.Spec.BaseBranch)},
 		{Name: "WORKFLOW_URL", Value: source.URL},
 	}
 	if source.Ref != "" {

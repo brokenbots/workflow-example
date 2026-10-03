@@ -67,6 +67,24 @@ func TestStampRepoConfigNilSafe(t *testing.T) {
 			t.Fatalf("no config selected: ConfigRef = %+v, want nil", spec.ConfigRef)
 		}
 	})
+	t.Run("entry baseBranch outranks the watcher flag and empty keeps the flag (KB-154)", func(t *testing.T) {
+		spec = criteriav1.CriteriaRunSpec{BaseBranch: "flag-main"}
+		StampRepoConfig(&spec, &routes.Selection{
+			ConfigName: "repo-a-v060",
+			Config:     routes.ConfigEntry{BuildCmd: "make build-a", BaseBranch: "v0.6.0-release"},
+		}, &criteriav1.CriteriaRunConfigRef{Name: "repo-a-v060", ResourceVersion: "7"})
+		if spec.BaseBranch != "v0.6.0-release" {
+			t.Errorf("BaseBranch = %q, want the entry's release branch", spec.BaseBranch)
+		}
+		spec = criteriav1.CriteriaRunSpec{BaseBranch: "flag-main"}
+		StampRepoConfig(&spec, &routes.Selection{
+			ConfigName: "repo-a",
+			Config:     routes.ConfigEntry{BaseBranch: ""},
+		}, nil)
+		if spec.BaseBranch != "flag-main" {
+			t.Errorf("BaseBranch = %q, want the untouched watcher flag value", spec.BaseBranch)
+		}
+	})
 }
 
 func TestPinConfigRef(t *testing.T) {

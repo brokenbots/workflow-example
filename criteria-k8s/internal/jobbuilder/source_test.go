@@ -35,6 +35,46 @@ func urlRun(name string, workflowSource *criteriav1.RunWorkflowSource, image str
 // The url-only source-mode run executes on the CRI-230 base image: the
 // operator's CriteriaBaseImage default (never the baked-workflow image),
 // with no repo-clone init container and the inline fetch/apply runner.
+// KB-154: the source-mode runner env carries the run's base-branch slice
+// (the --var base_branch bridge consumes ${BASE_BRANCH:-main}); an empty
+// spec keeps the main default. Mirrors the KB-103 command-override
+// delivery into --var build_cmd/test_cmd/ci_gate_cmd.
+func TestSourceModeRunnerEnvBaseBranch(t *testing.T) {
+	t.Run("spec baseBranch reaches the runner env", func(t *testing.T) {
+		run := urlRun("kb154-source-base", &criteriav1.RunWorkflowSource{
+			Type: "url",
+			URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		}, "")
+		run.Spec.BaseBranch = "v0.6.0-release"
+
+		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+			Image: "localhost:5000/linear-intake-remote:dev", DataPVC: "criteria-data",
+		})
+		runner := job.Spec.Template.Spec.Containers[0]
+		env := map[string]string{}
+		for _, e := range runner.Env {
+			env[e.Name] = e.Value
+		}
+		assert.Equal(t, "v0.6.0-release", env["BASE_BRANCH"])
+	})
+	t.Run("empty spec stays main", func(t *testing.T) {
+		run := urlRun("kb154-source-main", &criteriav1.RunWorkflowSource{
+			Type: "url",
+			URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		}, "")
+
+		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+			Image: "localhost:5000/linear-intake-remote:dev", DataPVC: "criteria-data",
+		})
+		runner := job.Spec.Template.Spec.Containers[0]
+		env := map[string]string{}
+		for _, e := range runner.Env {
+			env[e.Name] = e.Value
+		}
+		assert.Equal(t, "main", env["BASE_BRANCH"])
+	})
+}
+
 func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 	run := urlRun("cri-231-url", &criteriav1.RunWorkflowSource{
 		Type: "url",
