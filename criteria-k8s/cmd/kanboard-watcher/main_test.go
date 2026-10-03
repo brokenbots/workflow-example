@@ -433,15 +433,13 @@ func TestColumnReconciliationOnPhaseChange(t *testing.T) {
 	tw.pollOnce(t)
 	assert.Equal(t, 7, tw.kbS.taskColumn(13), "a Succeeded phase without a workflow verdict does not stamp Done")
 
-	// The success verdict without PR evidence still abstains...
+	// handler_complete stamps Done: since the KB-49 route guard the
+	// workflow itself refuses a handler success with an empty pr_url, so
+	// the verdict IS the PR evidence (KB-101 removed Status.PRNumber —
+	// permanently empty because no castle build ever published pr_url).
 	tw.setRunFinalStateByName(t, runName, "handler_complete")
 	tw.pollOnce(t)
-	assert.Equal(t, 7, tw.kbS.taskColumn(13), "handler_complete without a PR recorded does not stamp Done")
-
-	// ...and with the PR recorded, the run delivers the ticket to Done.
-	tw.setRunPRNumberByName(t, runName, "42")
-	tw.pollOnce(t)
-	assert.Equal(t, 8, tw.kbS.taskColumn(13), "succeeded run with verdict and PR evidence moves task to Done")
+	assert.Equal(t, 8, tw.kbS.taskColumn(13), "succeeded run with verdict moves task to Done")
 }
 
 func TestFailedRunMovesTaskToReview(t *testing.T) {
@@ -552,19 +550,16 @@ func TestTriageSucceededThenDevelopSucceedsStampsDone(t *testing.T) {
 	assert.Len(t, tw.runs(t), 2, "no duplicate run while the develop run is live")
 
 	// The develop run settles: without a verdict the watcher abstains
-	// (KB-50), the success verdict alone still abstains, and only the
-	// verdict plus PR evidence stamps Done.
+	// (KB-50); handler_complete stamps Done — since the KB-49 route guard
+	// the workflow refuses a handler success with an empty pr_url, so the
+	// verdict IS the PR evidence (KB-101 removed Status.PRNumber).
 	tw.setRunPhaseByName(t, devName, criteriav1.PhaseSucceeded)
 	tw.pollOnce(t)
 	assert.Equal(t, 7, tw.kbS.taskColumn(21), "a Completed pod alone does not stamp Done (KB-50)")
 
 	tw.setRunFinalStateByName(t, devName, "handler_complete")
 	tw.pollOnce(t)
-	assert.Equal(t, 7, tw.kbS.taskColumn(21), "handler_complete without a PR recorded does not stamp Done (KB-50)")
-
-	tw.setRunPRNumberByName(t, devName, "10")
-	tw.pollOnce(t)
-	assert.Equal(t, 8, tw.kbS.taskColumn(21), "only a dev-class success with verdict and PR evidence stamps Done")
+	assert.Equal(t, 8, tw.kbS.taskColumn(21), "a dev-class success with the verdict stamps Done")
 	assert.Len(t, tw.runs(t), 2, "a settled ticket in Done fires nothing (no route on Done)")
 }
 
@@ -584,18 +579,19 @@ func TestLegacyRunWithoutClassDoesNotStampDone(t *testing.T) {
 }
 
 // The KB-50 gate is evidence-based, not class-gated: a legacy run whose
-// record does carry the verified verdict and a PR still stamps Done.
-func TestLegacyRunWithVerdictAndPRStampsDone(t *testing.T) {
+// record carries the verified handler_complete verdict stamps Done (the
+// verdict is the PR evidence since the workflow's KB-49 guard; KB-101
+// removed Status.PRNumber).
+func TestLegacyRunWithVerdictStampsDone(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(31, 9, "k8s-run", "internal-reproduced")
 	tw.addRun(t, "kb-31-0000000001", "KB-31", "", criteriav1.PhaseSucceeded)
 	tw.setRunFinalStateByName(t, "kb-31-0000000001", "handler_complete")
-	tw.setRunPRNumberByName(t, "kb-31-0000000001", "77")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 8, tw.kbS.taskColumn(31),
-		"a legacy run with a verified verdict and PR evidence stamps Done")
+		"a legacy run with a verified verdict stamps Done")
 }
 
 // KB-50 acceptance regression: pod Completed + workflow failure + no PR.
@@ -645,16 +641,6 @@ func (tw *testWatcher) setRunFinalStateByName(t *testing.T, name, finalState str
 	t.Helper()
 	run := tw.runByName(t, name)
 	run.Status.FinalState = finalState
-	require.NoError(t, tw.client.Status().Update(context.Background(), run))
-}
-
-// setRunPRNumberByName stamps PR evidence (Status.PRNumber, KB-50) on a
-// pre-created run — the way the controller's castle observation leaves the
-// run when the castle run record carries a pr_url.
-func (tw *testWatcher) setRunPRNumberByName(t *testing.T, name, prNumber string) {
-	t.Helper()
-	run := tw.runByName(t, name)
-	run.Status.PRNumber = prNumber
 	require.NoError(t, tw.client.Status().Update(context.Background(), run))
 }
 
@@ -762,31 +748,26 @@ func TestDevSucceededWithHandlerCompleteVerdictStampsDone(t *testing.T) {
 	tw.kbS.addTask(26, 7, "k8s-run", "internal-reproduced") // Work in progress
 	tw.addRun(t, "kb-26-0000000001", "KB-26", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
 	tw.setRunFinalStateByName(t, "kb-26-0000000001", "handler_complete")
-	tw.setRunPRNumberByName(t, "kb-26-0000000001", "113")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 8, tw.kbS.taskColumn(26),
-		"a handler_complete verdict with PR evidence keeps the Done stamp")
+		"a handler_complete verdict stamps Done (KB-49 guard makes it the PR evidence)")
 }
 
-// KB-50 companion to the handler_complete stamp: the verdict confirmed the
-// run's terminal, but no PR is recorded on the run — the work was not
-// delivered (pre-KB-49 the develop workflow's success terminal was
-// reachable with create_pr having silently produced nothing), so the
-// watcher does not stamp Done and leaves the column to the workflow's own
-// bookkeeping.
-func TestDevSucceededHandlerCompleteWithoutPRDoesNotStampDone(t *testing.T) {
+// KB-101 companion regression: a Succeeded pod phase with NO verdict still
+// abstains — the empty-verdict path (KB-50) is the remaining abstain, since
+// handler_complete itself now stamps Done (the KB-49 guard makes the
+// verdict the PR evidence) and Status.PRNumber is gone.
+func TestDevSucceededWithoutVerdictDoesNotStampDone(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(30, 7, "k8s-run", "internal-reproduced") // Work in progress
 	tw.addRun(t, "kb-30-0000000001", "KB-30", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
-	tw.setRunFinalStateByName(t, "kb-30-0000000001", "handler_complete")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 7, tw.kbS.taskColumn(30),
-		"handler_complete without PR evidence leaves the column untouched")
-	assert.True(t, tw.logs.contains("not marking Done"), "the watcher logs why it abstained")
+		"a Succeeded pod phase without a workflow verdict leaves the column untouched")
 }
 
 // runNewer picks a ticket's most recent run by creation time with the name

@@ -42,9 +42,6 @@ spec:
         - name: Job
           type: string
           jsonPath: .status.jobName
-        - name: PR
-          type: string
-          jsonPath: .status.prNumber
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -258,16 +255,6 @@ spec:
                     operator's currently resolved runner image fails the run
                     fast with a BaseImageMismatch condition instead of
                     replaying a stale image through backoff.
-                prNumber:
-                  type: string
-                  description: >-
-                    Pull request number produced by the run, when known.
-                    Informational only: castle supplies no pr_url producer
-                    today, so the castle path leaves this empty in practice,
-                    and the terminal-completion gate does not depend on it.
-                    Empty does gate the kanboard watcher's Done reconcile
-                    (KB-50): a dev-class success only stamps Done when a PR
-                    is recorded on the run.
                 ticketState:
                   type: string
                   description: >-

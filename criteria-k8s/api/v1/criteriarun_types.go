@@ -221,14 +221,6 @@ type CriteriaRunStatus struct {
 	// runner Job replay a stale image through backoff.
 	BaseImage string `json:"baseImage,omitempty"`
 
-	// PRNumber records the pull request number produced by the run, when
-	// known. Informational only: castle supplies no pr_url producer today
-	// (nothing publishes run.metadata), so the castle path leaves this empty
-	// in practice, and the terminal-completion gate does not depend on it.
-	// Empty does gate the kanboard watcher's Done reconcile (KB-50): a
-	// dev-class success only stamps Done when a PR is recorded on the run.
-	PRNumber string `json:"prNumber,omitempty"`
-
 	// TicketState records the final Linear ticket state (CRI-132 semantics).
 	// The castle path leaves it unset: castle carries no Linear ticket-state
 	// source (the engine's RunCompleted.final_state is the workflow terminal
@@ -251,8 +243,8 @@ type CriteriaRunStatus struct {
 	// CastleTerminalObserved records that a castle observation delivered the
 	// run's terminal outcome (the run record's terminal status and/or
 	// RunCompleted/RunFailed envelopes). It is the completion signal for the
-	// terminal requeue: castle does not supply prNumber/ticketState today,
-	// so completion is gated on this marker, not on those fields.
+	// terminal requeue: castle does not supply ticketState today, so
+	// completion is gated on this marker, not on that field.
 	CastleTerminalObserved bool `json:"castleTerminalObserved,omitempty"`
 
 	// FinalState is the workflow's own verdict: the terminal state name the

@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 )
 
@@ -256,15 +256,6 @@ func TestTerminalFromEnvelope(t *testing.T) {
 	assert.Nil(t, terminalFromEnvelope(&v1.Envelope{RunId: "r1",
 		Payload: &v1.Envelope_RunStarted{RunStarted: &v1.RunStarted{}}}))
 	assert.Nil(t, terminalFromEnvelope(nil))
-}
-
-// prNumberFromURL parses the trailing pull request number.
-func TestPRNumberFromURL(t *testing.T) {
-	assert.Equal(t, "42", prNumberFromURL("https://github.com/brokenbots/workflow-example/pull/42"))
-	assert.Equal(t, "", prNumberFromURL(""))
-	assert.Equal(t, "", prNumberFromURL("https://github.com/brokenbots/workflow-example"))
-	assert.Equal(t, "", prNumberFromURL("https://github.com/brokenbots/workflow-example/pull/"))
-	assert.Equal(t, "", prNumberFromURL("https://example.com/notanumber/"))
 }
 
 // mustStruct builds a structpb.Struct for payload data.

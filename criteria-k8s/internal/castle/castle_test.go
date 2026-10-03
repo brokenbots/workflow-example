@@ -16,8 +16,8 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
-	criteriav1connect "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1/criteriav1connect"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
+	criteriav1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 )
 
 // stubServer implements the slice of v1connect.ServerServiceHandler the
@@ -229,7 +229,6 @@ func TestObserveTerminalFromEnvelopeAndRunRecord(t *testing.T) {
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)
 	assert.Equal(t, "done", obs.Terminal.FinalState)
-	assert.Empty(t, obs.Terminal.PRNumber)
 	assert.True(t, terminalFromRun(server.runs[0]).Success)
 }
 
@@ -604,7 +603,6 @@ func TestObserveRetainsTerminalStateAndResumesCursor(t *testing.T) {
 	require.NotNil(t, obs.Terminal)
 	assert.True(t, obs.Terminal.Success)
 	assert.Equal(t, "handler_complete", obs.Terminal.FinalState)
-	assert.Empty(t, obs.Terminal.PRNumber)
 	require.Len(t, obs.Lifecycle, 1)
 
 	c.mu.Lock()

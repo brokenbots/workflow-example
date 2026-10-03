@@ -3,7 +3,7 @@ package castle
 import (
 	"testing"
 
-	v1 "github.com/brokenbots/workflow-example/criteria-k8s/internal/criteria/pb/criteria/v1"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
