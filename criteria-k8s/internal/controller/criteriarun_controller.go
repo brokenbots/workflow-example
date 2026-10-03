@@ -260,6 +260,22 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.failBaseImageMismatch(ctx, &run, run.Status.BaseImage, currentImage, logger)
 	}
 
+	// KB-103: render the run's per-repo config before any child Job is
+	// built — the pinned ConfigMap's values outrank the spec fields per
+	// key, the render is recorded into status.configRender once (config
+	// provenance), and a pin that drifted from what the cluster declares
+	// fails the run fast before anything executes. On drift the fail-fast
+	// below returns; a CM read error other than drift propagates so the
+	// backoff retries the pass instead of failing the run off
+	// infrastructure problems.
+	drift, err := r.renderRunConfig(ctx, &run, update, logger)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if drift != "" {
+		return r.failConfigRenderDrift(ctx, &run, update, drift, logger)
+	}
+
 	desiredJobs := jobbuilder.BuildAll(&run, resolvedDefaults)
 
 	var runnerJob *batchv1.Job

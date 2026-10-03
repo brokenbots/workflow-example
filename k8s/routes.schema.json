@@ -31,6 +31,16 @@
         "$ref": "#/definitions/workflow"
       }
     },
+    "configLibrary": {
+      "type": "object",
+      "description": "Per-repo configuration overrides (KB-103): name -> command overrides the run executes on. An entry's NAME doubles as the per-repo ConfigMap the run pins (same name, in the workflow's execution namespace); the entry's command fields are what the watcher stamps into the run spec, and the operator renders run-time commands from the pinned ConfigMap's identically named data keys, outranking these inline values. Optional: payloads without per-repo config omit it entirely.",
+      "propertyNames": {
+        "$ref": "#/definitions/label"
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/config"
+      }
+    },
     "routes": {
       "type": "array",
       "description": "Route entries assigning Linear tickets to workflow-library objects. Each ticket is matched by project, tag subset, and Linear workflow states.",
@@ -498,6 +508,41 @@
           "items": {
             "type": "string",
             "minLength": 1
+          }
+        },
+        "configRef": {
+          "$ref": "#/definitions/label",
+          "description": "Per-repo config this route's runs execute under (KB-103): a configLibrary entry name whose ConfigMap the operator pins and renders. Must exist in configLibrary. The explicit route binding outranks a config label in the watcher's configured configs label group."
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "description": "A configLibrary entry (KB-103): per-repo command overrides a run executes on. The entry name identifies the pinned ConfigMap; its data keys (buildCmd/testCmd/ciGateCmd) outrank these inline fields. All fields optional — an entry may name only the keys a repo declares.",
+      "additionalProperties": false,
+      "properties": {
+        "buildCmd": {
+          "type": "string",
+          "description": "Per-repo build command override (no whitespace-only value).",
+          "minLength": 1,
+          "not": {
+            "pattern": "^\\s*$"
+          }
+        },
+        "testCmd": {
+          "type": "string",
+          "description": "Per-repo test command override (no whitespace-only value).",
+          "minLength": 1,
+          "not": {
+            "pattern": "^\\s*$"
+          }
+        },
+        "ciGateCmd": {
+          "type": "string",
+          "description": "Per-repo CI gate command override (the gate that must pass before a PR is opened; no whitespace-only value).",
+          "minLength": 1,
+          "not": {
+            "pattern": "^\\s*$"
           }
         }
       }

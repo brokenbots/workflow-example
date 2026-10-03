@@ -153,6 +153,8 @@ set -- apply "$workflow_url" \
     --var "linear_work_state=${LINEAR_WORK_STATE:-In Progress}" \
     --var "linear_done_state=${LINEAR_DONE_STATE:-Done}" \
     --var "base_branch=${BASE_BRANCH:-main}" \
+    --var "build_cmd=${BUILD_CMD:-}" \
+    --var "test_cmd=${TEST_CMD:-}" \
     --var "ci_gate_cmd=${CI_GATE_CMD:-}" \
     --var "provider_base_url=${PROVIDER_BASE_URL:-}"
 workflow_ref="${WORKFLOW_REF-}"
@@ -434,6 +436,14 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		// path; agents bound to it run in per-scope adapter pods that share
 		// only the data PVC, so the root must live on the PVC (CRI-264).
 		{Name: "TRIAGE_ROOT", Value: "/data/triage"},
+		// KB-103: the rendered per-repo command overrides reach the
+		// entrypoint like the image mode's runner env does, and the
+		// entrypoint bridges them into --var build_cmd/test_cmd/ci_gate_cmd
+		// below (closes the stamped-but-unconsumed gap: these spec fields
+		// were stamped but never consumed by a source-mode runner).
+		{Name: "BUILD_CMD", Value: run.Spec.BuildCmd},
+		{Name: "TEST_CMD", Value: run.Spec.TestCmd},
+		{Name: "CI_GATE_CMD", Value: run.Spec.CIGateCmd},
 		{Name: "WORKFLOW_URL", Value: source.URL},
 	}
 	if source.Ref != "" {

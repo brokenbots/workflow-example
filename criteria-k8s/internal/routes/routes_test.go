@@ -855,3 +855,138 @@ func TestParseAndResolveCarryAdapterImages(t *testing.T) {
 		t.Fatalf("resolved adapterImages.shell = %q, want %q", got, want)
 	}
 }
+
+// validConfigPayload is a config-bearing variant of the standard fixture:
+// the intake route binds configRef "repo-a", and the configLibrary holds
+// "repo-a" and "repo-b" (the latter omitting testCmd so per-key
+// precedence is observable).
+func validConfigPayload() *Payload {
+	p := validPayload()
+	p.ConfigLibrary = map[string]ConfigEntry{
+		"repo-a": {BuildCmd: "make build-a", TestCmd: "make test-a", CIGateCmd: "make ci-a"},
+		"repo-b": {BuildCmd: "make build-b"},
+	}
+	routes := p.Routes
+	routes[0].ConfigRef = "repo-a"
+	p.Routes = routes
+	return p
+}
+
+func TestResolveRouteConfigRef(t *testing.T) {
+	p := validConfigPayload()
+	// Label also present and in the configs group: the route's configRef
+	// deliberately outranks it.
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", []string{"repo-b"}, map[string]string{"repo-b": "configs"}))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConfigName != "repo-a" {
+		t.Errorf("ConfigName = %q, want route configRef %q", sel.ConfigName, "repo-a")
+	}
+	if sel.Config.BuildCmd != "make build-a" {
+		t.Errorf("Config.BuildCmd = %q, want %q", sel.Config.BuildCmd, "make build-a")
+	}
+}
+
+func TestResolveConfigLabelOverride(t *testing.T) {
+	p := validConfigPayload()
+	// Same route shape but without the configRef binding: the configs
+	// group label picks the entry.
+	p.Routes[0].ConfigRef = ""
+	sel := selectorFor("Runner", "Triage", []string{"repo-b"}, map[string]string{"repo-b": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	got, err := p.Resolve(sel)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.ConfigName != "repo-b" {
+		t.Errorf("ConfigName = %q, want label override %q", got.ConfigName, "repo-b")
+	}
+	if got.Config.BuildCmd != "make build-b" {
+		t.Errorf("Config.BuildCmd = %q, want %q", got.Config.BuildCmd, "make build-b")
+	}
+}
+
+func TestResolveNoConfigLeavesSelectionEmpty(t *testing.T) {
+	// Plain fixture: no configLibrary at all.
+	sel, err := validPayload().Resolve(selectorFor("Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConfigName != "" || sel.Config != (ConfigEntry{}) {
+		t.Errorf("no config selected: got ConfigName %q, Config %+v", sel.ConfigName, sel.Config)
+	}
+}
+
+func TestResolveConfigsGroupsUnsetIgnoresConfigLabels(t *testing.T) {
+	p := validConfigPayload()
+	p.Routes[0].ConfigRef = ""
+	// The label is in group "configs" but the selector's ConfigsLabelGroup
+	// is unset: the selection carries no config.
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", []string{"repo-b"}, map[string]string{"repo-b": "configs"}))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConfigName != "" {
+		t.Errorf("ConfigName = %q, want empty (configs group unset)", sel.ConfigName)
+	}
+}
+
+func TestResolveUnknownConfigFailsClosed(t *testing.T) {
+	p := validConfigPayload()
+	p.Routes[0].ConfigRef = ""
+	sel := selectorFor("Runner", "Triage", []string{"missing-config"}, map[string]string{"missing-config": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	if _, err := p.Resolve(sel); !errors.Is(err, ErrUnknownConfig) {
+		t.Fatalf("err = %v, want ErrUnknownConfig", err)
+	}
+}
+
+func TestResolveAmbiguousConfigsFailsClosed(t *testing.T) {
+	p := validConfigPayload()
+	p.Routes[0].ConfigRef = ""
+	sel := selectorFor("Runner", "Triage", []string{"repo-a", "repo-b"}, map[string]string{"repo-a": "configs", "repo-b": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	if _, err := p.Resolve(sel); !errors.Is(err, ErrAmbiguousConfig) {
+		t.Fatalf("err = %v, want ErrAmbiguousConfig", err)
+	}
+}
+
+func TestValidateRejectsDanglingRouteConfigRef(t *testing.T) {
+	p := validPayload()
+	routes := p.Routes
+	routes[0].ConfigRef = "repo-a" // no such entry
+	p.Routes = routes
+	if _, err := Parse(marshalPayload(t, p)); err == nil {
+		t.Fatal("Parse accepted a route configRef naming a missing configLibrary entry")
+	}
+}
+
+func TestValidateRejectsBadConfigEntry(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry ConfigEntry
+	}{
+		{"blank buildCmd", ConfigEntry{BuildCmd: "   "}},
+		{"blank ciGateCmd", ConfigEntry{CIGateCmd: "\t"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPayload()
+			p.ConfigLibrary = map[string]ConfigEntry{"repo-a": tc.entry}
+			if _, err := Parse(marshalPayload(t, p)); err == nil {
+				t.Fatalf("Parse accepted config entry %+v", tc.entry)
+			}
+		})
+	}
+}
+
+func TestValidatePositiveConfigEntry(t *testing.T) {
+	p := validPayload()
+	p.ConfigLibrary = map[string]ConfigEntry{
+		"repo-a": {BuildCmd: "make build", CIGateCmd: "make ci"},
+	}
+	if _, err := Parse(marshalPayload(t, p)); err != nil {
+		t.Fatalf("Parse rejected a valid config entry: %v", err)
+	}
+}

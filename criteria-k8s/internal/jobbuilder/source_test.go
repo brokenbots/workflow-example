@@ -471,7 +471,8 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 			"[--var] [intake_root=/data/intake] [--var] [triage_root=/data/triage] "+
 			"[--var] [linear_review_state=In Review] "+
 			"[--var] [linear_work_state=In Progress] [--var] [linear_done_state=Done] "+
-			"[--var] [base_branch=main] [--var] [ci_gate_cmd=] [--var] [provider_base_url=] "+
+			"[--var] [base_branch=main] [--var] [build_cmd=] [--var] [test_cmd=] "+
+			"[--var] [ci_gate_cmd=] [--var] [provider_base_url=] "+
 			"[--workflow-ref] [28777aacc3cfbe85005ddb27f548116e692c0eb4] "+
 			"[--server] [http://castle:9443] [--events-file] [/tmp/events.ndjson]",
 			"apply must receive the URL, the bridged runtime vars, the pin, and the forwarded flags in order: %s", log)

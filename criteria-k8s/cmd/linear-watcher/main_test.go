@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -887,6 +888,9 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 	if err := criteriav1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&criteriav1.CriteriaRun{}).Build()
 
@@ -909,6 +913,7 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 			maxAgentVisits:      2,
 			routesFile:          routesPath,
 			workflowsLabelGroup: "workflows",
+			configsLabelGroup:   "configs",
 			repoValidator:       func(string) bool { return true },
 			// The deployed watcher resolves the team in run(); tests set it
 			// directly (CRI-219 team-scoped labels).
@@ -1195,6 +1200,147 @@ func TestPollStampsWorkflowSource(t *testing.T) {
 		tw.linearS.setIssues(issue("i-16", "CRI-16", gateLabel()))
 		tw.pollOnce(t)
 		assert.Empty(t, tw.runs(t), "the routes loader must reject a url workflow with a blank url")
+	})
+}
+
+// routesJSONConfig (KB-103): a configLibrary carrying the repo's command
+// overrides and a route binding to it; the entry deliberately omits testCmd
+// so the entry-by-entry outranking against the watcher-level fallback
+// flags is observable in the stamp.
+const routesJSONConfig = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "configLibrary": {
+    "workflow-example": {
+      "buildCmd": "make build && make vet",
+      "ciGateCmd": "make ci && make vuln-scan"
+    }
+  },
+  "routes": [
+    {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner", "states": ["Triage"], "configRef": "workflow-example"}
+  ]
+}`
+
+// KB-103: the watcher resolves the per-repo config from the routes payload
+// (route configRef or configs-label-group label), stamps the entry's command
+// values OVER the watcher-level fallback flags entry-by-entry, and pins
+// spec.configRef — with the CM's resourceVersion when the CM exists in the
+// execution namespace at stamping time, name-only otherwise.
+func TestPollStampsRepoConfig(t *testing.T) {
+	t.Run("route configRef stamps entry values over flag fallbacks and pins the rv", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONConfig)
+		tw.w.buildCmd = "flag-build"
+		tw.w.testCmd = "flag-test"
+		tw.w.ciGateCmd = "flag-gate"
+		if err := tw.client.Create(context.Background(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "workflow-example", Namespace: "criteria-jobs"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		tw.linearS.setIssues(issue("i-20", "CRI-20", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		assert.Equal(t, "make build && make vet", spec.BuildCmd,
+			"the config entry's buildCmd outranks the flag fallback")
+		assert.Equal(t, "flag-test", spec.TestCmd,
+			"a key the entry omits keeps the flag fallback")
+		assert.Equal(t, "make ci && make vuln-scan", spec.CIGateCmd,
+			"the config entry's ciGateCmd outranks the flag fallback")
+		require.NotNil(t, spec.ConfigRef, "a selected config stamps spec.configRef")
+		assert.Equal(t, "workflow-example", spec.ConfigRef.Name)
+		var cm corev1.ConfigMap
+		require.NoError(t, tw.client.Get(context.Background(),
+			client.ObjectKey{Namespace: "criteria-jobs", Name: "workflow-example"}, &cm),
+			"fixture CM must still exist")
+		assert.Equal(t, cm.ResourceVersion, spec.ConfigRef.ResourceVersion,
+			"the CM readable at stamping time is pinned by resourceVersion")
+	})
+
+	t.Run("cm absent at stamping stamps a name-only pin", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSONConfig)
+		tw.linearS.setIssues(issue("i-21", "CRI-21", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.ConfigRef,
+			"a selected config stamps a name-only pin even without an existing CM")
+		assert.Equal(t, "workflow-example", runs[0].Spec.ConfigRef.Name)
+		assert.Empty(t, runs[0].Spec.ConfigRef.ResourceVersion,
+			"no rv when the CM does not exist yet (soft-fail at stamp)")
+	})
+
+	t.Run("configs-group label selects the config when the route has no configRef", func(t *testing.T) {
+		noRef := strings.Replace(routesJSONConfig, `, "configRef": "workflow-example"`, ``, 1)
+		if noRef == routesJSONConfig {
+			t.Fatal("fixture rewrite did not apply")
+		}
+		tw := newTestWatcher(t, noRef)
+		tw.linearS.setIssues(issue("i-22", "CRI-22", gateLabel(), groupLabel("workflow-example", "configs")))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.ConfigRef)
+		assert.Equal(t, "workflow-example", runs[0].Spec.ConfigRef.Name)
+		assert.Equal(t, "make build && make vet", runs[0].Spec.BuildCmd)
+	})
+
+	t.Run("config labels naming a missing entry fail closed", func(t *testing.T) {
+		noRef := strings.Replace(routesJSONConfig, `, "configRef": "workflow-example"`, ``, 1)
+		if noRef == routesJSONConfig {
+			t.Fatal("fixture rewrite did not apply")
+		}
+		tw := newTestWatcher(t, noRef)
+		tw.linearS.setIssues(issue("i-23", "CRI-23", gateLabel(), groupLabel("unknown-config", "configs")))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "fail closed: no run when the configs label names nothing")
+		assert.True(t, tw.logs.contains("failed closed"), "watcher should log the failure")
+	})
+
+	t.Run("ambiguous config labels fail closed", func(t *testing.T) {
+		amb := `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {"type": "image", "image": "localhost:5000/linear-intake-remote:dev", "namespace": "criteria-jobs"}
+  },
+  "configLibrary": {
+    "config-a": {"buildCmd": "a"},
+    "config-b": {"buildCmd": "b"}
+  },
+  "routes": [
+    {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner", "states": ["Triage"]}
+  ]
+}`
+		tw := newTestWatcher(t, amb)
+		tw.linearS.setIssues(issue("i-24", "CRI-24", gateLabel(),
+			groupLabel("config-a", "configs"), groupLabel("config-b", "configs")))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "fail closed on ambiguous config labels")
+	})
+
+	t.Run("no config selected leaves the spec at the fallback defaults", func(t *testing.T) {
+		tw := newTestWatcher(t, routesJSON)
+		tw.w.buildCmd = "flag-build"
+		tw.w.testCmd = "flag-test"
+		tw.w.ciGateCmd = "flag-gate"
+		tw.linearS.setIssues(issue("i-25", "CRI-25", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		assert.Equal(t, "flag-build", spec.BuildCmd)
+		assert.Equal(t, "flag-test", spec.TestCmd)
+		assert.Equal(t, "flag-gate", spec.CIGateCmd)
+		assert.Nil(t, spec.ConfigRef, "no config in the payload stamps no pin")
 	})
 }
 

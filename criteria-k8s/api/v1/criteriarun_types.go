@@ -75,6 +75,33 @@ type CriteriaRunSpec struct {
 	// source, ref, cache path) is recorded by the criteria binary's
 	// run-metadata publisher (CRI-225) at run admission.
 	WorkflowSource *RunWorkflowSource `json:"workflowSource,omitempty"`
+
+	// ConfigRef (KB-103) pins the per-repo config ConfigMap the run
+	// executes under: the watcher resolves it from the routes payload's
+	// configLibrary and stamps the ConfigMap's resourceVersion at stamping
+	// time. The operator renders the run's build/test/ci-gate commands
+	// from that ConfigMap and re-verifies the pin on every reconcile
+	// pass: a ConfigMap replaced under an admitted run fails it with a
+	// ConfigRenderDrift condition (the workflowSource ref-pin symmetry,
+	// CRI-226). Nil keeps the pre-KB-103 behavior: commands come from the
+	// spec fields alone (watcher-level fallback defaults).
+	ConfigRef *CriteriaRunConfigRef `json:"configRef,omitempty"`
+}
+
+// CriteriaRunConfigRef pins a per-repo config ConfigMap (KB-103) by
+// namespace-local name plus the resourceVersion observed when it was read
+// at stamping time. An omitted resourceVersion is a name-only pin: the
+// operator renders it only when the ConfigMap exists at the admission
+// pass, and the recorded render is never re-derived afterward (no
+// mid-flight adoption).
+type CriteriaRunConfigRef struct {
+	// Name is the ConfigMap name (a configLibrary entry name in routes).
+	Name string `json:"name"`
+
+	// ResourceVersion is the ConfigMap RV observed at stamping time; the
+	// operator fail-closes on a mismatch (ConfigRenderDrift). Empty means
+	// no RV was observable when the watcher stamped the run.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
 // RunWorkflowSource declares a run's workflow source for source mode
@@ -95,6 +122,30 @@ type RunWorkflowSource struct {
 	// enforced fail-closed by the criteria binary (CRI-226). Empty means no
 	// pin was declared.
 	Ref string `json:"ref,omitempty"`
+}
+
+// RunConfigRender records the config a CriteriaRun executes on (KB-103):
+// the admission-time render of the pinned config ConfigMap (or the spec
+// fields alone when no ConfigMap exists). Stamped into status once and
+// never re-derived — the config-provenance record, like status.baseImage.
+type RunConfigRender struct {
+	// ConfigMap is the pinned ConfigMap's name; empty when the run carried
+	// no configRef or the ConfigMap did not exist at admission (the
+	// rendered values then come from the spec fields alone).
+	ConfigMap string `json:"configMap,omitempty"`
+
+	// ResourceVersion is the ConfigMap RV observed at render time.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
+
+	// BuildCmd is the rendered build command (ConfigMap value outranking
+	// the spec field per non-empty key).
+	BuildCmd string `json:"buildCmd,omitempty"`
+
+	// TestCmd is the rendered test command.
+	TestCmd string `json:"testCmd,omitempty"`
+
+	// CIGateCmd is the rendered CI gate command.
+	CIGateCmd string `json:"ciGateCmd,omitempty"`
 }
 
 // RunWorkflow is a workflow-library object resolved from the routes
@@ -221,6 +272,18 @@ type CriteriaRunStatus struct {
 	// runner Job replay a stale image through backoff.
 	BaseImage string `json:"baseImage,omitempty"`
 
+	// ConfigRender (KB-103) records the config the run executes on: the
+	// pinned ConfigMap's name and resourceVersion plus the rendered
+	// build/test/ci-gate commands (config ConfigMap values outrank the
+	// spec fields). Rendered once at admission and never re-derived, so
+	// post-hoc you can always see WHICH config a run executed on — config
+	// provenance, the same reason status.baseImage is stamped. ConfigMap
+	// patches never touch in-flight runs: the run keeps executing config X
+	// (a pin mismatch instead fails it with a ConfigRenderDrift
+	// condition); refires pick up the patch. Nil with no configRef means
+	// the run behaves exactly as before KB-103.
+	ConfigRender *RunConfigRender `json:"configRender,omitempty"`
+
 	// TicketState records the final Linear ticket state (CRI-132 semantics).
 	// The castle path leaves it unset: castle carries no Linear ticket-state
 	// source (the engine's RunCompleted.final_state is the workflow terminal
@@ -334,6 +397,16 @@ func (in *CriteriaRunSpec) DeepCopyInto(out *CriteriaRunSpec) {
 		*out = new(RunWorkflowSource)
 		**out = **in
 	}
+	if in.ConfigRef != nil {
+		in, out := &in.ConfigRef, &out.ConfigRef
+		*out = new(CriteriaRunConfigRef)
+		**out = **in
+	}
+}
+
+// DeepCopyInto for RunConfigRender.
+func (in *RunConfigRender) DeepCopyInto(out *RunConfigRender) {
+	*out = *in
 }
 
 // DeepCopyInto for RunWorkflowSource.
@@ -460,6 +533,11 @@ func (in *CriteriaRunStatus) DeepCopyInto(out *CriteriaRunStatus) {
 		in, out := &in.Queue, &out.Queue
 		*out = new(CriteriaRunQueueStatus)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.ConfigRender != nil {
+		in, out := &in.ConfigRender, &out.ConfigRender
+		*out = new(RunConfigRender)
+		**out = **in
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions

@@ -81,10 +81,16 @@ const (
 
 // Payload is the routes ConfigMap payload (the 'routes.json' data key).
 type Payload struct {
-	APIVersion      string              `json:"apiVersion"`
-	Kind            string              `json:"kind"`
+	APIVersion string              `json:"apiVersion"`
+	Kind       string              `json:"kind"`
+	// WorkflowLibrary is the workflow set routes select from.
 	WorkflowLibrary map[string]Workflow `json:"workflowLibrary"`
-	Routes          []Route             `json:"routes"`
+	// ConfigLibrary (KB-103) is the per-repo configuration overlay routes
+	// select alongside the workflow: entry name -> command overrides. The
+	// name doubles as the per-repo ConfigMap the operator pins and renders
+	// for the run. Optional: payloads predating KB-103 validate unchanged.
+	ConfigLibrary map[string]ConfigEntry `json:"configLibrary,omitempty"`
+	Routes        []Route                `json:"routes"`
 }
 
 // Workflow is a workflow-library object: how a run obtains its workflow and
@@ -134,6 +140,26 @@ type Secret struct {
 	Env                 map[string]string `json:"env,omitempty"`
 }
 
+// ConfigEntry is a per-repo configuration entry (KB-103): the value side
+// of the routes payload's configLibrary. The entry's NAME identifies the
+// per-repo ConfigMap the run pins (same name, in the execution namespace);
+// the entry's command fields are what the watcher stamps into the run spec
+// when a config is selected. The operator renders run-time commands from
+// the pinned ConfigMap's identically named data keys
+// (buildCmd/testCmd/ciGateCmd), falling back through these inline fields,
+// the run spec fields, the watcher defaults, and empty: an empty gate
+// self-skips exactly as before KB-103. Command fields carry shell command
+// text, so whitespace is legal — only empty values fail validation.
+type ConfigEntry struct {
+	// BuildCmd is the per-repo build command override.
+	BuildCmd string `json:"buildCmd,omitempty"`
+	// TestCmd is the per-repo test command override.
+	TestCmd string `json:"testCmd,omitempty"`
+	// CIGateCmd is the per-repo CI gate command override (the gate that
+	// must pass before a PR is opened).
+	CIGateCmd string `json:"ciGateCmd,omitempty"`
+}
+
 // Route assigns Linear tickets to a workflow-library object by project, tag
 // subset, and Linear workflow states.
 type Route struct {
@@ -147,6 +173,13 @@ type Route struct {
 	// explicit empty or null list is rejected by Validate, mirroring the
 	// schema of record (minItems: 1).
 	States []string `json:"states"`
+	// ConfigRef (KB-103) names the configLibrary entry this route's runs
+	// execute under: the entry name doubles as the per-repo ConfigMap the
+	// operator renders at admission. The route match wins over the
+	// configs-label-group override; a ref naming an absent entry fails
+	// closed in Validate (payload errors surface when the ConfigMap is
+	// applied, not per ticket).
+	ConfigRef string `json:"configRef,omitempty"`
 }
 
 var (
@@ -234,6 +267,11 @@ func (p *Payload) Validate() error {
 			return fmt.Errorf("workflowLibrary[%q]: %w", name, err)
 		}
 	}
+	for name, entry := range p.ConfigLibrary {
+		if err := validateConfigEntry(name, entry); err != nil {
+			return fmt.Errorf("configLibrary[%q]: %w", name, err)
+		}
+	}
 	if len(p.Routes) == 0 {
 		return errors.New("routes must not be empty")
 	}
@@ -248,6 +286,14 @@ func (p *Payload) Validate() error {
 		seenRoutes[r.Name] = true
 		if _, ok := p.WorkflowLibrary[r.Workflow]; !ok {
 			return fmt.Errorf("routes[%d] (%s): workflow %q is not present in workflowLibrary", i, r.Name, r.Workflow)
+		}
+		// KB-103: a route's configRef must resolve against the payload's
+		// configLibrary — the same integrity rule the workflow ref has —
+		// so payload errors surface when the ConfigMap is applied.
+		if r.ConfigRef != "" {
+			if _, ok := p.ConfigLibrary[r.ConfigRef]; !ok {
+				return fmt.Errorf("routes[%d] (%s): configRef %q is not present in configLibrary", i, r.Name, r.ConfigRef)
+			}
 		}
 		if r.Project == "" {
 			return fmt.Errorf("routes[%d] (%s): project is required", i, r.Name)
@@ -335,6 +381,29 @@ func validateWorkflow(name string, wf Workflow) error {
 			return fmt.Errorf("secrets[%d] (%s): name is not unique within the workflow", i, s.Name)
 		}
 		seenSecrets[s.Name] = true
+	}
+	return nil
+}
+
+// validateConfigEntry enforces the per-config constraints (KB-103): the
+// name is a DNS-1123 label (it doubles as the pinned ConfigMap's name) and
+// every declared command value is non-empty. Shell text legitimately
+// contains whitespace, so values are only length-checked.
+func validateConfigEntry(name string, entry ConfigEntry) error {
+	if !labelRe.MatchString(name) {
+		return fmt.Errorf("name is not a DNS-1123 label")
+	}
+	for field, value := range map[string]string{
+		"buildCmd":  entry.BuildCmd,
+		"testCmd":   entry.TestCmd,
+		"ciGateCmd": entry.CIGateCmd,
+	} {
+		if value == "" {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not be blank when declared", field)
+		}
 	}
 	return nil
 }
@@ -459,6 +528,16 @@ var ErrUnknownWorkflow = errors.New("workflow is not present in the routes workf
 // Fail closed on the ambiguity: no run, watcher log, Linear comment.
 var ErrAmbiguousWorkflow = errors.New("multiple workflow labels in the workflows label group")
 
+// ErrUnknownConfig (KB-103) reports that a selected config name (a route's
+// configRef or a configs-group label) is absent from the routes
+// configLibrary. Fail closed: no run, watcher log, ticket comment.
+var ErrUnknownConfig = errors.New("config is not present in the routes configLibrary")
+
+// ErrAmbiguousConfig (KB-103) reports several configs-group labels on one
+// ticket. Fail closed on the ambiguity: no run, watcher log, ticket
+// comment.
+var ErrAmbiguousConfig = errors.New("multiple config labels in the configs label group")
+
 // TicketStates returns the deduplicated, sorted union of all routes'
 // declared states: the Linear workflow state names any route can match
 // (CRI-218). The watcher queries Linear for tickets in these states; the
@@ -517,6 +596,12 @@ type Selector struct {
 	// WorkflowsLabelGroup is the label group whose labels name workflow
 	// overrides ("workflows" per CRI-217).
 	WorkflowsLabelGroup string
+	// ConfigsLabelGroup (KB-103) is the label group whose labels name
+	// config overrides (per-repo configLibrary entries). Only consulted
+	// when the matched route carries no configRef: the explicit route
+	// binding wins (same precedence the workflow override chain has
+	// between tag-specific and tag-less routes).
+	ConfigsLabelGroup string
 }
 
 // Selection is the resolved route plus the workflow it assigns.
@@ -527,6 +612,14 @@ type Selection struct {
 	Name string
 	// Workflow is the resolved workflow-library object.
 	Workflow Workflow
+	// ConfigName (KB-103) is the resolved configLibrary name: the matched
+	// route's configRef when set, else the single configs-group label
+	// name, else empty (no per-repo config — runs behave exactly as
+	// before KB-103).
+	ConfigName string
+	// Config is the resolved configLibrary entry (zero value when no
+	// config was selected).
+	Config ConfigEntry
 }
 
 // Resolve applies the CRI-217 lookup rules: find the route for the ticket's
@@ -552,7 +645,57 @@ func (p *Payload) Resolve(sel Selector) (*Selection, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownWorkflow, name)
 	}
-	return &Selection{Route: *route, Name: name, Workflow: wf}, nil
+
+	// KB-103 config selection: the matched route's configRef wins; absent
+	// it, a single configs-group label names the config; more than one is
+	// ambiguous and fails closed. The explicit route binding outranks the
+	// label override (a route's configRef is deliberately placed config).
+	configName := route.ConfigRef
+	if configName == "" {
+		override, err := configOverride(sel)
+		if err != nil {
+			return nil, err
+		}
+		configName = override
+	}
+	var config ConfigEntry
+	if configName != "" {
+		var ok bool
+		if config, ok = p.ConfigLibrary[configName]; !ok {
+			return nil, fmt.Errorf("%w: %q", ErrUnknownConfig, configName)
+		}
+	}
+
+	return &Selection{
+		Route:      *route,
+		Name:       name,
+		Workflow:   wf,
+		ConfigName: configName,
+		Config:     config,
+	}, nil
+}
+
+// configOverride returns the config-library name carried by the ticket's
+// label in the configured configs label group, or "" when the ticket
+// carries none. More than one such label is ambiguous and fails closed.
+func configOverride(sel Selector) (string, error) {
+	if sel.ConfigsLabelGroup == "" {
+		return "", nil
+	}
+	var overrides []string
+	for _, label := range sel.Labels {
+		if sel.LabelGroups[label] == sel.ConfigsLabelGroup {
+			overrides = append(overrides, label)
+		}
+	}
+	switch len(overrides) {
+	case 0:
+		return "", nil
+	case 1:
+		return overrides[0], nil
+	default:
+		return "", fmt.Errorf("%w: %s", ErrAmbiguousConfig, strings.Join(overrides, ", "))
+	}
 }
 
 // matchRoute returns the first route matching the ticket's project and

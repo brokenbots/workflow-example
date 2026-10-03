@@ -17,6 +17,15 @@
 # linear_intake_v1 image, or its url-only fetch, via a ticket's
 # workflows-label-group override — no route assigns them by default anymore.
 #
+# KB-103: 'configLibrary' holds per-repo runner config (build/test/ci-gate
+# commands). Each entry name doubles as the ConfigMap name the operator
+# renders at admission; routes bind to an entry with an optional 'configRef'
+# (the 'criteria-develop' route carries it so dev runs gate BEFORE PR open).
+# A repo's own ConfigMap (named after its configLibrary entry, in the
+# execution namespace) can declare the same camelCase data keys; patching it
+# is a routing change for future refires only — admitted runs stamped the
+# pin fail-closed (ConfigRenderDrift).
+#
 # CRI-243 (plan CRI-214 M10.1, exit condition 3): the criteria project's
 # routes are the split pattern — its actual workflow. The 'criteria-triage'
 # route fires linear_triage_v1 on [Triage] and the 'criteria-develop' route
@@ -462,6 +471,13 @@ data:
           }
         }
       },
+      "configLibrary": {
+        "workflow-example": {
+          "buildCmd": "make build",
+          "testCmd": "make test",
+          "ciGateCmd": "make ci && make vuln-scan"
+        }
+      },
       "routes": [
         {
           "name": "criteria-triage",
@@ -475,6 +491,7 @@ data:
           "name": "criteria-develop",
           "workflow": "linear-develop-url",
           "project": "Criteria K8s Workflow Runner",
+          "configRef": "workflow-example",
           "states": [
             "Ready for Development"
           ]

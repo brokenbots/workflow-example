@@ -13,6 +13,7 @@ import (
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,6 +41,7 @@ var (
 	defaultRepoURL      = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when Linear issue does not contain one")
 	routesFile          = flag.String("routes-file", getenv("CRITERIA_ROUTES_FILE", routes.DefaultFile), "Routes payload file (mounted from the criteria-routes ConfigMap); re-read every poll")
 	workflowsLabelGroup = flag.String("linear-workflows-label-group", getenv("LINEAR_WORKFLOWS_LABEL_GROUP", "workflows"), "Linear label group whose labels name a workflow overriding the route's project default")
+	configsLabelGroup   = flag.String("linear-configs-label-group", getenv("LINEAR_CONFIGS_LABEL_GROUP", "configs"), "Linear label group whose labels name a per-repo config (KB-103 configLibrary entry) for tickets whose route carries no configRef")
 )
 
 func main() {
@@ -100,6 +102,7 @@ func main() {
 		defaultRepoURL:      *defaultRepoURL,
 		routesFile:          *routesFile,
 		workflowsLabelGroup: *workflowsLabelGroup,
+		configsLabelGroup:   *configsLabelGroup,
 		repoValidator:       linear.DefaultRepoValidator(nil, githubToken, ""),
 		log:                 logger,
 	}
@@ -127,6 +130,7 @@ type watcher struct {
 	defaultRepoURL      string
 	routesFile          string
 	workflowsLabelGroup string
+	configsLabelGroup   string
 	repoValidator       linear.RepoValidator
 	// teamID is the Linear team the watched project belongs to; the
 	// automation labels are created in this team (CRI-219). Resolved once
@@ -409,6 +413,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 			Labels:              issue.Labels,
 			LabelGroups:         issue.LabelGroups,
 			WorkflowsLabelGroup: w.workflowsLabelGroup,
+			ConfigsLabelGroup:   w.configsLabelGroup,
 		})
 		if err != nil {
 			if errors.Is(err, routes.ErrNoRoute) {
@@ -451,7 +456,7 @@ func (w *watcher) poll(ctx context.Context, projectID string) error {
 				"ticket", issue.Identifier)
 			continue
 		}
-		run := w.buildCriteriaRun(issue, repoURL, sel)
+		run := w.buildCriteriaRun(ctx, issue, repoURL, sel)
 		if err := w.client.Create(ctx, run); err != nil {
 			w.log.Error(err, "creating CriteriaRun", "ticket", issue.Identifier)
 			continue
@@ -868,7 +873,11 @@ func (w *watcher) sweepOrphanedAutomationLabels(ctx context.Context, projectID s
 	return nil
 }
 
-func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
+// buildCriteriaRun stamps a CriteriaRun for a Linear issue.
+// repoURL is the non-empty repo URL the ticket carries (extracted earlier);
+// stamping consults the pinned per-repo config ConfigMap in the workflow's
+// execution namespace so the configRef can carry its resourceVersion.
+func (w *watcher) buildCriteriaRun(ctx context.Context, issue linear.Issue, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
 	ticket := issue.Identifier
 	name := fmt.Sprintf("%s-%d", strings.ToLower(ticket), time.Now().Unix())
 	spec := criteriav1.CriteriaRunSpec{
@@ -902,7 +911,20 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *rout
 		MaxAgentVisits:  w.maxAgentVisits,
 		ProviderBaseURL: w.providerBaseURL,
 	}
-	stampWorkflowSource(&spec, sel.Workflow)
+	// KB-103: per-repo config outranks the watcher-level fallback
+	// flags entry-by-entry; spec.configRef pins the ConfigMap the
+	// operator renders (fail-closed on drift).
+	execNS := w.namespace
+	if sel.Workflow.Namespace != "" {
+		execNS = sel.Workflow.Namespace
+	}
+	cfgRef, pinErr := runstamp.PinConfigRef(ctx, w.client, execNS, sel)
+	if pinErr != nil {
+		w.log.Error(pinErr, "per-repo config ConfigMap read failed at stamping; stamping a name-only pin",
+			"ticket", issue.Identifier, "configMap", sel.ConfigName)
+	}
+	runstamp.StampRepoConfig(&spec, sel, cfgRef)
+	runstamp.StampWorkflowSource(&spec, sel.Workflow)
 	return &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -914,28 +936,6 @@ func (w *watcher) buildCriteriaRun(issue linear.Issue, repoURL string, sel *rout
 			},
 		},
 		Spec: spec,
-	}
-}
-
-// stampWorkflowSource resolves the source-mode spec fields from a url-type
-// routes workflow object (CRI-231): spec.workflowSource carries the URL the
-// runner fetches and applies at run time (plus the operator's fail-closed
-// ref pin), and url+image routes additionally stamp spec.image so the
-// process executes in the route-provided image. Image-type routes (baked
-// tree) leave both unset. Type/url validation is the routes package's job
-// (k8s/routes.schema.json); the guards here only keep an unvalidated
-// declaration from stamping an unusable source.
-func stampWorkflowSource(spec *criteriav1.CriteriaRunSpec, wf routes.Workflow) {
-	if wf.Type != routes.TypeURL || strings.TrimSpace(wf.URL) == "" {
-		return
-	}
-	spec.WorkflowSource = &criteriav1.RunWorkflowSource{
-		Type: "url",
-		URL:  wf.URL,
-		Ref:  wf.Ref,
-	}
-	if strings.TrimSpace(wf.Image) != "" {
-		spec.Image = wf.Image
 	}
 }
 
