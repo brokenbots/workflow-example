@@ -9,7 +9,8 @@
 //
 //   handler_complete      — the handler merged its PR and the ticket was
 //                           moved to the done state.
-//   awaiting_human        — the run ended by handing the ticket to a human:
+//   awaiting_human        — FAILURE ending: the run hands the ticket to a human
+//                           (success=false — humans are for broken things):
 //                           the reviewer loop could not conclude (the handler
 //                           fails the run when its bounded review/fix cycle
 //                           does not converge), a Linear write failed, or the
@@ -440,7 +441,7 @@ state "handler_complete" {
 
 state "awaiting_human" {
     terminal = true
-    success  = true
+    success  = false
 }
 
 state "failed" {

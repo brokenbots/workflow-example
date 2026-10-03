@@ -131,7 +131,7 @@ step "check_pr_status" {
         }
     }
     outcome "failure" {
-        next = state.failed
+        next = step.retry_check_pr_status
         write {
             target = data.internal._failure_reason.value
             // KB-24: a live deterministic failure must never reach the parent
@@ -139,6 +139,43 @@ step "check_pr_status" {
             // engine-synthesized session loss and would trigger a pointless
             // scope re-provision.
             value  = "PR status check failed (KB-24)"
+        }
+    }
+}
+
+// TRANSIENT-RETRY (2026-10-02, dave ruling): check_pr_status is a NETWORK
+// surface (gh api to api.github.com) and dies on transient transport errors
+// (TLS handshake timeout observed live on KB-48's merge leg, 2026-10-02 — a
+// one-off blip parked the run at awaiting_human for a green approved PR).
+// One bounded retry fires before the failure is believed: the API outage
+// class is minute-scale, so a single quick retry almost always recovers and
+// the human hand-off stays reserved for genuine breakage. The retry re-runs
+// the SAME step body; its failure arm keeps the original KB-24 typed reason.
+step "retry_check_pr_status" {
+    target     = adapter.shell.reviewer
+    timeout    = "120s"
+    max_visits = var.max_poll_visits
+    input {
+        command = templatefile("./scripts/check_pr_status.sh.tftpl", {
+            criteria_value_1 = data.internal._pr_number.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_pr_status
+        write {
+            target = data.internal._status_output.value
+            value  = output.stdout
+        }
+        write {
+            target = data.internal.review_result.value
+            value  = startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : "")
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal._failure_reason.value
+            value  = "PR status check failed after retry (KB-24, transient-surface)"
         }
     }
 }
