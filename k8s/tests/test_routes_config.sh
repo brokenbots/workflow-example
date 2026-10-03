@@ -75,8 +75,9 @@ MOUNT_RE = re.compile(r"^/")
 WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages"}
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
-ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states"}
-TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "routes"}
+ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
+TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes"}
+CONFIG_KEYS = {"buildCmd", "testCmd", "ciGateCmd"}
 VOLUME_KINDS = ("pvc", "nfs", "tmp", "k8s-secret")
 WORKFLOW_TYPES = ("url", "image")
 WORKFLOW_CLASSES = ("dev", "triage")
@@ -271,7 +272,7 @@ def validate_workflow(name, workflow, where, errs):
         errs.append(f"{where}: type url requires url")
 
 
-def validate_route(route, where, library, errs):
+def validate_route(route, where, library, config_library, errs):
     if not isinstance(route, dict):
         errs.append(f"{where} must be an object")
         return
@@ -307,6 +308,28 @@ def validate_route(route, where, library, errs):
     workflow = route.get("workflow")
     if "workflow" in route and isinstance(library, dict) and workflow not in library:
         errs.append(f"{where}.workflow {workflow!r} is not in workflowLibrary")
+    config_ref = route.get("configRef")
+    if "configRef" in route:
+        if not is_label(config_ref):
+            errs.append(f"{where}.configRef {config_ref!r} is not a DNS-1123 label")
+        elif isinstance(config_library, dict) and config_ref not in config_library:
+            errs.append(f"{where}.configRef {config_ref!r} is not in configLibrary")
+
+
+def validate_config(name, entry, where, errs):
+    if not isinstance(entry, dict):
+        errs.append(f"{where} must be an object")
+        return
+    if not is_label(name):
+        errs.append(f"configLibrary key {name!r} is not a DNS-1123 label")
+    for key in entry:
+        if key not in CONFIG_KEYS:
+            errs.append(f"{where} has unknown field {key!r}")
+    for key in CONFIG_KEYS:
+        if key in entry:
+            value = entry[key]
+            if not isinstance(value, str) or not value.strip():
+                errs.append(f"{where}.{key} must be a non-empty string")
 
 
 def validate(doc):
@@ -332,6 +355,13 @@ def validate(doc):
                 if not is_label(name):
                     errs.append(f"payload.workflowLibrary key {name!r} is not a DNS-1123 label")
                 validate_workflow(name, workflow, f"payload.workflowLibrary.{name}", errs)
+    config_library = doc.get("configLibrary")
+    if "configLibrary" in doc:
+        if not isinstance(config_library, dict):
+            errs.append("payload.configLibrary must be an object")
+        else:
+            for name, entry in config_library.items():
+                validate_config(name, entry, f"payload.configLibrary.{name}", errs)
     routes = doc.get("routes")
     if "routes" in doc:
         if not isinstance(routes, list) or not routes:
@@ -343,7 +373,7 @@ def validate(doc):
                 if rn in seen:
                     errs.append(f"payload.routes has duplicate name {rn!r}")
                 seen.add(rn)
-                validate_route(route, f"payload.routes[{i}]", library, errs)
+                validate_route(route, f"payload.routes[{i}]", library, config_library, errs)
     return errs
 
 
@@ -389,6 +419,29 @@ positive = [
                        "copilot": "localhost:5000/criteria-adapter-copilot@sha256:" + "0" * 64}))),
 ]
 
+# KB-103: configLibrary + per-route configRef — the explicit route
+# binding and a bare (name-only) config entry are both valid.
+
+
+def kb103_add_route_configref(d):
+    d["configLibrary"]["acme-repo"] = {"buildCmd": "scripts/build.sh", "testCmd": "make test"}
+    d["routes"][0].update(configRef="acme-repo")
+
+
+def kb103_add_empty_config(d):
+    d["configLibrary"]["acme-repo"] = {}
+
+
+def kb103_add_gate_only_config(d):
+    d["configLibrary"]["acme-repo"] = {"ciGateCmd": "make ci && make vuln-scan"}
+
+
+positive.extend([
+    ("config-library-with-route-configref", mutate(kb103_add_route_configref)),
+    ("config-library-entry-empty", mutate(kb103_add_empty_config)),
+    ("config-library-gate-only", mutate(kb103_add_gate_only_config)),
+])
+
 negative = [
     ("image-workflow-with-url", True, mutate(lambda d: d[LIB][BAKED].update(
         url="git::https://example.invalid/repo.git//wf"))),
@@ -430,6 +483,37 @@ negative = [
     ("volume-env-value-not-string", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0]["env"].update(
         CRITERIA_RUN_DIR_ROOT=42))),
 ]
+
+# KB-103: configLibrary fail-closed variants.
+
+
+def kb103_set_unknown_field(d):
+    d["configLibrary"]["acme-repo"] = {"image": "repo-image:latest"}
+
+
+def kb103_set_blank_cmd(d):
+    d["configLibrary"]["acme-repo"] = {"buildCmd": "   "}
+
+
+def kb103_add_bad_key(d):
+    d["configLibrary"]["Acme Repo"] = {"buildCmd": "scripts/build.sh"}
+
+
+def kb103_dangling_configref(d):
+    d["routes"][0].update(configRef="other-repo")
+
+
+def kb103_bad_configref_label(d):
+    d["routes"][0].update(configRef="Acme Repo")
+
+
+negative.extend([
+    ("config-unknown-field", True, mutate(kb103_set_unknown_field)),
+    ("config-blank-cmd", True, mutate(kb103_set_blank_cmd)),
+    ("config-bad-key-name", True, mutate(kb103_add_bad_key)),
+    ("route-dangling-configref", False, mutate(kb103_dangling_configref)),
+    ("route-bad-configref-label", True, mutate(kb103_bad_configref_label)),
+])
 
 failures = []
 
@@ -525,6 +609,21 @@ if develop_route is not None:
     if develop_route.get("states") != ["Ready for Development"]:
         failures.append(
             f"shipped example: criteria-develop states = {develop_route.get('states')}, want [Ready for Development]"
+        )
+
+# KB-103: the shipped example carries a per-repo configLibrary and the
+# criteria-develop route binds to it — dev-run gate-before-PR-open wiring.
+config_library = base.get("configLibrary")
+shipped_err(isinstance(config_library, dict) and bool(config_library),
+            "shipped example: configLibrary must be a non-empty object")
+if isinstance(config_library, dict):
+    for name, entry in config_library.items():
+        validate_config(name, entry, f"shipped example: configLibrary.{name}", failures)
+if develop_route is not None:
+    if develop_route.get("configRef") != "workflow-example":
+        failures.append(
+            f"shipped example: criteria-develop configRef = {develop_route.get('configRef')!r}, "
+            "want 'workflow-example' (the repo's own gate runs BEFORE PR open)"
         )
 
 # CRI-310 (validation run C): the dirty label is a routing surface. The
