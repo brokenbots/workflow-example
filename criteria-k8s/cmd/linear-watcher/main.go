@@ -38,6 +38,7 @@ var (
 	buildCmd            = flag.String("build-cmd", getenv("BUILD_CMD", ""), "Default build command")
 	testCmd             = flag.String("test-cmd", getenv("TEST_CMD", ""), "Default test command")
 	ciGateCmd           = flag.String("ci-gate-cmd", getenv("CI_GATE_CMD", ""), "Default CI gate command")
+	baseBranch          = flag.String("base-branch", getenv("BASE_BRANCH", ""), "Default branch runs fork from, validate against, and open PRs against (main when empty); overridden by the selected config entry")
 	defaultRepoURL      = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when Linear issue does not contain one")
 	routesFile          = flag.String("routes-file", getenv("CRITERIA_ROUTES_FILE", routes.DefaultFile), "Routes payload file (mounted from the criteria-routes ConfigMap); re-read every poll")
 	workflowsLabelGroup = flag.String("linear-workflows-label-group", getenv("LINEAR_WORKFLOWS_LABEL_GROUP", "workflows"), "Linear label group whose labels name a workflow overriding the route's project default")
@@ -99,6 +100,7 @@ func main() {
 		buildCmd:            *buildCmd,
 		testCmd:             *testCmd,
 		ciGateCmd:           *ciGateCmd,
+		baseBranch:          *baseBranch,
 		defaultRepoURL:      *defaultRepoURL,
 		routesFile:          *routesFile,
 		workflowsLabelGroup: *workflowsLabelGroup,
@@ -127,6 +129,7 @@ type watcher struct {
 	buildCmd            string
 	testCmd             string
 	ciGateCmd           string
+	baseBranch          string
 	defaultRepoURL      string
 	routesFile          string
 	workflowsLabelGroup string
@@ -908,6 +911,7 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, issue linear.Issue, repo
 		BuildCmd:        w.buildCmd,
 		TestCmd:         w.testCmd,
 		CIGateCmd:       w.ciGateCmd,
+		BaseBranch:      w.baseBranch,
 		MaxAgentVisits:  w.maxAgentVisits,
 		ProviderBaseURL: w.providerBaseURL,
 	}

@@ -9,8 +9,8 @@ import (
 	"context"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -37,6 +37,9 @@ func StampRepoConfig(spec *criteriav1.CriteriaRunSpec, sel *routes.Selection, cf
 	}
 	if cfgEntry.CIGateCmd != "" {
 		spec.CIGateCmd = cfgEntry.CIGateCmd
+	}
+	if cfgEntry.BaseBranch != "" {
+		spec.BaseBranch = cfgEntry.BaseBranch
 	}
 	spec.ConfigRef = cfg
 }

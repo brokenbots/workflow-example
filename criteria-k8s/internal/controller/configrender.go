@@ -122,6 +122,7 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 		BuildCmd:        firstNonEmpty(cm.Data["buildCmd"], run.Spec.BuildCmd),
 		TestCmd:         firstNonEmpty(cm.Data["testCmd"], run.Spec.TestCmd),
 		CIGateCmd:       firstNonEmpty(cm.Data["ciGateCmd"], run.Spec.CIGateCmd),
+		BaseBranch:      firstNonEmpty(cm.Data["baseBranch"], run.Spec.BaseBranch),
 	}
 	update.Status.ConfigRender = render
 	// The rendered values are what the run executes on: apply them onto
@@ -181,13 +182,14 @@ func hasSpecRender(spec criteriav1.CriteriaRunSpec) bool {
 	return spec.BuildCmd != "" || spec.TestCmd != "" || spec.CIGateCmd != ""
 }
 
-// applyRenderToSpec forces the recorded render's command values onto the
-// run's spec copy (never persisted) so every pass builds child Jobs on the
-// config the run was admitted under.
+// applyRenderToSpec forces the recorded render's command and base-branch
+// values onto the run's spec copy (never persisted) so every pass builds
+// child Jobs on the config the run was admitted under.
 func applyRenderToSpec(spec *criteriav1.CriteriaRunSpec, render criteriav1.RunConfigRender) {
 	spec.BuildCmd = render.BuildCmd
 	spec.TestCmd = render.TestCmd
 	spec.CIGateCmd = render.CIGateCmd
+	spec.BaseBranch = render.BaseBranch
 }
 
 // specFieldsRender renders the spec fields alone (no ConfigMap behind
@@ -195,9 +197,10 @@ func applyRenderToSpec(spec *criteriav1.CriteriaRunSpec, render criteriav1.RunCo
 // on.
 func specFieldsRender(spec criteriav1.CriteriaRunSpec) *criteriav1.RunConfigRender {
 	return &criteriav1.RunConfigRender{
-		BuildCmd:  spec.BuildCmd,
-		TestCmd:   spec.TestCmd,
-		CIGateCmd: spec.CIGateCmd,
+		BuildCmd:   spec.BuildCmd,
+		TestCmd:    spec.TestCmd,
+		CIGateCmd:  spec.CIGateCmd,
+		BaseBranch: spec.BaseBranch,
 	}
 }
 
