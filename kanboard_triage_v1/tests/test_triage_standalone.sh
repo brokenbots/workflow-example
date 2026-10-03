@@ -84,8 +84,13 @@ terminals="$(jq -r '[.states[] | select(.terminal)] | length' "$GRAPH")"
 terminal_names="$(jq -r '[.states[] | select(.terminal) | .name] | sort | join(" ")' "$GRAPH")"
 require_equal "$terminal_names" "awaiting_human ready_for_development" "terminal states are exactly awaiting_human and ready_for_development"
 
-jq -e '[.states[] | select(.terminal) | .success] | all' "$GRAPH" >/dev/null \
-    || fail "terminal states must both be success=true: every run ends by handing the task to a human or declaring it ready"
+# 2026-10-02 dave ruling: a human hand-off is a FAILURE ending (success=false);
+# only the delivery terminal (ready_for_development = confirmed workstream handed
+# to development) stays success=true.
+jq -e '.states[] | select(.terminal and .name == "awaiting_human" and (.success | not))' "$GRAPH" >/dev/null \
+    || fail "terminal awaiting_human must be success=false: a human hand-off is a failure ending"
+jq -e '.states[] | select(.terminal and .name == "ready_for_development" and .success)' "$GRAPH" >/dev/null \
+    || fail "terminal ready_for_development must be success=true"
 
 # Every step, switch and terminal reachable from initial_state; both terminal
 # outcomes reachable in tests is asserted by membership here.
