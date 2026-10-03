@@ -555,10 +555,14 @@
         },
         "tags": {
           "type": "array",
-          "description": "Ticket tags this entry serves (KB-154 tag-group config); tickets carrying any (tagMatch any) or all (tagMatch all) of these select the entry from the configs label group by tag subset. Empty means the entry is selectable only by its name.",
+          "description": "Ticket tags this entry serves (KB-154 tag-group config); tickets carrying any (tagMatch any) or all (tagMatch all) of these select the entry from the configs label group by tag subset. An empty tags list is rejected — tag-group entries must declare at least one non-blank tag (omit tags to keep the entry selectable only by its name).",
+          "minItems": 1,
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": {
+              "pattern": "^\\s*$"
+            }
           }
         },
         "tagMatch": {
