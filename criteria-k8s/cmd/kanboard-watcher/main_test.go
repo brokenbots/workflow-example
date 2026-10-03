@@ -19,6 +19,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -261,6 +262,9 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 	if err := criteriav1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&criteriav1.CriteriaRun{}).Build()
 
@@ -286,6 +290,7 @@ func newTestWatcher(t *testing.T, routesJSON string) *testWatcher {
 		maxAgentVisits:    2,
 		routesFile:        routesPath,
 		workflowsTagGroup: "workflows",
+		configsTagGroup:   "configs",
 		repoValidator:     func(string) bool { return true },
 		projectID:         1,
 		log:               logr.New(recorder),
@@ -402,6 +407,123 @@ func TestTriggerTagGatesFiring(t *testing.T) {
 	tw.pollOnce(t)
 
 	assert.Empty(t, tw.runs(t), "no run without the trigger tag")
+}
+
+// testRoutesJSONConfig (KB-103): kanboard fixture with a configLibrary and
+// a route binding to it; the entry omits testCmd so the entry-by-entry
+// outranking against the fallback flags is observable in the stamp.
+const testRoutesJSONConfig = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "kanboard-intake": {
+      "type": "image",
+      "image": "localhost:5000/linear-intake-remote:dev",
+      "namespace": "criteria-jobs"
+    }
+  },
+  "configLibrary": {
+    "workflow-example": {
+      "buildCmd": "make build && make vet",
+      "ciGateCmd": "make ci && make vuln-scan"
+    }
+  },
+  "routes": [
+    {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"], "configRef": "workflow-example"}
+  ]
+}`
+
+// KB-103: the kanboard watcher resolves the per-repo config the same way
+// the linear watcher does — route configRef first, else a task tag naming
+// a configLibrary entry (payload-driven configs tag group) — and stamps
+// the entry's commands over the fallback flags and spec.configRef.
+func TestPollStampsRepoConfig(t *testing.T) {
+	t.Run("route configRef stamps entry values over flag fallbacks and pins the rv", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSONConfig)
+		tw.w.buildCmd = "flag-build"
+		tw.w.testCmd = "flag-test"
+		tw.w.ciGateCmd = "flag-gate"
+		if err := tw.client.Create(context.Background(), &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "workflow-example", Namespace: "criteria-jobs"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		tw.kbS.addTask(20, 5, "k8s-run")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		assert.Equal(t, "make build && make vet", spec.BuildCmd,
+			"the config entry's buildCmd outranks the flag fallback")
+		assert.Equal(t, "flag-test", spec.TestCmd,
+			"a key the entry omits keeps the flag fallback")
+		assert.Equal(t, "make ci && make vuln-scan", spec.CIGateCmd,
+			"the config entry's ciGateCmd outranks the flag fallback")
+		require.NotNil(t, spec.ConfigRef, "a selected config stamps spec.configRef")
+		assert.Equal(t, "workflow-example", spec.ConfigRef.Name)
+		var cm corev1.ConfigMap
+		require.NoError(t, tw.client.Get(context.Background(),
+			client.ObjectKey{Namespace: "criteria-jobs", Name: "workflow-example"}, &cm),
+			"fixture CM must still exist")
+		assert.Equal(t, cm.ResourceVersion, spec.ConfigRef.ResourceVersion,
+			"the CM readable at stamping time is pinned by resourceVersion")
+	})
+
+	t.Run("cm absent at stamping stamps a name-only pin", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSONConfig)
+		tw.kbS.addTask(21, 5, "k8s-run")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.ConfigRef,
+			"a selected config stamps a name-only pin even without an existing CM")
+		assert.Equal(t, "workflow-example", runs[0].Spec.ConfigRef.Name)
+		assert.Empty(t, runs[0].Spec.ConfigRef.ResourceVersion,
+			"no rv when the CM does not exist yet (soft-fail at stamp)")
+	})
+
+	t.Run("task tag naming a configLibrary entry selects it when the route has no configRef", func(t *testing.T) {
+		noRef := strings.Replace(testRoutesJSONConfig, `, "configRef": "workflow-example"`, "", 1)
+		if noRef == testRoutesJSONConfig {
+			t.Fatal("fixture rewrite did not apply")
+		}
+		tw := newTestWatcher(t, noRef)
+		tw.kbS.addTask(22, 5, "k8s-run", "workflow-example")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		require.NotNil(t, runs[0].Spec.ConfigRef)
+		assert.Equal(t, "workflow-example", runs[0].Spec.ConfigRef.Name)
+		assert.Equal(t, "make build && make vet", runs[0].Spec.BuildCmd)
+	})
+
+	t.Run("config tag naming a missing entry fails closed (no pin, no commands)", func(t *testing.T) {
+		noRef := strings.Replace(testRoutesJSONConfig, `, "configRef": "workflow-example"`, "", 1)
+		if noRef == testRoutesJSONConfig {
+			t.Fatal("fixture rewrite did not apply")
+		}
+		tw := newTestWatcher(t, noRef)
+		tw.kbS.addTask(23, 5, "k8s-run", "unknown-config")
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "fail closed: no run when the config tag names nothing")
+		assert.True(t, tw.logs.contains("failed closed"), "watcher should log the failure")
+	})
+
+	t.Run("no config selected leaves the spec at the fallback defaults", func(t *testing.T) {
+		tw := newTestWatcher(t, testRoutesJSON)
+		tw.w.buildCmd = "flag-build"
+		tw.w.testCmd = "flag-test"
+		tw.w.ciGateCmd = "flag-gate"
+		tw.kbS.addTask(25, 5, "k8s-run")
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		assert.Equal(t, "flag-build", spec.BuildCmd)
+		assert.Equal(t, "flag-test", spec.TestCmd)
+		assert.Equal(t, "flag-gate", spec.CIGateCmd)
+		assert.Nil(t, spec.ConfigRef, "no config in the payload stamps no pin")
+	})
 }
 
 func TestLiveRunBlocksDuplicateFiring(t *testing.T) {

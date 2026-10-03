@@ -17,6 +17,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -84,6 +85,7 @@ var (
 	defaultRepoURL    = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when the Kanboard task does not reference one")
 	routesFile        = flag.String("routes-file", getenv("CRITERIA_ROUTES_FILE", routes.DefaultFile), "Routes payload file (mounted from the criteria-routes ConfigMap); re-read every poll")
 	workflowsTagGroup = flag.String("kanboard-workflows-tag-group", getenv("KANBOARD_WORKFLOWS_TAG_GROUP", "workflows"), "Tag group whose tags name a workflow overriding the route's project default (empty disables overrides)")
+	configsTagGroup   = flag.String("kanboard-configs-tag-group", getenv("KANBOARD_CONFIGS_TAG_GROUP", "configs"), "Tag group whose tags name a per-repo config (KB-103 configLibrary entry) for tasks whose route carries no configRef (empty disables the overrides)")
 	routingTags       = flag.String("kanboard-routing-tags", getenv("KANBOARD_ROUTING_TAGS", ""), "Comma-separated task tags that are routing signals (e.g. component tags), never workflow-override candidates; they join the built-in exemption filter (empty disables the extra exemptions)")
 )
 
@@ -151,6 +153,7 @@ func main() {
 		defaultRepoURL:    *defaultRepoURL,
 		routesFile:        *routesFile,
 		workflowsTagGroup: *workflowsTagGroup,
+		configsTagGroup:   *configsTagGroup,
 		routingTags:       parseTagList(*routingTags),
 		repoValidator:     linear.DefaultRepoValidator(nil, githubToken, ""),
 		log:               logger,
@@ -227,6 +230,7 @@ type watcher struct {
 	defaultRepoURL    string
 	routesFile        string
 	workflowsTagGroup string
+	configsTagGroup   string
 	// routingTags holds the KANBOARD_ROUTING_TAGS entries (comma-separated
 	// env): tags that are board routing metadata (e.g. component tags like
 	// criteria, operator) and must never become workflow-override
@@ -497,10 +501,21 @@ func (w *watcher) poll(ctx context.Context) error {
 		// Resolve sees them. WorkflowsLabelGroup is always passed as the
 		// literal group name so routes.Resolve's override logic cannot treat
 		// ungrouped tags as overrides.
+		//
+		// KB-103: the configs tag group works the same way; membership is
+		// payload-driven — a tag maps to the configs group only when it
+		// names a configLibrary entry in the live payload, so non-routing
+		// tags keep mapping to the workflows group exactly as before.
 		tagGroups := map[string]string{}
 		for _, tag := range task.Tags {
 			if w.isRoutingSignal(tag) {
 				continue
+			}
+			if w.configsTagGroup != "" {
+				if _, isConfig := routesPayload.ConfigLibrary[tag]; isConfig {
+					tagGroups[tag] = w.configsTagGroup
+					continue
+				}
 			}
 			tagGroups[tag] = w.workflowsTagGroup
 		}
@@ -510,6 +525,7 @@ func (w *watcher) poll(ctx context.Context) error {
 			Labels:              task.Tags,
 			LabelGroups:         tagGroups,
 			WorkflowsLabelGroup: w.workflowsTagGroup,
+			ConfigsLabelGroup:   w.configsTagGroup,
 		})
 		if err != nil {
 			if errors.Is(err, routes.ErrNoRoute) {
@@ -528,7 +544,7 @@ func (w *watcher) poll(ctx context.Context) error {
 			w.log.V(1).Info("run already active", "ticket", ticketID)
 			continue
 		}
-		run := w.buildCriteriaRun(task, repoURL, sel)
+		run := w.buildCriteriaRun(ctx, task, repoURL, sel)
 		if err := w.client.Create(ctx, run); err != nil {
 			w.log.Error(err, "creating CriteriaRun", "ticket", ticketID)
 			continue
@@ -779,8 +795,10 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 
 // buildCriteriaRun stamps a CriteriaRun for a Kanboard task. TicketID is
 // KB-<id>; the workflow and its volumes/secrets are stamped from the routes
-// selection exactly as the linear watcher stamps them (CRI-222 contract).
-func (w *watcher) buildCriteriaRun(task kanboard.Task, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
+// selection exactly as the linear watcher stamps them (CRI-222 contract);
+// the per-repo config pin consults the pinned CM at stamping time so
+// spec.configRef carries its resourceVersion when it exists.
+func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
 	ticketID := task.Identifier()
 	name := fmt.Sprintf("%s-%d", strings.ToLower(ticketID), time.Now().Unix())
 	spec := criteriav1.CriteriaRunSpec{
@@ -794,7 +812,20 @@ func (w *watcher) buildCriteriaRun(task kanboard.Task, repoURL string, sel *rout
 		MaxAgentVisits:   w.maxAgentVisits,
 		ProviderBaseURL:  w.providerBaseURL,
 	}
-	stampWorkflowSource(&spec, sel.Workflow)
+	// KB-103: per-repo config outranks the watcher-level fallback flags
+	// entry-by-entry; spec.configRef pins the ConfigMap the operator
+	// renders (fail-closed on drift).
+	execNS := w.namespace
+	if sel.Workflow.Namespace != "" {
+		execNS = sel.Workflow.Namespace
+	}
+	cfgRef, pinErr := runstamp.PinConfigRef(ctx, w.client, execNS, sel)
+	if pinErr != nil {
+		w.log.Error(pinErr, "per-repo config ConfigMap read failed at stamping; stamping a name-only pin",
+			"ticket", ticketID, "configMap", sel.ConfigName)
+	}
+	runstamp.StampRepoConfig(&spec, sel, cfgRef)
+	runstamp.StampWorkflowSource(&spec, sel.Workflow)
 	return &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -877,26 +908,6 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		}
 	}
 	return out
-}
-
-// stampWorkflowSource resolves the source-mode spec fields from a url-type
-// routes workflow object, identical to the linear watcher's stamping (CRI-231):
-// spec.workflowSource carries the URL the runner fetches and applies at run
-// time (plus the fail-closed ref pin), and url+image additionally stamps
-// spec.image. Image-type routes leave both unset so the operator's default
-// image remains the source of truth for baked workflows.
-func stampWorkflowSource(spec *criteriav1.CriteriaRunSpec, wf routes.Workflow) {
-	if wf.Type != routes.TypeURL || strings.TrimSpace(wf.URL) == "" {
-		return
-	}
-	spec.WorkflowSource = &criteriav1.RunWorkflowSource{
-		Type: "url",
-		URL:  wf.URL,
-		Ref:  wf.Ref,
-	}
-	if strings.TrimSpace(wf.Image) != "" {
-		spec.Image = wf.Image
-	}
 }
 
 // workflowClass resolves the admission queue class (CRI-242): an omitted
