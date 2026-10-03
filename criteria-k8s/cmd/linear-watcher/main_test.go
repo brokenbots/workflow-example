@@ -1344,6 +1344,67 @@ func TestPollStampsRepoConfig(t *testing.T) {
 	})
 }
 
+// KB-154: a configs-group label matching a configLibrary entry's tag
+// subset selects the tag-group config — the release branch stamps onto
+// the spec like the commands do.
+func TestPollStampsTagGroupConfig(t *testing.T) {
+	tagGroup := `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "linear-intake-v1": {"type": "image", "image": "localhost:5000/linear-intake-remote:dev", "namespace": "criteria-jobs"}
+  },
+  "configLibrary": {
+    "workflow-example": {
+      "buildCmd": "make build && make vet",
+      "ciGateCmd": "make ci && make vuln-scan"
+    },
+    "workflow-example-v060": {
+      "buildCmd": "make build",
+      "baseBranch": "v0.6.0-release",
+      "tags": ["v0.6.0"]
+    }
+  },
+  "routes": [
+    {"name": "criteria-intake", "workflow": "linear-intake-v1", "project": "Criteria K8s Workflow Runner", "states": ["Triage"]}
+  ]
+}`
+	t.Run("tagged config entry stamps the release branch over the flag fallback", func(t *testing.T) {
+		tw := newTestWatcher(t, tagGroup)
+		tw.w.buildCmd = "flag-build"
+		tw.w.baseBranch = "flag-main"
+		tw.linearS.setIssues(issue("i-30", "CRI-30", gateLabel(), groupLabel("v0.6.0", "configs")))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		spec := runs[0].Spec
+		require.NotNil(t, spec.ConfigRef)
+		assert.Equal(t, "workflow-example-v060", spec.ConfigRef.Name,
+			"the tag-subset member resolves by subset, not by name")
+		assert.Equal(t, "v0.6.0-release", spec.BaseBranch)
+		assert.Equal(t, "make build", spec.BuildCmd)
+	})
+
+	t.Run("untagged ticket keeps the flag fallback", func(t *testing.T) {
+		tw := newTestWatcher(t, tagGroup)
+		tw.w.baseBranch = "flag-main"
+		tw.linearS.setIssues(issue("i-31", "CRI-31", gateLabel()))
+		tw.pollOnce(t)
+		runs := tw.runs(t)
+		require.Len(t, runs, 1)
+		assert.Nil(t, runs[0].Spec.ConfigRef)
+		assert.Equal(t, "flag-main", runs[0].Spec.BaseBranch)
+	})
+
+	t.Run("configs label matching no entry fails closed", func(t *testing.T) {
+		tw := newTestWatcher(t, tagGroup)
+		tw.linearS.setIssues(issue("i-32", "CRI-32", gateLabel(), groupLabel("v9.9.9", "configs")))
+		tw.pollOnce(t)
+		assert.Empty(t, tw.runs(t), "an armed ticket naming a config that does not exist is a wiring error")
+		assert.True(t, tw.logs.contains("failed closed"), "watcher should log the failure")
+	})
+}
+
 // CRI-242: the workflow object's admission queue class is stamped onto the
 // run, defaulted to dev when the routes payload omits it.
 func TestPollStampsWorkflowClass(t *testing.T) {

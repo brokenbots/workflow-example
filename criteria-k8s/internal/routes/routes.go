@@ -81,8 +81,8 @@ const (
 
 // Payload is the routes ConfigMap payload (the 'routes.json' data key).
 type Payload struct {
-	APIVersion string              `json:"apiVersion"`
-	Kind       string              `json:"kind"`
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
 	// WorkflowLibrary is the workflow set routes select from.
 	WorkflowLibrary map[string]Workflow `json:"workflowLibrary"`
 	// ConfigLibrary (KB-103) is the per-repo configuration overlay routes
@@ -150,6 +150,16 @@ type Secret struct {
 // the run spec fields, the watcher defaults, and empty: an empty gate
 // self-skips exactly as before KB-103. Command fields carry shell command
 // text, so whitespace is legal — only empty values fail validation.
+//
+// KB-154 tag-group config: an entry may declare the ticket tags it serves
+// (Tags/TagMatch) — the declarative half of the tag-group config overlay
+// on the KB-103 per-repo config. A ticket tag satisfying an entry's tag
+// subset selects that entry's config for the run (tags: a `v0.6.0` group
+// entry can set baseBranch to the release branch). The matched route's
+// configRef stays the primary binding (KB-103 precedence); the tag-group
+// overlay applies through the configs label group when the route carries
+// no configRef, and the kanboard watcher uses entry tags to impute which
+// flat tags belong to the configs group.
 type ConfigEntry struct {
 	// BuildCmd is the per-repo build command override.
 	BuildCmd string `json:"buildCmd,omitempty"`
@@ -158,6 +168,21 @@ type ConfigEntry struct {
 	// CIGateCmd is the per-repo CI gate command override (the gate that
 	// must pass before a PR is opened).
 	CIGateCmd string `json:"ciGateCmd,omitempty"`
+	// BaseBranch (KB-154) is the release-branch slice of the tag-group
+	// config: the branch a run forks from, validates against, and opens
+	// its PR against. Empty means the default branch ("main"), declared
+	// by the routes schema of record. Whitespace rejects (git refs never
+	// carry whitespace).
+	BaseBranch string `json:"baseBranch,omitempty"`
+	// Tags (KB-154) declares the ticket tags this entry serves: a ticket
+	// carrying a tag in this subset selects the entry's config over the
+	// plain repo config (the tag-group overlay). Omitted keeps the entry
+	// tag-group-less: it is selected only by name (route configRef or a
+	// configs-group label naming it), exactly as before KB-154.
+	Tags []string `json:"tags,omitempty"`
+	// TagMatch is the subset semantics for Tags: "all" (default) requires
+	// the ticket to carry every declared tag, "any" at least one.
+	TagMatch string `json:"tagMatch,omitempty"`
 }
 
 // Route assigns Linear tickets to a workflow-library object by project, tag
@@ -388,15 +413,19 @@ func validateWorkflow(name string, wf Workflow) error {
 // validateConfigEntry enforces the per-config constraints (KB-103): the
 // name is a DNS-1123 label (it doubles as the pinned ConfigMap's name) and
 // every declared command value is non-empty. Shell text legitimately
-// contains whitespace, so values are only length-checked.
+// contains whitespace, so values are only length-checked. KB-154: a
+// declared baseBranch must be a git-ref-shaped name without whitespace,
+// tags must not contain empty names, and tagMatch obeys the route's
+// tagMatch vocabulary.
 func validateConfigEntry(name string, entry ConfigEntry) error {
 	if !labelRe.MatchString(name) {
 		return fmt.Errorf("name is not a DNS-1123 label")
 	}
 	for field, value := range map[string]string{
-		"buildCmd":  entry.BuildCmd,
-		"testCmd":   entry.TestCmd,
-		"ciGateCmd": entry.CIGateCmd,
+		"buildCmd":   entry.BuildCmd,
+		"testCmd":    entry.TestCmd,
+		"ciGateCmd":  entry.CIGateCmd,
+		"baseBranch": entry.BaseBranch,
 	} {
 		if value == "" {
 			continue
@@ -404,6 +433,19 @@ func validateConfigEntry(name string, entry ConfigEntry) error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s must not be blank when declared", field)
 		}
+	}
+	if whitespaceRe.MatchString(entry.BaseBranch) {
+		return fmt.Errorf("baseBranch %q must be a git ref name without whitespace", entry.BaseBranch)
+	}
+	for _, tag := range entry.Tags {
+		if tag == "" {
+			return fmt.Errorf("tags must not contain empty names")
+		}
+	}
+	switch entry.TagMatch {
+	case "", TagMatchAll, TagMatchAny:
+	default:
+		return fmt.Errorf("tagMatch must be %q or %q, got %q", TagMatchAll, TagMatchAny, entry.TagMatch)
 	}
 	return nil
 }
@@ -650,9 +692,12 @@ func (p *Payload) Resolve(sel Selector) (*Selection, error) {
 	// it, a single configs-group label names the config; more than one is
 	// ambiguous and fails closed. The explicit route binding outranks the
 	// label override (a route's configRef is deliberately placed config).
+	// KB-154: a configs-group label resolves by entry name OR by the label
+	// satisfying an entry's tag subset (the tag-group config overlay) —
+	// the specificity ordering stays fail-closed on ambiguity.
 	configName := route.ConfigRef
 	if configName == "" {
-		override, err := configOverride(sel)
+		override, err := configOverride(p, sel)
 		if err != nil {
 			return nil, err
 		}
@@ -675,10 +720,21 @@ func (p *Payload) Resolve(sel Selector) (*Selection, error) {
 	}, nil
 }
 
-// configOverride returns the config-library name carried by the ticket's
-// label in the configured configs label group, or "" when the ticket
-// carries none. More than one such label is ambiguous and fails closed.
-func configOverride(sel Selector) (string, error) {
+// configOverride returns the config-library entry the ticket's label in
+// the configured configs label group selects, or "" when the ticket
+// carries none. KB-154 tag-group config: the label resolves by entry name
+// first (KB-103), else by satisfying an entry's tag subset — a ticket tag
+// like `v0.6.0` selects the entry that declares it. An entry that carries
+// no tags is name-selectable only, exactly as before KB-154.
+//
+// Every configs-group label is resolved independently and each must select
+// exactly one entry: an ambiguous selection (two names, or one tag
+// satisfied by several entries — map iteration order would otherwise pick
+// one arbitrarily) and a selection naming no entry both fail closed. The
+// single-overlay-selection invariant keeps the overlay from becoming a
+// second routing surface: multiple ticket tags in the configs group are a
+// wiring error, not a preference list.
+func configOverride(p *Payload, sel Selector) (string, error) {
 	if sel.ConfigsLabelGroup == "" {
 		return "", nil
 	}
@@ -692,10 +748,71 @@ func configOverride(sel Selector) (string, error) {
 	case 0:
 		return "", nil
 	case 1:
-		return overrides[0], nil
+		return p.configNameForLabel(overrides[0])
 	default:
 		return "", fmt.Errorf("%w: %s", ErrAmbiguousConfig, strings.Join(overrides, ", "))
 	}
+}
+
+// configNameForLabel resolves one configs-group label to its configLibrary
+// entry name: the label naming the entry (KB-103) wins, else the label
+// satisfying an entry's tag subset (KB-154 tag-group overlay). An entry
+// that carries no tags is name-selectable only. No entry matches is
+// ErrUnknownConfig and several tag-subset matches is ErrAmbiguousConfig —
+// both fail closed: map iteration order must never decide the selection.
+func (p *Payload) configNameForLabel(label string) (string, error) {
+	if _, ok := p.ConfigLibrary[label]; ok {
+		return label, nil
+	}
+	matches := make([]string, 0, 2)
+	for name, entry := range p.ConfigLibrary {
+		if entryTagsSatisfied(&entry, label) {
+			matches = append(matches, name)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("%w: %q", ErrUnknownConfig, label)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("%w: %s", ErrAmbiguousConfig, strings.Join(matches, ", "))
+	}
+}
+
+// entryTagsSatisfied applies an entry's tagMatch semantics to a single
+// ticket tag: "all" (default) requires the entry to declare exactly the
+// given tag, "any" requires the ticket tag to be among the entry's
+// declared tags.
+func entryTagsSatisfied(entry *ConfigEntry, tag string) bool {
+	if entry.TagMatch == TagMatchAny {
+		return slices.Contains(entry.Tags, tag)
+	}
+	// "all" (the schema default): one label satisfies the subset only
+	// when the subset is exactly that one tag.
+	return len(entry.Tags) == 1 && entry.Tags[0] == tag
+}
+
+// ConfigsTagGroupMember reports whether a ticket tag belongs in the
+// configs label group (KB-154): the tag names a configLibrary entry, or
+// satisfies the tag subset of some entry. Kanboard has flat tags — the
+// watcher consults this per tag to impute which tag group the tag is a
+// member of, so a ticket tag like v0.6.0 selects the tag-group config
+// instead of failing closed as a phantom workflow override. When the
+// subset is satisfied by several entries the tag is still a member: the
+// resolver's configs-group selection then fails closed as
+// ErrAmbiguousConfig, and a matched route carrying a configRef (KB-103
+// precedence) never consults the overlay at all.
+func (p *Payload) ConfigsTagGroupMember(tag string) bool {
+	if _, ok := p.ConfigLibrary[tag]; ok {
+		return true
+	}
+	for _, entry := range p.ConfigLibrary {
+		if entryTagsSatisfied(&entry, tag) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchRoute returns the first route matching the ticket's project and

@@ -77,7 +77,8 @@ VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "ser
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
 TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes"}
-CONFIG_KEYS = {"buildCmd", "testCmd", "ciGateCmd"}
+CONFIG_KEYS = {"buildCmd", "testCmd", "ciGateCmd", "baseBranch", "tags", "tagMatch"}
+CONFIG_TAG_MATCHES = {"", "all", "any"}
 VOLUME_KINDS = ("pvc", "nfs", "tmp", "k8s-secret")
 WORKFLOW_TYPES = ("url", "image")
 WORKFLOW_CLASSES = ("dev", "triage")
@@ -326,10 +327,24 @@ def validate_config(name, entry, where, errs):
         if key not in CONFIG_KEYS:
             errs.append(f"{where} has unknown field {key!r}")
     for key in CONFIG_KEYS:
-        if key in entry:
-            value = entry[key]
-            if not isinstance(value, str) or not value.strip():
-                errs.append(f"{where}.{key} must be a non-empty string")
+        if key not in entry:
+            continue
+        value = entry[key]
+        if key == "tags":
+            if not isinstance(value, list) or not value:
+                errs.append(f"{where}.tags must be a non-empty list of tag names (empty means name-only selection; omit the field)")
+                continue
+            for tag in value:
+                if not isinstance(tag, str) or not tag.strip():
+                    errs.append(f"{where}.tags must carry non-empty tag names")
+                    break
+            continue
+        if key == "tagMatch":
+            if not isinstance(value, str) or value not in CONFIG_TAG_MATCHES:
+                errs.append(f"{where}.tagMatch {value!r} must be one of: empty, all, any")
+            continue
+        if not isinstance(value, str) or not value.strip():
+            errs.append(f"{where}.{key} must be a non-empty string")
 
 
 def validate(doc):
@@ -442,6 +457,37 @@ positive.extend([
     ("config-library-gate-only", mutate(kb103_add_gate_only_config)),
 ])
 
+# KB-154: tag-group config entries — tags + tagMatch + baseBranch are all
+# valid shapes of the config schema (release-branch targeting rides a
+# configs-label-group/ticket-tag overlay, and baseBranch needs no
+# whitespace to be a git ref).
+def kb154_add_tag_group(d):
+    d["configLibrary"]["acme-repo-v060"] = {
+        "buildCmd": "scripts/build.sh", "baseBranch": "v0.6.0-release", "tags": ["v0.6.0"],
+    }
+
+
+def kb154_add_matching_tagmatch(d):
+    d["configLibrary"]["acme-repo-beta"] = {
+        "baseBranch": "beta-release", "tags": ["beta", "v0.6.0"], "tagMatch": "any",
+    }
+
+
+def kb154_add_empty_tagmatch(d):
+    d["configLibrary"]["acme-repo-main"] = {"baseBranch": "release-test", "tags": ["v0.6.0"], "tagMatch": ""}
+
+
+def kb154_add_basebranch_only(d):
+    d["configLibrary"]["acme-repo-release"] = {"baseBranch": "release"}
+
+
+positive.extend([
+    ("config-library-tag-group-entry", mutate(kb154_add_tag_group)),
+    ("config-library-tag-match-any", mutate(kb154_add_matching_tagmatch)),
+    ("config-library-tag-match-empty", mutate(kb154_add_empty_tagmatch)),
+    ("config-library-basebranch-only", mutate(kb154_add_basebranch_only)),
+])
+
 negative = [
     ("image-workflow-with-url", True, mutate(lambda d: d[LIB][BAKED].update(
         url="git::https://example.invalid/repo.git//wf"))),
@@ -513,6 +559,35 @@ negative.extend([
     ("config-bad-key-name", True, mutate(kb103_add_bad_key)),
     ("route-dangling-configref", False, mutate(kb103_dangling_configref)),
     ("route-bad-configref-label", True, mutate(kb103_bad_configref_label)),
+])
+
+# KB-154: tag-group fail-closed variants.
+def kb154_bad_tagmatch(d):
+    d["configLibrary"]["acme-repo-v060"] = {"baseBranch": "v0.6.0-release", "tags": ["v0.6.0"], "tagMatch": "some"}
+
+
+def kb154_empty_tags(d):
+    d["configLibrary"]["acme-repo-v060"] = {"baseBranch": "v0.6.0-release", "tags": []}
+
+
+def kb154_nonlist_tags(d):
+    d["configLibrary"]["acme-repo-v060"] = {"baseBranch": "v0.6.0-release", "tags": "v0.6.0"}
+
+
+def kb154_blank_tag_name(d):
+    d["configLibrary"]["acme-repo-v060"] = {"baseBranch": "v0.6.0-release", "tags": ["   "]}
+
+
+def kb154_blank_basebranch(d):
+    d["configLibrary"]["acme-repo-v060"] = {"baseBranch": "   "}
+
+
+negative.extend([
+    ("config-bad-tagmatch", True, mutate(kb154_bad_tagmatch)),
+    ("config-empty-tags", True, mutate(kb154_empty_tags)),
+    ("config-nonlist-tags", True, mutate(kb154_nonlist_tags)),
+    ("config-blank-tag-name", True, mutate(kb154_blank_tag_name)),
+    ("config-blank-basebranch", True, mutate(kb154_blank_basebranch)),
 ])
 
 failures = []

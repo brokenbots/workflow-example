@@ -82,6 +82,7 @@ var (
 	buildCmd          = flag.String("build-cmd", getenv("BUILD_CMD", ""), "Default build command")
 	testCmd           = flag.String("test-cmd", getenv("TEST_CMD", ""), "Default test command")
 	ciGateCmd         = flag.String("ci-gate-cmd", getenv("CI_GATE_CMD", ""), "Default CI gate command")
+	baseBranch        = flag.String("base-branch", getenv("BASE_BRANCH", ""), "Default branch runs fork from, validate against, and open PRs against (main when empty); overridden by the selected config entry")
 	defaultRepoURL    = flag.String("default-repo-url", getenv("DEFAULT_REPO_URL", ""), "Default repo URL when the Kanboard task does not reference one")
 	routesFile        = flag.String("routes-file", getenv("CRITERIA_ROUTES_FILE", routes.DefaultFile), "Routes payload file (mounted from the criteria-routes ConfigMap); re-read every poll")
 	workflowsTagGroup = flag.String("kanboard-workflows-tag-group", getenv("KANBOARD_WORKFLOWS_TAG_GROUP", "workflows"), "Tag group whose tags name a workflow overriding the route's project default (empty disables overrides)")
@@ -150,6 +151,7 @@ func main() {
 		buildCmd:          *buildCmd,
 		testCmd:           *testCmd,
 		ciGateCmd:         *ciGateCmd,
+		baseBranch:        *baseBranch,
 		defaultRepoURL:    *defaultRepoURL,
 		routesFile:        *routesFile,
 		workflowsTagGroup: *workflowsTagGroup,
@@ -227,6 +229,7 @@ type watcher struct {
 	buildCmd          string
 	testCmd           string
 	ciGateCmd         string
+	baseBranch        string
 	defaultRepoURL    string
 	routesFile        string
 	workflowsTagGroup string
@@ -506,6 +509,12 @@ func (w *watcher) poll(ctx context.Context) error {
 		// payload-driven — a tag maps to the configs group only when it
 		// names a configLibrary entry in the live payload, so non-routing
 		// tags keep mapping to the workflows group exactly as before.
+		//
+		// KB-154: tag-group config extends the same payload-driven rule to
+		// tag-subset entries — a tag matching an entry's declared tag set
+		// (e.g. "v0.6.0" on an entry tagged v0.6.0-release targeting) also
+		// maps to the configs group. Selection still fails closed: a
+		// configs-group tag that matches nothing is ErrUnknownConfig.
 		tagGroups := map[string]string{}
 		for _, tag := range task.Tags {
 			if w.isRoutingSignal(tag) {
@@ -513,6 +522,10 @@ func (w *watcher) poll(ctx context.Context) error {
 			}
 			if w.configsTagGroup != "" {
 				if _, isConfig := routesPayload.ConfigLibrary[tag]; isConfig {
+					tagGroups[tag] = w.configsTagGroup
+					continue
+				}
+				if routesPayload.ConfigsTagGroupMember(tag) {
 					tagGroups[tag] = w.configsTagGroup
 					continue
 				}
@@ -809,12 +822,14 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repo
 		BuildCmd:         w.buildCmd,
 		TestCmd:          w.testCmd,
 		CIGateCmd:        w.ciGateCmd,
+		BaseBranch:       w.baseBranch,
 		MaxAgentVisits:   w.maxAgentVisits,
 		ProviderBaseURL:  w.providerBaseURL,
 	}
 	// KB-103: per-repo config outranks the watcher-level fallback flags
 	// entry-by-entry; spec.configRef pins the ConfigMap the operator
-	// renders (fail-closed on drift).
+	// renders (fail-closed on drift). KB-154: the same stamp carries the
+	// entry's baseBranch onto the spec.
 	execNS := w.namespace
 	if sel.Workflow.Namespace != "" {
 		execNS = sel.Workflow.Namespace

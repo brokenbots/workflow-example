@@ -13,6 +13,55 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// KB-154: the runner env BASE_BRANCH carries the run's (rendered) spec
+// base-branch slice, falling back to "main" when no config selected one.
+func TestBuildRunnerJobBaseBranch(t *testing.T) {
+	buildRun := func(name, baseBranch string) *criteriav1.CriteriaRun {
+		run := &criteriav1.CriteriaRun{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: criteriav1.CriteriaRunSpec{
+				TicketID:        "KB-154",
+				RepoURL:         "https://github.com/brokenbots/workflow-example.git",
+				Image:           "localhost:5000/linear-intake-remote:dev",
+				MaxAgentVisits:  1,
+				ProviderBaseURL: "http://provider/v1",
+			},
+		}
+		run.Spec.BaseBranch = baseBranch
+		return run
+	}
+	t.Run("spec baseBranch flows through as BASE_BRANCH", func(t *testing.T) {
+		job := jobbuilder.BuildRunnerJob(buildRun("kb154-base", "v0.6.0-release"), jobbuilder.Defaults{
+			Image: "default-image:dev", DataPVC: "criteria-data",
+			ProviderBaseURL: "http://default-provider/v1",
+		})
+		require.NotNil(t, job)
+		var runner corev1.Container
+		for i := range job.Spec.Template.Spec.Containers {
+			c := &job.Spec.Template.Spec.Containers[i]
+			if c.Name == jobbuilder.RunnerContainerName {
+				runner = *c
+			}
+		}
+		assert.Equal(t, "v0.6.0-release", envValue(runner.Env, "BASE_BRANCH"))
+	})
+	t.Run("empty spec baseBranch keeps main", func(t *testing.T) {
+		job := jobbuilder.BuildRunnerJob(buildRun("kb154-main", ""), jobbuilder.Defaults{
+			Image: "default-image:dev", DataPVC: "criteria-data",
+			ProviderBaseURL: "http://default-provider/v1",
+		})
+		require.NotNil(t, job)
+		var runner corev1.Container
+		for i := range job.Spec.Template.Spec.Containers {
+			c := &job.Spec.Template.Spec.Containers[i]
+			if c.Name == jobbuilder.RunnerContainerName {
+				runner = *c
+			}
+		}
+		assert.Equal(t, "main", envValue(runner.Env, "BASE_BRANCH"))
+	})
+}
+
 func TestBuildAllPodSecurity(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-113"},

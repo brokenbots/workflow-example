@@ -194,6 +194,80 @@ func TestReconcileConfigRenderWithoutPin(t *testing.T) {
 	})
 }
 
+// KB-154: the pinned ConfigMap's baseBranch key outranks the spec field
+// (the release-branch slice renders like the command fields), the render
+// records it for provenance, and the runner env carries the rendered
+// value; a CM without the key keeps the watcher-stamped spec value.
+func TestReconcileConfigRenderBaseBranch(t *testing.T) {
+	cm := func(rv string, baseBranch string) *corev1.ConfigMap {
+		data := map[string]string{"buildCmd": "make release-build"}
+		if baseBranch != "" {
+			data["baseBranch"] = baseBranch
+		}
+		return &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "repo-a-v060",
+				Namespace:       "default",
+				ResourceVersion: rv,
+			},
+			Data: data,
+		}
+	}
+	run := func(name, specBase string, rv string) *criteriav1.CriteriaRun {
+		r := newProbeRun(name)
+		r.Spec.BuildCmd = "flag-build"
+		r.Spec.BaseBranch = specBase
+		r.Spec.ConfigRef = &criteriav1.CriteriaRunConfigRef{Name: "repo-a-v060", ResourceVersion: rv}
+		return r
+	}
+	t.Run("CM baseBranch outranks the spec field and lands in env", func(t *testing.T) {
+		scheme := newScheme(t)
+		r0 := run("kb154-render-cm-branch", "watcher-main", repoCMStamped)
+		cl := configRunClient(t, scheme, r0, cm(repoCMStamped, "v0.6.0-release"))
+		rr := newProbeReconciler(cl, scheme, nil)
+
+		reconcileOnce(t, rr, r0)
+
+		var after criteriav1.CriteriaRun
+		require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(r0), &after))
+		require.NotNil(t, after.Status.ConfigRender)
+		assert.Equal(t, "v0.6.0-release", after.Status.ConfigRender.BaseBranch, "the CM value records")
+		assert.Equal(t, "make release-build", after.Status.ConfigRender.BuildCmd)
+		assert.Equal(t, "watcher-main", after.Spec.BaseBranch, "the persisted spec keeps the watcher's stamp; only the render record and env carry the CM value")
+		env := runnerCommandEnv(t, cl, r0)
+		assert.Equal(t, "v0.6.0-release", env["BASE_BRANCH"], "the runner forks/PRs against the release branch")
+		assert.Equal(t, "make release-build", env["BUILD_CMD"])
+	})
+	t.Run("CM without the key keeps the watcher stamp", func(t *testing.T) {
+		scheme := newScheme(t)
+		r0 := run("kb154-render-spec-branch", "watcher-main", repoCMStamped)
+		cl := configRunClient(t, scheme, r0, cm(repoCMStamped, ""))
+		rr := newProbeReconciler(cl, scheme, nil)
+
+		reconcileOnce(t, rr, r0)
+
+		var after criteriav1.CriteriaRun
+		require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(r0), &after))
+		require.NotNil(t, after.Status.ConfigRender)
+		assert.Equal(t, "watcher-main", after.Status.ConfigRender.BaseBranch, "the spec field records")
+	})
+	t.Run("a baseBranch alone never manufactures a render", func(t *testing.T) {
+		// hasSpecRender stays command-gated (KB-103): the render-free shape
+		// of an unconfigured run must not loosen for the new field.
+		scheme := newScheme(t)
+		r0 := newProbeRun("kb154-branch-only")
+		r0.Spec.BaseBranch = "watcher-main"
+		cl := configRunClient(t, scheme, r0)
+		rr := newProbeReconciler(cl, scheme, nil)
+
+		reconcileOnce(t, rr, r0)
+
+		var after criteriav1.CriteriaRun
+		require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(r0), &after))
+		assert.Nil(t, after.Status.ConfigRender, "no pin and no commands: still render-free")
+	})
+}
+
 // A name-only pin whose ConfigMap does not exist at admission renders the
 // spec fields alone instead of failing the run (a run may be admitted
 // before its repo's config CM is first created).

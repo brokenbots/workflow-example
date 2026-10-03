@@ -68,6 +68,12 @@ spec:
                 ciGateCmd:
                   type: string
                   description: CI gate command for the implementation loop.
+                baseBranch:
+                  type: string
+                  description: >-
+                    Release-branch slice of the per-repo config (KB-154):
+                    the branch the run forks from, validates against, and
+                    opens its PR against. Empty means "main".
                 maxAgentVisits:
                   type: integer
                   default: 2
@@ -226,8 +232,8 @@ spec:
                     resolves the run's config from the routes configLibrary
                     and pins the ConfigMap name plus the resourceVersion
                     observed at stamping time. The operator renders the
-                    run's build/test/ci-gate commands from it (ConfigMap
-                    values outrank the spec fields) and re-verifies the pin
+                    run's build/test/ci-gate commands and baseBranch
+                    (KB-154) from it (ConfigMap values outrank the spec fields) and re-verifies the pin
                     on every reconcile pass: a ConfigMap replaced under an
                     admitted run fails it with a ConfigRenderDrift
                     condition (the workflowSource ref-pin symmetry, CRI-226).
@@ -288,6 +294,13 @@ spec:
                     ciGateCmd:
                       type: string
                       description: Rendered CI gate command.
+                    baseBranch:
+                      type: string
+                      description: >-
+                        Rendered branch the run forks from, validates
+                        against, and opens its PR against (ConfigMap value
+                        outranking the spec field; empty remains "main" at
+                        consumption).
                 ticketState:
                   type: string
                   description: >-

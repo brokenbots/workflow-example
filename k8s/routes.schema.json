@@ -33,7 +33,7 @@
     },
     "configLibrary": {
       "type": "object",
-      "description": "Per-repo configuration overrides (KB-103): name -> command overrides the run executes on. An entry's NAME doubles as the per-repo ConfigMap the run pins (same name, in the workflow's execution namespace); the entry's command fields are what the watcher stamps into the run spec, and the operator renders run-time commands from the pinned ConfigMap's identically named data keys, outranking these inline values. Optional: payloads without per-repo config omit it entirely.",
+      "description": "Per-repo configuration overrides (KB-103): name -> command overrides the run executes on. An entry's NAME doubles as the per-repo ConfigMap the run pins (same name, in the workflow's execution namespace); the entry's command fields are what the watcher stamps into the run spec, and the operator renders run-time commands from the pinned ConfigMap's identically named data keys, outranking these inline values. KB-154: an entry may also declare ticket tags — entries whose tag subset includes the ticket tag are selected from the configs label group without the tag naming the entry, and baseBranch carries the branch the run forks from, validates against, and opens its PR against. Optional: payloads without per-repo config omit it entirely.",
       "propertyNames": {
         "$ref": "#/definitions/label"
       },
@@ -512,13 +512,13 @@
         },
         "configRef": {
           "$ref": "#/definitions/label",
-          "description": "Per-repo config this route's runs execute under (KB-103): a configLibrary entry name whose ConfigMap the operator pins and renders. Must exist in configLibrary. The explicit route binding outranks a config label in the watcher's configured configs label group."
+          "description": "Per-repo config this route's runs execute under (KB-103): a configLibrary entry name whose ConfigMap the operator pins and renders. Must exist in configLibrary. The explicit route binding outranks a config label in the watcher's configured configs label group. KB-154: binding a tag-group entry here makes the route itself the tag selector (its tags match the route's tag subsets via the CRI-217 tag ordering)."
         }
       }
     },
     "config": {
       "type": "object",
-      "description": "A configLibrary entry (KB-103): per-repo command overrides a run executes on. The entry name identifies the pinned ConfigMap; its data keys (buildCmd/testCmd/ciGateCmd) outrank these inline fields. All fields optional — an entry may name only the keys a repo declares.",
+      "description": "A configLibrary entry (KB-103): per-repo command overrides a run executes on. The entry name identifies the pinned ConfigMap; its data keys (buildCmd/testCmd/ciGateCmd/baseBranch) outrank these inline fields. All fields optional — an entry may name only the keys a repo declares. KB-154: tags + tagMatch turn the entry into a tag-group config (tag-subset selection from the configs label group).",
       "additionalProperties": false,
       "properties": {
         "buildCmd": {
@@ -544,6 +544,35 @@
           "not": {
             "pattern": "^\\s*$"
           }
+        },
+        "baseBranch": {
+          "type": "string",
+          "description": "Release-branch slice (KB-154): the branch the run forks from, validates against, and opens its PR against (main when omitted; no whitespace — git refs never carry it).",
+          "minLength": 1,
+          "not": {
+            "pattern": "^\\s*$"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "description": "Ticket tags this entry serves (KB-154 tag-group config); tickets carrying any (tagMatch any) or all (tagMatch all) of these select the entry from the configs label group by tag subset. An empty tags list is rejected — tag-group entries must declare at least one non-blank tag (omit tags to keep the entry selectable only by its name).",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "pattern": "^\\s*$"
+            }
+          }
+        },
+        "tagMatch": {
+          "type": "string",
+          "description": "How an entry's tags match a ticket tag (KB-154): any — the ticket tag equals one of the entry's tags; all — reserved for multi-tag subsets (a single ticket tag can only satisfy an entry whose tags carry exactly that one tag). Empty defaults to all.",
+          "enum": [
+            "",
+            "all",
+            "any"
+          ]
         }
       }
     }

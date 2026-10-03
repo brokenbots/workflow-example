@@ -499,6 +499,16 @@ GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
 	}
 }
 
+// baseBranchOrDefault resolves the env BASE_BRANCH: the run's (KB-154
+// rendered) spec base-branch slice, or "main" — the jobbuilder default —
+// when no config selected a branch.
+func baseBranchOrDefault(spec string) string {
+	if strings.TrimSpace(spec) != "" {
+		return spec
+	}
+	return "main"
+}
+
 func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "TICKET_ID", Value: run.Spec.TicketID},
@@ -510,7 +520,7 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		{Name: "LINEAR_TRIAGE_STATE", Value: "Triage"},
 		{Name: "LINEAR_WORK_STATE", Value: "In Progress"},
 		{Name: "LINEAR_DONE_STATE", Value: "Done"},
-		{Name: "BASE_BRANCH", Value: "main"},
+		{Name: "BASE_BRANCH", Value: baseBranchOrDefault(run.Spec.BaseBranch)},
 		{Name: "BUILD_CMD", Value: run.Spec.BuildCmd},
 		{Name: "TEST_CMD", Value: run.Spec.TestCmd},
 		{Name: "CI_GATE_CMD", Value: run.Spec.CIGateCmd},
