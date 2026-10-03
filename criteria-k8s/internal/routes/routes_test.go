@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -70,6 +71,14 @@ func selectorFor(project, state string, labels []string, groups map[string]strin
 		LabelGroups:         groups,
 		WorkflowsLabelGroup: "workflows",
 	}
+}
+
+// configsSelector is selectorFor with the ticket's single config-flavored
+// label placed in the configs label group (KB-103/KB-154).
+func configsSelector(tag, project, state string) Selector {
+	sel := selectorFor(project, state, []string{tag}, map[string]string{tag: "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	return sel
 }
 
 func TestParseAndValidate(t *testing.T) {
@@ -913,7 +922,9 @@ func TestResolveNoConfigLeavesSelectionEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if sel.ConfigName != "" || sel.Config != (ConfigEntry{}) {
+	// Empty-selection check: ConfigEntry carries a Tags slice (KB-154), so
+	// the zero value is not comparable with ==.
+	if sel.ConfigName != "" || !reflect.DeepEqual(sel.Config, ConfigEntry{}) {
 		t.Errorf("no config selected: got ConfigName %q, Config %+v", sel.ConfigName, sel.Config)
 	}
 }
@@ -988,5 +999,211 @@ func TestValidatePositiveConfigEntry(t *testing.T) {
 	}
 	if _, err := Parse(marshalPayload(t, p)); err != nil {
 		t.Fatalf("Parse rejected a valid config entry: %v", err)
+	}
+}
+
+// taggedConfigPayload is a KB-154 tag-group config variant of the KB-103
+// fixture: the intake route binds the plain repo config "repo-a";
+// "repo-a-v060" carries the v0.6.0 tag group and the release branch, and
+// "repo-b" is a second repo's config for cross-repo overlay tests. The
+// tagged entry names its branch only — the release-branch slice the
+// overlay exists to select. Overlay-dependent tests strip the route
+// binding to exercise the fallback path.
+func taggedConfigPayload() *Payload {
+	p := validConfigPayload()
+	p.ConfigLibrary["repo-a-v060"] = ConfigEntry{
+		BuildCmd:   "make build-a-v060",
+		TestCmd:    "make test-a-v060",
+		CIGateCmd:  "make ci-a-v060",
+		BaseBranch: "v0.6.0-release",
+		Tags:       []string{"v0.6.0"},
+	}
+	return p
+}
+
+// unboundConfigPayload strips the intake route's configRef so the
+// configs-group overlay is what selects the entry.
+func unboundConfigPayload() *Payload {
+	p := taggedConfigPayload()
+	routes := p.Routes
+	routes[0].ConfigRef = ""
+	p.Routes = routes
+	return p
+}
+
+func TestResolveConfigTagGroupOverlay(t *testing.T) {
+	p := unboundConfigPayload()
+	// The ticket's configs-group v0.6.0 label satisfies the tagged entry's
+	// tag subset but names no entry: the overlay resolves it by tags.
+	sel, err := p.Resolve(configsSelector("v0.6.0", "Runner", "Triage"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConfigName != "repo-a-v060" {
+		t.Fatalf("ConfigName = %q, want tag-group entry %q", sel.ConfigName, "repo-a-v060")
+	}
+	entry := p.ConfigLibrary["repo-a-v060"]
+	if sel.Config.BaseBranch != "v0.6.0-release" || sel.Config.BuildCmd != entry.BuildCmd {
+		t.Fatalf("Config = %+v, want the repo-a-v060 entry", sel.Config)
+	}
+}
+
+func TestResolveTaggedConfigEntryIsOverlayOnly(t *testing.T) {
+	// The route binding (repo-a) outranks the tag-group overlay: the
+	// ticket's v0.6.0 label does not redirect a configRef-bound route.
+	// The tag-group entry is intended to bind through a tagged route; a
+	// route-bound ticket carrying the label keeps the route's config.
+	p := taggedConfigPayload()
+	sel, err := p.Resolve(configsSelector("v0.6.0", "Runner", "Triage"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.Route.ConfigRef != "repo-a" || sel.ConfigName != "repo-a" {
+		t.Fatalf("route binding outranked by overlay: ConfigName = %q, want %q", sel.ConfigName, "repo-a")
+	}
+}
+
+func TestResolveUntaggedTicketKeepsRepoConfig(t *testing.T) {
+	// Without the v0.6.0 tag the plain repo config applies (KB-103).
+	p := taggedConfigPayload()
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConfigName != "repo-a" {
+		t.Fatalf("ConfigName = %q, want %q", sel.ConfigName, "repo-a")
+	}
+}
+
+func TestResolveConfigTagGroupAmbiguousFailsClosed(t *testing.T) {
+	// Two entries declare the same tag group: map iteration order must
+	// never decide the selection, so it fails closed instead.
+	p := unboundConfigPayload()
+	p.ConfigLibrary["repo-b-v060"] = ConfigEntry{BuildCmd: "make build-b-v060", Tags: []string{"v0.6.0"}}
+	sel := selectorFor("Runner", "Triage", []string{"v0.6.0"}, map[string]string{"v0.6.0": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	if _, err := p.Resolve(sel); !errors.Is(err, ErrAmbiguousConfig) {
+		t.Fatalf("err = %v, want ErrAmbiguousConfig", err)
+	}
+}
+
+func TestResolveConfigTagGroupUnknownFailsClosed(t *testing.T) {
+	// A configs-group label matching no entry name and no tag subset
+	// fails closed (the decided KB-154 failure mode): a config that does
+	// not exist is a wiring error worth surfacing, not a silent
+	// mis-branching.
+	p := unboundConfigPayload()
+	delete(p.ConfigLibrary, "repo-a-v060")
+	sel := selectorFor("Runner", "Triage", []string{"v0.6.0"}, map[string]string{"v0.6.0": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	if _, err := p.Resolve(sel); !errors.Is(err, ErrUnknownConfig) {
+		t.Fatalf("err = %v, want ErrUnknownConfig", err)
+	}
+}
+
+func TestResolveConfigTagGroupNoEntryTagsStaysNameOnly(t *testing.T) {
+	// A tag-less entry (plain KB-103 repo config) is name-selectable
+	// only: the label "repo-a-v060" (an entry NAME in the configs group)
+	// selects it, while "v0.6.0" against a tag-less payload fails closed.
+	p := unboundConfigPayload()
+	p.ConfigLibrary["repo-a-v060"] = ConfigEntry{BuildCmd: "make build-a-v060"} // tag stripped
+	sel := selectorFor("Runner", "Triage", []string{"v0.6.0"}, map[string]string{"v0.6.0": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	if _, err := p.Resolve(sel); !errors.Is(err, ErrUnknownConfig) {
+		t.Fatalf("err = %v, want ErrUnknownConfig for a tag with no tag-group entry", err)
+	}
+}
+
+func TestResolveConfigTagGroupAnyMatch(t *testing.T) {
+	// tagMatch=any: the tag is among the declared tags, and the other
+	// tagged entry (v0.6.0 under all-semantics) is not satisfied by
+	// "beta".
+	p := unboundConfigPayload()
+	p.ConfigLibrary["repo-a-beta"] = ConfigEntry{BuildCmd: "make build-beta", Tags: []string{"beta", "v0.6.0"}, TagMatch: TagMatchAny}
+	sel, err := p.Resolve(configsSelector("beta", "Runner", "Triage"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConfigName != "repo-a-beta" {
+		t.Fatalf("ConfigName = %q, want %q", sel.ConfigName, "repo-a-beta")
+	}
+}
+
+func TestResolveConfigTagGroupMultiTagAllNotSatisfiedBySingleLabel(t *testing.T) {
+	// tagMatch=all with two declared tags: a single configs-group label
+	// cannot satisfy the subset, so the label fails closed rather than
+	// half-selecting the entry.
+	p := unboundConfigPayload()
+	entry := p.ConfigLibrary["repo-a-v060"]
+	entry.TagMatch = TagMatchAll
+	entry.Tags = []string{"v0.6.0", "urgent"}
+	p.ConfigLibrary["repo-a-v060"] = entry
+	sel := selectorFor("Runner", "Triage", []string{"v0.6.0"}, map[string]string{"v0.6.0": "configs"})
+	sel.ConfigsLabelGroup = "configs"
+	if _, err := p.Resolve(sel); !errors.Is(err, ErrUnknownConfig) {
+		t.Fatalf("err = %v, want ErrUnknownConfig", err)
+	}
+}
+
+func TestConfigsTagGroupMember(t *testing.T) {
+	p := taggedConfigPayload()
+	cases := []struct {
+		tag  string
+		want bool
+	}{
+		{"repo-a-v060", true}, // names an entry (KB-103)
+		{"repo-a", true},      // names the untagged entry
+		{"v0.6.0", true},      // single-tag all-subset match
+		{"repo-b", true},      // names an entry
+		{"beta", false},       // declared only under all-semantics with v0.6.0
+		{"nonsense", false},   // neither name nor tag
+		{"v0.7.0", false},     // no entry declares it
+	}
+	for _, tc := range cases {
+		if got := p.ConfigsTagGroupMember(tc.tag); got != tc.want {
+			t.Errorf("ConfigsTagGroupMember(%q) = %v, want %v", tc.tag, got, tc.want)
+		}
+	}
+	// An ambiguous tag subset is a member: the resolver fails closed on
+	// it when a route-without-configRef relies on the overlay.
+	p.ConfigLibrary["repo-b-v060"] = ConfigEntry{BuildCmd: "make build-b-v060", Tags: []string{"v0.6.0"}}
+	if !p.ConfigsTagGroupMember("v0.6.0") {
+		t.Errorf("ConfigsTagGroupMember(v0.6.0) = false with an ambiguous subset, want true (ambiguous membership fails closed at selection)")
+	}
+}
+
+func TestValidateRejectsBadTagGroupEntry(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry ConfigEntry
+	}{
+		{"whitespace baseBranch", ConfigEntry{BaseBranch: "v0.6.0 release"}},
+		{"blank baseBranch", ConfigEntry{BaseBranch: "   "}},
+		{"bad tagMatch", ConfigEntry{Tags: []string{"v0.6.0"}, TagMatch: "some"}},
+		{"empty tag name", ConfigEntry{Tags: []string{""}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPayload()
+			p.ConfigLibrary = map[string]ConfigEntry{"repo-a": tc.entry}
+			if _, err := Parse(marshalPayload(t, p)); err == nil {
+				t.Fatalf("Parse accepted tag-group config entry %+v", tc.entry)
+			}
+		})
+	}
+}
+
+func TestValidatePositiveTagGroupEntry(t *testing.T) {
+	p := validPayload()
+	p.ConfigLibrary = map[string]ConfigEntry{
+		"repo-a-v060": {
+			BuildCmd:   "make build",
+			BaseBranch: "v0.6.0-release",
+			Tags:       []string{"v0.6.0", "urgent"},
+			TagMatch:   TagMatchAny,
+		},
+	}
+	if _, err := Parse(marshalPayload(t, p)); err != nil {
+		t.Fatalf("Parse rejected a valid tag-group config entry: %v", err)
 	}
 }
