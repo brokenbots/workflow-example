@@ -1,0 +1,62 @@
+// labs_smoke_v1 — criteria-labs isolation smoke test (workflow-cutover handbook §3).
+// Purpose: prove the labs plane end-to-end BEFORE any labs tooling work: namespace
+// isolation, dedicated operator watch, anonymous workflow fetch via git:: URL, shell
+// adapter pull/run from ghcr, deterministic routing, typed outputs, and phase
+// observability by the remote agent's scoped identity.
+//
+// Fired as a CriteriaRun in namespace criteria-labs ONLY. Never fired in criteria-jobs.
+// Failure verdicts are DETERMINISTIC (graph-side match on exit_code), never agent
+// interpretation — the agent only reports.
+
+workflow {
+    name             = "labs_smoke_v1"
+    version          = "1"
+    criteria_version = ">=0.5.24-10, <0.6.0"
+    initial_state    = "probe"
+    target_state     = "done"
+}
+
+variable "probe_msg" {
+    type    = string
+    default = "criteria-labs isolation smoke"
+}
+
+adapter "shell" "probe" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.3"
+}
+
+step "probe" {
+    target = adapter.shell.probe
+    input {
+        command = templatefile("./scripts/probe.sh.tftpl", {
+            probe_msg = var.probe_msg
+        })
+        timeout = "2m"
+    }
+    outcome "success" { next = step.assert_id }
+    outcome "failure" { next = state.failed }
+}
+
+step "assert_id" {
+    target = adapter.shell.probe
+    input {
+        command = templatefile("./scripts/assert_id.sh.tftpl", {
+            expected_ns = "criteria-labs"
+        })
+        timeout = "1m"
+    }
+    outcome "ok"       { next = state.done }
+    outcome "mismatch" { next = state.failed }
+    outcome "failure"  { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

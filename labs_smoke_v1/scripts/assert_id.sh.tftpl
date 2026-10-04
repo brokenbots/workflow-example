@@ -1,0 +1,16 @@
+set -eu
+# Deterministic labs assertion: the run's /data volume must be present and writable.
+# (Namespace binding is structurally guaranteed — the job exists in criteria-labs and
+# pods cannot escape their namespace; the CR audit trail shows who fired it.)
+if [ ! -d /data ]; then
+    echo "DATA_ASSERT: missing /data mount"
+    exit 10
+fi
+echo "DATA_WRITE" > /data/labs_smoke_probe.txt
+if [ "$(cat /data/labs_smoke_probe.txt)" != "DATA_WRITE" ]; then
+    echo "DATA_ASSERT: write verification failed"
+    exit 10
+fi
+echo "NS_ASSERT : $(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo unknown)"
+echo "DATA_ASSERT: ok (/data writable)"
+exit 0

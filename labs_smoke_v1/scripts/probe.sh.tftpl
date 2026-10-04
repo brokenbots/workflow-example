@@ -1,0 +1,12 @@
+set -eu
+echo "PROBE_MSG: ${probe_msg}"
+echo "HOSTNAME  : $(hostname)"
+echo "ENGINE    : $(criteria version 2>/dev/null || echo 'criteria-cli-not-on-path')"
+echo "NOW       : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# service-account namespace file is the canonical in-pod namespace source
+if [ -r /var/run/secrets/kubernetes.io/serviceaccount/namespace ]; then
+    echo "POD_NS    : $(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
+else
+    echo "POD_NS    : (sa namespace file not readable)"
+fi
+echo "PROBE_OK"
