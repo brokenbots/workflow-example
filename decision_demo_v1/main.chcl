@@ -41,6 +41,12 @@ variable "route_conf_floor" {
     description = "Minimum acceptable decision confidence for auto-routing."
 }
 
+variable "urgency_act_floor" {
+    description = "Noul urgency probability at or above which a ticket counts as urgent when the backend reports the verdict as a number; string verdicts gate on equality instead."
+    type        = number
+    default     = 0.5
+}
+
 // Score levels are zero-based indices into the severity question's criteria
 // list ("low", "medium", "high"). A model score at or above this level routes
 // the ticket to human escalation even with acceptable confidence.
@@ -140,9 +146,15 @@ switch "route_department" {
         condition = steps.classify.answers.department.confidence < var.route_conf_floor
         next      = approval.confirm_department
     }
-    // Urgent tickets (noul answer = yes) go to human escalation.
+    // Urgent tickets go to human escalation. The noul verdict travels in two
+    // live shapes — the documented "yes"/"no" string, or the probability-like
+    // number in [0, 1] that the local Ollama backend reports — so the arm
+    // reads both: the string verdict gates on equality, and any non-string
+    // verdict gates on the numeric act floor (!= "no" keeps a literal "no"
+    // from falling into the numeric comparison). Cross-type == and != are
+    // false/true without error, so one arm serves both backends.
     match {
-        condition = steps.classify.answers.urgency.noul == "yes"
+        condition = steps.classify.answers.urgency.noul == "yes" || (steps.classify.answers.urgency.noul != "no" && steps.classify.answers.urgency.noul >= var.urgency_act_floor)
         next      = approval.confirm_escalation
     }
     // High-severity scores escalate even when the model is confident.

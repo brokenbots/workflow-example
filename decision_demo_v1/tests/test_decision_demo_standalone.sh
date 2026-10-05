@@ -111,7 +111,7 @@ require_equal "$(jq -r '.switches[0].conditions | length' "$TMP/cloud.json")" "6
 GOT_ARMS="$(jq -c '[.switches[0].conditions[] | [.match, .next]] | tostring' "$TMP/cloud.json")"
 WANT_ARMS="$(jq -c -n '
     [["steps.classify.answers.department.confidence < var.route_conf_floor","confirm_department"],
-      ["steps.classify.answers.urgency.noul == \"yes\"","confirm_escalation"],
+      ["steps.classify.answers.urgency.noul == \"yes\" || (steps.classify.answers.urgency.noul != \"no\" && steps.classify.answers.urgency.noul >= var.urgency_act_floor)","confirm_escalation"],
       ["steps.classify.answers.severity.score >= var.severity_escalation_level","confirm_escalation"],
       ["steps.classify.answers.department.choice == \"security\"","confirm_escalation"],
       ["steps.classify.answers.department.choice == \"billing\"","queued_billing"],
