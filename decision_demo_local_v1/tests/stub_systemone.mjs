@@ -1,7 +1,8 @@
 // stub_systemone.mjs — deterministic System One decision-backend stub for the
 // decision_demo_* runtime tests. Speaks the System One wire format over POST
-// /v1/systemone (ADR-0013): request {model, state, questions}, response
-// {model, answers, usage}.
+// /v1/systemone (ADR-0013): request {model, state, questions:{id → question}},
+// response {model, answers:{id → answer}, usage} — both sides map-shaped,
+// keyed by question id (the shape Typesafe's own docs document).
 //
 // Answers are derived from the ticket state's subject so every scenario is
 // driven purely by the test's --var inputs (no test-specific backend knobs):
@@ -52,16 +53,22 @@ const server = http.createServer((req, res) => {
     const noul = subject.includes("urgent") ? "yes" : "no";
     const score = subject.includes("critical") ? 2 : 0;
 
-    // Answers are positionally aligned with the request questions. The wire
-    // contract (ADR-0013) strictly decodes every entry: choice answers
-    // carry {id, choice, probabilities, [confidence]}, score answers carry
-    // {id, score, legend, probabilities, [confidence]} with legend equal to
-    // the chosen level, and noul answers carry {id, noul} with no
-    // confidence. Choice answers for an undeclared option and probability
-    // keys outside the declared criteria are rejected by the adapter.
-    const answers = (request.questions ?? []).map((q) => {
+    // The System One wire contract is map-shaped: the request carries the
+    // questions keyed by id ({id → question}) and the response answers them
+    // in the same key space ({id → answer}), every answer typed. The adapter
+    // strictly decodes each entry, so the stub must speak the live shape:
+    // noul answers carry {type, noul} with no confidence, choice answers
+    // carry {type, choice, probabilities, [confidence]}, and score answers
+    // carry {type, score, legend, probabilities, [confidence]} with legend
+    // equal to the chosen level. Choice answers for an undeclared option and
+    // probability keys outside the declared criteria are rejected by the
+    // adapter.
+    const answers = {};
+    for (const [id, q] of Object.entries(request.questions ?? {})) {
       switch (q.type) {
-        case "noul": return { id: q.id, noul };
+        case "noul":
+          answers[id] = { type: "noul", noul };
+          break;
         case "choice": {
           const options = Object.keys(q.criteria ?? {});
           const probs = {};
@@ -69,21 +76,25 @@ const server = http.createServer((req, res) => {
           for (const option of options) {
             probs[option.toLowerCase()] = option.toLowerCase() === choice ? confidence : rest / (options.length - 1);
           }
-          return { id: q.id, choice, probabilities: probs, confidence };
+          answers[id] = { type: "choice", choice, probabilities: probs, confidence };
+          break;
         }
         case "score": {
           const levels = q.criteria ?? ["low"];
-          return {
-            id: q.id,
+          answers[id] = {
+            type: "score",
             score,
             legend: levels[score],
             probabilities: { [levels[score]]: 0.97, [levels[0]]: 0.03 },
             confidence: 0.97,
           };
+          break;
         }
-        default: return { id: q.id };
+        default:
+          answers[id] = { type: q.type ?? "unknown" };
+          break;
       }
-    });
+    }
 
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ model: `stub-${subject ? "echo" : "bare"}`, answers, usage: { tokens: 0 } }));

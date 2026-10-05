@@ -13,6 +13,9 @@ set -euo pipefail
 # when the engine, the decision adapter binary, or node is unavailable: the
 # decision adapter is still unpublished, so CI runs skip this test by design
 # and the compile-level test (decision_demo_v1/tests/) is the CI gate.
+# The live-ollama validation leg (real engine, model tev1:0.8b on the
+# GPU-light test host) is executed out-of-band per KB-209; the deterministic
+# stub below speaks the same map-shaped wire contract.
 
 TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRITERIA="${CRITERIA_BIN:-criteria}"

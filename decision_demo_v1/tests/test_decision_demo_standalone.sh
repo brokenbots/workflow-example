@@ -110,33 +110,33 @@ require_equal "$(jq -r '.switches[0].conditions | length' "$TMP/cloud.json")" "6
 # Each arm is [condition, next]; order is routing semantics (first match wins).
 GOT_ARMS="$(jq -c '[.switches[0].conditions[] | [.match, .next]] | tostring' "$TMP/cloud.json")"
 WANT_ARMS="$(jq -c -n '
-    [["steps.classify.answers[1].confidence < var.route_conf_floor","confirm_department"],
-      ["steps.classify.answers[0].noul == \"yes\"","confirm_escalation"],
-      ["steps.classify.answers[2].score >= var.severity_escalation_level","confirm_escalation"],
-      ["steps.classify.answers[1].choice == \"security\"","confirm_escalation"],
-      ["steps.classify.answers[1].choice == \"billing\"","queued_billing"],
-      ["steps.classify.answers[1].choice == \"technical\"","queued_technical"]] | tostring')"
+    [["steps.classify.answers.department.confidence < var.route_conf_floor","confirm_department"],
+      ["steps.classify.answers.urgency.noul == \"yes\"","confirm_escalation"],
+      ["steps.classify.answers.severity.score >= var.severity_escalation_level","confirm_escalation"],
+      ["steps.classify.answers.department.choice == \"security\"","confirm_escalation"],
+      ["steps.classify.answers.department.choice == \"billing\"","queued_billing"],
+      ["steps.classify.answers.department.choice == \"technical\"","queued_technical"]] | tostring')"
 require_equal "$GOT_ARMS" "$WANT_ARMS" "switch arms in the declared order with the declared targets"
 require_equal "$(jq -r '.switches[0].default_next' "$TMP/cloud.json")" "confirm_department" "undeclared choices default to the human gate"
 
 # Acceptance: the demo exercises every answer type in routing.
 ARMS_RAW="$(jq -r '.switches[0].conditions[].match' "$TMP/cloud.json")"
-if echo "$ARMS_RAW" | grep -q 'answers\[1\].confidence'; then
+if echo "$ARMS_RAW" | grep -q 'answers\.department\.confidence'; then
     ok "confidence answer exercised in routing"
 else
     fail "confidence answer not exercised in routing"
 fi
-if echo "$ARMS_RAW" | grep -q 'answers\[0\].noul'; then
+if echo "$ARMS_RAW" | grep -q 'answers\.urgency\.noul'; then
     ok "noul answer exercised in routing"
 else
     fail "noul answer not exercised in routing"
 fi
-if echo "$ARMS_RAW" | grep -q 'answers\[2\].score'; then
+if echo "$ARMS_RAW" | grep -q 'answers\.severity\.score'; then
     ok "score answer exercised in routing"
 else
     fail "score answer not exercised in routing"
 fi
-CHOICE_ARMS="$(echo "$ARMS_RAW" | grep -c 'answers\[1\].choice' || true)"
+CHOICE_ARMS="$(echo "$ARMS_RAW" | grep -c 'answers\.department\.choice' || true)"
 require_equal "$CHOICE_ARMS" "3" "choice answer exercised in routing (security/billing/technical)"
 
 # ── 4. Approval outcomes, terminals, reachability ────────────────────────────
@@ -215,8 +215,8 @@ if grep -qE 'api_?key[[:space:]]*=[[:space:]]*"[^"]+"' "$CLOUD/main.chcl"; then
 else
     ok "no quoted credential literal in the cloud variant"
 fi
-if grep -q 'base_url = "https://s1.typesafe.ai"' "$CLOUD/main.chcl" && grep -q 'model    = "jev"' "$CLOUD/main.chcl"; then
-    ok "cloud variant pins the System One endpoint and model jev"
+if grep -q 'base_url = "https://api.typesafe.ai"' "$CLOUD/main.chcl" && grep -q 'model    = "jev-latest"' "$CLOUD/main.chcl"; then
+    ok "cloud variant pins the System One endpoint and model jev-latest"
 else
     fail "cloud variant does not pin the System One endpoint/model"
 fi
