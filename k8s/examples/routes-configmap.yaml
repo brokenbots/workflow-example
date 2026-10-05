@@ -81,6 +81,18 @@
 # Makefile 'apply-routes' target documents the deploy ordering that pairs
 # the operator/watcher rollout with the state creation and this cutover.
 #
+# KB-205 (ADR-0013 M6 consumer enablement): the demo workflows land in
+# this repository as runnable proof of the decision adapter's composition
+# shape (classification -> switch/match routing -> confidence-gated human
+# approval). The 'decision-demo-url' object is ROUTE PREP ONLY for KB-207:
+# no routes[] entry fires it yet (the shipped example must keep exactly the
+# five live routes), it is url-only and pinless like the
+# linear-intake-url object, and KB-207 completes the wiring in one place —
+# re-pinning 'ref' to the merge commit that lands decision_demo_v1 (the
+# CRI-241/CRI-243 follow-up convention), declaring the decision adapter
+# image in adapterImages, binding the System One credential surfaced by a
+# SecretProviderClass (name references only), and adding the route entry.
+#
 # Secrets are name references only: every secret here points at a
 # SecretProviderClass (OpenBao via the Secrets Store CSI driver). No
 # credential material appears in this file (plan CRI-214 section 3.8).
@@ -469,6 +481,11 @@ data:
             "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
             "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
           }
+        },
+        "decision-demo-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//decision_demo_v1",
+          "namespace": "criteria-jobs"
         }
       },
       "configLibrary": {
