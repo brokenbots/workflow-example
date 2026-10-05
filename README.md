@@ -3,6 +3,35 @@
 Repository for Criteria-based triage and workstream-handler workflows used by
 BrokenBots.
 
+## Workflow trees
+
+- `linear_intake_v1`, `linear_triage_v1`, `linear_develop_v1`, `ticket_cleanup_v1`:
+  the Linear ticket pipelines routed via the `criteria-routes` ConfigMap
+  (`k8s/examples/routes-configmap.yaml`).
+- `decision_demo_v1` (KB-205, ADR-0013): the runnable proof of the decision
+  adapter's composition shape. One decision step asks a System One model for
+  a noul answer (urgency), a choice (department), and a score (severity)
+  about a ticket; a switch routes on the answers — confident models dispatch
+  on the department choice, while a department confidence under
+  `route_conf_floor` pauses the run on a human approval node (matching arm
+  is evaluated to the approval first). A second human gate handles
+  urgencies, high-severity scores, and security department choices.
+  Endings cover both queue terminals, the escalation terminal, the approval
+  abandonment, and the model-failure terminal, with a routing summary
+  output capturing the model's facts.
+- `decision_demo_local_v1`: the same grammar pointed at
+  `http://localhost:11434` (an Ollama `clef-flash` backend) with no
+  credentials and no secrets block, proving the composition is
+  backend-agnostic; its adapter config carries the only difference.
+- Both trees validate and compile with `make validate`, and
+  `decision_demo_v1/tests/` pins the compiled graph (arm order, every answer
+  type exercised in routing, the confidence-gate approval path,
+  credential discipline). `decision_demo_local_v1/tests/` runs a 7-scenario
+  end-to-end regression against a stub System One backend
+  (`stub_systemone.mjs`) where the unpublished decision adapter binary is
+  available; `k8s/examples/routes-configmap.yaml` carries the
+  `decision-demo-url` object prepared for the KB-207 routing run.
+
 ## Kubernetes deployment
 
 The `k8s/` directory contains a Kubernetes Job template and launcher for running
