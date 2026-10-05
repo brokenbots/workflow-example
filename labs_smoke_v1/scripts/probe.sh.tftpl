@@ -1,5 +1,7 @@
+probe_msg={{ .probe_msg | shellquote }}
+
 set -eu
-echo "PROBE_MSG: ${probe_msg}"
+echo "PROBE_MSG: $probe_msg"
 echo "HOSTNAME  : $(hostname)"
 echo "ENGINE    : $(criteria version 2>/dev/null || echo 'criteria-cli-not-on-path')"
 echo "NOW       : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
