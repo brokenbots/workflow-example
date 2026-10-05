@@ -121,6 +121,8 @@ validate:
 	/usr/local/bin/criteria validate linear_triage_v1
 	/usr/local/bin/criteria validate linear_develop_v1
 	/usr/local/bin/criteria validate ticket_cleanup_v1
+	/usr/local/bin/criteria validate decision_demo_v1
+	/usr/local/bin/criteria validate decision_demo_local_v1
 
 # CRI-241 + CRI-243: apply the criteria-routes ConfigMap live. Deploy
 # ordering for the CRI-243 cutover (the criteria project's routes become
@@ -197,6 +199,10 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_criteria_base_entrypoint.sh
 	@echo "Running criteria-base pin deploy-pairing guard (CRI-234/CRI-237)..."
 	./k8s/tests/test_criteria_base_pin.sh
+	@echo "Running decision demo compile-level regression test (KB-205)..."
+	./decision_demo_v1/tests/test_decision_demo_standalone.sh
+	@echo "Running decision demo runtime regression test (KB-205, skips without the unpublished adapter)..."
+	./decision_demo_local_v1/tests/test_decision_demo_runtime.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -231,7 +237,9 @@ lint: lint-criteria-k8s
 		criteria-base/tests/smoke_test.sh \
 		k8s/tests/test_criteria_base.sh \
 		k8s/tests/test_criteria_base_entrypoint.sh \
-		k8s/tests/test_criteria_base_pin.sh
+		k8s/tests/test_criteria_base_pin.sh \
+		decision_demo_v1/tests/test_decision_demo_standalone.sh \
+		decision_demo_local_v1/tests/test_decision_demo_runtime.sh
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...

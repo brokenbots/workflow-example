@@ -112,15 +112,21 @@ require_equal "$(jq -r '.switches[0].default_next' "$TMP/cloud.json")" "confirm_
 
 # Acceptance: the demo exercises every answer type in routing.
 ARMS_RAW="$(jq -r '.switches[0].conditions[].match' "$TMP/cloud.json")"
-echo "$ARMS_RAW" | grep -q 'answers\[1\].confidence' \
-    && ok "confidence answer exercised in routing" \
-    || fail "confidence answer not exercised in routing"
-echo "$ARMS_RAW" | grep -q 'answers\[0\].noul' \
-    && ok "noul answer exercised in routing" \
-    || fail "noul answer not exercised in routing"
-echo "$ARMS_RAW" | grep -q 'answers\[2\].score' \
-    && ok "score answer exercised in routing" \
-    || fail "score answer not exercised in routing"
+if echo "$ARMS_RAW" | grep -q 'answers\[1\].confidence'; then
+    ok "confidence answer exercised in routing"
+else
+    fail "confidence answer not exercised in routing"
+fi
+if echo "$ARMS_RAW" | grep -q 'answers\[0\].noul'; then
+    ok "noul answer exercised in routing"
+else
+    fail "noul answer not exercised in routing"
+fi
+if echo "$ARMS_RAW" | grep -q 'answers\[2\].score'; then
+    ok "score answer exercised in routing"
+else
+    fail "score answer not exercised in routing"
+fi
 CHOICE_ARMS="$(echo "$ARMS_RAW" | grep -c 'answers\[1\].choice' || true)"
 require_equal "$CHOICE_ARMS" "3" "choice answer exercised in routing (security/billing/technical)"
 

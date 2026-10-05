@@ -65,7 +65,9 @@ if [ -n "$SKIP" ]; then
 fi
 
 cleanup() {
-    [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null || true
+    if [ -n "$STUB_PID" ]; then
+        kill "$STUB_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
