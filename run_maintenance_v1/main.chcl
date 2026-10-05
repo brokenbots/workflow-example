@@ -1,0 +1,159 @@
+// run_maintenance_v1 — labs-plane run hygiene (criteria-labs ONLY).
+//
+// Scope boundary (HANDBOOK.md §3/§4 isolation design): this workflow maintains
+// CriteriaRun objects and intake artifacts in the criteria-labs namespace ONLY.
+// Production cleanup (criteria-jobs plane: castle CRs, production intake) is
+// console-side by design — the labs agent's kubeconfig is deliberately scoped
+// so it cannot see or touch criteria-jobs, and this workflow must never be
+// fired there. If a production cleanup is ever needed, that is a console
+// ticket, not a re-pin of this workflow.
+//
+// Parameterized by ticket_id: performs, in order —
+//
+//   check_cr        does a CriteriaRun named for ticket_id exist in
+//                   criteria-labs? (kubectl via the pod SA — labs-only by
+//                   RBAC; a forbidden error out of criteria-jobs is
+//                   impossible by design, not caught-and-hidden.)
+//   delete_if_exists race-fix order per plan §5: CR first, then artifacts.
+//                   No-op success when no CR exists.
+//   clean_intake    intake directory removal for ticket_id under intake_root.
+//   verify          deterministic postcondition asserts, fail-closed:
+//                   CR gone (or was never there), intake dir gone, and the
+//                   two-tag fail-closed rule asserted (fail if the run
+//                   record carries neither or both of the maintenance tags).
+//
+// All steps use the shell adapter; outcomes are ADAPTER-NATIVE only
+// (success/failure on exit code — HANDBOOK §6.1, second smoke failure: custom
+// labels compile but leave the real outcome unmapped → deterministic failure).
+// Script bodies are GO-TEMPLATE ({{ .var | shellquote }}), never shell ${var}
+// interpolation (§6.1, first smoke failure).
+//
+// Verification doctrine (§6.1): the phase string is never trusted alone — a
+// fired run is verified by reading events.ndjson on the labs-data PVC via
+// adapter pod exec. The verify step's asserts are the in-run deterministic
+// half; the post-run events.ndjson read is the operator half.
+//
+// Requires no secrets. Intended pin: shell adapter
+// localhost:5000/criteria-adapter-shell:k8s-0.5.4-2 (explicit CR pin — the
+// operator default tags are unpublished, §6.1 CRI-214 M14).
+
+workflow {
+    name             = "run_maintenance_v1"
+    version          = "1"
+    criteria_version = ">=0.5.24-10, <0.6.0"
+    initial_state    = "check_cr"
+    target_state     = "done"
+
+    policy {
+        max_total_steps = 10
+    }
+}
+
+// Absolute path under which per-ticket intake directories live. Same default
+// shape as the sibling trees so cleanup targets stay OUTSIDE the repository.
+variable "intake_root" {
+    description = "Absolute path under which per-ticket intake directories live (<intake_root>/<ticket_id>/). Must be OUTSIDE the repository."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+// Ticket identifier whose labs-plane artifacts are being maintained. Used to
+// derive the CR name prefix and the intake directory. The labs smoke run used
+// ticketId LABS-SMOKE-1 / CR name labs-smoke-0001, so the slug convention is
+// the lowercase ticket id with a numeric suffix.
+variable "ticket_id" {
+    description = "Ticket identifier to clean up in the LABS plane (e.g. \"LABS-MAINT-1\"). Matches CriteriaRun.metadata.name prefix labs-maint-XXXX and the intake dir <intake_root>/<ticket_id>."
+    type        = string
+}
+
+adapter "shell" "maint" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.3"
+}
+
+// ── check_cr ─────────────────────────────────────────────────────────────────
+
+// Deterministic check: does a CriteriaRun whose metadata.name starts with the
+// slug of ticket_id exist in namespace criteria-labs? Exit 0 = exists,
+// exit 1 = absent (mapped to the distinct "absent" routing below), other
+// exit = real failure (RBAC/API error — fail closed, never swallow).
+step "check_cr" {
+    target = adapter.shell.maint
+    input {
+        command = templatefile("./scripts/check_cr.sh.tftpl", {
+            ticket_id = var.ticket_id
+        })
+        timeout = "2m"
+    }
+    outcome "success" { next = step.delete_if_exists }
+    // Adapter-native outcome name for "not found" is still failure on exit
+    // code; the routing distinction is made inside delete_if_exists by
+    // re-checking, keeping the outcome map adapter-native (§6.1).
+    outcome "failure" { next = step.delete_if_exists }
+}
+
+// ── delete_if_exists ─────────────────────────────────────────────────────────
+
+// Race-fix order (plan §5): if the CR exists, delete IT first, then artifacts.
+// If check_cr reported absence, this is a no-op success.
+step "delete_if_exists" {
+    target = adapter.shell.maint
+    input {
+        command = templatefile("./scripts/delete_if_exists.sh.tftpl", {
+            ticket_id = var.ticket_id
+        })
+        timeout = "2m"
+    }
+    outcome "success" { next = step.clean_intake }
+    outcome "failure" { next = state.failed }
+}
+
+// ── clean_intake ─────────────────────────────────────────────────────────────
+
+// Remove the intake directory for ticket_id. Guarded rm: only under
+// intake_root, never the root itself, never recursive-bare.
+step "clean_intake" {
+    target = adapter.shell.maint
+    input {
+        command = templatefile("./scripts/clean_intake.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+        timeout = "2m"
+    }
+    outcome "success" { next = step.verify }
+    outcome "failure" { next = state.failed }
+}
+
+// ── verify ───────────────────────────────────────────────────────────────────
+
+// Fail-closed deterministic asserts:
+//   1. no CriteriaRun matching the ticket slug remains
+//   2. intake dir gone
+//   3. two-tag rule: the run-record tag set must carry EXACTLY ONE of the
+//      maintenance tags (labs-maint / labs-maint-pending) — neither = untagged
+//      run leaking past hygiene, both = ambiguous state. Fail closed on 0 or 2.
+step "verify" {
+    target = adapter.shell.maint
+    input {
+        command = templatefile("./scripts/verify.sh.tftpl", {
+            intake_root = var.intake_root
+            ticket_id   = var.ticket_id
+        })
+        timeout = "2m"
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

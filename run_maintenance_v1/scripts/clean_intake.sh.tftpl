@@ -1,0 +1,34 @@
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
+
+set -u
+# clean_intake — remove the intake directory for ticket_id under intake_root.
+# Labs plane only: this is the labs-created working-directory artifact
+# (/tmp/criteria-intake/<ticket_id>/). Production intake cleanup is
+# console-side by design and is NEVER targeted here.
+#
+# Guarded rm: only ever <intake_root>/<ticket_id>, never the root itself, and
+# never a bare recursive glob. Absent dir = no-op success.
+
+TARGET_DIR="${intake_root:?}/${ticket_id:?}"
+
+echo "CLEAN_INTAKE: removing intake dir ${TARGET_DIR} (labs plane only)"
+
+# Guard: refuse anything that would resolve to intake_root itself or the FS root.
+if [ "$TARGET_DIR" = "$intake_root" ] || [ "$TARGET_DIR" = "/" ]; then
+    echo "CLEAN_INTAKE: refusing dangerous target ${TARGET_DIR}"
+    exit 30
+fi
+
+if [ ! -d "$TARGET_DIR" ]; then
+    echo "CLEAN_INTAKE: ${TARGET_DIR} absent — no-op success"
+    exit 0
+fi
+
+if rm -rf "$TARGET_DIR"; then
+    echo "CLEAN_INTAKE: removed ${TARGET_DIR}"
+    exit 0
+else
+    echo "CLEAN_INTAKE: rm failed for ${TARGET_DIR}"
+    exit 31
+fi

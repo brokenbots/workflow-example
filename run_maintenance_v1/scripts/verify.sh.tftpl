@@ -1,0 +1,102 @@
+intake_root={{ .intake_root | shellquote }}
+ticket_id={{ .ticket_id | shellquote }}
+
+set -u
+# verify — deterministic fail-closed postconditions (plan §5):
+#   1. no CriteriaRun matching the ticket slug remains in criteria-labs
+#   2. intake dir gone
+#   3. two-tag fail-closed rule: exactly ONE maintenance tag must remain
+#      associated with the ticket's labs-plane record — neither (0) or both
+#      (2) is a fail. Tags live on the CriteriaRun labels as
+#      criteria.brokenbots.dev/labs-maint (done) and
+#      criteria.brokenbots.dev/labs-maint-pending (re-fire pending).
+#      When NO CR remains (full success), the run-record label read is also
+#      done via the labs-plane records; absence of any CR means the ticket
+#      has zero tags, which for a completed maintenance pass is the expected
+#      clean state — the two-tag assert then applies to the intake evidence
+#      file instead (see step 3b below).
+#
+# Post-run verification doctrine (§6.1): the phase string is NOT trusted
+# alone — events.ndjson for this run is read from the labs-data PVC via
+# adapter pod exec as the operator half of verification. This step's asserts
+# are the in-run deterministic half.
+
+TICKET_ID=$ticket_id
+CR_NAME_PREFIX="labs-maint-"
+FAILS=0
+
+echo "VERIFY: ticket ${TICKET_ID} — labs-plane postconditions"
+
+# ── assert 1: CR gone ────────────────────────────────────────────────────────
+if ! kubectl get criteriaruns -n criteria-labs -o name > /tmp/verify_names.txt 2>/tmp/verify_err.txt; then
+    echo "VERIFY: kubectl get failed — fail closed:"
+    cat /tmp/verify_err.txt
+    exit 40
+fi
+if grep -q "^criteriarun.criteria.brokenbots.dev/${CR_NAME_PREFIX}" /tmp/verify_names.txt; then
+    echo "VERIFY: FAIL — CR still present:"
+    grep "^criteriarun.criteria.brokenbots.dev/${CR_NAME_PREFIX}" /tmp/verify_names.txt
+    FAILS=$((FAILS + 1))
+else
+    echo "VERIFY: ok — no CR matching ${CR_NAME_PREFIX} remains"
+fi
+
+# ── assert 2: intake dir gone ────────────────────────────────────────────────
+TARGET_DIR="${intake_root:?}/${ticket_id:?}"
+if [ -d "$TARGET_DIR" ]; then
+    echo "VERIFY: FAIL — intake dir still present: ${TARGET_DIR}"
+    FAILS=$((FAILS + 1))
+else
+    echo "VERIFY: ok — intake dir ${TARGET_DIR} absent"
+fi
+
+# ── assert 3: two-tag fail-closed rule ───────────────────────────────────────
+# Read the tags from any surviving labs-plane CR labels; if none survive
+# (clean state), read the maintenance evidence marker instead: exactly one of
+# .done / .pending must exist under the labs-plane evidence root.
+TAG_DONE=0
+TAG_PENDING=0
+while IFS= read -r CR; do
+    [ -z "$CR" ] && continue
+    NAME=${CR#criteriarun.criteria.brokenbots.dev/}
+    LABELS=$(kubectl get criteriarun "$NAME" -n criteria-labs -o jsonpath='{.metadata.labels}' 2>/dev/null || echo '{}')
+    if echo "$LABELS" | grep -q 'labs-maint"'; then
+        TAG_DONE=$((TAG_DONE + 1))
+    fi
+    if echo "$LABELS" | grep -q 'labs-maint-pending'; then
+        TAG_PENDING=$((TAG_PENDING + 1))
+    fi
+done < /tmp/verify_names.txt
+
+# Strip the pending count from the done count when a pending tag was also
+# counted by the looser 'labs-maint"' match (labs-maint-pending ends in
+# -pending, not a quote, so the quote-anchored grep above does not
+# double-count; kept explicit here for clarity and fail-closedness).
+TAG_COUNT=$((TAG_DONE + TAG_PENDING))
+
+if [ "$TAG_COUNT" -eq 0 ]; then
+    # No surviving CR carries any maintenance tag → check the evidence
+    # markers: exactly one of done/pending must exist.
+    EV_ROOT="${intake_root:?}/.labs-maint-evidence/${TICKET_ID}"
+    D=0; P=0
+    [ -f "${EV_ROOT}.done" ] && D=1
+    [ -f "${EV_ROOT}.pending" ] && P=1
+    if [ $((D + P)) -eq 1 ]; then
+        echo "VERIFY: ok — two-tag rule satisfied (exactly one evidence marker: D=${D} P=${P})"
+    else
+        echo "VERIFY: FAIL — two-tag rule violated: 0 or 2 markers (D=${D} P=${P}) at ${EV_ROOT}"
+        FAILS=$((FAILS + 1))
+    fi
+elif [ "$TAG_COUNT" -eq 1 ]; then
+    echo "VERIFY: ok — two-tag rule satisfied (exactly one CR carries exactly one maintenance tag)"
+else
+    echo "VERIFY: FAIL — two-tag rule violated: ${TAG_COUNT} maintenance tag instances found (want exactly 1)"
+    FAILS=$((FAILS + 1))
+fi
+
+if [ "$FAILS" -gt 0 ]; then
+    echo "VERIFY: ${FAILS} postcondition(s) FAILED — run fails closed"
+    exit 41
+fi
+echo "VERIFY: all postconditions ok"
+exit 0

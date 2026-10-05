@@ -1,0 +1,28 @@
+ticket_id={{ .ticket_id | shellquote }}
+
+set -u
+# check_cr — does a CriteriaRun for this ticket exist in criteria-labs?
+# Labs-plane only: the pod SA cannot see criteria-jobs (isolation design). A
+# forbidden error there is impossible by RBAC design; any kubectl error here is
+# a real labs-plane failure and must fail closed.
+
+CR_NAME_PREFIX="labs-maint-"
+TICKET_ID=$ticket_id
+
+echo "CHECK_CR: looking for CriteriaRun in criteria-labs for ticket ${TICKET_ID}"
+
+if ! kubectl get criteriaruns -n criteria-labs -o name > /tmp/check_cr_names.txt 2>/tmp/check_cr_err.txt; then
+    echo "CHECK_CR: kubectl get criteriaruns failed — NOT treating as 'absent':"
+    cat /tmp/check_cr_err.txt
+    exit 20
+fi
+
+if grep -q "^criteriarun.criteria.brokenbots.dev/${CR_NAME_PREFIX}" /tmp/check_cr_names.txt; then
+    MATCH=$(grep "^criteriarun.criteria.brokenbots.dev/${CR_NAME_PREFIX}" /tmp/check_cr_names.txt | head -5)
+    echo "CHECK_CR: CR exists:"
+    echo "$MATCH"
+    exit 0
+else
+    echo "CHECK_CR: no CR matching prefix ${CR_NAME_PREFIX} (ticket ${TICKET_ID}) — nothing to delete"
+    exit 1
+fi

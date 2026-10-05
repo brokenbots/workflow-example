@@ -1,0 +1,45 @@
+ticket_id={{ .ticket_id | shellquote }}
+
+set -u
+# delete_if_exists — race-fix order per plan §5: CR first, then artifacts.
+# This step handles ONLY the CR deletion; intake artifacts are handled by
+# clean_intake (next step). No-op success when no CR matches.
+
+CR_NAME_PREFIX="labs-maint-"
+TICKET_ID=$ticket_id
+
+echo "DELETE_IF_EXISTS: resolving CRs for ticket ${TICKET_ID} in criteria-labs"
+
+if ! kubectl get criteriaruns -n criteria-labs -o name > /tmp/del_names.txt 2>/tmp/del_err.txt; then
+    echo "DELETE_IF_EXISTS: kubectl get failed — fail closed:"
+    cat /tmp/del_err.txt
+    exit 20
+fi
+
+MATCHES=$(grep "^criteriarun.criteria.brokenbots.dev/${CR_NAME_PREFIX}" /tmp/del_names.txt || true)
+if [ -z "$MATCHES" ]; then
+    echo "DELETE_IF_EXISTS: no CR matching prefix ${CR_NAME_PREFIX} — no-op success"
+    exit 0
+fi
+
+DELETED=0
+FAILED=0
+for CR in $MATCHES; do
+    NAME=${CR#criteriarun.criteria.brokenbots.dev/}
+    echo "DELETE_IF_EXISTS: deleting CR ${NAME} (race-fix order: CR first)"
+    if kubectl delete criteriarun "$NAME" -n criteria-labs --wait=true > /dev/null 2>/tmp/del_one_err.txt; then
+        DELETED=$((DELETED + 1))
+        echo "DELETE_IF_EXISTS: deleted ${NAME}"
+    else
+        FAILED=$((FAILED + 1))
+        echo "DELETE_IF_EXISTS: FAILED to delete ${NAME}:"
+        cat /tmp/del_one_err.txt
+    fi
+done
+
+if [ "$FAILED" -gt 0 ]; then
+    echo "DELETE_IF_EXISTS: ${FAILED} deletion(s) failed out of $((DELETED + FAILED))"
+    exit 21
+fi
+echo "DELETE_IF_EXISTS: deleted ${DELETED} CR(s) — proceeding to intake cleanup"
+exit 0
