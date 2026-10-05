@@ -1,0 +1,233 @@
+// decision_demo_v1 — M6 (ADR-0013): flagship composition demo for the decision
+// adapter (KB-205). A ticket is classified by a System One decision model
+// (noul urgency + choice department + score severity); a switch routes on the
+// answers; a confidence floor routes unconfident department choices to a human
+// approval instead of letting the model dispatch alone. Existing engine
+// primitives only: step, switch, approval, state, output.
+//
+// Backend: Typesafe System One / S1 Jev (production shape). The sibling
+// decision_demo_local_v1 points the same grammar at a local Ollama backend
+// (clef-flash) to prove the workflow shape is backend-agnostic.
+workflow {
+    name             = "decision_demo_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "classify"
+    target_state     = "dispatched"
+
+    policy {
+        max_total_steps = 20
+    }
+}
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+
+variable "ticket_subject" {
+    type        = string
+    description = "Ticket subject line handed to the decision model state."
+}
+
+variable "ticket_body" {
+    type        = string
+    default     = ""
+    description = "Optional ticket body handed to the decision model state."
+}
+
+// The routing gate: a department choice below this confidence is not trusted
+// to dispatch on its own and pauses for a human approval instead.
+variable "route_conf_floor" {
+    type        = number
+    default     = 0.85
+    description = "Minimum acceptable decision confidence for auto-routing."
+}
+
+// Score levels are zero-based indices into the severity question's criteria
+// list ("low", "medium", "high"). A model score at or above this level routes
+// the ticket to human escalation even with acceptable confidence.
+variable "severity_escalation_level" {
+    type        = number
+    default     = 2
+    description = "Severity index at or above which a ticket escalates to a human."
+}
+
+// Optional bearer credential for the System One backend. Left empty the model
+// is called anonymously (the decision adapter treats an empty api_key as
+// anonymous). Secret-tainted per D69: it reaches the adapter only through the
+// secret channel.
+variable "systemone_api_key" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "Optional API key for the System One decision backend."
+}
+
+// ── Decision adapter ─────────────────────────────────────────────────────────
+
+adapter "decision" "system_one" {
+    config {
+        // The adapter appends /v1/systemone.
+        base_url = "https://s1.typesafe.ai"
+        model    = "jev"
+        timeout  = "45s"
+        retries  = 1
+    }
+    secrets {
+        api_key = var.systemone_api_key
+    }
+}
+
+// The classification questions, sent to the model as a JSON array. Answer
+// order is fixed by this declaration and the routing below indexes it:
+//   answers[0] = urgency     (noul)   — no confidence
+//   answers[1] = department  (choice) — carries numeric confidence
+//   answers[2] = severity    (score)  — carries numeric confidence
+local "classify_questions" {
+    value = jsonencode([
+        {
+            id           = "urgency"
+            type         = "noul"
+            instructions = "Would acting on this ticket now materially reduce customer impact? Answer yes or no."
+        },
+        {
+            id           = "department"
+            type         = "choice"
+            instructions = "Which team owns fixing this? Pick exactly one."
+            criteria     = {
+                billing   = "Money: invoices, payments, subscriptions, refunds."
+                technical = "Product bugs: crashes, build failures, broken features."
+                security  = "Exposure: secrets, access control, data leaks, abuse."
+            }
+        },
+        {
+            id           = "severity"
+            type         = "score"
+            instructions = "Rate the impact on users today: low, medium, or high."
+            criteria     = ["low", "medium", "high"]
+        }
+    ])
+}
+
+// ── Graph ────────────────────────────────────────────────────────────────────
+
+// Single decision call: the model answers the questions against the ticket
+// state; the step only succeeds when the backend accepted the call. The step
+// declares no outcome_question, so it is outcome-pure: the answers are routed
+// by the switch below, not by mapping a choice onto the step outcome.
+step "classify" {
+    target = adapter.decision.system_one
+    input {
+        questions = local.classify_questions
+        state     = jsonencode({
+            subject = var.ticket_subject
+            body    = var.ticket_body
+        })
+    }
+    outcome "success" { next = switch.route_department }
+    outcome "failure" { next = state.decision_failed }
+}
+
+// Route on the model's answers. Match arms are evaluated in declaration order
+// and the first truthy condition wins, so the confidence gate must stay first:
+// a low-confidence department choice always lands on the approval, never on an
+// auto-route below it.
+switch "route_department" {
+    // Confidence gate on the department choice (human-in-the-loop). This is
+    // the routing workstream's required path: under route_conf_floor the
+    // model's dispatch is paused until a human confirms it.
+    match {
+        condition = steps.classify.answers[1].confidence < var.route_conf_floor
+        next      = approval.confirm_department
+    }
+    // Urgent tickets (noul answer = yes) go to human escalation.
+    match {
+        condition = steps.classify.answers[0].noul == "yes"
+        next      = approval.confirm_escalation
+    }
+    // High-severity scores escalate even when the model is confident.
+    match {
+        condition = steps.classify.answers[2].score >= var.severity_escalation_level
+        next      = approval.confirm_escalation
+    }
+    // Confident, calm tickets route on the department choice.
+    match {
+        condition = steps.classify.answers[1].choice == "security"
+        next      = approval.confirm_escalation
+    }
+    match {
+        condition = steps.classify.answers[1].choice == "billing"
+        next      = state.queued_billing
+    }
+    match {
+        condition = steps.classify.answers[1].choice == "technical"
+        next      = state.queued_technical
+    }
+    // Anything the model chose that is not a declared option gets a human.
+    default { next = approval.confirm_department }
+}
+
+approval "confirm_department" {
+    approvers = ["criteria-operator"]
+    reason    = "Department routing confidence below route_conf_floor — confirm or override the model's department choice."
+    outcome "approved" { next = state.dispatched }
+    outcome "rejected" { next = state.abandoned }
+}
+
+approval "confirm_escalation" {
+    approvers = ["criteria-operator"]
+    reason    = "The model flagged this ticket urgent, high-severity, or security-related — confirm the escalation."
+    outcome "approved" { next = state.escalated }
+    outcome "rejected" { next = state.abandoned }
+}
+
+// ── Endings ──────────────────────────────────────────────────────────────────
+
+state "dispatched" {
+    terminal = true
+    success  = true
+}
+
+state "escalated" {
+    terminal = true
+    success  = true
+}
+
+state "queued_billing" {
+    terminal = true
+    success  = true
+}
+
+state "queued_technical" {
+    terminal = true
+    success  = true
+}
+
+// Rejected by the approving human (2026-10-02 dave ruling: human hand-offs
+// that reject the action record failure so they are never reported as
+// successful runs).
+state "abandoned" {
+    terminal = true
+    success  = false
+}
+
+// The decision backend itself failed (transport, auth, decode). No routing
+// decision was made; a retry is a fresh run.
+state "decision_failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+
+// Published when a terminal state is reached, so every arm reports the same
+// routing facts; steps.classify is not present if the backend failed at the
+// entry step, hence the try() guards.
+output "routing_summary" {
+    type        = string
+    description = "Model routing facts: urgency answer, department choice and confidence, severity score."
+    value       = jsonencode({
+        urgency    = try(steps.classify.answers[0].noul, "")
+        department = try(steps.classify.answers[1].choice, "")
+        confidence = try(steps.classify.answers[1].confidence, -1)
+        severity   = try(steps.classify.answers[2].score, -1)
+    })
+}
