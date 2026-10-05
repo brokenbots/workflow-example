@@ -20,9 +20,12 @@ BrokenBots.
   abandonment, and the model-failure terminal, with a routing summary
   output capturing the model's facts.
 - `decision_demo_local_v1`: the same grammar pointed at
-  `http://localhost:11434` (an Ollama `clef-flash` backend) with no
-  credentials and no secrets block, proving the composition is
-  backend-agnostic; its adapter config carries the only difference.
+  `http://localhost:11434` (an Ollama System One backend, v0.35.1 or newer)
+  with no credentials and no secrets block, proving the composition is
+  backend-agnostic; its adapter config carries the only difference. The
+  validated test bed on the GPU-light demo host is model `tev1:0.8b`
+  (KB-209); `clef-flash` is the original pinned example model name, and any
+  Ollama System One model can be substituted.
 - Both trees validate and compile with `make validate`, and
   `decision_demo_v1/tests/` pins the compiled graph (arm order, every answer
   type exercised in routing, the confidence-gate approval path,

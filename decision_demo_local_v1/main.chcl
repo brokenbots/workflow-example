@@ -3,8 +3,10 @@
 // One cloud. The entire class of decision-model routing — noul urgency +
 // choice department + score severity, switch routing, and the
 // confidence-gated human approval — is unchanged; only the adapter block
-// differs (Ollama /v1/systemone endpoint, clef-flash model, no credential,
-// since the local endpoint is unauthenticated).
+// differs (Ollama /v1/systemone endpoint, no credential, since the local
+// endpoint is unauthenticated). The validated local test bed is ollama
+// >= 0.35.1 serving model tev1:0.8b on a GPU-light host (see README.md);
+// clef-flash is the original example model name.
 workflow {
     name             = "decision_demo_local_v1"
     version          = "1"
@@ -38,6 +40,12 @@ variable "route_conf_floor" {
     description = "Minimum acceptable decision confidence for auto-routing."
 }
 
+variable "urgency_act_floor" {
+    description = "Noul urgency probability at or above which a ticket counts as urgent when the backend reports the verdict as a number; string verdicts gate on equality instead."
+    type        = number
+    default     = 0.5
+}
+
 // Score levels are zero-based indices into the severity question's criteria
 // list ("low", "medium", "high"). A model score at or above this level routes
 // the ticket to human escalation even with acceptable confidence.
@@ -49,9 +57,11 @@ variable "severity_escalation_level" {
 
 // ── Decision adapter ─────────────────────────────────────────────────────────
 
-// Local decision backend: Ollama with a Clef Flash model (>= Ollama v0.35.1
-// System One API). Unauthenticated endpoint, therefore no secrets block at
-// all — the same grammar runs with or without a credential.
+// Local decision backend: Ollama with the System One API (v0.35.1 or newer).
+// Unauthenticated endpoint, therefore no secrets block at all — the same
+// grammar runs with or without a credential. The GPU-light test host serves
+// the tev1:0.8b variant of this backend (see README.md); clef-flash is the
+// original example model name and stays pinned here for the demo.
 adapter "decision" "system_one" {
     config {
         // The adapter appends /v1/systemone.
@@ -62,11 +72,13 @@ adapter "decision" "system_one" {
     }
 }
 
-// The classification questions, sent to the model as a JSON array. Answer
-// order is fixed by this declaration and the routing below indexes it:
-//   answers[0] = urgency     (noul)   — no confidence
-//   answers[1] = department  (choice) — carries numeric confidence
-//   answers[2] = severity    (score)  — carries numeric confidence
+// The classification questions. The adapter converts this array into the
+// map-shaped System One request ({id → question}), keyed by question id, and
+// the answers come back keyed the same way — the routing below names them by
+// id rather than position:
+//   answers.urgency    (noul)   — no confidence
+//   answers.department (choice) — carries numeric confidence
+//   answers.severity   (score)  — carries numeric confidence
 local "classify_questions" {
     value = jsonencode([
         {
@@ -121,30 +133,36 @@ switch "route_department" {
     // the routing workstream's required path: under route_conf_floor the
     // model's dispatch is paused until a human confirms it.
     match {
-        condition = steps.classify.answers[1].confidence < var.route_conf_floor
+        condition = steps.classify.answers.department.confidence < var.route_conf_floor
         next      = approval.confirm_department
     }
-    // Urgent tickets (noul answer = yes) go to human escalation.
+    // Urgent tickets go to human escalation. The noul verdict travels in two
+    // live shapes — the documented "yes"/"no" string, or the probability-like
+    // number in [0, 1] that the local Ollama backend reports — so the arm
+    // reads both: the string verdict gates on equality, and any non-string
+    // verdict gates on the numeric act floor (!= "no" keeps a literal "no"
+    // from falling into the numeric comparison). Cross-type == and != are
+    // false/true without error, so one arm serves both backends.
     match {
-        condition = steps.classify.answers[0].noul == "yes"
+        condition = steps.classify.answers.urgency.noul == "yes" || (steps.classify.answers.urgency.noul != "no" && steps.classify.answers.urgency.noul >= var.urgency_act_floor)
         next      = approval.confirm_escalation
     }
     // High-severity scores escalate even when the model is confident.
     match {
-        condition = steps.classify.answers[2].score >= var.severity_escalation_level
+        condition = steps.classify.answers.severity.score >= var.severity_escalation_level
         next      = approval.confirm_escalation
     }
     // Confident, calm tickets route on the department choice.
     match {
-        condition = steps.classify.answers[1].choice == "security"
+        condition = steps.classify.answers.department.choice == "security"
         next      = approval.confirm_escalation
     }
     match {
-        condition = steps.classify.answers[1].choice == "billing"
+        condition = steps.classify.answers.department.choice == "billing"
         next      = state.queued_billing
     }
     match {
-        condition = steps.classify.answers[1].choice == "technical"
+        condition = steps.classify.answers.department.choice == "technical"
         next      = state.queued_technical
     }
     // Anything the model chose that is not a declared option gets a human.
@@ -211,9 +229,9 @@ output "routing_summary" {
     type        = string
     description = "Model routing facts: urgency answer, department choice and confidence, severity score."
     value       = jsonencode({
-        urgency    = try(steps.classify.answers[0].noul, "")
-        department = try(steps.classify.answers[1].choice, "")
-        confidence = try(steps.classify.answers[1].confidence, -1)
-        severity   = try(steps.classify.answers[2].score, -1)
+        urgency    = try(steps.classify.answers.urgency.noul, "")
+        department = try(steps.classify.answers.department.choice, "")
+        confidence = try(steps.classify.answers.department.confidence, -1)
+        severity   = try(steps.classify.answers.severity.score, -1)
     })
 }
