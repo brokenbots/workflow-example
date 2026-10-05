@@ -91,8 +91,8 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 7 {
-		t.Errorf("workflowLibrary size = %d, want 7", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 8 {
+		t.Errorf("workflowLibrary size = %d, want 8", len(p.WorkflowLibrary))
 	}
 	if len(p.Routes) != 5 {
 		t.Errorf("routes size = %d, want 5", len(p.Routes))
@@ -109,6 +109,17 @@ func TestParseAndValidate(t *testing.T) {
 	}
 	if kb.Type != TypeURL || kb.Class != ClassTriage || len(kb.Volumes) != 3 || len(kb.Secrets) != 2 {
 		t.Errorf("kanboard-triage-url = %+v, want triage-class url workflow with 3 volumes and 2 secrets", kb)
+	}
+	// decision-demo-url (KB-205) is route prep only: a url workflow with no
+	// route/ref/volumes/secrets yet — KB-207 wires those in one coherent
+	// change when the validation run starts gating the demo.
+	dec, ok := p.WorkflowLibrary["decision-demo-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing decision-demo-url")
+	}
+	if dec.Type != TypeURL || dec.URL == "" || dec.Namespace != "criteria-jobs" ||
+		dec.Class != "" || dec.Ref != "" || len(dec.Volumes) != 0 || len(dec.Secrets) != 0 {
+		t.Errorf("decision-demo-url = %+v, want plain criteria-jobs url workflow with route-facing fields left for KB-207", dec)
 	}
 	kbRoutes := 0
 	for _, r := range p.Routes {
