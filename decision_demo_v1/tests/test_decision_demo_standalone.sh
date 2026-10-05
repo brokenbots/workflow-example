@@ -65,9 +65,18 @@ for dir in "$CLOUD" "$LOCAL"; do
     "$CRITERIA" validate "$dir" >/dev/null 2>"$TMP/$_name.validate.err" \
         || { echo "FAIL: criteria validate $_name: $(cat "$TMP/$_name.validate.err")" >&2; exit 1; }
     # The only warning CI may emit is the unverified-schema notice for the
-    # unpublished decision adapter; anything else is a tree defect.
-    if grep -v 'Warning: adapter "decision" schema unverified' "$TMP/$_name.validate.err" \
-        | grep -q .; then
+    # unpublished decision adapter; anything else is a tree defect. The
+    # notice is emitted as a block — a "<path>: warnings:" preamble, the
+    # header line, and indented continuation lines — so the whole block is
+    # consumed before the "anything else" check. A distinct warning (its
+    # column-0 header, or text at column 0 right after) still surfaces.
+    if awk '
+        /: warnings:$/ { skip = 1; next }
+        /Warning: adapter "decision" schema unverified/ { skip = 1; next }
+        skip && /^[[:space:]]/ { next }
+        { skip = 0 }
+        { print }
+    ' "$TMP/$_name.validate.err" | grep -q .; then
         fail "$_name validate produced unexpected warnings: $(cat "$TMP/$_name.validate.err")"
     else
         ok "criteria validate passes standalone ($_name)"
