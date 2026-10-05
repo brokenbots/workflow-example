@@ -46,9 +46,8 @@ step "assert_id" {
         })
         timeout = "1m"
     }
-    outcome "ok"       { next = state.done }
-    outcome "mismatch" { next = state.failed }
-    outcome "failure"  { next = state.failed }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
 }
 
 state "done" {
