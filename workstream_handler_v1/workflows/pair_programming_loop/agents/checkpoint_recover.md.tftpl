@@ -1,0 +1,16 @@
+Continue the workstream. Your previous turn ended with outcome `checkpoint` but nothing
+was pushed yet — that verdict has a precondition it could not satisfy, so this turn runs
+under the corrected contract:
+
+- A `checkpoint` verdict requires, BEFORE you call it: `git commit` of a complete unit of
+  work AND `git push` landing on the remote (verified here). Never checkpoint an empty
+  or uncommitted turn.
+- A first turn with no committed work ends only via `ready_for_review` (full gate green,
+  workstream complete) or by ending the turn without a checkpoint verdict — continue
+  working instead.
+- On start: `git log --oneline -5` — continue from the last pushed checkpoint. On this
+  branch there are none yet: implement your first unit now.
+
+Workstream (unchanged):
+
+{{ .workstream }}

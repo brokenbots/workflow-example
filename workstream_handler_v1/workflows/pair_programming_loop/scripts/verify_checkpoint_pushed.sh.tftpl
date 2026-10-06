@@ -1,6 +1,8 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
 set -euo pipefail; exec 2>&1
 branch="$criteria_value_1"
+base="$criteria_value_2"
 # The branch value travels through stdout writes on its way here and can carry
 # stray edge whitespace (observed: a trailing newline from an untrimmed
 # `basename` write made the refs/heads match below fail on a pushed branch,
@@ -22,7 +24,21 @@ fi
 head_sha=$(git rev-parse "refs/heads/$branch" 2>/dev/null || git rev-parse HEAD)
 remote_sha=$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')
 if [ -z "$remote_sha" ]; then
-    echo "checkpoint push verification: remote branch $branch does not exist" >&2
+    # KB-211: a checkpoint verdict with NOTHING pushed yet is a deterministic,
+    # benign recoverable shape, not data loss — the agent named an outcome whose
+    # precondition (a pushed commit) could not exist on its first turn. Fail the
+    # run only when work exists that a missing push would lose; resume the loop
+    # (deterministic correction prompt on the success path) when the tree carries
+    # zero committed work beyond the base branch. The FATAL case stays fatal:
+    # local commits exist but the push never landed — continuing would run on
+    # unpushed work the next session cannot see.
+    base_ref="origin/${base:-main}"
+    workstream_commits=$(git rev-list --count "${base_ref}..HEAD" 2>/dev/null || echo 0)
+    if [ "$workstream_commits" = "0" ]; then
+        echo "resumed_no_work=1"
+        exit 0
+    fi
+    echo "checkpoint push verification: remote branch $branch does not exist; $workstream_commits unpushed commit(s) — push lost would lose them" >&2
     exit 1
 fi
 if [ "$head_sha" != "$remote_sha" ]; then

@@ -185,17 +185,26 @@ step "push_checkpoint" {
     input {
         command = templatefile("./scripts/verify_checkpoint_pushed.sh.tftpl", {
             criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = var.base_branch
         })
     }
 
     // CRI-272: loop-back sessions get a SLIM continuation prompt (branch + git-log
     // orientation + workstream title only). Re-sending the full workstream spec on
     // every checkpoint iteration cost minutes of re-orientation per checkpoint.
+    //
+    // KB-211: a checkpoint verdict with nothing pushed (benign first-turn shape) is
+    // deterministic shell truth from the verifier (`resumed_no_work=1`), not agent
+    // judgment: the continuation prompt switches to the correction template stating
+    // the checkpoint precondition. An agent is never handed an option whose
+    // preconditions cannot hold without being told what they are.
     outcome "success" {
         next = step.develop
         write {
             target = data.internal.developer_prompt.value
-            value  = templatefile("./agents/develop_continue.md.tftpl", {
+            value = contains(output.stdout, "resumed_no_work=1") ? templatefile("./agents/checkpoint_recover.md.tftpl", {
+                workstream = steps.read_workstream.stdout
+            }) : templatefile("./agents/develop_continue.md.tftpl", {
                 workstream = steps.read_workstream.stdout
             })
         }

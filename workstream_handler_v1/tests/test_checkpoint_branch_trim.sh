@@ -85,11 +85,12 @@ reset_fixture() {
     git -C "${REPO}" push -q origin "${TICKET}"
 }
 
-render_with_value() { # rendered_script assignment_lines
-    local out="$1" value="$2"
+render_with_value() { # rendered_script branch_value base_value
+    local out="$1" value="$2" base="${3:-main}"
     {
-        printf '%b\n' "${value}"
-        tail -n +2 "${TEMPLATE}"
+        printf '%b\n' "criteria_value_1='${value}'"
+        printf 'criteria_value_2=%s\n' "$(printf '%s' "$base" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+        tail -n +3 "${TEMPLATE}"
     } > "${out}"
     chmod +x "${out}"
 }
@@ -104,7 +105,8 @@ echo "==> Scenario: CRI-295 regression — branch value carries a trailing newli
 SCRIPT="${WORK_DIR}/verify_newline.sh"
 # Exact rendering of a value that is "CRI-295\n": the quote closes on the next
 # line, which is how the live failure embedded a line break into the error.
-render_with_value "${SCRIPT}" "criteria_value_1='${TICKET}\n'"
+render_with_value "${SCRIPT}" "${TICKET}
+"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "newline-carrying branch value failed verification (CRI-295 false negative): ${out}"
 [[ "${out}" == *"checkpoint_pushed=$(local_head)"* ]] \
@@ -113,7 +115,7 @@ echo "==> OK"
 
 echo "==> Scenario: CRI-295 regression — branch value carries leading whitespace"
 SCRIPT="${WORK_DIR}/verify_lead_ws.sh"
-render_with_value "${SCRIPT}" "criteria_value_1='  ${TICKET}'"
+render_with_value "${SCRIPT}" "  ${TICKET}"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "whitespace-padded branch value failed verification: ${out}"
 [[ "${out}" == *"checkpoint_pushed=$(local_head)"* ]] \
@@ -122,7 +124,7 @@ echo "==> OK"
 
 echo "==> Scenario: normal path — clean branch value still verifies"
 SCRIPT="${WORK_DIR}/verify_clean.sh"
-render_with_value "${SCRIPT}" "criteria_value_1='${TICKET}'"
+render_with_value "${SCRIPT}" "${TICKET}"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "clean branch value failed verification: ${out}"
 [[ "${out}" == *"checkpoint_pushed=$(local_head)"* ]] \
@@ -131,7 +133,8 @@ echo "==> OK"
 
 echo "==> Scenario: loud failure preserved — whitespace-only branch value"
 SCRIPT="${WORK_DIR}/verify_ws_only.sh"
-render_with_value "${SCRIPT}" "criteria_value_1='   \n  '"
+render_with_value "${SCRIPT}" "   
+  "
 if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
     fail "expected failure for a whitespace-only branch value, got: ${out}"
 fi
@@ -139,15 +142,41 @@ fi
     || fail "expected the empty-branch signature, got: ${out}"
 echo "==> OK"
 
-echo "==> Scenario: loud failure preserved — branch absent from the remote"
+echo "==> Scenario: KB-211 benign — branch missing, ZERO workstream commits: resume"
+# The turn-1 checkpoint shape: the agent named `checkpoint` with nothing pushed and
+# nothing committed beyond base. That is deterministic shell truth, not agent judgment:
+# exit 0 with resumed_no_work=1 (the workflow routes develop back with a correction
+# prompt), not a run-killing failure. Zero-work fixture: branch exists locally with no
+# commits beyond main (work.txt is UNTRACKED, not committed).
+SCRIPT="${WORK_DIR}/verify_benign.sh"
+git -C "${REPO}" checkout -q -B "${TICKET}-benign" main
+git -C "${REPO}" push -q origin --delete "${TICKET}" 2>/dev/null || true
+git -C "${REPO}" remote set-url origin "${ORIGIN}"
+printf 'uncommitted scratch\n' > "${REPO}/scratch.txt"
+render_with_value "${SCRIPT}" "${TICKET}-benign" "main"
+out=$(cd "${REPO}" && bash "${SCRIPT}") \
+    || fail "benign no-work checkpoint should exit 0 (KB-211): ${out}"
+[[ "${out}" == *"resumed_no_work=1"* ]] \
+    || fail "benign no-work checkpoint did not report resumed_no_work=1: ${out}"
+rm -f "${REPO}/scratch.txt"
+echo "==> OK"
+
+echo "==> Scenario: loud failure preserved — branch absent with UNPUSHED work (fatal)"
+# KB-211 fatal case: local commits beyond base exist but the push never landed —
+# continuing would run on work the next session cannot see. Exit 1 preserved.
 SCRIPT="${WORK_DIR}/verify_missing.sh"
-render_with_value "${SCRIPT}" "criteria_value_1='${TICKET}'"
-git -C "${REPO}" push -q origin --delete "${TICKET}"
+git -C "${REPO}" checkout -q -B "${TICKET}" main
+printf 'checkpoint work\n' > "${REPO}/work.txt"
+git -C "${REPO}" add -A
+git -C "${REPO}" commit -qm "checkpoint work"
+render_with_value "${SCRIPT}" "${TICKET}" "main"
 if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
-    fail "expected failure for a branch missing on the remote, got: ${out}"
+    fail "expected failure for unpushed commits, got: ${out}"
 fi
 [[ "${out}" == *"checkpoint push verification: remote branch ${TICKET} does not exist"* ]] \
     || fail "expected the does-not-exist signature, got: ${out}"
+[[ "${out}" == *"unpushed commit(s)"* ]] \
+    || fail "the fatal signature must state the unpushed-commit count, got: ${out}"
 # A match spanning the whole sentence is only possible when the branch name is
 # clean: a newline-carrying value would break the line between the branch and
 # "does not exist" (the signature observed in the live failure).
