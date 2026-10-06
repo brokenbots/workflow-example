@@ -489,6 +489,9 @@ data:
         }
       },
       "configLibrary": {
+        "criteria-repo": {
+          "ciGateCmd": "make ci"
+        },
         "workflow-example": {
           "buildCmd": "make build",
           "testCmd": "make test",
