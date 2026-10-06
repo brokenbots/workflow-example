@@ -281,6 +281,14 @@ step "verify_committed" {
 // the workflow works on repos without a standard CI entry point.
 step "ci_gate" {
     target = adapter.shell.sh
+    // KB-95 (2026-10-06): the shell adapter's default step timeout is 5m.
+    // Full-CI gates (make build && make lint-go && make validate &&
+    // go test ./...) run 10-20m cold, so the 5m default kills the gate with
+    // empty output — the developer gets an unexplainable blank failure and
+    // the develop<->ci_gate loop burns visits with no progress. Give the
+    // gate the same generous budget as the develop/reviewer steps; a gate
+    // that fails for real exits nonzero long before this.
+    timeout = "60m"
 
     input {
         command = var.ci_gate_cmd != "" ? var.ci_gate_cmd : "echo 'ci_gate skipped: no ci_gate_cmd configured'"
