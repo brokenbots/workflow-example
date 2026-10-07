@@ -615,6 +615,19 @@ func adapterContainer(kind, image, runnerJobName string, plan *workflowPlan) cor
 			},
 		}
 	}
+	if kind == "shell" {
+		// KB-95 (2026-10-07): the per-repo ci gate (KB-103 ciGateCmd) runs the
+		// full build/lint/validate/test baseline INSIDE the shell adapter's
+		// session. The 2Gi limit OOM-killed the adapter 4.5 minutes into
+		// `go build`+`golangci-lint` (run a3746db4: session EOF crash = the
+		// CRI-272 family, the same reason copilot was raised to 8Gi).
+		// Requests stay at 512Mi so scheduling is unchanged; the limit is
+		// burst headroom only.
+		resources.Limits = corev1.ResourceList{
+			corev1.ResourceMemory: resourceQuantity("8Gi"),
+			corev1.ResourceCPU:    resourceQuantity("2000m"),
+		}
+	}
 
 	return corev1.Container{
 		Name:            fmt.Sprintf("adapter-%s", kind),
