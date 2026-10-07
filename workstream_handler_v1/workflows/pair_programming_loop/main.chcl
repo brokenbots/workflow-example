@@ -291,6 +291,13 @@ step "ci_gate" {
     timeout = "60m"
 
     input {
+        // KB-156 (2026-10-07, wave driver): the shell adapter carries its OWN
+        // hard timeout input (default 5m) and never sees the engine's
+        // step.Timeout — the KB-95 '60m' step attribute alone still got the
+        // gate killed at exactly 300s (kb-95 + kb-156 runs, warm-cache attempt
+        // 3 passed at 217s). The ceiling must be stated in the adapter's own
+        // input as well.
+        timeout = "60m"
         command = var.ci_gate_cmd != "" ? var.ci_gate_cmd : "echo 'ci_gate skipped: no ci_gate_cmd configured'"
     }
 
