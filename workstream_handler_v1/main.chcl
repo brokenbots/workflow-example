@@ -115,6 +115,7 @@ subworkflow "pair_programming_loop" {
         provider_base_url     = var.provider_base_url
         workflow_github_token = var.workflow_github_token
         git_credential_helper = file("./scripts/_github_token_git_credentials.sh.tftpl")
+        base_branch           = var.base_branch
     }
 }
 
@@ -133,6 +134,7 @@ subworkflow "pair_programming_loop_feedback" {
         provider_base_url        = var.provider_base_url
         workflow_github_token    = var.workflow_github_token
         git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
+        base_branch              = var.base_branch
     }
 }
 
