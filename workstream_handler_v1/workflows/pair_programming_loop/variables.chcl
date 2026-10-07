@@ -6,6 +6,15 @@ variable "developer_initial_prompt" {
     default = ""
 }
 
+// Base branch the checkpoint verifier compares the workstream branch against
+// (KB-211 benign-resume / fatal-unpushed split). Plumbed in by the parent's
+// pair_programming_loop subworkflow blocks; defaults to main.
+variable "base_branch" {
+    type        = string
+    description = "Base branch for push_checkpoint's committed-vs-base comparison (verify_checkpoint_pushed.sh)."
+    default     = "main"
+}
+
 // Shell snippet shared with the parent workflow that sets up a Git credential
 // helper reading GH_TOKEN / GITHUB_TOKEN / WORKFLOW_GITHUB_TOKEN at runtime.
 // Injected so push steps do not duplicate the helper or embed a token.
