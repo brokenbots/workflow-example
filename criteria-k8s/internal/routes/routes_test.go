@@ -171,7 +171,7 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	if wf.Type != TypeURL {
 		t.Errorf("workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
 	}
-	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3" {
+	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f" {
 		t.Errorf("workflow url = %q, want the linear_develop_v1 subtree pinned to current main (CRI-311 loop recovery)", wf.URL)
 	}
 	// Ref pins track current main since the CRI-311 loop recovery
@@ -180,7 +180,7 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	// 91153bc — advancing both the subtree content (develop: main.chcl +
 	// adapters.chcl; triage: adapters.chcl + script templates) and the
 	// environment contract.
-	if wf.Ref != "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3" {
+	if wf.Ref != "c1708d9fee1176814c40e583fd5a15b5c607639f" {
 		t.Errorf("workflow ref = %q, want the re-pinned current-main develop commit (CRI-311 loop recovery)", wf.Ref)
 	}
 	if wf.Image != "" {
@@ -218,10 +218,10 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	if triageWf.Type != TypeURL {
 		t.Errorf("triage workflow type = %q, want %q (url-only, minimal criteria base runtime)", triageWf.Type, TypeURL)
 	}
-	if triageWf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3" {
+	if triageWf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f" {
 		t.Errorf("triage workflow url = %q, want the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery)", triageWf.URL)
 	}
-	if triageWf.Ref != "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3" {
+	if triageWf.Ref != "c1708d9fee1176814c40e583fd5a15b5c607639f" {
 		t.Errorf("triage workflow ref = %q, want the re-pinned current-main triage commit (CRI-311 loop recovery)", triageWf.Ref)
 	}
 	if triageWf.Image != "" {

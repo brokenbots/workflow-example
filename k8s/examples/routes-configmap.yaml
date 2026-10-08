@@ -31,13 +31,13 @@
 # route fires linear_triage_v1 on [Triage] and the 'criteria-develop' route
 # fires linear_develop_v1 on [Ready for Development], both url-only via git
 # URL with ADR-0005 D7 commit pins:
-#   - linear-triage-url is pinned to current main (91153bc, CRI-311 loop
-#     recovery 2026-09-23) — the triage/develop tree content is identical to
-#     the earlier CRI-240 pin. Its
-#     class is 'triage' (CRI-242/M9.5): triage work is read-only against the
+#   - linear-triage-url is pinned to current main (c1708d9, 2026-10-07
+#     wave carrier: KB-153 shim teardown sync, KB-95/96 session fixes, KB-156
+#     lease-based shared sessions, KB-96 checkpoint crash fix).
+#     Its class is 'triage' (CRI-242/M9.5): triage work is read-only against the
 #     repo, so triage runs admit concurrently with any run on the same
 #     repoURL while dev runs serialize per repoURL.
-#   - linear-develop-url is pinned to current main (91153bc); class stays
+#   - linear-develop-url is pinned to current main (c1708d9); class stays
 #     omitted (defaults to dev).
 # CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
 # dirty label is a ROUTING SURFACE. The 'ticket-cleanup-url' object fetches
@@ -210,8 +210,8 @@ data:
         },
         "linear-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
-          "ref": "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f",
+          "ref": "c1708d9fee1176814c40e583fd5a15b5c607639f",
           "namespace": "criteria-jobs",
           "volumes": [
             {
@@ -263,8 +263,8 @@ data:
         },
         "linear-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
-          "ref": "e68a8825bf3eaeef2d2ff95566ed2416fae6c2c3",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f",
+          "ref": "c1708d9fee1176814c40e583fd5a15b5c607639f",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -371,8 +371,8 @@ data:
         },
         "kanboard-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=562e319d74eeaf3ba70ba24f42d7b0fb29ce2e9a",
-          "ref": "562e319d74eeaf3ba70ba24f42d7b0fb29ce2e9a",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f",
+          "ref": "c1708d9fee1176814c40e583fd5a15b5c607639f",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -428,8 +428,8 @@ data:
         },
         "kanboard-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=562e319d74eeaf3ba70ba24f42d7b0fb29ce2e9a",
-          "ref": "562e319d74eeaf3ba70ba24f42d7b0fb29ce2e9a",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f",
+          "ref": "c1708d9fee1176814c40e583fd5a15b5c607639f",
           "namespace": "criteria-jobs",
           "volumes": [
             {
