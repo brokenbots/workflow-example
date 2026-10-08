@@ -22,14 +22,15 @@ import (
 // never share a pod name. It returns the number of still-active provisions
 // so the caller can decide whether to keep polling castle.
 //
-// Grouping (CRI-234 M7.2): provisions carrying an environment identity are
-// co-located — one pod per (scope, environment) with each adapter as a
-// separate container. Provisions WITHOUT environment identity (engines older
-// than CRI-233's fc95449) fall back to one pod per adapter, matching the
-// pre-CRI-234 shape. A group pod is recreated whenever its member set drifts
-// (a member was released or a new one provisioned): pod container sets are
-// immutable in Kubernetes, so a stale container would keep dialing a
-// deregistered shim otherwise.
+// Grouping (CRI-234 M7.2, KB-214): provisions carrying an environment
+// identity are co-located — one pod per (scope, environment) running a
+// SINGLE criteria-peer container that hosts every adapter kind of the pair
+// (the engine's multi-adapter manifest). Provisions WITHOUT environment
+// identity (engines older than CRI-233's fc95449) fall back to one pod per
+// adapter, matching the pre-CRI-234 shape. Membership drift within a live
+// scope's lifetime stays inside the peer container — the container set is
+// constant, so the pod is never recreated for a released or newly
+// provisioned member.
 //
 // Wire token delivery (CRI-237): provisions carrying an accept_token
 // (runner eae0181) receive the token over the shim channel, which needs the
@@ -180,8 +181,8 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 
 // adapterPodLogLabel renders the pod's adapter identification for the
 // reconcile create-log: the single kind for per-adapter fallback pods, the
-// comma-joined kind set for (scope, environment) group pods. Group pods
-// carry the kind set on the AnnotationAdapterKinds annotation — the comma
+// comma-joined kind set for (scope, environment) peer pods. Peer pods carry
+// the kind set on the AnnotationAdapterKinds annotation — the comma
 // separator is illegal in a label value (CRI-234 R1).
 func adapterPodLogLabel(pod *corev1.Pod) string {
 	if kind := pod.Labels[jobbuilder.LabelAdapterKind]; kind != "" {
