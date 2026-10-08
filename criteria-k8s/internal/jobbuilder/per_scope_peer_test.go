@@ -1,7 +1,9 @@
 package jobbuilder_test
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -518,4 +520,203 @@ func TestBuildPerScopePeerPodNameStableAcrossTokenRotation(t *testing.T) {
 	// on the next reconcile's desired spec.
 	assert.Equal(t, "accept-shell", containerEnvMap(first.Spec.Containers[0])["CRITERIA_REMOTE_TOKEN"])
 	assert.Equal(t, "accept-rotated-2", containerEnvMap(second.Spec.Containers[0])["CRITERIA_REMOTE_TOKEN"])
+}
+
+// multiKindMembers is a shell+copilot pair sharing one (scope, environment)
+// pair — the smallest multi-kind peer pod a live environment can produce.
+func multiKindMembers() []events.LifecycleEvent {
+	return []events.LifecycleEvent{
+		groupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("review", "copilot", "scope-a", "ci"),
+	}
+}
+
+// peerBinMount returns the staged-binaries mount among a container's
+// volume mounts, failing the test when there is not exactly one.
+func peerBinMount(t *testing.T, containerName string, mounts []corev1.VolumeMount) corev1.VolumeMount {
+	t.Helper()
+	var found []corev1.VolumeMount
+	for _, m := range mounts {
+		if m.Name == jobbuilder.PerScopePeerBinVolumeName {
+			found = append(found, m)
+		}
+	}
+	require.Len(t, found, 1, "container %q must mount the staged-binaries volume exactly once", containerName)
+	return found[0]
+}
+
+// TestBuildPerScopePeerPodMultiKindStagesAdapterBinaries pins the KB-214
+// review-remediation mechanism end to end: a multi-kind peer pod stages
+// every hosted kind's adapter binary out of that kind's OWN pinned engine
+// image (per-kind Dockerfile.peer images install exactly ONE binary) into a
+// shared emptyDir, and the peer container mounts the stage read-only with a
+// CRITERIA_ADAPTER_<KIND>_BINARY override for every kind — without which
+// the engine's multi-adapter boot validates every child's binary and fails
+// closed.
+func TestBuildPerScopePeerPodMultiKindStagesAdapterBinaries(t *testing.T) {
+	pod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+		multiKindMembers(), "10.0.0.10")
+	require.NotNil(t, pod)
+
+	// Still ONE working container; the staging is init-side.
+	require.Len(t, pod.Spec.Containers, 1)
+
+	// One init container per hosted kind, sorted (copilot < shell), each
+	// running its kind's own resolved peer image.
+	require.Len(t, pod.Spec.InitContainers, 2)
+	for i, kind := range []string{"copilot", "shell"} {
+		ic := pod.Spec.InitContainers[i]
+		assert.Equal(t, "copy-"+kind, ic.Name)
+		assert.Equal(t, fmt.Sprintf("localhost:5000/criteria-adapter-%s-peer:%s", kind, jobbuilder.DefaultAdapterTag), ic.Image,
+			"init container for kind %q must run that kind's resolved peer image", kind)
+		assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
+		assert.Equal(t, []string{
+			"/bin/cp",
+			"/usr/local/bin/criteria-adapter-" + kind,
+			fmt.Sprintf("%s/criteria-adapter-%s", jobbuilder.PerScopePeerBinVolumePath, kind),
+		}, ic.Command, "init container must stage kind %q's binary from its image's Dockerfile.peer install path", kind)
+		mount := peerBinMount(t, ic.Name, ic.VolumeMounts)
+		assert.Equal(t, jobbuilder.PerScopePeerBinVolumePath, mount.MountPath)
+		assert.False(t, mount.ReadOnly, "init containers stage INTO the emptyDir")
+		require.NotNil(t, ic.SecurityContext, "init containers inherit the restricted container security context")
+	}
+
+	// The pod declares the shared emptyDir once, and the peer container
+	// mounts the stage read-only, pinning every hosted kind's binary via
+	// the engine's per-adapter override grammar (the same
+	// CRITERIA_ADAPTER_ keys the digest pins ride).
+	assert.True(t, hasVolume(pod.Spec.Volumes, jobbuilder.PerScopePeerBinVolumeName))
+
+	main := pod.Spec.Containers[0]
+	mount := peerBinMount(t, main.Name, main.VolumeMounts)
+	assert.Equal(t, jobbuilder.PerScopePeerBinVolumePath, mount.MountPath)
+	assert.True(t, mount.ReadOnly, "the peer container only reads the staged binaries")
+	env := containerEnvMap(main)
+	for kind, key := range map[string]string{
+		"copilot": "CRITERIA_ADAPTER_COPILOT_BINARY",
+		"shell":   "CRITERIA_ADAPTER_SHELL_BINARY",
+	} {
+		want := fmt.Sprintf("%s/criteria-adapter-%s", jobbuilder.PerScopePeerBinVolumePath, kind)
+		assert.Equal(t, want, env[key], "kind %q's binary override must point at its staged copy", kind)
+	}
+}
+
+// TestBuildPerScopePeerPodSingleKindStaysImageSupplied pins the flip side:
+// a single-kind peer pod never stages — its image is image-complete for the
+// one manifest kind, so no init containers, no emptyDir, no binary
+// overrides, no extra mounts (an override would point at a directory the
+// pod does not even mount).
+func TestBuildPerScopePeerPodSingleKindStaysImageSupplied(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		members []events.LifecycleEvent
+	}{
+		{"one member", []events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}},
+		{"two same-kind members", []events.LifecycleEvent{
+			groupMember("intake", "shell", "scope-a", "ci"),
+			groupMember("poll", "shell", "scope-a", "ci"),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+				tc.members, "10.0.0.10")
+			require.NotNil(t, pod)
+			assert.Empty(t, pod.Spec.InitContainers)
+			assert.False(t, hasVolume(pod.Spec.Volumes, jobbuilder.PerScopePeerBinVolumeName))
+			env := containerEnvMap(pod.Spec.Containers[0])
+			for _, m := range pod.Spec.Containers[0].VolumeMounts {
+				assert.NotEqual(t, jobbuilder.PerScopePeerBinVolumePath, m.MountPath)
+			}
+			for _, e := range pod.Spec.Containers[0].Env {
+				assert.False(t, strings.HasSuffix(e.Name, "_BINARY"),
+					"single-kind pod must not emit a staged-binary pin: %s=%s", e.Name, e.Value)
+			}
+			assert.Equal(t, tc.members[0].Digest, env["CRITERIA_ADAPTER_SHELL_DIGEST"],
+				"the digest pin contract keeps carrying the member's lockfile digest")
+		})
+	}
+}
+
+// TestBuildPerScopePeerPodStagingRidesPerKindImages proves the staged
+// binaries and the peer container resolve through the SAME per-kind image
+// resolution: the workflow's adapterImages override wins on every lane, so
+// the copied binary provably comes from the image the pod actually pins.
+func TestBuildPerScopePeerPodStagingRidesPerKindImages(t *testing.T) {
+	run := groupTestRun()
+	run.Spec.Workflow = &criteriav1.RunWorkflow{
+		AdapterImages: map[string]string{
+			"copilot": "registry.example/criteria-adapter-copilot-peer:v9",
+			"shell":   "registry.example/criteria-adapter-shell-peer:v9",
+		},
+	}
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		multiKindMembers(), "10.0.0.10")
+	require.NotNil(t, pod)
+	require.Len(t, pod.Spec.InitContainers, 2)
+	for i, kind := range []string{"copilot", "shell"} {
+		assert.Equal(t, fmt.Sprintf("registry.example/criteria-adapter-%s-peer:v9", kind), pod.Spec.InitContainers[i].Image)
+	}
+	assert.Equal(t, "registry.example/criteria-adapter-shell-peer:v9",
+		pod.Spec.Containers[0].Image, "the dial member's kind still resolves the container image")
+}
+
+// TestBuildPerScopePeerPodStagingIsDeliveryAgnostic proves the staging
+// contract holds across BOTH token-delivery shapes (the kind set and the
+// delivery channel are independent), and that the staged-binaries volume
+// never displaces the data-volume rules: wire delivery keeps mounting no
+// data volume, legacy delivery keeps it.
+func TestBuildPerScopePeerPodStagingIsDeliveryAgnostic(t *testing.T) {
+	run := groupTestRun()
+	wireMembers := []events.LifecycleEvent{
+		wireGroupMember("intake", "shell", "scope-a", "ci"),
+		wireGroupMember("review", "copilot", "scope-a", "ci"),
+	}
+	legacyMembers := []events.LifecycleEvent{
+		groupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("review", "copilot", "scope-a", "ci"),
+	}
+
+	for label, members := range map[string][]events.LifecycleEvent{
+		"wire":   wireMembers,
+		"legacy": legacyMembers,
+	} {
+		t.Run(label, func(t *testing.T) {
+			pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci",
+				members, "10.0.0.10")
+			require.NotNil(t, pod)
+			env := containerEnvMap(pod.Spec.Containers[0])
+			assert.NotEmpty(t, env["CRITERIA_ADAPTER_COPILOT_BINARY"])
+			assert.NotEmpty(t, env["CRITERIA_ADAPTER_SHELL_BINARY"])
+			require.Len(t, pod.Spec.InitContainers, 2)
+			assert.Equal(t, members[0].AcceptToken, env["CRITERIA_REMOTE_TOKEN"],
+				"staging must not disturb the wire handshake on wire-shaped pairs")
+			assert.Equal(t, members[0].AcceptToken == "", hasVolume(pod.Spec.Volumes, "data"),
+				"the data-volume rule follows the delivery shape, never the staging")
+		})
+	}
+}
+
+// TestBuildPerScopePeerPodStagingDeterministic proves the multi-kind shape
+// is byte-stable across reconciles and member orderings: repeated builds
+// produce identical init-container sequences (per Kubernetes init containers
+// run in declaration order, so their order is part of the contract).
+func TestBuildPerScopePeerPodStagingDeterministic(t *testing.T) {
+	forward := multiKindMembers()
+	reversed := []events.LifecycleEvent{forward[1], forward[0]}
+
+	first := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci", forward, "10.0.0.10")
+	second := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci", reversed, "10.0.0.10")
+	require.NotNil(t, first)
+	require.NotNil(t, second)
+
+	firstJSON, err := json.Marshal(first)
+	require.NoError(t, err)
+	secondJSON, err := json.Marshal(second)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(firstJSON), string(secondJSON),
+		"repeated reconciles of the same pair must produce byte-identical pod specs")
+	require.Len(t, first.Spec.InitContainers, 2)
+	assert.Equal(t, []string{"copy-copilot", "copy-shell"}, []string{
+		first.Spec.InitContainers[0].Name, first.Spec.InitContainers[1].Name,
+	}, "init containers are declared in the sorted hosted-kind order")
 }

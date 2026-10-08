@@ -32,6 +32,7 @@ package jobbuilder_test
 // that boots with zero hosted children.
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -179,4 +180,81 @@ func TestPeerAbsentDigestPinEquivalence(t *testing.T) {
 				"peer pins are digests or absent, never empty-valued: %s", e.Name)
 		}
 	}
+}
+
+// engineBinaryPin mirrors internal/peer/adapterset.go
+// applyAdapterSpecOverrides' per-adapter BINARY pin: the override value the
+// engine splices into a hosted child's spec binary before resolution.
+func engineBinaryPin(env map[string]string, kind string) string {
+	return env["CRITERIA_ADAPTER_"+engineAdapterEnvName(kind)+"_BINARY"]
+}
+
+// TestPeerMultiKindChildrenResolveWithinMountedStage asserts the pod-level
+// reality the engine's boot requires: for a multi-kind peer pod, every
+// hosted child's resolved binary is an absolute path INSIDE the staged
+// binaries dir AND that dir is exactly what the peer container mounts —
+// i.e. the operator's per-kind override pins line up with the mounted
+// volume the engine's validateSpecBinary (os.Stat) will stat at boot, so
+// the whole manifest passes the fail-closed boot validation.
+func TestPeerMultiKindChildrenResolveWithinMountedStage(t *testing.T) {
+	run := groupTestRun()
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{
+			groupMember("intake", "shell", "scope-a", "ci"),
+			groupMember("review", "copilot", "scope-a", "ci"),
+		}, "10.0.0.10")
+	require.NotNil(t, pod)
+	env := containerEnvMap(pod.Spec.Containers[0])
+
+	kinds, err := engineParseAdaptersEnv(env["CRITERIA_REMOTE_ADAPTERS"])
+	require.NoError(t, err)
+	require.Greater(t, len(kinds), 1, "a multi-kind pod is the subject of this test")
+
+	// The stage path the overrides point at must be the mount path of the
+	// volume the container itself mounts.
+	var stageMount *string
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		if m.Name == jobbuilder.PerScopePeerBinVolumeName {
+			path := m.MountPath
+			stageMount = &path
+			assert.True(t, m.ReadOnly, "the peer container reads the staged binaries")
+		}
+	}
+	require.NotNil(t, stageMount, "the peer container must mount the staged binaries volume")
+
+	for _, kind := range kinds {
+		pin := engineBinaryPin(env, kind)
+		require.NotEmpty(t, pin,
+			"every hosted child in a multi-kind pod gets a binary override (the kind's per-kind image supplies exactly one binary)")
+		require.True(t, filepath.IsAbs(pin))
+		require.Equal(t, *stageMount, filepath.Dir(pin),
+			"the child's resolved binary must stat THROUGH the container's own mount for the engine's os.Stat to succeed")
+		require.Equal(t, filepath.Base(pin), "criteria-adapter-"+kind,
+			"the staged binary keeps the Dockerfile.peer install spelling, scannable by the engine's directory fallback too")
+	}
+}
+
+// TestPeerSingleKindChildStaysImageSupplied asserts the single-kind flip
+// side in engine terms: no binary override is emitted, so the engine's
+// resolution falls back to the CONVENTIONAL install path inside the container
+// image — which resolves only when the image's own adapter kind matches the
+// manifest kind. The builder therefore must not pin a binary for a
+// single-kind pod, and its image must be the per-kind peer image.
+func TestPeerSingleKindChildStaysImageSupplied(t *testing.T) {
+	run := groupTestRun()
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{groupMember("intake", "shell", "scope-a", "ci")}, "10.0.0.10")
+	require.NotNil(t, pod)
+	env := containerEnvMap(pod.Spec.Containers[0])
+
+	kinds, err := engineParseAdaptersEnv(env["CRITERIA_REMOTE_ADAPTERS"])
+	require.NoError(t, err)
+	require.Len(t, kinds, 1)
+
+	for _, kind := range kinds {
+		assert.Empty(t, engineBinaryPin(env, kind),
+			"a single-kind pod must not pin a staged binary: the image supplies the sole binary conventionally")
+	}
+	assert.Contains(t, pod.Spec.Containers[0].Image, "criteria-adapter-"+kinds[0]+"-peer",
+		"the container image must be the manifest kind's own per-kind peer image for the conventional resolution to hold")
 }

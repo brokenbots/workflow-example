@@ -93,10 +93,30 @@ func shortHash(s string) string {
 // The image resolves from the dial member's kind (CRI-214 M14): the
 // workflow object's adapterImages override, else the event's
 // digest-verified image_reference, else the operator's registry/tag
-// defaults. A multi-kind pair hosts every kind's child behind this one
-// image's criteria binary; the fleet image set must supply binaries for
-// every manifest kind, which the engine enforces at boot (missing adapter
-// binaries fail closed — the pod never half-boots).
+// defaults.
+//
+// A multi-kind pair cannot boot from that one dial-kind image alone: a
+// Dockerfile.peer engine image installs exactly ONE adapter binary
+// (images/Dockerfile.peer puts the per-kind binary at
+// /usr/local/bin/criteria-adapter-<ADAPTER_NAME>), and the engine's
+// multi-adapter boot validates EVERY hosted child's binary and fails
+// closed (internal/peer/adapterset.go, criteria PR #517, so a multi-kind
+// manifest under a single-binary image is a pod that never boots).
+// Single-kind pods stay image-supplied and image-complete. Multi-kind
+// pods therefore stage every hosted kind's binary out of that kind's
+// ALREADY-PINNED per-kind engine image — resolvePeerAdapterImage again,
+// so the fleet's per-kind images and pins need no repin churn: one init
+// container per kind (copy-<kind>) copies
+// /usr/local/bin/criteria-adapter-<kind> from its kind's image into a
+// shared emptyDir (PerScopePeerBinVolumeName mounted at
+// PerScopePeerBinVolumePath), and the peer container mounts that dir
+// read-only with a CRITERIA_ADAPTER_<KIND>_BINARY override for every
+// hosted kind — the engine's per-adapter binary override grammar
+// (applyAdapterSpecOverrides), the same keys the digest pins ride. The
+// staged name keeps the conventional criteria-adapter-<kind> spelling,
+// so the staged dir also stays scannable by the engine's directory
+// fallback. A kind whose image lacks its binary fails closed at the init
+// container, exactly like the engine's own boot validation.
 //
 // members are the provision events sharing the pair. Their order is
 // normalized (adapter type, then adapter node name, then scope key) so
@@ -159,6 +179,10 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 			// for membership drift (the manifest hosts the children).
 			RestartPolicy:                corev1.RestartPolicyOnFailure,
 			AutomountServiceAccountToken: boolPtr(plan.hasSecrets()),
+			// The sequential per-kind init containers are the multi-kind
+			// image-coherence mechanism staged below (empty member set is
+			// defended above; single-kind pods stay image-supplied).
+			InitContainers: peerBinCopyContainers(plan, defaults, members),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: boolPtr(true),
 				RunAsUser:    int64Ptr(10001),
@@ -171,7 +195,7 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 			Containers: []corev1.Container{
 				perScopePeerContainer(run, defaults, plan, dial, members, runnerIP, includeData),
 			},
-			Volumes: plan.podVolumes(dataPVC, includeData),
+			Volumes: peerPodVolumes(plan, dataPVC, includeData, members),
 		},
 	}
 	if plan.hasSecrets() {
@@ -192,7 +216,11 @@ const maxLabelValueLength = 63
 // the multi-adapter manifest env, per-kind digest pins, the dial member's
 // scope/token handshake env, and the aggregate of the hosted kinds'
 // resources. A multi-kind pair shares one container, so its resources take
-// the per-resource maximum across the hosted members.
+// the per-resource maximum across the hosted members. A multi-kind pair
+// additionally mounts the staged-binaries dir read-only and sets a
+// CRITERIA_ADAPTER_<KIND>_BINARY override for every hosted kind (the
+// peerBinCopyContainers staging contract); a single-kind pair stays
+// image-supplied with no overrides.
 func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan *workflowPlan, dial events.LifecycleEvent, members []events.LifecycleEvent, runnerIP string, includeData bool) corev1.Container {
 	dialKind := adapterKind(dial)
 	wireDelivery := peerWireDelivery(members, runnerIP)
@@ -267,6 +295,15 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 		}
 	}
 
+	// A multi-kind pair stages every hosted kind's binary out of its own
+	// per-kind engine image (peerBinCopyContainers) and points the engine's
+	// per-adapter binary-override grammar at the staged copies: one
+	// CRITERIA_ADAPTER_<KIND>_BINARY per kind, mounted read-only. Kinds are
+	// the deduplicated sorted set, so the overrides and the mount land in a
+	// deterministic order. A single-kind pair emits none — its image
+	// supplies the (sole) binary conventionally, no emptyDir, no staging.
+	env = append(env, peerAdapterBinariesEnv(members)...)
+
 	return corev1.Container{
 		Name:            PerScopePeerContainerName,
 		Image:           resolvePeerAdapterImage(plan, dial, dialKind, defaults),
@@ -276,7 +313,7 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 		// (ADR-0008). adapter.sh is never passed through in peer mode.
 		SecurityContext: restrictedContainerSecurityContext(),
 		Env:             appendEnvDistinct(env, plan.adapterEnvs()),
-		VolumeMounts:    plan.peerAdapterMounts(includeData),
+		VolumeMounts:    peerContainerMounts(plan, includeData, members),
 		Resources:       peerContainerResources(members),
 	}
 }
@@ -335,6 +372,167 @@ func peerAdapterEnvName(kind string) string {
 		b.WriteByte('_')
 	}
 	return "CRITERIA_ADAPTER_" + b.String()
+}
+
+// PerScopePeerBinVolumeName is the shared emptyDir a multi-kind peer pod
+// stages the hosted adapter binaries into (the KB-214 review-remediation
+// mechanism: a Dockerfile.peer engine image installs exactly ONE adapter
+// binary, so a multi-kind manifest cannot boot from the dial kind's image
+// alone — every kind's binary is staged out of that kind's own pinned
+// image instead). Single-kind pods carry no such volume: their image is
+// image-complete for the one manifest kind.
+const PerScopePeerBinVolumeName = "peer-adapter-binaries"
+
+// PerScopePeerBinVolumePath is the mount path of PerScopePeerBinVolumeName
+// on both the staging init containers and the (read-only) peer container;
+// each CRITERIA_ADAPTER_<KIND>_BINARY override points at a binary under
+// this path.
+const PerScopePeerBinVolumePath = "/usr/local/share/criteria-peer-adapters"
+
+// engineImageAdapterBinaryPath prefixes the install path of an adapter
+// binary inside the per-kind Dockerfile.peer engine images
+// (images/Dockerfile.peer: /usr/local/bin/criteria-adapter-<ADAPTER_NAME>).
+const engineImageAdapterBinaryPath = "/usr/local/bin/criteria-adapter-"
+
+// peerBinBinaryPath renders the staged path of one hosted kind's adapter
+// binary. The staged name keeps the engine's conventional install spelling,
+// so the staged dir stays scannable by the engine's directory fallback too.
+func peerBinBinaryPath(kind string) string {
+	return filepath.Join(PerScopePeerBinVolumePath, "criteria-adapter-"+kind)
+}
+
+// peerAdapterKinds returns the deduplicated, sorted, raw adapter kinds
+// hosted by a peer pod's member set — the set behind the manifest
+// env value (adapterKindsLabel), the staged-binary init containers, and the
+// per-kind binary overrides. Uses the raw kind, the same value the digest
+// pins key off, so every per-kind family keys identically.
+func peerAdapterKinds(members []events.LifecycleEvent) []string {
+	seen := make(map[string]struct{}, len(members))
+	kinds := make([]string, 0, len(members))
+	for _, member := range members {
+		kind := adapterKind(member)
+		if _, ok := seen[kind]; ok {
+			continue
+		}
+		seen[kind] = struct{}{}
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
+}
+
+// peerBinCopyContainers builds the multi-kind staging init containers (one
+// per hosted kind, sorted): each copies its kind's adapter binary out of
+// that kind's ALREADY-PINNED engine image (resolvePeerAdapterImage — the
+// same resolution the digest-verified event lane and the workflow override
+// lane ride, so no new image shapes and no pin churn) into the shared
+// staged-binaries emptyDir. Init containers run as the pod's criteria user
+// (10001) before any container starts, mount the stage read-write, and get
+// the same restricted container security context. Sequential per
+// Kubernetes semantics; a missing binary fails the init container and the
+// pod, mirroring the engine's fail-closed boot validation.
+func peerBinCopyContainers(plan *workflowPlan, defaults Defaults, members []events.LifecycleEvent) []corev1.Container {
+	kinds := peerAdapterKinds(members)
+	if len(kinds) <= 1 {
+		return nil
+	}
+	// Represent each kind's image resolution with the kind's first hosted
+	// member (members arrive sorted): the same event resolvePeerAdapterImage
+	// is evaluated against for the digest-verified image_reference lane.
+	byKind := make(map[string]events.LifecycleEvent, len(kinds))
+	for _, member := range members {
+		kind := adapterKind(member)
+		if _, ok := byKind[kind]; !ok {
+			byKind[kind] = member
+		}
+	}
+	containers := make([]corev1.Container, 0, len(kinds))
+	for _, kind := range kinds {
+		containers = append(containers, corev1.Container{
+			Name:            peerBinCopyContainerName(kind),
+			Image:           resolvePeerAdapterImage(plan, byKind[kind], kind, defaults),
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Command: []string{
+				"/bin/cp",
+				engineImageAdapterBinaryPath + kind,
+				peerBinBinaryPath(kind),
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: PerScopePeerBinVolumeName, MountPath: PerScopePeerBinVolumePath},
+			},
+			SecurityContext: restrictedContainerSecurityContext(),
+		})
+	}
+	return containers
+}
+
+// peerBinCopyContainerName renders an RFC1123-safe init container name for
+// one hosted kind; the copy- prefix keeps the name in its own family and
+// guarantees a valid leading character.
+func peerBinCopyContainerName(kind string) string {
+	var b strings.Builder
+	b.WriteString("copy-")
+	for _, r := range strings.ToLower(kind) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return trimHyphens(b.String())
+}
+
+// peerAdapterBinariesEnv renders the CRITERIA_ADAPTER_<KIND>_BINARY
+// overrides a multi-kind peer container needs (the engine's per-adapter
+// binary-override grammar, the same keys the digest pins ride), pointing
+// every hosted kind at its staged copy under PerScopePeerBinVolumePath. A
+// single-kind member set emits nothing: its image supplies the sole binary
+// conventionally, and an override would pin it to a directory the pod does
+// not even mount.
+func peerAdapterBinariesEnv(members []events.LifecycleEvent) []corev1.EnvVar {
+	kinds := peerAdapterKinds(members)
+	if len(kinds) <= 1 {
+		return nil
+	}
+	envs := make([]corev1.EnvVar, 0, len(kinds))
+	for _, kind := range kinds {
+		envs = append(envs, corev1.EnvVar{
+			Name:  peerAdapterEnvName(kind) + "_BINARY",
+			Value: peerBinBinaryPath(kind),
+		})
+	}
+	return envs
+}
+
+// peerPodVolumes is the peer pod's volume set: the declared volumes (pod
+// re-sourcing rules kept) plus the staged-binaries emptyDir whenever the
+// pair actually hosts more than one kind.
+func peerPodVolumes(plan *workflowPlan, dataPVC string, includeData bool, members []events.LifecycleEvent) []corev1.Volume {
+	volumes := plan.podVolumes(dataPVC, includeData)
+	if len(peerAdapterKinds(members)) <= 1 {
+		return volumes
+	}
+	return append(volumes, corev1.Volume{
+		Name:         PerScopePeerBinVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	})
+}
+
+// peerContainerMounts is the peer container's volume-mount set: the
+// adapter mounts plus a READ-ONLY staged-binaries mount whenever the pair
+// hosts more than one kind (the init containers stage binaries; the peer
+// container only reads them).
+func peerContainerMounts(plan *workflowPlan, includeData bool, members []events.LifecycleEvent) []corev1.VolumeMount {
+	mounts := plan.peerAdapterMounts(includeData)
+	if len(peerAdapterKinds(members)) <= 1 {
+		return mounts
+	}
+	return append(mounts, corev1.VolumeMount{
+		Name:      PerScopePeerBinVolumeName,
+		MountPath: PerScopePeerBinVolumePath,
+		ReadOnly:  true,
+	})
 }
 
 // peerContainerResources takes the per-resource maximum across the hosted
@@ -421,19 +619,13 @@ func resMax(into, other corev1.ResourceList, name corev1.ResourceName) {
 // env value, and the reconcile create-log. The value is an ANNOTATION value
 // (AnnotationAdapterKinds), not a label value: the comma separator is
 // illegal in a Kubernetes label value (CRI-234 R1), while annotations
-// accept any string. Each kind is sanitized individually so the dedup
-// stays stable across engine kind spellings.
+// accept any string. Each kind is sanitized individually (peerAdapterKinds
+// supplies the raw set) so the dedup stays stable across engine kind
+// spellings.
 func adapterKindsLabel(members []events.LifecycleEvent) string {
-	seen := make(map[string]struct{}, len(members))
-	kinds := make([]string, 0, len(members))
-	for _, member := range members {
-		kind := safeLabelValue(adapterKind(member))
-		if _, ok := seen[kind]; ok {
-			continue
-		}
-		seen[kind] = struct{}{}
-		kinds = append(kinds, kind)
+	kinds := peerAdapterKinds(members)
+	for i, kind := range kinds {
+		kinds[i] = safeLabelValue(kind)
 	}
-	sort.Strings(kinds)
 	return strings.Join(kinds, ",")
 }
