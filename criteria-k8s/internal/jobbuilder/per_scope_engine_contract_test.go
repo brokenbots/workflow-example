@@ -229,7 +229,7 @@ func TestPeerMultiKindChildrenResolveWithinMountedStage(t *testing.T) {
 		require.True(t, filepath.IsAbs(pin))
 		require.Equal(t, *stageMount, filepath.Dir(pin),
 			"the child's resolved binary must stat THROUGH the container's own mount for the engine's os.Stat to succeed")
-		require.Equal(t, filepath.Base(pin), "criteria-adapter-"+kind,
+		require.Equal(t, "criteria-adapter-"+kind, filepath.Base(pin),
 			"the staged binary keeps the Dockerfile.peer install spelling, scannable by the engine's directory fallback too")
 	}
 }
