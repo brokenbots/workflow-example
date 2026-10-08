@@ -152,8 +152,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "linear-intake-url": {
@@ -204,8 +204,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "linear-develop-url": {
@@ -257,8 +257,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "linear-triage-url": {
@@ -311,8 +311,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "ticket-cleanup-url": {
@@ -365,8 +365,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "kanboard-triage-url": {
@@ -422,8 +422,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "kanboard-develop-url": {
@@ -478,8 +478,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.14"
+            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
           }
         },
         "decision-demo-url": {

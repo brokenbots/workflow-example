@@ -26,7 +26,7 @@ environment "remote" "develop" {
 // channel. They are never interpolated into step input.
 adapter "shell" "develop" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.3"
+    version     = "0.5.4"
     environment = remote.develop
     secrets {
         KANBOARD_APP_TOKEN = var.kanboard_app_token

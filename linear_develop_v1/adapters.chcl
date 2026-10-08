@@ -25,7 +25,7 @@ environment "remote" "develop" {
 // interpolated into step input.
 adapter "shell" "develop" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.3"
+    version     = "0.5.4"
     environment = remote.develop
     secrets {
         LINEAR_API_KEY = var.linear_api_key

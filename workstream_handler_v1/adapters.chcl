@@ -27,7 +27,7 @@ environment "remote" "primary" {
 adapter "copilot" "coordinator" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.8"
+    version = "0.5.15"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     //
     // The remote environment does not inherit host token variables.
@@ -48,7 +48,7 @@ adapter "copilot" "coordinator" {
 // Runs inside the isolated worktree: all branch-scoped git/gh/coordinator ops.
 adapter "shell" "sh" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version = "0.5.3"
+    version = "0.5.4"
     environment = remote.worktree
     secrets {
         GH_TOKEN = var.workflow_github_token
@@ -59,7 +59,7 @@ adapter "shell" "sh" {
 // teardown) that must not depend on the per-run worktree existing.
 adapter "shell" "repo" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version = "0.5.3"
+    version = "0.5.4"
     environment = remote.primary
     secrets {
         GH_TOKEN = var.workflow_github_token
@@ -69,7 +69,7 @@ adapter "shell" "repo" {
 // Linear status updates do not receive either GitHub token.
 adapter "shell" "linear" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.3"
+    version     = "0.5.4"
     environment = remote.worktree
     secrets {
         LINEAR_API_KEY = var.linear_api_key
