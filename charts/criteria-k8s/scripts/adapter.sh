@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+# KB-214: this entrypoint is the LEGACY path only. The shim-era CRI-234
+# group pods and the pre-CRI-233 per-adapter fallback pods run
+# criteria-adapter-remote-runner through this wrapper; peer-mode pods (the
+# criteria-adapter-<kind>-peer images built from Dockerfile.peer) run
+# `criteria peer` as their ENTRYPOINT directly and never execute this
+# script. Both modes stay runnable during the mixed-fleet window (legacy
+# engine runs keep provisioning this shape); KB-210's removal sweep retires
+# this script once the legacy fleet is gone.
+
 if [ -z "${ADAPTER_KIND:-}" ]; then
     echo "ADAPTER_KIND must be set to shell or copilot" >&2
     exit 1
