@@ -22,7 +22,7 @@ environment "remote" "triage" {
 // interpolated into step input.
 adapter "shell" "triage" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.3"
+    version     = "0.5.4"
     environment = remote.triage
     secrets {
         LINEAR_API_KEY = var.linear_api_key
@@ -34,7 +34,7 @@ adapter "shell" "triage" {
 adapter "copilot" "triage_reviewer" {
     environment = remote.triage
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.8"
+    version     = "0.5.15"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token

@@ -27,7 +27,7 @@ environment "remote" "primary" {
 // Branch-scoped git ops run inside the isolated worktree.
 adapter "shell" "sh" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version = "0.5.3"
+    version = "0.5.4"
     environment = remote.worktree
     secrets {
         GH_TOKEN = var.workflow_github_token
@@ -38,7 +38,7 @@ adapter "shell" "sh" {
 // it must work before the per-run worktree exists.
 adapter "shell" "repo" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version = "0.5.3"
+    version = "0.5.4"
     environment = remote.primary
     secrets {
         GH_TOKEN = var.workflow_github_token
@@ -48,7 +48,7 @@ adapter "shell" "repo" {
 adapter "copilot" "branch_repair" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.8"
+    version = "0.5.15"
     // copilot >= 0.5.2 requires a GitHub token over the secret channel.
     secrets {
         GITHUB_TOKEN = var.workflow_github_token

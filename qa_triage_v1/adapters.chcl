@@ -40,7 +40,7 @@ environment "remote" "scratch" {
 
 adapter "shell" "repo" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.3"
+    version     = "0.5.4"
     environment = remote.primary
     secrets {
         GH_TOKEN = var.workflow_github_token
@@ -57,7 +57,7 @@ adapter "shell" "repo" {
 adapter "copilot" "investigator" {
     environment = remote.scratch
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.8"
+    version     = "0.5.15"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
@@ -79,7 +79,7 @@ adapter "copilot" "investigator" {
 adapter "copilot" "supervisor" {
     environment = remote.scratch
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.8"
+    version     = "0.5.15"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token
