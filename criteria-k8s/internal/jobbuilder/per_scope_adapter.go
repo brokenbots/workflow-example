@@ -34,7 +34,7 @@ func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) s
 // identity (engines older than CRI-233's fc95449): its name and shape match
 // the pre-CRI-234 builder verbatim, so an operator rollout against older
 // events keeps reconciling the same pods. Adapters sharing an environment are
-// co-located by BuildPerScopeAdapterPodGroup instead.
+// co-located by BuildPerScopePeerPod instead (KB-214).
 //
 // Token delivery is version-keyed (CRI-237): events carrying accept_token
 // (runner commit eae0181, CRI-236) get the token on the wire through the
@@ -119,10 +119,12 @@ func BuildPerScopeAdapterPod(run *criteriav1.CriteriaRun, defaults Defaults, sco
 // perScopeAdapterContainer builds one adapter container for a per-scope
 // adapter: the handshake env from the member's own provision event, the
 // workflow plan's declared volumes/secrets/env, and the kind's resources.
-// Both the per-adapter fallback pod and the (scope, environment) group pod
-// build their containers here, so the two pod shapes share the handshake
-// contract exactly. Token delivery is version-keyed (CRI-237): accept_token
-// events (runner eae0181) carry the token on the wire — CRITERIA_REMOTE_TOKEN
+// Only the per-adapter fallback pod builds its containers here (the peer
+// builder constructs its own single container in per_scope_peer.go), and the
+// fallback pod's handshake contract stays byte-identical to the pre-CRI-234
+// builder so mixed-fleet shapes keep reconciling unchanged. Token delivery is
+// version-keyed (CRI-237): accept_token events (runner eae0181) carry the
+// token on the wire — CRITERIA_REMOTE_TOKEN
 // plus a routable CRITERIA_REMOTE_HOST dial address built from the resolved
 // runner pod IP and the event's shim listen port — while pre-eae0181 events
 // keep the CRITERIA_REMOTE_TOKEN_FILE file surface and the discovery-file

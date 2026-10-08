@@ -22,22 +22,26 @@ import (
 // never share a pod name. It returns the number of still-active provisions
 // so the caller can decide whether to keep polling castle.
 //
-// Grouping (CRI-234 M7.2): provisions carrying an environment identity are
-// co-located — one pod per (scope, environment) with each adapter as a
-// separate container. Provisions WITHOUT environment identity (engines older
-// than CRI-233's fc95449) fall back to one pod per adapter, matching the
-// pre-CRI-234 shape. A group pod is recreated whenever its member set drifts
-// (a member was released or a new one provisioned): pod container sets are
-// immutable in Kubernetes, so a stale container would keep dialing a
-// deregistered shim otherwise.
+// Grouping (CRI-234 M7.2, KB-214): provisions carrying an environment
+// identity are co-located — one pod per (scope, environment) running a
+// SINGLE criteria-peer container that hosts every adapter kind of the pair
+// (the engine's multi-adapter manifest). Provisions WITHOUT environment
+// identity (engines older than CRI-233's fc95449) fall back to one pod per
+// adapter, matching the pre-CRI-234 shape. Membership drift within a live
+// scope's lifetime stays inside the peer container — the container set is
+// constant, so the pod is never recreated for a released or newly
+// provisioned member.
 //
-// Wire token delivery (CRI-237): provisions carrying an accept_token
-// (runner eae0181) receive the token over the shim channel, which needs the
-// runner pod's routable IP. When any active provision carries a token, the
-// runner pod is resolved first; until it resolves (no running pod, no pod
-// IP yet) no adapter mutation happens at all — existing pods stay untouched
-// and the reconcile requeues on the next poll, so a wire-shaped pod is never
-// built with a dangling dial address.
+// Dial delivery (CRI-236/237/KB-214): wire-shaped provisions carry an
+// accept_token (runner eae0181) delivered over the shim channel, and the
+// legacy-shaped peer pods bake the dial host from the same address — both
+// need the runner pod's routable IP. When any active provision needs it,
+// the runner pod is resolved first; until it resolves (no running pod, no
+// pod IP yet) no adapter mutation happens at all — existing pods stay
+// untouched and the reconcile requeues on the next poll, so a peer pod is
+// never built with a dangling dial address. Only the env-less fallback
+// pods run adapter.sh's own discovery polling and can build without a
+// runner IP.
 func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
 	if !run.Spec.PerScopeSessions {
 		return 0, nil
@@ -46,19 +50,29 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	active := events.ActiveProvisions(lifecycleEvents)
 
 	runnerIP := ""
+	needsRunnerIP := false
 	for _, scope := range active {
-		if scope.AcceptToken != "" {
-			var err error
-			runnerIP, err = r.resolveRunnerIP(ctx, run)
-			if err != nil {
-				return 0, fmt.Errorf("resolving runner pod for wire token delivery: %w", err)
-			}
-			if runnerIP == "" {
-				logger.Info("wire token delivery deferred: no runner pod with a routable IP yet; leaving adapter pods untouched",
-					"run", run.Name)
-				return len(active), nil
-			}
+		// Every peer pod needs the runner pod's routable IP: wire-shaped
+		// delivery dials it to deliver the token, and the legacy peer
+		// shape bakes the dial host from it (the direct `criteria peer`
+		// ENTRYPOINT has no adapter.sh wrapper to poll the per-run
+		// discovery files). Only the env-less fallback pods — they do run
+		// adapter.sh's own discovery polling — can build without one.
+		if scope.AcceptToken != "" || scope.Environment != "" {
+			needsRunnerIP = true
 			break
+		}
+	}
+	if needsRunnerIP {
+		var err error
+		runnerIP, err = r.resolveRunnerIP(ctx, run)
+		if err != nil {
+			return 0, fmt.Errorf("resolving runner pod for peer/adapter token delivery: %w", err)
+		}
+		if runnerIP == "" {
+			logger.Info("peer pod provisioning deferred: no runner pod with a routable IP yet; leaving adapter pods untouched",
+				"run", run.Name)
+			return len(active), nil
 		}
 	}
 
@@ -103,7 +117,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		group.members = append(group.members, scope)
 	}
 	for _, group := range groups {
-		pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
+		pod := jobbuilder.BuildPerScopePeerPod(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
 		if pod == nil {
 			continue
 		}
@@ -124,21 +138,17 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	// Delete pods that are no longer desired first. This ensures a release for
 	// one scope is processed before a provision-wanted for the next scope when
 	// both events are pending. Desired names are stable functions of the
-	// (scope, environment) pair, so this covers both full releases and group
-	// membership drift: a released member changes the group's container set,
-	// and because pod container sets are immutable the stale group pod must
-	// be deleted and recreated with the remaining members — otherwise a
-	// released adapter's container would keep dialing a deregistered shim.
-	// Per-adapter fallback pods cannot drift (their name pins the kind and
-	// scope), so only group pods are drift-checked.
+	// (scope, environment) pair: a released member changes the peer
+	// container's manifest, never the pod — membership drift within a live
+	// scope's lifetime stays inside the peer container (KB-214), so no
+	// drift-recreate path remains. Pods still being deleted here are only
+	// the retired name shapes (CRI-234 group pods, per-adapter fallback
+	// pods whose provisions went away) and fully released scopes.
 	deletedNames := make(map[string]struct{})
 	for i := range existing.Items {
 		pod := &existing.Items[i]
-		if desiredPod, ok := desired[pod.Name]; ok {
-			if !isAdapterGroupPod(pod) || adapterContainerNamesEqual(pod, desiredPod) {
-				continue
-			}
-			logger.Info("recreating per-scope adapter group pod after membership change", "pod", pod.Name)
+		if _, ok := desired[pod.Name]; ok {
+			continue
 		}
 		logger.Info("deleting per-scope adapter pod", "pod", pod.Name)
 		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
@@ -184,44 +194,14 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 
 // adapterPodLogLabel renders the pod's adapter identification for the
 // reconcile create-log: the single kind for per-adapter fallback pods, the
-// comma-joined kind set for (scope, environment) group pods. Group pods
-// carry the kind set on the AnnotationAdapterKinds annotation — the comma
+// comma-joined kind set for (scope, environment) peer pods. Peer pods carry
+// the kind set on the AnnotationAdapterKinds annotation — the comma
 // separator is illegal in a label value (CRI-234 R1).
 func adapterPodLogLabel(pod *corev1.Pod) string {
 	if kind := pod.Labels[jobbuilder.LabelAdapterKind]; kind != "" {
 		return kind
 	}
 	return pod.Annotations[jobbuilder.AnnotationAdapterKinds]
-}
-
-// isAdapterGroupPod reports whether pod is a (scope, environment) co-location
-// pod rather than a per-adapter fallback pod. Group pods carry the
-// environment label; the fallback builder never sets it.
-func isAdapterGroupPod(pod *corev1.Pod) bool {
-	return pod.Labels[jobbuilder.LabelEnvironment] != ""
-}
-
-// adapterContainerNamesEqual reports whether the existing pod's container
-// name set matches the desired pod's. Only names are compared — the API
-// server defaults mutable container fields, so a deep spec comparison would
-// false-positive on cosmetic differences. Group container names are
-// member-sensitive (they embed a hash of each member's handshake binding),
-// so a name-set mismatch means the group's membership — or a member's
-// binding — changed.
-func adapterContainerNamesEqual(existing, desired *corev1.Pod) bool {
-	if len(existing.Spec.Containers) != len(desired.Spec.Containers) {
-		return false
-	}
-	desiredNames := make(map[string]struct{}, len(desired.Spec.Containers))
-	for _, c := range desired.Spec.Containers {
-		desiredNames[c.Name] = struct{}{}
-	}
-	for _, c := range existing.Spec.Containers {
-		if _, ok := desiredNames[c.Name]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // resolveRunnerIP resolves the run's runner pod IP for wire token delivery

@@ -380,7 +380,7 @@ func (p *workflowPlan) runnerMounts(legacySecretVolumes bool) []corev1.VolumeMou
 			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
 		}
 	}
-	return p.envMounts(dataMountPath, true)
+	return withScriptsMount(p.envMounts(dataMountPath, true))
 }
 
 // cloneMounts renders the repo-clone init container's mounts.
@@ -396,7 +396,7 @@ func (p *workflowPlan) cloneMounts(legacySecretVolumes bool) []corev1.VolumeMoun
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 		}
 	}
-	return p.envMounts(dataMountPath, true)
+	return withScriptsMount(p.envMounts(dataMountPath, true))
 }
 
 // adapterMounts renders an adapter container's mounts. When includeData is
@@ -416,7 +416,31 @@ func (p *workflowPlan) adapterMounts(includeData bool) []corev1.VolumeMount {
 			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
 		}
 	}
+	return withScriptsMount(p.envMounts(dataMountPath, includeData))
+}
+
+// peerAdapterMounts renders the peer pod's single container's mounts: the
+// declared volumes and secrets around the run-state data mount, WITHOUT
+// the pod-adapter scripts ConfigMap — the peer image runs `criteria peer`
+// as its ENTRYPOINT (ADR-0008) and never passes through adapter.sh.
+func (p *workflowPlan) peerAdapterMounts(includeData bool) []corev1.VolumeMount {
+	if p == nil {
+		if includeData {
+			return []corev1.VolumeMount{
+				{Name: dataVolumeName, MountPath: dataMountPath},
+			}
+		}
+		return nil
+	}
 	return p.envMounts(dataMountPath, includeData)
+}
+
+// withScriptsMount appends the pod-adapter scripts ConfigMap mount, the
+// shell-level adapter surface that containerized adapters and the runner
+// share (the criteria-peer container is the only caller-level shape that
+// omits it).
+func withScriptsMount(mounts []corev1.VolumeMount) []corev1.VolumeMount {
+	return append(mounts, corev1.VolumeMount{Name: scriptsVolumeName, MountPath: scriptsMountPath})
 }
 
 // envMounts renders the declared volumes and secrets into container mounts
@@ -427,7 +451,10 @@ func (p *workflowPlan) adapterMounts(includeData bool) []corev1.VolumeMount {
 // every data-carrying container already leads with. includeData=false
 // (wire-shaped adapter pods, CRI-237) omits that lead mount; a /data
 // declaration cannot co-occur with it, because callers force includeData
-// whenever the workflow declares /data.
+// whenever the workflow declares /data. The pod-adapter scripts ConfigMap
+// mount is NOT included here: callers add it explicitly
+// (withScriptsMount), and the criteria-peer container is the one shape
+// that omits it (its image's ENTRYPOINT never passes through adapter.sh).
 func (p *workflowPlan) envMounts(dataMount string, includeData bool) []corev1.VolumeMount {
 	mounts := make([]corev1.VolumeMount, 0, 8)
 	if includeData {
@@ -451,7 +478,7 @@ func (p *workflowPlan) envMounts(dataMount string, includeData bool) []corev1.Vo
 			ReadOnly:  true,
 		})
 	}
-	return append(mounts, corev1.VolumeMount{Name: scriptsVolumeName, MountPath: scriptsMountPath})
+	return mounts
 }
 
 // runnerEnvs injects the workflow object's own env map plus each declared
