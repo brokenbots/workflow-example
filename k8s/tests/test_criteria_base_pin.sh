@@ -57,6 +57,15 @@ set -euo pipefail
 # CRITERIA_VERSION=<tag of that exact commit> (the 2026-10-01 lesson: a
 # stamp-only bump ships a stale source pin silently).
 #
+# Re-audited to 3bf70c84 (v0.5.44 wave carrier, 2026-10-07): proto delta vs
+# 99baa281 (v0.5.42, the deployed image) is peer.proto ONLY and purely
+# ADDITIVE - ADR-0008 arms (CancelChildRun control arm 5, ChildRunStarted 11,
+# ChildRunTerminal 12, ChildRunTeardownPartial 13, new ChildRun* messages);
+# the next-free comment notes field 14. Zero removed or renumbered fields
+# (grep of numbered-line removals over the delta: 0). events.proto delta:
+# EMPTY - castle ingest envelope-verbatim, consumer-safe. adapter wire v2
+# (criteria-adapter-proto) untouched - criteria-base builds the engine.
+#
 # To move off 77b6e0ed, re-audit the emitted adapter event contract, then
 # update AUDITED_COMMIT here and the equality checks in
 # k8s/tests/test_criteria_base.sh and criteria-base/tests/smoke_test.sh in
@@ -70,7 +79,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="637eb212655fc0cd84d58e7af3a404b2b94b24cd"
+AUDITED_COMMIT="3bf70c84efdd4d8a75eded1a4fa748a86c8f7975"
 
 fail() {
     echo "FAIL: $1" >&2
