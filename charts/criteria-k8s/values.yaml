@@ -46,6 +46,11 @@ images:
   # for adapter image references the operator composes itself — the fallback
   # when neither the workflow object's adapterImages override nor the
   # provision_wanted event's digest-verified image_reference resolves one.
+  # KB-214: the repo name carries the pod shape — legacy per-adapter
+  # fallback pods resolve criteria-adapter-<kind>:<tag> (adapter.sh +
+  # remote-runner shim), peer pods resolve
+  # criteria-adapter-<kind>-peer:<tag> ('criteria peer' ENTRYPOINT,
+  # Dockerfile.peer). Both shapes read these same values.
   adapter:
     registry: localhost:5000
     tag: k8s-3

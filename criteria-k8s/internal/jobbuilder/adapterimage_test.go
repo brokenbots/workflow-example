@@ -140,3 +140,117 @@ func jobbuilderBuildPerScopeAdapterPod(t *testing.T, run *criteriav1.CriteriaRun
 	require.NotNil(t, pod)
 	return pod
 }
+
+// KB-214: peer pods resolve through the same precedence order as the
+// legacy fallback but land on a peer-shaped default:
+// <registry>/criteria-adapter-<kind>-peer:<tag>. The -peer repo's
+// ENTRYPOINT is `criteria peer`, so the legacy-named default must never
+// backstop a peer pod. These tests mirror the resolveAdapterImage branch
+// pins on the peer path and pin the builder-level resolution.
+func TestResolvePeerAdapterImageDefaultsToPeerRepo(t *testing.T) {
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer:k8s-9", resolvePeerAdapterImage(nil, events.LifecycleEvent{}, "shell", adapterImageDefaults()))
+
+	// Zero Defaults fall back to the built-in registry and tag on the
+	// -peer repo.
+	assert.Equal(t, "localhost:5000/criteria-adapter-copilot-peer:k8s-3", resolvePeerAdapterImage(nil, events.LifecycleEvent{}, "copilot", Defaults{}))
+
+	// Components override independently, same as the legacy default.
+	registryOnly := resolvePeerAdapterImage(nil, events.LifecycleEvent{}, "shell", Defaults{AdapterRegistry: "reg2.example:443"})
+	assert.Equal(t, "reg2.example:443/criteria-adapter-shell-peer:k8s-3", registryOnly)
+	tagOnly := resolvePeerAdapterImage(nil, events.LifecycleEvent{}, "shell", Defaults{AdapterTag: "k8s-9"})
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-9", tagOnly)
+}
+
+func TestResolvePeerAdapterImageOverrideWins(t *testing.T) {
+	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}}
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		ImageReference: "localhost:5000/criteria-adapter-shell-peer:k8s-5",
+	}
+
+	img := resolvePeerAdapterImage(plan, scope, "shell", adapterImageDefaults())
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4", img,
+		"the workflow object's adapterImages override wins over the event reference and the peer default")
+}
+
+func TestResolvePeerAdapterImageUsesDigestVerifiedReference(t *testing.T) {
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		ImageReference: "registry.example:5000/criteria-adapter-shell-peer@sha256:abc",
+	}
+
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:abc",
+		resolvePeerAdapterImage(nil, scope, "shell", adapterImageDefaults()),
+		"a digest-verified image_reference displaces the peer default")
+}
+
+func TestResolvePeerAdapterImageWithoutDigestIgnoresReference(t *testing.T) {
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		ImageReference: "evil-registry.example/criteria-adapter-shell-peer:latest",
+	}
+
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer:k8s-9",
+		resolvePeerAdapterImage(nil, scope, "shell", adapterImageDefaults()),
+		"an image_reference without a digest is unverified and falls through to the peer default")
+}
+
+// BuildPerScopePeerPod consumes the whole peer resolution order, not just
+// the defaults branch: an unverified reference must not leak into the pod,
+// and the no-pin/no-ref default must be the -peer shape even when the
+// operator's legacy tag is configured.
+func peerImageTestRun(adapterImages map[string]string) *criteriav1.CriteriaRun {
+	run := perScopeAdapterTestRun()
+	if adapterImages != nil {
+		run.Spec.Workflow = &criteriav1.RunWorkflow{AdapterImages: adapterImages}
+	}
+	return run
+}
+
+func TestBuildPerScopePeerPodResolvesPeerImage(t *testing.T) {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	member := func(digest, ref string) events.LifecycleEvent {
+		m := events.LifecycleEvent{
+			Event:       events.EventProvisionWanted,
+			RunID:       "CRI-42",
+			ScopeID:     "root",
+			ScopeTag:    "root-scope",
+			AdapterName: "intake",
+			AdapterType: "shell",
+			TokenFile:   "/data/intake/CRI-42/tokens/intake",
+			Environment: "ci",
+		}
+		if digest != "" {
+			m.Digest = digest
+		}
+		if ref != "" {
+			m.ImageReference = ref
+		}
+		return m
+	}
+	verified := member(digest, "registry.example:5000/criteria-adapter-shell-peer@sha256:abc")
+	unverified := member("", "evil-registry.example/criteria-adapter-shell-peer:latest")
+	mkPod := func(run *criteriav1.CriteriaRun, members []events.LifecycleEvent) corev1.Container {
+		t.Helper()
+		pod := BuildPerScopePeerPod(run, Defaults{AdapterTag: "k8s-5"}, "root", "ci", members, "")
+		require.NotNil(t, pod)
+		return pod.Spec.Containers[0]
+	}
+
+	// A digest-verified event reference wins over the configured default.
+	got := mkPod(peerImageTestRun(nil), []events.LifecycleEvent{verified})
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:abc", got.Image)
+
+	// An unverified reference must not displace the peer default — and the
+	// default is the -peer shape, not the legacy criteria-adapter-<kind>
+	// image whose ENTRYPOINT cannot host the manifest.
+	got = mkPod(peerImageTestRun(nil), []events.LifecycleEvent{unverified})
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-5", got.Image)
+
+	// The workflow override beats the verified reference.
+	got = mkPod(peerImageTestRun(map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}),
+		[]events.LifecycleEvent{verified})
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4", got.Image)
+}

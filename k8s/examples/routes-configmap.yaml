@@ -96,6 +96,17 @@
 # Secrets are name references only: every secret here points at a
 # SecretProviderClass (OpenBao via the Secrets Store CSI driver). No
 # credential material appears in this file (plan CRI-214 section 3.8).
+#
+# KB-214 (peer-pod flip, ADR-0007/0008): workflow adapterImages now pin the
+# criteria-adapter-<kind>-peer images (built from the criteria repo's
+# Dockerfile.peer; one container per pod runs 'criteria peer' directly —
+# no adapter.sh, no remote-runner shim). The tags below are the FIRST peer
+# builds of the 0.5.4/0.5.15 waves, so they are fresh refs; any corrected
+# peer rebuild must push a NEW tag (e.g. 'k8s-0.5.4-2') — KB-63: same-tag
+# re-push serves a stale cached manifest. Legacy
+# criteria-adapter-<kind>:<tag> pins stay valid only for pre-CRI-233
+# (env-less) workflows, which provision one pod per adapter via
+# adapter.sh + criteria-adapter-remote-runner.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -152,8 +163,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "linear-intake-url": {
@@ -204,8 +215,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "linear-develop-url": {
@@ -257,8 +268,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "linear-triage-url": {
@@ -311,8 +322,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "ticket-cleanup-url": {
@@ -365,8 +376,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "kanboard-triage-url": {
@@ -422,8 +433,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "kanboard-develop-url": {
@@ -478,8 +489,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot:k8s-0.5.15"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
           }
         },
         "decision-demo-url": {

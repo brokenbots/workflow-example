@@ -226,7 +226,7 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 
 	return corev1.Container{
 		Name:            PerScopePeerContainerName,
-		Image:           resolveAdapterImage(plan, dial, dialKind, defaults),
+		Image:           resolvePeerAdapterImage(plan, dial, dialKind, defaults),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		// No Command: the criteria-adapter-<kind>-peer image's ENTRYPOINT
 		// runs `criteria peer`, hosting the manifest's adapters directly
