@@ -35,7 +35,7 @@ func affinityLabelsOf(labels map[string]string) map[string]string {
 	return out
 }
 
-// affinityGroupPod builds the (scope, environment) group pod for the run.
+// affinityGroupPod builds the (scope, environment) peer pod for the run.
 func affinityGroupPod(t *testing.T, run *criteriav1.CriteriaRun) *corev1.Pod {
 	t.Helper()
 	members := []events.LifecycleEvent{
@@ -54,7 +54,7 @@ func affinityGroupPod(t *testing.T, run *criteriav1.CriteriaRun) *corev1.Pod {
 			Environment: "ci",
 		},
 	}
-	pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
 	require.NotNil(t, pod)
 	return pod
 }

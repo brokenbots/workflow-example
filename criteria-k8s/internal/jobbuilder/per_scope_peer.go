@@ -245,6 +245,14 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 // name convention). Duplicate kinds — same kind hosted twice in one pair —
 // collide on one env entry, so the first member's digest wins; digests of
 // same-kind members come from the same lockfile entry in practice.
+// peerAdapterManifestEnv returns the per-kind digest pin env vars the
+// engine's multi-adapter resolution contract (KB-213) keys each hosted
+// member by: CRITERIA_ADAPTER_<KIND>_DIGEST, rendered with the kind
+// uppercased and non-alphanumerics replaced by underscores (shell ->
+// CRITERIA_ADAPTER_SHELL_DIGEST, triage-reviewer -> CRITERIA_ADAPTER_
+// TRIAGE_REVIEWER_DIGEST). Identical kinds collapse; the sorted-first
+// member's digest wins (the same member that dials, so the pin always
+// matches the conn's handshake identity).
 func peerAdapterManifestEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 	envs := make([]corev1.EnvVar, 0, len(members))
 	seen := make(map[string]struct{}, len(members))
@@ -269,10 +277,8 @@ func peerAdapterManifestEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 	return envs
 }
 
-// peerAdapterManifestEnv returns the env names the engine's multi-adapter
-// resolution contract keys per adapter kind: the kind uppercased with
-// non-alphanumerics replaced by underscores (shell -> SHELL, triage-reviewer
-// -> TRIAGE_REVIEWER).
+// peerAdapterEnvName renders the env name prefix the engine's multi-adapter
+// resolution contract keys per adapter kind.
 func peerAdapterEnvName(kind string) string {
 	var b strings.Builder
 	for _, r := range strings.ToUpper(kind) {
