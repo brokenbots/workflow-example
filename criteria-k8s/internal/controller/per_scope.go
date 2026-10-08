@@ -32,13 +32,16 @@ import (
 // constant, so the pod is never recreated for a released or newly
 // provisioned member.
 //
-// Wire token delivery (CRI-237): provisions carrying an accept_token
-// (runner eae0181) receive the token over the shim channel, which needs the
-// runner pod's routable IP. When any active provision carries a token, the
-// runner pod is resolved first; until it resolves (no running pod, no pod
-// IP yet) no adapter mutation happens at all — existing pods stay untouched
-// and the reconcile requeues on the next poll, so a wire-shaped pod is never
-// built with a dangling dial address.
+// Dial delivery (CRI-236/237/KB-214): wire-shaped provisions carry an
+// accept_token (runner eae0181) delivered over the shim channel, and the
+// legacy-shaped peer pods bake the dial host from the same address — both
+// need the runner pod's routable IP. When any active provision needs it,
+// the runner pod is resolved first; until it resolves (no running pod, no
+// pod IP yet) no adapter mutation happens at all — existing pods stay
+// untouched and the reconcile requeues on the next poll, so a peer pod is
+// never built with a dangling dial address. Only the env-less fallback
+// pods run adapter.sh's own discovery polling and can build without a
+// runner IP.
 func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
 	if !run.Spec.PerScopeSessions {
 		return 0, nil
@@ -47,19 +50,29 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	active := events.ActiveProvisions(lifecycleEvents)
 
 	runnerIP := ""
+	needsRunnerIP := false
 	for _, scope := range active {
-		if scope.AcceptToken != "" {
-			var err error
-			runnerIP, err = r.resolveRunnerIP(ctx, run)
-			if err != nil {
-				return 0, fmt.Errorf("resolving runner pod for wire token delivery: %w", err)
-			}
-			if runnerIP == "" {
-				logger.Info("wire token delivery deferred: no runner pod with a routable IP yet; leaving adapter pods untouched",
-					"run", run.Name)
-				return len(active), nil
-			}
+		// Every peer pod needs the runner pod's routable IP: wire-shaped
+		// delivery dials it to deliver the token, and the legacy peer
+		// shape bakes the dial host from it (the direct `criteria peer`
+		// ENTRYPOINT has no adapter.sh wrapper to poll the per-run
+		// discovery files). Only the env-less fallback pods — they do run
+		// adapter.sh's own discovery polling — can build without one.
+		if scope.AcceptToken != "" || scope.Environment != "" {
+			needsRunnerIP = true
 			break
+		}
+	}
+	if needsRunnerIP {
+		var err error
+		runnerIP, err = r.resolveRunnerIP(ctx, run)
+		if err != nil {
+			return 0, fmt.Errorf("resolving runner pod for peer/adapter token delivery: %w", err)
+		}
+		if runnerIP == "" {
+			logger.Info("peer pod provisioning deferred: no runner pod with a routable IP yet; leaving adapter pods untouched",
+				"run", run.Name)
+			return len(active), nil
 		}
 	}
 

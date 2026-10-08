@@ -1,6 +1,7 @@
 package jobbuilder_test
 
 import (
+	"fmt"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -366,8 +367,13 @@ func TestBuildPerScopePeerPodMixedMembersKeepDataVolume(t *testing.T) {
 	// Defensive: a pair holding one pre-eae0181 member (no accept_token —
 	// impossible in practice, since one engine emits one event shape)
 	// degrades the whole peer container to the legacy shape — the single
-	// container must keep the shared data volume for the token file, and
-	// never sends a half-shaped wire handshake.
+	// container keeps the shared data volume so the peer can read the
+	// rotating token files, and never sends a half-shaped wire handshake.
+	// The dial member is the sorted-first member ("intake", the wire-shaped
+	// shell member), but the whole container degrades to the legacy branch:
+	// the operator-baked host is set, no token env can ride the pod spec
+	// (no accept_token was received for the degrade's dial decision), and
+	// the fixture's token_ref must resolve to the run discovery root.
 	run := groupTestRun()
 	members := []events.LifecycleEvent{
 		wireGroupMember("intake", "shell", "scope-a", "ci"),
@@ -376,28 +382,114 @@ func TestBuildPerScopePeerPodMixedMembersKeepDataVolume(t *testing.T) {
 
 	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
 	require.NotNil(t, pod)
-	env := containerEnvMap(pod.Spec.Containers[0])
 	assert.True(t, hasVolume(pod.Spec.Volumes, "data"))
-	// The dial member is the sorted-first member ("intake", the wire-shaped
-	// shell member): the whole container degrades to the legacy branch, so
-	// it pins that member's token file and sends no wire handshake.
-	assert.Equal(t, "/data/intake/CRI-234/tokens/intake", env["CRITERIA_REMOTE_TOKEN_FILE"])
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
 	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN")
+	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN_FILE")
+}
+
+func TestBuildPerScopePeerPodLegacyDiscoveryDelivery(t *testing.T) {
+	// Shim-era legacy delivery (pre-eae0181 engines, the CRI-234-era
+	// fleet): no accept_token, and the direct `criteria peer` ENTRYPOINT
+	// cannot poll discovery files like adapter.sh. The operator bakes the
+	// dial host from the runner pod IP and hands the peer the run
+	// discovery dir's remote-tokens root, where the peer scans (scope,
+	// adapter) rotating token files itself — the token never crosses the
+	// pod spec.
+	run := groupTestRun()
+	members := []events.LifecycleEvent{
+		groupMember("intake", "shell", "scope-a", "ci"),
+		groupMember("review", "copilot", "scope-a", "ci"),
+	}
+	for i := range members {
+		members[i].ShimAddress = "[::]:7778"
+		members[i].TokenFile = fmt.Sprintf("/data/.criteria/runs/cri-234/tokens/%s.token", members[i].AdapterName)
+	}
+
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "10.0.0.10")
+	require.NotNil(t, pod)
+	require.Len(t, pod.Spec.Containers, 1)
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
+	assert.Equal(t, "/data/.criteria/runs/cri-234/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"],
+		"the fc95449 static token_ref derives the run's sibling remote-tokens root the peer scans")
+	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN",
+		"no accept_token was received, so no token may ride the pod spec")
+	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN_FILE",
+		"the peer is a direct ENTRYPOINT: the adapter.sh token-file var is inert and must not be set")
+	assert.True(t, hasVolume(pod.Spec.Volumes, "data"),
+		"the rotating token files live on the shared data volume")
+}
+
+func TestBuildPerScopePeerPodDiscoveryRootRotatingLayout(t *testing.T) {
+	// A token_ref already inside the rotating layout derives its own
+	// remote-tokens ancestor as the scan root (workflow-scope shape:
+	// <root>/<scopeName>/<instanceID>/<adapterType>.token).
+	run := groupTestRun()
+	member := groupMember("intake", "shell", "scope-a", "ci")
+	member.ShimAddress = "[::]:7778"
+	member.TokenFile = "/data/.criteria/runs/cri-234/remote-tokens/my-scope/11111111-1111-1111-1111-111111111111/shell.token"
+
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, pod)
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.Equal(t, "/data/.criteria/runs/cri-234/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"])
+}
+
+func TestBuildPerScopePeerPodDiscoveryRootUnshapedStaysAbsent(t *testing.T) {
+	// A token_ref matching neither live shape derives nothing: the peer
+	// boots with no scopes dir and fails its host handshake loudly on the
+	// missing token instead of silently scanning an unrelated directory.
+	run := groupTestRun()
+	member := groupMember("intake", "shell", "scope-a", "ci")
+	member.ShimAddress = "[::]:7778"
+	member.TokenFile = "/var/tmp/intake-session"
+
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, pod)
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.NotContains(t, env, "CRITERIA_REMOTE_SCOPES_DIR")
+}
+
+func TestBuildPerScopePeerPodLegacyWithoutRunnerIPHasNoHost(t *testing.T) {
+	// Defensive: the builder is pure — it never resolves the runner IP
+	// itself. Called without one it leaves CRITERIA_REMOTE_HOST absent
+	// (the peer fails boot loudly on a missing host); the reconcile
+	// defers peer pod creation in that state, so the pod is never built.
+	run := groupTestRun()
+	member := groupMember("intake", "shell", "scope-a", "ci")
+	member.ShimAddress = "[::]:7778"
+	member.TokenFile = "/data/.criteria/runs/cri-234/tokens/intake.token"
+
+	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "")
+	require.NotNil(t, pod)
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.NotContains(t, env, "CRITERIA_REMOTE_HOST")
+	assert.Equal(t, "/data/.criteria/runs/cri-234/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"],
+		"the discovery root derivation does not depend on the runner IP")
 }
 
 func TestBuildPerScopePeerPodWireWithoutRunnerIPLegacy(t *testing.T) {
 	// Defensive: accept_token members with an unresolved runner IP keep the
 	// legacy shape (the reconcile never builds this state — it requeues).
+	// No host can be baked and no token may be inlined without the wire; a
+	// remote-tokens-shaped token_ref still derives the scan root.
 	run := groupTestRun()
 	members := []events.LifecycleEvent{
 		wireGroupMember("intake", "shell", "scope-a", "ci"),
 	}
+	members[0].TokenFile = "/data/.criteria/runs/cri-237/remote-tokens/11111111-1111-1111-1111-111111111111/shell.token"
 
 	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{DataPVC: "criteria-data"}, "scope-a", "ci", members, "")
 	require.NotNil(t, pod)
 	assert.True(t, hasVolume(pod.Spec.Volumes, "data"))
 	env := containerEnvMap(pod.Spec.Containers[0])
-	assert.Contains(t, env, "CRITERIA_REMOTE_TOKEN_FILE")
+	assert.NotContains(t, env, "CRITERIA_REMOTE_HOST")
+	assert.Equal(t, "/data/.criteria/runs/cri-237/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"])
 	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN")
 }
 

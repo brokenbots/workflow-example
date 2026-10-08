@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	logr "github.com/go-logr/logr"
@@ -33,6 +34,31 @@ func groupProvision(adapter, kind, scopeID, environment string) events.Lifecycle
 		AdapterType: kind,
 		Digest:      "sha256:deadbeef",
 		Environment: environment,
+		// The fc95449/CRI-234 emission shape: the runner's shim bind
+		// address and the static per-run token_ref peer pods derive their
+		// discovery root from.
+		ShimAddress: "[::]:7778",
+		TokenFile:   "/data/.criteria/runs/cri-234/tokens/" + adapter + ".token",
+	}
+}
+
+// groupRunnerPod seeds the provisioned run's runner pod (RoleRunner) with a
+// routable IP: every environment-carrying provision needs the runner IP —
+// wire-shaped delivery dials it to deliver the token, and the legacy peer
+// shape bakes the dial host from it — so the reconcile defers until a
+// runner pod exists. The shared runnerPod helper hard-codes the cri-237
+// run label; peer tests run the per-scope fixture run instead.
+func groupRunnerPod(run *criteriav1.CriteriaRun, ip string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      run.Name + "-runner",
+			Namespace: run.Namespace,
+			Labels: map[string]string{
+				jobbuilder.LabelRun:  run.Name,
+				jobbuilder.LabelRole: jobbuilder.RoleRunner,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
 	}
 }
 
@@ -77,7 +103,7 @@ func podManifestKinds(pod corev1.Pod) []string {
 // co-locate as ONE peer container's manifest in exactly one pod.
 func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	events := []events.LifecycleEvent{
 		groupProvision("intake", "shell", "scope-a", "ci"),
@@ -88,7 +114,7 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "exactly ONE pod per (scope, environment)")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1, "exactly ONE peer container per pod")
@@ -98,13 +124,21 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing
 	assert.Equal(t, "ci", pods[0].Labels[jobbuilder.LabelEnvironment])
 	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
 	assert.Equal(t, "scope-a", pods[0].Labels[jobbuilder.LabelScopeID])
+	// fc95449-shaped provisions carry no accept_token: the peer pod bakes
+	// the runner dial address and the run's remote-tokens discovery root —
+	// never a token.
+	env := containerEnvByName(pods[0].Spec.Containers[0])
+	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
+	assert.Equal(t, "/data/.criteria/runs/cri-234/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"])
+	assert.Empty(t, env["CRITERIA_REMOTE_TOKEN"])
+	assert.Empty(t, env["CRITERIA_REMOTE_TOKEN_FILE"])
 }
 
 // Separate envs -> separate pods: adapters declaring different environments
 // never share a pod (co-location is config-declared trust only).
 func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	events := []events.LifecycleEvent{
 		groupProvision("intake", "shell", "scope-a", "ci"),
@@ -116,7 +150,7 @@ func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 2, "one pod per (scope, environment), never fewer")
 
 	byEnv := make(map[string]corev1.Pod, len(pods))
@@ -138,7 +172,7 @@ func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 // directly (adapter.sh is never passed through in peer mode).
 func TestReconcilePerScopeAdaptersPeerContainerRunsDirectEntrypoint(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	events := []events.LifecycleEvent{
 		groupProvision("intake", "shell", "scope-a", "ci"),
@@ -148,7 +182,7 @@ func TestReconcilePerScopeAdaptersPeerContainerRunsDirectEntrypoint(t *testing.T
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, events, logr.Discard())
 	require.NoError(t, err)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
 	require.Len(t, pods[0].Spec.Containers, 1)
 	container := pods[0].Spec.Containers[0]
@@ -166,7 +200,7 @@ func TestReconcilePerScopeAdaptersPeerContainerRunsDirectEntrypoint(t *testing.T
 // preserved).
 func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	provisions := []events.LifecycleEvent{
 		groupProvision("intake", "shell", "scope-a", "ci"),
@@ -175,7 +209,7 @@ func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing
 	}
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, provisions, logr.Discard())
 	require.NoError(t, err)
-	require.Len(t, listAdapterPods(t, cl, "default"), 3)
+	require.Len(t, listAdapterRolePods(t, cl, "default"), 3)
 
 	// Full per-scope teardown: releases for every member of scope-a,
 	// delivered over the accumulated history as the castle client does. The
@@ -188,7 +222,7 @@ func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, 1, active, "only scope-b's member stays active")
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "scope-a's environment groups are fully torn down; scope-b survives")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-b", "ci"), pods[0].Name)
 }
@@ -201,7 +235,7 @@ func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing
 // drift-recreate path the CRI-234 group pod needed.
 func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	provisions := []events.LifecycleEvent{
 		groupProvision("intake", "shell", "scope-a", "ci"),
@@ -209,7 +243,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	}
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, provisions, logr.Discard())
 	require.NoError(t, err)
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
 	beforeUID := string(pods[0].UID)
 	require.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
@@ -222,7 +256,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
-	pods = listAdapterPods(t, cl, "default")
+	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "the peer pod persists for the remaining member")
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"membership drift must NOT recreate the peer pod: child cycling happens inside the container")
@@ -234,7 +268,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	// same pod object too.
 	_, err = r.reconcilePerScopeAdapters(context.Background(), run, provisions, logr.Discard())
 	require.NoError(t, err)
-	pods = listAdapterPods(t, cl, "default")
+	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"re-provisioning the released member must keep the same peer pod object")
@@ -246,13 +280,13 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 // function of the pair and the manifest, both anchored at pod creation.
 func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	first := groupProvision("first", "shell", "scope-a", "ci")
 	first.Digest = "sha256:aaaaaaaa"
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{first}, logr.Discard())
 	require.NoError(t, err)
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
 	beforeUID := string(pods[0].UID)
 
@@ -268,7 +302,7 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
-	pods = listAdapterPods(t, cl, "default")
+	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "the (scope, environment) keeps exactly one pod")
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"the peer pod is not recreated for a same-kind member swap")
@@ -281,7 +315,7 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 // name-based eviction, never a spec comparison.
 func TestReconcilePerScopeAdaptersEvictsRetiredGroupPodShape(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	// Seed the pre-flip group pod with the retired -adp- name shape
 	// (`<job>-adp-<scope-hash>-<env-hash>`); the old builder is deleted, so
@@ -314,12 +348,46 @@ func TestReconcilePerScopeAdaptersEvictsRetiredGroupPodShape(t *testing.T) {
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, events, logr.Discard())
 	require.NoError(t, err)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "the retired group pod is evicted; only the peer pod remains")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1)
 	assert.Nil(t, pods[0].Spec.Containers[0].Command,
 		"the surviving pod is the peer pod, not the retired adapter.sh group pod")
+}
+
+// The peer pod is never built before the runner pod has a routable IP: the
+// reconcile defers (no creates, no deletes) and builds on the next poll
+// once the runner pod exists with an IP. The env-less fallback shape needs
+// no runner IP (adapter.sh polls discovery files itself), so it is
+// unaffected.
+func TestReconcilePerScopeAdaptersPeerGroupDefersUntilRunnerIP(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run)
+
+	events := []events.LifecycleEvent{
+		groupProvision("intake", "shell", "scope-a", "ci"),
+		groupProvision("review", "copilot", "scope-a", "ci"),
+	}
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, events, logr.Discard())
+	require.NoError(t, err, "deferral is not an error: the caller requeues on the next poll")
+	assert.Equal(t, 2, active, "the provisions stay active so the poll interval keeps requeueing")
+	require.Empty(t, listAdapterRolePods(t, cl, "default"),
+		"no peer pod may be created before the runner IP resolves: the direct ENTRYPOINT cannot boot without the baked host")
+
+	// The runner pod appears with a routable IP; the next poll builds the
+	// peer pods.
+	require.NoError(t, cl.Create(context.Background(), groupRunnerPod(run, "10.0.0.10")))
+	active, err = r.reconcilePerScopeAdapters(context.Background(), run, events, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 2, active)
+
+	pods := listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1)
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
+	env := containerEnvByName(pods[0].Spec.Containers[0])
+	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"],
+		"the deferred build bakes the runner dial host once the IP resolves")
 }
 
 // Backward-compat: events without environment identity (pre-fc95449
@@ -339,7 +407,7 @@ func TestReconcilePerScopeAdaptersEnvLessEventsFallBackToPerAdapterPods(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 2, "env-less events keep one pod per adapter")
 	for _, pod := range pods {
 		assert.Empty(t, pod.Labels[jobbuilder.LabelEnvironment],
@@ -356,7 +424,7 @@ func TestReconcilePerScopeAdaptersEnvLessEventsFallBackToPerAdapterPods(t *testi
 // grouping only applies where env identity exists.
 func TestReconcilePerScopeAdaptersMixedShapesStaySeparate(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	events := []events.LifecycleEvent{
 		{Event: events.EventProvisionWanted, RunID: "CRI-234", ScopeID: "scope-a", AdapterName: "legacy", AdapterType: "shell"},
@@ -367,7 +435,7 @@ func TestReconcilePerScopeAdaptersMixedShapesStaySeparate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 2, "the env-less adapter keeps its own pod; the env-carrying adapter gets the peer pod")
 
 	fallbackSeen, peerSeen := false, false
@@ -392,7 +460,7 @@ func TestReconcilePerScopeAdaptersMixedShapesStaySeparate(t *testing.T) {
 // the existing peer pods instead of recreating them.
 func TestReconcilePerScopeAdaptersGroupedIdempotent(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	events := []events.LifecycleEvent{
 		groupProvision("intake", "shell", "scope-a", "ci"),
@@ -402,7 +470,7 @@ func TestReconcilePerScopeAdaptersGroupedIdempotent(t *testing.T) {
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, events, logr.Discard())
 	require.NoError(t, err)
 	uid := func() string {
-		pods := listAdapterPods(t, cl, "default")
+		pods := listAdapterRolePods(t, cl, "default")
 		require.Len(t, pods, 1)
 		return string(pods[0].UID)
 	}()
@@ -410,7 +478,7 @@ func TestReconcilePerScopeAdaptersGroupedIdempotent(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		_, err = r.reconcilePerScopeAdapters(context.Background(), run, events, logr.Discard())
 		require.NoError(t, err)
-		pods := listAdapterPods(t, cl, "default")
+		pods := listAdapterRolePods(t, cl, "default")
 		require.Len(t, pods, 1)
 		assert.Equal(t, uid, string(pods[0].UID), "repeat reconciles must keep the existing peer pod")
 	}
@@ -435,7 +503,7 @@ const (
 // environment co-locate in exactly one peer pod.
 func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	stream := strings.Join([]string{fcWorktreeShellIntake, fcWorktreeCopilotReview}, "\n")
 	parsed, err := events.ParseLifecycleEventsBytes([]byte(stream))
@@ -450,7 +518,7 @@ func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "one (scope, environment) -> exactly one peer pod")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46", "remote/worktree"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1)
@@ -465,7 +533,7 @@ func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) 
 // different environments.
 func TestReconcilePerScopeAdaptersSeparatesVerbatimFC95449EnvironmentPairs(t *testing.T) {
 	run := perScopeTestRun(true)
-	r, cl := newPerScopeTestReconciler(t, run)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
 
 	stream := strings.Join([]string{fcWorktreeShellIntake, fcProdCopilotReview}, "\n")
 	parsed, err := events.ParseLifecycleEventsBytes([]byte(stream))
@@ -478,7 +546,7 @@ func TestReconcilePerScopeAdaptersSeparatesVerbatimFC95449EnvironmentPairs(t *te
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 2, "one peer pod per (scope, environment) pair")
 
 	byEnv := make(map[string]corev1.Pod, len(pods))
@@ -510,7 +578,7 @@ func TestReconcilePerScopeAdaptersVerbatimPreFC95449StreamFallsBack(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
-	pods := listAdapterPods(t, cl, "default")
+	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
 	assert.Empty(t, pods[0].Labels[jobbuilder.LabelEnvironment],
 		"env-less events keep the per-adapter fallback shape")

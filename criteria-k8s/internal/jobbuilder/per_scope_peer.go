@@ -3,6 +3,7 @@ package jobbuilder
 import (
 	"crypto/sha256"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -73,8 +74,12 @@ func shortHash(s string) string {
 // per-scope token wiring semantics (CRI-236/237) are unchanged — a fully
 // wire-shaped member set delivers the token on the wire
 // (CRITERIA_REMOTE_TOKEN + CRITERIA_REMOTE_HOST), anything else keeps the
-// legacy token-file surface. A mixed member set (wire plus legacy members)
-// degrades to the legacy shape so no member loses its delivery channel.
+// legacy discovery-dir shape: the peer reads rotating per-(scope, adapter)
+// token files from the runner's remote-tokens root on the shared data
+// volume (CRITERIA_REMOTE_SCOPES_DIR) and dials the runner itself from the
+// operator-baked CRITERIA_REMOTE_HOST.
+// A mixed member set (wire plus legacy members) degrades to the legacy
+// shape so no member loses its delivery channel.
 //
 // The image resolves from the dial member's kind (CRI-214 M14): the
 // workflow object's adapterImages override, else the event's
@@ -216,11 +221,38 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 			corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN", Value: dial.AcceptToken},
 		)
 	} else {
-		// Legacy delivery (pre-eae0181 engines): the peer resolves the
-		// host from the runner's discovery file and the token from the
-		// engine-rotated token file on the shared data volume.
-		if dial.TokenFile != "" {
-			env = append(env, corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN_FILE", Value: dial.TokenFile})
+		// Legacy delivery (pre-eae0181 engines): no accept_token rode the
+		// event, so the token cannot ride the wire either — and the peer
+		// is a direct `criteria peer` ENTRYPOINT with no adapter.sh
+		// wrapper to poll the per-run discovery files. The operator
+		// therefore resolves the dial address itself and points the peer
+		// at the runner's rotating-token root:
+		//   - CRITERIA_REMOTE_HOST is baked from the runner pod's
+		//     routable IP (the event's shim_listen_address supplies only
+		//     the port); the peer's own config Resolve() requires it at
+		//     boot, so the reconcile must defer pod creation while no
+		//     runner pod carries an IP instead of baking a half-shaped
+		//     env.
+		//   - CRITERIA_REMOTE_SCOPES_DIR (internal/peer ScanRemoteScopes)
+		//     makes the peer scan (scope, adapter) token files under the
+		//     run discovery dir's remote-tokens root on the shared data
+		//     volume and dial ONE conn per file, reading the rotated
+		//     token material itself — the token never crosses the
+		//     operator or the pod spec.
+		// An unusable CRITERIA_REMOTE_SCOPES_DIR is not fatal at boot:
+		// an empty scan leaves the peer waiting (a re-scan recovers on
+		// the next rotation), while a missing host fails the boot loudly.
+		if runnerIP != "" {
+			env = append(env, corev1.EnvVar{
+				Name:  "CRITERIA_REMOTE_HOST",
+				Value: runnerDialAddr(runnerIP, dial.ShimAddress),
+			})
+		}
+		if root := peerDiscoveryRoot(dial.TokenFile); root != "" {
+			env = append(env, corev1.EnvVar{
+				Name:  "CRITERIA_REMOTE_SCOPES_DIR",
+				Value: root,
+			})
 		}
 	}
 
@@ -315,6 +347,43 @@ func peerWireDelivery(members []events.LifecycleEvent, runnerIP string) bool {
 		}
 	}
 	return len(members) > 0
+}
+
+// peerDiscoveryRoot derives the run discovery dir's rotating-token root a
+// peer scan consumes (internal/peer ScanRemoteScopes) from a provision
+// event's token_ref. Two live shapes exist and both derive the SAME run
+// root:
+//   - the rotating layout itself: a token_ref inside the run's
+//     "<...>/remote-tokens" tree derives its nearest "remote-tokens"
+//     ancestor;
+//   - the fc95449/CRI-234 shape: token_ref = "<run>/tokens/<name>.token",
+//     the static per-adapter sibling directory "<run>/tokens" — its
+//     rotation root is the sibling "<run>/remote-tokens".
+//
+// Empty when neither shape matches: the peer then boots with no scopes
+// dir and its host handshake fails loudly on the missing token instead of
+// silently scanning an unrelated directory.
+func peerDiscoveryRoot(tokenRef string) string {
+	if tokenRef == "" {
+		return ""
+	}
+	clean := filepath.Clean(tokenRef)
+	if filepath.Base(filepath.Dir(clean)) == "tokens" {
+		runDir := filepath.Dir(filepath.Dir(clean))
+		return filepath.Join(runDir, "remote-tokens")
+	}
+	dir := filepath.Dir(clean)
+	for hops := 0; hops < 4; hops++ {
+		if filepath.Base(dir) == "remote-tokens" {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
 }
 
 // resMax keeps the larger of the two per-resource quantities in `into`.
