@@ -425,12 +425,12 @@ func (p *workflowPlan) adapterMounts(includeData bool) []corev1.VolumeMount {
 // as its ENTRYPOINT (ADR-0008) and never passes through adapter.sh.
 func (p *workflowPlan) peerAdapterMounts(includeData bool) []corev1.VolumeMount {
 	if p == nil {
-	if includeData {
-		return []corev1.VolumeMount{
-			{Name: dataVolumeName, MountPath: dataMountPath},
+		if includeData {
+			return []corev1.VolumeMount{
+				{Name: dataVolumeName, MountPath: dataMountPath},
+			}
 		}
-	}
-	return nil
+		return nil
 	}
 	return p.envMounts(dataMountPath, includeData)
 }
