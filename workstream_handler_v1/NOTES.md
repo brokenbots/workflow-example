@@ -22,29 +22,29 @@ adapter returns a malformed tool-call or missing `submit_outcome`.
 - Once a valid `approve` or `changes_requested` outcome is returned, the repair
   context is cleared.
 
-## Pins (as of 2026-07-28)
+## Pins (as of 2026-10-08, release wave: criteria v0.5.44 @ 3bf70c84)
 
-| adapter | source | version | notes |
-|---|---|---|---|
-| copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.2` | multi-arch, signed. Used for every agent role: developer, coordinator, branch-repair, pair-loop reviewer, PR reviewer. |
-| shell        | `ghcr.io/brokenbots/criteria-adapter-shell`        | `0.5.2` | multi-arch, keyless-signed. |
+| adapter | source | version | lock digest | notes |
+|---|---|---|---|---|
+| copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.15` | `sha256:827e39ad040a24ad81251b802b1996a00195121ce2c97b7b6ba62d558d581773` | multi-arch, signed. Used for every agent role: developer, coordinator, branch-repair, pair-loop reviewer, PR reviewer. |
+| shell        | `ghcr.io/brokenbots/criteria-adapter-shell`        | `0.5.4`  | `sha256:2530b8251d00c44e714418ae2b59b9237e1d673cb81ddb81eb54eb37ee00ef11` | multi-arch, keyless-signed. |
 
 All agent roles now run on the copilot adapter; the `claude-agent` adapter is
 no longer used anywhere in this workflow.
 
-## Model pins (as of 2026-07-28)
+## Model pins (as of 2026-10-08)
 
 | role | adapter | model |
 |---|---|---|
-| developer (pair loop)  | copilot | `kimi-k2.7-code:cloud` (Ollama cloud — `kimi-k3:cloud` is extra-usage-only on the current plan; `kimi-k2.7-code:cloud` is the latest included kimi and is coding-tuned) |
+| developer (pair loop)  | copilot | `glm-5.3-flash:cloud` (Ollama cloud) |
 | coordinator (root)     | copilot | `minimax-m3:cloud` (Ollama cloud) |
 | branch repair          | copilot | `minimax-m3:cloud` (Ollama cloud) |
-| reviewer (pair loop)   | copilot | `glm-5.2:cloud` (Ollama cloud) |
-| PR reviewer            | copilot | `glm-5.2:cloud` (Ollama cloud) |
+| reviewer (pair loop)   | copilot | `deepseek-v4.1-flash:cloud` (Ollama cloud) |
+| PR reviewer            | copilot | `deepseek-v4.1-flash:cloud` (Ollama cloud) |
 
 Every copilot role resolves through the local Ollama endpoint
 (`http://localhost:11434/v1`, `responses` wire API); pull the cloud models with
-`ollama pull kimi-k2.7-code:cloud minimax-m3:cloud glm-5.2:cloud`. No `claude`
+`ollama pull glm-5.3-flash:cloud minimax-m3:cloud deepseek-v4.1-flash:cloud`. No `claude`
 CLI is required — there are no claude-agent roles left.
 
 ## Git push credentials for agent shells (CRI-95)

@@ -91,8 +91,7 @@ variable "developer" {
         }))
     })
 
-    // glm-5.3-flash:cloud is the coding model; the kimi-k3 family is
-    // glm-5.3-flash:cloud is the latest included kimi and is coding-tuned.
+    // glm-5.3-flash:cloud is the coding model for the developer.
     default = {
         model     = "glm-5.3-flash:cloud"
         max_turns = 30
