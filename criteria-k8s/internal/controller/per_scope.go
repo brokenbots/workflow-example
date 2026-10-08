@@ -103,7 +103,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		group.members = append(group.members, scope)
 	}
 	for _, group := range groups {
-		pod := jobbuilder.BuildPerScopeAdapterPodGroup(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
+		pod := jobbuilder.BuildPerScopePeerPod(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
 		if pod == nil {
 			continue
 		}
@@ -124,21 +124,17 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	// Delete pods that are no longer desired first. This ensures a release for
 	// one scope is processed before a provision-wanted for the next scope when
 	// both events are pending. Desired names are stable functions of the
-	// (scope, environment) pair, so this covers both full releases and group
-	// membership drift: a released member changes the group's container set,
-	// and because pod container sets are immutable the stale group pod must
-	// be deleted and recreated with the remaining members — otherwise a
-	// released adapter's container would keep dialing a deregistered shim.
-	// Per-adapter fallback pods cannot drift (their name pins the kind and
-	// scope), so only group pods are drift-checked.
+	// (scope, environment) pair: a released member changes the peer
+	// container's manifest, never the pod — membership drift within a live
+	// scope's lifetime stays inside the peer container (KB-214), so no
+	// drift-recreate path remains. Pods still being deleted here are only
+	// the retired name shapes (CRI-234 group pods, per-adapter fallback
+	// pods whose provisions went away) and fully released scopes.
 	deletedNames := make(map[string]struct{})
 	for i := range existing.Items {
 		pod := &existing.Items[i]
-		if desiredPod, ok := desired[pod.Name]; ok {
-			if !isAdapterGroupPod(pod) || adapterContainerNamesEqual(pod, desiredPod) {
-				continue
-			}
-			logger.Info("recreating per-scope adapter group pod after membership change", "pod", pod.Name)
+		if _, ok := desired[pod.Name]; ok {
+			continue
 		}
 		logger.Info("deleting per-scope adapter pod", "pod", pod.Name)
 		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
@@ -192,36 +188,6 @@ func adapterPodLogLabel(pod *corev1.Pod) string {
 		return kind
 	}
 	return pod.Annotations[jobbuilder.AnnotationAdapterKinds]
-}
-
-// isAdapterGroupPod reports whether pod is a (scope, environment) co-location
-// pod rather than a per-adapter fallback pod. Group pods carry the
-// environment label; the fallback builder never sets it.
-func isAdapterGroupPod(pod *corev1.Pod) bool {
-	return pod.Labels[jobbuilder.LabelEnvironment] != ""
-}
-
-// adapterContainerNamesEqual reports whether the existing pod's container
-// name set matches the desired pod's. Only names are compared — the API
-// server defaults mutable container fields, so a deep spec comparison would
-// false-positive on cosmetic differences. Group container names are
-// member-sensitive (they embed a hash of each member's handshake binding),
-// so a name-set mismatch means the group's membership — or a member's
-// binding — changed.
-func adapterContainerNamesEqual(existing, desired *corev1.Pod) bool {
-	if len(existing.Spec.Containers) != len(desired.Spec.Containers) {
-		return false
-	}
-	desiredNames := make(map[string]struct{}, len(desired.Spec.Containers))
-	for _, c := range desired.Spec.Containers {
-		desiredNames[c.Name] = struct{}{}
-	}
-	for _, c := range existing.Spec.Containers {
-		if _, ok := desiredNames[c.Name]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // resolveRunnerIP resolves the run's runner pod IP for wire token delivery
