@@ -63,11 +63,20 @@ func shortHash(s string) string {
 // adapter kinds for the pair (the env-first resolution manifest), and
 // CRITERIA_ADAPTER_<KIND>_DIGEST pins each member's lockfile digest, the
 // same per-member digest env semantics the group-pod builder carried.
-// Engine-note deviation: the manifest variable is CRITERIA_REMOTE_ADAPTERS,
-// not the workstream card's literal CRITERIA_ADAPTERS — the engine card
-// renamed it because CRITERIA_ADAPTERS is the adapter binary install
-// directory in-tree, and the pinned manifest contract
-// (internal/peer/adapterset.go) owns the name.
+//
+// Engine contract source (verified 2026-10-08): repo brokenbots/criteria PR
+// #517 (KB-213), merge commit
+// 3a4bac57db1f7c3bd18c04afd7722389fd638836. The manifest variable is
+// CRITERIA_REMOTE_ADAPTERS, NOT the workstream card's literal
+// CRITERIA_ADAPTERS: internal/peer/config.go:54 pins
+// EnvAdapters = "CRITERIA_REMOTE_ADAPTERS", and its const-block comment
+// explains the rename — the pre-existing CRITERIA_ADAPTERS name is the
+// adapter install DIRECTORY consumed by adapterhost discovery, so the
+// multi-adapter list moved under the CRITERIA_REMOTE_* family (also
+// scrubbed from child environments). The rest of the grammar lives in
+// internal/peer/adapterset.go (ParseAdaptersConfig, applyAdapterSpecOverrides,
+// adapterEnvName, resolveSpecDigest) and is asserted against a pinned
+// engine-contract fixture in per_scope_engine_contract_test.go.
 //
 // The pod dials the runner with the sorted-first member's identity
 // (deterministic; the manifest's first child is the conn's dial child):
@@ -191,10 +200,12 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 	env := []corev1.EnvVar{
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
 		// CRITERIA_REMOTE_ADAPTERS is the engine's env-first multi-adapter
-		// manifest (KB-213): the deduplicated, sorted kind set hosted by
-		// this peer container. Per-kind CRITERIA_ADAPTER_<KIND>_DIGEST pins
-		// each member's lockfile digest, mirroring the per-member digest
-		// env semantics the group-pod builder carried.
+		// manifest (KB-213; source-of-record citation in
+		// BuildPerScopePeerPod's doc): the deduplicated, sorted kind set
+		// hosted by this peer container. Per-kind
+		// CRITERIA_ADAPTER_<KIND>_DIGEST pins each member's lockfile
+		// digest, mirroring the per-member digest env semantics the
+		// group-pod builder carried.
 		{Name: "CRITERIA_REMOTE_ADAPTERS", Value: adapterKindsLabel(members)},
 		// The remote-runner binary presents CRITERIA_REMOTE_SCOPE in the
 		// identity handshake; the shim registers scope tokens under
@@ -280,6 +291,14 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 // the sorted-first member's digest wins (the same member that dials, so
 // the pin always matches the conn's handshake identity; same-kind members
 // come from the same lockfile entry in practice).
+//
+// A kind with no digest gets NO digest env var at all, never an empty one:
+// the engine's resolveSpecDigest (internal/peer/adapterset.go, criteria PR
+// #517 commit 3a4bac5) short-circuits on an empty spec.Digest, and
+// applyAdapterSpecOverrides trim-normalizes override values — so an absent
+// variable and an empty-valued one are equally "no pinning". Emitting no
+// variable for an unpinned member keeps the engine-facing manifest clean of
+// pin placeholders that never pin anything.
 func peerAdapterManifestEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 	envs := make([]corev1.EnvVar, 0, len(members))
 	seen := make(map[string]struct{}, len(members))
