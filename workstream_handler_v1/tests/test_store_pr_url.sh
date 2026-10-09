@@ -61,11 +61,13 @@ case "${first_line}" in
 *)   fail "rendered command's first non-empty line is a comment (got: [${first_line}])" ;;
 esac
 
-run_rendered() { # run_rendered <out-file> <err-file> <extra-path...>
-    local out_file=$1 err_file=$2
-    ( export PATH="${WORK_ROOT}/bin:$PATH"
+run_rendered() { # run_rendered <out-file> <err-file> <backoff-arg>
+    out_file=$1 err_file=$2
+    (
+      export PATH="${WORK_ROOT}/bin:$PATH"
       export HOME="${WORK_ROOT}"
-      export GH_RETRY_BACKOFF_SECONDS="${GH_RETRY_BACKOFF_SECONDS:-"15 30 60"}"
+      export GH_RETRY_BACKOFF_SECONDS
+      GH_RETRY_BACKOFF_SECONDS=$3
       "${RENDERED}" >"${out_file}" 2>"${err_file}"
     )
     echo $?
@@ -73,34 +75,42 @@ run_rendered() { # run_rendered <out-file> <err-file> <extra-path...>
 
 echo "==> Happy path: one wrapped gh call emits the URL on stdout, clean stderr"
 out="${WORK_ROOT}/out"; err="${WORK_ROOT}/err"
-rc=$(run_rendered "${out}" "${err}")
-[ "$rc" -eq 0 ] && ok "rendered store_pr_url exits 0" || fail "rendered store_pr_url exits 0 (rc=${rc})"
-[ "$(cat "${out}")" = 'https://github.com/org/repo/pull/42' ] && ok \
-    "stdout is the PR URL" || fail "stdout is the PR URL (got [$(cat "${out}")])"
+rc=$(run_rendered "${out}" "${err}" "15 30 60")
+if [ "$rc" -eq 0 ]; then
+    ok "rendered store_pr_url exits 0"
+else
+    fail "rendered store_pr_url exits 0 (rc=${rc})"
+fi
+if [ "$(cat "${out}")" = 'https://github.com/org/repo/pull/42' ]; then
+    ok "stdout is the PR URL"
+else
+    fail "stdout is the PR URL (got [$(cat "${out}")])"
+fi
 if [ ! -s "${err}" ]; then
     ok "stderr is empty"
 else
-    fail "stderr is empty (got: $(cat "${err}" | head -2))"
+    fail "stderr is empty (got: $(head -n 2 "${err}"))"
 fi
 
 echo "==> Failure path: a persistently-failing gh call fails the step honestly"
 # The wrapper retries transient failures with the default 15/30/60s backoff —
 # collapsed here so the suite stays fast; real-budget behavior has its own
 # scenario in test_gh_retry.sh.
-export GH_RETRY_BACKOFF_SECONDS='0 0 0'
-printf 'reject' >"${WORK_ROOT}/deny"
-cat >"${WORK_ROOT}/bin/gh" <<'STUB'
-#!/bin/sh
-echo 'fatal: unable to access .api.github.com/: TLS handshake timeout' >&2
-exit 1
-STUB
+printf '#!/bin/sh\necho "fatal: unable to access .api.github.com/: TLS handshake timeout" >&2\nexit 1\n' \
+    >"${WORK_ROOT}/bin/gh"
 chmod +x "${WORK_ROOT}/bin/gh"
 out2="${WORK_ROOT}/out2"; err2="${WORK_ROOT}/err2"
-rc=$(run_rendered "${out2}" "${err2}")
-[ "$rc" -ne 0 ] && ok "failed gh call keeps the step failing (rc=${rc})" \
-    || fail "failed gh call keeps the step failing (rc=${rc})"
-grep -q 'attempt=' "${err2}" && ok "failure path carries retry evidence on stderr" \
-    || fail "failure path carries retry evidence on stderr"
+rc=$(run_rendered "${out2}" "${err2}" "0 0 0")
+if [ "$rc" -ne 0 ]; then
+    ok "failed gh call keeps the step failing (rc=${rc})"
+else
+    fail "failed gh call keeps the step failing (rc=${rc})"
+fi
+if grep -q 'attempt=' "${err2}"; then
+    ok "failure path carries retry evidence on stderr"
+else
+    fail "failure path carries retry evidence on stderr"
+fi
 
 if [ "${FAILED}" -eq 0 ]; then
     echo "PASS: store_pr_url rendered artifact verified"
