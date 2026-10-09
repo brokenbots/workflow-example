@@ -196,6 +196,52 @@ check "explicit gh_retry entry made two calls" 2 "$(call_count s9)"
 err_has "attempt=1/4 result=retry class=connection_reset" s9 "explicit entry logged the retry"
 err_not_has "cat: can" s9 "no errfile collision noise from a nested engine"
 
+# Scenario 10 pins the wrapper's CONSUMER coverage structurally: every call
+# surface that hits api.github.com / gh CLI must reference gh_retry in its
+# step or script file, so removing a wrapper line regresses loudly even
+# without an egress-deny live test. Counts are the mechanical scan numbers.
+echo "==> Scenario 10: structural consumer coverage of every gh/API call site"
+REPO_ROOT="${SCRIPT_DIR}/../.."
+assert_grep_count() {
+    local desc=$1 want=$2 file=$3
+    if [ ! -f "${file}" ]; then
+        fail "${desc}: missing file ${file}"
+        return
+    fi
+    local got
+    got=$(grep -c "${4:-gh_retry }" "${file}" 2>/dev/null || true)
+    if [ "${got}" -eq "${want}" ]; then
+        ok "${desc}"
+    else
+        fail "${desc}: expected ${want}, got ${got} in ${file}"
+    fi
+}
+assert_grep_count "workstream_handler_v1 root steps wrapped" 8 \
+    "${REPO_ROOT}/workstream_handler_v1/main.chcl"
+assert_grep_count "pr_reviewer_loop steps wrapped" 6 \
+    "${REPO_ROOT}/workstream_handler_v1/workflows/pr_reviewer_loop/main.chcl"
+assert_grep_count "devops_triage root steps wrapped" 2 \
+    "${REPO_ROOT}/devops_triage_v1/main.chcl"
+assert_grep_count "devops_triage open_pr script wrapped" 2 \
+    "${REPO_ROOT}/devops_triage_v1/scripts/open_pr.sh.tftpl"
+assert_grep_count "linear intake entrypoint sites wrapped" 3 \
+    "${REPO_ROOT}/linear_intake_v1/container-entrypoint.sh"
+for f in criteria-k8s/internal/jobbuilder/jobbuilder.go k8s/job-cri-27.yaml \
+         k8s/job-cri-27.yaml.tmpl k8s/examples/ticket-job.yaml; do
+    assert_grep_count "jobbuilder fixture wrapped: ${f}" 1 "${REPO_ROOT}/${f}" \
+        "gh_retry gh repo clone"
+done
+assert_grep_count "CI registers the linear intake retry test" 1 \
+    "${REPO_ROOT}/.github/workflows/ci.yml" "test_container_entrypoint_gh_retry"
+for probe in k8s/pod-adapter-runner.sh k8s/pod-adapter-adapter.sh; do
+    if grep -q 'api\.github\.com\|gh pr\|gh api\|gh repo' "${REPO_ROOT}/${probe}" 2>/dev/null; then
+        assert_grep_count "probe-only script unexpectedly calls gh: ${probe}" 0 \
+            "${REPO_ROOT}/${probe}" "gh_retry "
+    else
+        ok "probe-only script makes no GitHub calls: ${probe}"
+    fi
+done
+
 if [ "${FAILED}" -gt 0 ]; then
     echo "FAILED: ${FAILED} assertion(s)" >&2
     exit 1
