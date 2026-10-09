@@ -77,7 +77,15 @@ gh_retry_run() {
     # argv with the pre-alias binary path so exactly one engine wraps the call.
     if [ "$1" = "gh" ]; then
         shift
-        set -- "$_GH_RETRY_GH_BIN" "$@"
+        if [ -x "${_GH_RETRY_GH_BIN}" ]; then
+            # Pre-alias absolute path: exec directly, exactly one engine wrap.
+            set -- "$_GH_RETRY_GH_BIN" "$@"
+        else
+            # gh was absent on PATH at source time: resolve via `command`,
+            # which suppresses the gh() shadow, so a missing binary fails
+            # honestly instead of recursing into the shadow forever.
+            set -- command "$_GH_RETRY_GH_BIN" "$@"
+        fi
     fi
     _gr_attempts=${GH_RETRY_MAX_ATTEMPTS:-4}
     case "$_gr_attempts" in ''|*[!0-9]*) _gr_attempts=4 ;; esac
