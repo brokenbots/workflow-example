@@ -160,9 +160,18 @@ step "develop" {
         prompt = data.internal.developer_prompt.value
     }
 
-    outcome "ready_for_review" { next = step.write_work_log }
-    outcome "checkpoint"       { next = step.push_checkpoint }
-    outcome "need_help"        { next = state.failed }
+    outcome "ready_for_review" {
+        next = step.write_work_log
+        require_comment = true
+    }
+    outcome "checkpoint" {
+        next = step.push_checkpoint
+        require_comment = true
+    }
+    outcome "need_help" {
+        next = state.failed
+        require_comment = true
+    }
     // CRI-275: a turn that ends without a verdict routes through the
     // checkpoint loop instead of failing the run — push_checkpoint verifies
     // the last pushed commit and the next turn resumes from it. Two sources
@@ -171,8 +180,14 @@ step "develop" {
     // and when the copilot adapter's session dies or the agent never calls
     // submit_outcome. need_help stays terminal (the agent itself declared it
     // cannot proceed); max_visits still bounds the whole cycle.
-    outcome "failure"          { next = step.push_checkpoint }
-    outcome "default"          { next = step.push_checkpoint }
+    outcome "failure" {
+        next = step.push_checkpoint
+        require_comment = true
+    }
+    outcome "default" {
+        next = step.push_checkpoint
+        require_comment = true
+    }
 }
 
 // Pushed by the agent inside the turn (checkpoint discipline); this step
@@ -425,13 +440,17 @@ step "review" {
         })
     }
 
-    outcome "need_help" { next = state.failed }
+    outcome "need_help" {
+        next = state.failed
+        require_comment = true
+    }
     outcome "approved" {
         next = step.write_review_log
         write {
             target = data.internal.review_verdict.value
             value  = "approved"
         }
+        require_comment = true
     }
     outcome "changes_requested" {
         next = step.write_review_log
@@ -454,11 +473,18 @@ step "review" {
                 findings = output.reason
             })
         }
+        require_comment = true
     }
     // The copilot adapter emits "failure" if the session dies or the agent
     // never calls submit_outcome after re-prompts — route it somewhere terminal.
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        require_comment = true
+    }
+    outcome "default" {
+        next = state.failed
+        require_comment = true
+    }
 }
 
 step "write_review_log" {
