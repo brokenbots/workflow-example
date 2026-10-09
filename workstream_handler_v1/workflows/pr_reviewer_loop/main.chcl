@@ -66,6 +66,9 @@ data "internal" "_failure_reason" {
 
 step "resolve_pr_number" {
     target = adapter.shell.reviewer
+    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // timeout comfortably above it (matches check_pr_status).
+    timeout    = "300s"
     input {
         command = templatefile("./scripts/resolve_pr_number.sh.tftpl", {
             criteria_value_1 = var.pr_url
@@ -354,6 +357,9 @@ switch "route_review_retry" {
 
 step "post_approval" {
     target = adapter.shell.reviewer
+    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // timeout comfortably above it (matches check_pr_status).
+    timeout    = "300s"
     input {
         command = templatefile("./scripts/post_review.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
@@ -378,6 +384,9 @@ step "post_approval" {
 
 step "post_changes_requested" {
     target = adapter.shell.reviewer
+    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // timeout comfortably above it (matches check_pr_status).
+    timeout    = "300s"
     input {
         command = templatefile("./scripts/post_review.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value

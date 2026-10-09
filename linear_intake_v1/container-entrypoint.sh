@@ -82,6 +82,10 @@ fi
 
 workflow_user=$(GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh_retry gh api user --jq .login)
 reviewer_user=$(GH_TOKEN="$REVIEWER_GITHUB_TOKEN" gh_retry gh api user --jq .login)
+# An env-prefix assignment persists when the "command" is a shell function,
+# so unset GH_TOKEN instead of leaving the probe token exported into the
+# adapter children below.
+unset GH_TOKEN
 if [ "$workflow_user" = "$reviewer_user" ]; then
     echo "workflow and reviewer tokens resolve to the same GitHub user: $workflow_user" >&2
     exit 2
@@ -99,6 +103,7 @@ if ! git -C "$REPO_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
     fi
     mkdir -p "$(dirname "$REPO_DIR")"
     GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh_retry gh repo clone "$REPO_URL" "$REPO_DIR"
+    unset GH_TOKEN
 fi
 
 mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"

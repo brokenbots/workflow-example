@@ -495,6 +495,7 @@ done
 if [ -n "$_gh_retry_script" ]; then
     . "${_gh_retry_script}"
     GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh_retry gh repo clone "$REPO_URL" "$REPO_DIR"
+    unset GH_TOKEN
 else
     GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"
 fi`,
