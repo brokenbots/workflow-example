@@ -17,8 +17,11 @@
 #      and the step's own stderr channel stays free of captured text;
 #   6. the cumulative sleep budget keeps the wall clock bounded;
 #   7. the drop-in `gh` shadow engages the same engine;
-#   8. the shadow retries transient classes; and
-#   9. a literal `gh_retry gh ...` invocation wraps exactly once.
+#   8. the shadow retries transient classes;
+#   9. a literal `gh_retry gh ...` invocation wraps exactly once;
+#  10. structural consumer coverage of every gh/API call site; and
+#  11. a REAL multi-second deny window (the KB-213/214 shape): the engine
+#      converges while the window is open, with clock-checked backoff.
 
 set -uo pipefail
 
@@ -196,6 +199,7 @@ check "explicit gh_retry entry made two calls" 2 "$(call_count s9)"
 err_has "attempt=1/4 result=retry class=connection_reset" s9 "explicit entry logged the retry"
 err_not_has "cat: can" s9 "no errfile collision noise from a nested engine"
 
+
 # Scenario 10 pins the wrapper's CONSUMER coverage structurally: every call
 # surface that hits api.github.com / gh CLI must reference gh_retry in its
 # step or script file, so removing a wrapper line regresses loudly even
@@ -242,6 +246,58 @@ for probe in k8s/pod-adapter-runner.sh k8s/pod-adapter-adapter.sh; do
     fi
 done
 
+
+# Scenario 11 is the KB-213/214 acceptance shape end to end: a REAL wall-clock
+# deny window (like the scripted 20-30s egress deny, compressed to ~3s) stays
+# open across the first two engine attempts, and the engine converges on the
+# third with attempt# + class evidence. Real sleeps (1s × 2+) are asserted
+# with a clock check so the test cannot silently degrade to the
+# instant-pass-through path. The deny window is 2.5s; backoff is 1s.
+echo "==> Scenario 11: real-time deny window — wrapper retries and converges"
+printf 'reject' >"${WORK_ROOT}/s11.deny"
+cat >"${WORK_ROOT}/bin/gh" <<'STUB'
+#!/bin/sh
+n=$(cat "$GH_RETRY_STUB_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" >"$GH_RETRY_STUB_COUNT"
+if [ -f "$GH_RETRY_DENY_FILE" ]; then
+    echo 'fatal: unable to access .api.github.com/: TLS handshake timeout' >&2
+    exit 1
+fi
+echo '{"state":"OPEN"}'
+STUB
+chmod +x "${WORK_ROOT}/bin/gh"
+: >"${WORK_ROOT}/s11.count"
+s11_rc=$( ( export PATH="${WORK_ROOT}/bin:${PATH}"
+            export GH_RETRY_STUB_COUNT="${WORK_ROOT}/s11.count"
+            export GH_RETRY_STUB_LOG="${WORK_ROOT}/s11.stderr"
+            export GH_RETRY_DENY_FILE="${WORK_ROOT}/s11.deny"
+            set +e
+            : >"${GH_RETRY_STUB_LOG}"
+            ( sleep 2.5 && rm -f "${GH_RETRY_DENY_FILE}" ) &
+            source "${ROOT_DIR}/scripts/gh_retry.sh.tftpl"
+            s11_start=$(date +%s)
+            GH_RETRY_BACKOFF_SECONDS="1 1 1" gh_retry gh api /user >/dev/null 2>"${GH_RETRY_STUB_LOG}"
+            s11_rc=$?
+            s11_elapsed=$(( $(date +%s) - s11_start ))
+            printf 'RESULT=%s ELAPSED=%s' "$s11_rc" "$s11_elapsed"
+          ) 2>/dev/null )
+s11_status=${s11_rc%% *}
+s11_elapsed=${s11_rc##*ELAPSED=}
+check "deny-window run converged rc 0" 'RESULT=0' "$s11_status"
+s11_calls=$(call_count s11)
+if [ "${s11_calls}" -eq 4 ]; then
+    ok "deny-window run retried inside the window and converged (calls: ${s11_calls})"
+else
+    fail "deny-window run retried inside the window and converged (calls: ${s11_calls})"
+fi
+if [ "$s11_elapsed" -ge 3 ]; then
+    ok "wrapper executed real backoff sleeps (elapsed ${s11_elapsed}s >= deny window)"
+else
+    fail "wrapper executed real backoff sleeps (elapsed ${s11_elapsed}s, expected >= 3)"
+fi
+err_has "attempt=1/4 result=retry class=tls_handshake_timeout wait=1s" s11 "first attempt logged its class"
+err_has "result=success class=none" s11 "convergence after the window logged"
 if [ "${FAILED}" -gt 0 ]; then
     echo "FAILED: ${FAILED} assertion(s)" >&2
     exit 1
