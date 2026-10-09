@@ -105,12 +105,12 @@ func TestPodStateReportsExtraction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scope := podStateProvisionEvent
-			memberScope := map[string]events.LifecycleEvent{"pod-1": scope}
+			memberPods := map[string][]events.LifecycleEvent{"pod-1": {scope}}
 			existing := &corev1.PodList{Items: []corev1.Pod{{
 				ObjectMeta: metav1.ObjectMeta{Name: "pod-1"},
 				Status:     tt.status,
 			}}}
-			reports := podStateReports(existing, memberScope, now, logr.Discard())
+			reports := podStateReports(existing, memberPods, now, logr.Discard())
 			require.Len(t, reports, 1)
 			report := reports[0]
 			assert.Equal(t, tt.wantPhase, report.Phase)
@@ -137,17 +137,47 @@ func TestPodStateReportsSkipsUnreportableMembers(t *testing.T) {
 	noType.AdapterType = ""
 	assert.Empty(t, podStateReports(
 		&corev1.PodList{Items: []corev1.Pod{pod("pod-1", pending)}},
-		map[string]events.LifecycleEvent{"pod-1": noType}, time.Now(), logr.Discard()))
+		map[string][]events.LifecycleEvent{"pod-1": {noType}}, time.Now(), logr.Discard()))
 
 	// A pod whose status has not been observed at all reports nothing.
 	assert.Empty(t, podStateReports(
 		&corev1.PodList{Items: []corev1.Pod{pod("pod-1", corev1.PodStatus{})}},
-		map[string]events.LifecycleEvent{"pod-1": podStateProvisionEvent}, time.Now(), logr.Discard()))
+		map[string][]events.LifecycleEvent{"pod-1": {podStateProvisionEvent}}, time.Now(), logr.Discard()))
 
 	// A pod that exists but hosts no active scope reports nothing.
 	assert.Empty(t, podStateReports(
 		&corev1.PodList{Items: []corev1.Pod{pod("pod-1", pending)}},
-		map[string]events.LifecycleEvent{}, time.Now(), logr.Discard()))
+		map[string][]events.LifecycleEvent{}, time.Now(), logr.Discard()))
+}
+
+func TestPodStateReportsOnePerPeerMember(t *testing.T) {
+	// A peer pod hosts two members of one (scope, environment) group — the
+	// KB-214 norm (intake/shell and review/copilot share one manifest). One
+	// report per MEMBER, not per pod: each member's scope key differs and
+	// every scope's session wait consumes its own report.
+	intake := podStateProvisionEvent
+	review := podStateProvisionEvent
+	review.AdapterName = "review"
+	review.AdapterType = "copilot"
+	pending := corev1.PodStatus{Phase: corev1.PodPending}
+	reports := podStateReports(
+		&corev1.PodList{Items: []corev1.Pod{
+			{ObjectMeta: metav1.ObjectMeta{Name: "pod-1"}, Status: pending},
+		}},
+		map[string][]events.LifecycleEvent{"pod-1": {intake, review}},
+		time.Now(), logr.Discard())
+
+	require.Len(t, reports, 2, "one report per member even on a shared peer pod")
+	assert.Equal(t, "copilot/develop/dev-001", reports[0].ScopeKey())
+	assert.Equal(t, "review", reports[0].AdapterName)
+	assert.Equal(t, "copilot", reports[0].AdapterType)
+	assert.Equal(t, "shell/develop/dev-001", reports[1].ScopeKey())
+	assert.Equal(t, "intake", reports[1].AdapterName)
+	assert.Equal(t, "shell", reports[1].AdapterType)
+	assert.Equal(t, "pod-1", reports[0].Pod)
+	assert.Equal(t, "pod-1", reports[1].Pod)
+	assert.Equal(t, "Pending", reports[0].Phase)
+	assert.Equal(t, "Pending", reports[1].Phase)
 }
 
 // podStateCriteriaWatcher records the envelopes submitted through the feed.
@@ -362,4 +392,80 @@ func TestReconcileSkipsEmitWithoutCastleRunID(t *testing.T) {
 	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{podStateProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, stub.received("castle-run-1"))
+}
+
+// Every member of a peer pod gets its own pod-state report: the KB-214 norm
+// co-locates several adapters of one (scope, environment) on ONE pod, and
+// each scope's session wait consumes the pod phase named for its own
+// scope key — never just the one member that happens to win the map.
+func TestReconcileEmitsPodStateForEveryPeerMember(t *testing.T) {
+	feed, stub := podStateTestFeed(t)
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
+	r.PodState = feed
+
+	ctx := context.Background()
+	events := []events.LifecycleEvent{
+		func() events.LifecycleEvent {
+			e := groupProvision("intake", "shell", "scope-a", "ci")
+			e.ScopeTag = "develop"
+			return e
+		}(),
+		func() events.LifecycleEvent {
+			e := groupProvision("review", "copilot", "scope-a", "ci")
+			e.ScopeTag = "develop"
+			return e
+		}(),
+	}
+
+	// Pass 1: the peer pod does not exist yet; reconcile creates ONE pod for
+	// both members and reports nothing — nothing was observed.
+	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, logr.Discard())
+	require.NoError(t, err)
+	require.Equal(t, 2, created, "two active members")
+	assert.Zero(t, stub.received("castle-run-1"))
+
+	pods := listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1, "both members share one peer pod")
+	pod := pods[0].DeepCopy()
+	const unschedulable = "0/4 nodes are available"
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodPending,
+		Conditions: []corev1.PodCondition{
+			{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: unschedulable},
+		},
+	}
+	require.NoError(t, cl.Status().Update(ctx, pod))
+
+	// Pass 2: BOTH members report the stuck pod under their own scope keys —
+	// neither scope's session wait stays blind.
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 2, stub.received("castle-run-1"))
+
+	// Reports are ordered by scope key, so emission is deterministic even
+	// though provisioning map iteration order is not.
+	first := stub.dataFor(t, "castle-run-1", 0)
+	assert.Equal(t, "review", first["adapter"])
+	assert.Equal(t, "copilot", first["adapter_type"])
+	assert.Equal(t, "scope-a", first["scope_instance_id"])
+	assert.Equal(t, "develop", first["scope_name"])
+	assert.Equal(t, pod.Name, first["pod"])
+	assert.Equal(t, "Pending", first["phase"])
+	assert.Equal(t, "Unschedulable", first["reason"])
+	assert.Equal(t, unschedulable, first["message"])
+
+	second := stub.dataFor(t, "castle-run-1", 1)
+	assert.Equal(t, "intake", second["adapter"])
+	assert.Equal(t, "shell", second["adapter_type"])
+	assert.Equal(t, "scope-a", second["scope_instance_id"])
+	assert.Equal(t, "develop", second["scope_name"])
+	assert.Equal(t, pod.Name, second["pod"])
+	assert.Equal(t, "Pending", second["phase"])
+	assert.Equal(t, "Unschedulable", second["reason"])
+
+	// Pass 3: unchanged state — transition-only emission, no resubmission.
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 2, stub.received("castle-run-1"))
 }

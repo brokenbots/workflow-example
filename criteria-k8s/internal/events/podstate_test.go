@@ -10,9 +10,16 @@ import (
 // podStateFixture is a captured-shape fixture of the line the operator
 // emits for one per-scope adapter pod observation, in the exact nested
 // AdapterEvent envelope shape stored on the run's castle event stream
-// (seq is 0 pre-castle-stamp). The fixture is intentionally written as a
-// byte-for-byte literal: consumers of this channel must parse THIS shape,
-// not a hand-modeled one.
+// (seq is 0 pre-castle-stamp). Provenance: this is the PERSISTED ndjson
+// envelope that castle writes to the run's event stream — snake_case
+// schema_version/seq/run_id/payload_type wrapper — which the runner and the
+// consumer read back. The operator's LIVE submission goes over the typed
+// Envelope proto (protojson camelCase) pinned by
+// TestPodStateEventEnvelopeDataKeys in internal/castle. Both
+// serializations carry the same nested AdapterEvent with the same nine
+// flat data keys: one event contract at every level. The fixture is
+// intentionally written as a byte-for-byte literal: consumers of this
+// channel must parse THIS shape, not a hand-modeled one.
 const podStateFixture = `{"schema_version":1,"seq":0,"run_id":"019a2f3e-4c5b-7cc1-a1de-32f4a5b6c7d8","payload_type":"AdapterEvent","payload":{"adapter":"intake","kind":"adapter.podstate.observed","data":{"adapter":"intake","adapter_type":"shell","scope_instance_id":"dev-001","scope_name":"develop","pod":"shell-develop-dev-001-adapter","phase":"Pending","reason":"Unschedulable","message":"0/4 nodes are available: 2 node(s) were not ready, 2 Insufficient cpu.","observed_at":"2026-10-07T12:34:56Z"}}}`
 
 func TestMarshalPodStateEventMatchesFixtureShape(t *testing.T) {
@@ -134,6 +141,11 @@ func TestMarshalPodStateEventValidation(t *testing.T) {
 	noPhase.Phase = ""
 	if _, err := MarshalPodStateEvent("run-1", noPhase); err == nil {
 		t.Fatal("empty phase must be rejected")
+	}
+	badPhase := base
+	badPhase.Phase = "Terminated"
+	if _, err := MarshalPodStateEvent("run-1", badPhase); err == nil {
+		t.Fatal("phase outside the PodPhase* constants must be rejected")
 	}
 }
 

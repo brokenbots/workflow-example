@@ -11,43 +11,44 @@ import (
 )
 
 // podStateReports derives pod-state reports for active scopes from the
-// adapter pods observed in one reconcile pass. Every active scope maps to
-// the pod hosting its member (peer pods host several members of one
-// (scope, environment) group); a scope without a live pod reports nothing —
-// there is nothing observed to name. The returned reports are ordered by
-// scope key so repeated passes behave deterministically.
-func podStateReports(existing *corev1.PodList, memberScope map[string]events.LifecycleEvent, now time.Time, logger logr.Logger) []events.PodStateReport {
-	reports := make([]events.PodStateReport, 0, len(memberScope))
+// adapter pods observed in one reconcile pass. Every active member maps to
+// the pod hosting it (peer pods host every member of one (scope,
+// environment) group), and EACH member gets its own report — a shared peer
+// pod reporting once per pod would leave the other scopes' session waits
+// blind. A member without a live pod reports nothing — there is nothing
+// observed to name. The returned reports are ordered by scope key so
+// repeated passes behave deterministically regardless of provisioning map
+// iteration order.
+func podStateReports(existing *corev1.PodList, memberPods map[string][]events.LifecycleEvent, now time.Time, logger logr.Logger) []events.PodStateReport {
+	reports := make([]events.PodStateReport, 0, len(memberPods))
 	for i := range existing.Items {
 		pod := &existing.Items[i]
-		scope, ok := memberScope[pod.Name]
-		if !ok {
-			continue
+		for _, scope := range memberPods[pod.Name] {
+			if scope.AdapterType == "" {
+				// Engines without adapter_type (pre-v0.5.22) cannot be joined
+				// by the consumer's probe key; skip rather than emit an
+				// ambiguous event.
+				logger.V(1).Info("skipping pod-state report: provision carries no adapter_type",
+					"pod", pod.Name, "adapter", scope.AdapterName, "scope_id", scope.ScopeID)
+				continue
+			}
+			phase := pod.Status.Phase
+			if phase == "" {
+				continue
+			}
+			reason, message := podStateWaitReason(pod)
+			reports = append(reports, events.PodStateReport{
+				AdapterName: scope.AdapterName,
+				AdapterType: scope.AdapterType,
+				ScopeName:   scope.ScopeTag,
+				ScopeID:     scope.ScopeID,
+				Pod:         pod.Name,
+				Phase:       string(phase),
+				Reason:      reason,
+				Message:     message,
+				ObservedAt:  now,
+			})
 		}
-		if scope.AdapterType == "" {
-			// Engines without adapter_type (pre-v0.5.22) cannot be joined
-			// by the consumer's probe key; skip rather than emit an
-			// ambiguous event.
-			logger.V(1).Info("skipping pod-state report: provision carries no adapter_type",
-				"pod", pod.Name, "adapter", scope.AdapterName, "scope_id", scope.ScopeID)
-			continue
-		}
-		phase := pod.Status.Phase
-		if phase == "" {
-			continue
-		}
-		reason, message := podStateWaitReason(pod)
-		reports = append(reports, events.PodStateReport{
-			AdapterName: scope.AdapterName,
-			AdapterType: scope.AdapterType,
-			ScopeName:   scope.ScopeTag,
-			ScopeID:     scope.ScopeID,
-			Pod:         pod.Name,
-			Phase:       string(phase),
-			Reason:      reason,
-			Message:     message,
-			ObservedAt:  now,
-		})
 	}
 	sort.Slice(reports, func(i, j int) bool {
 		return reports[i].ScopeKey() < reports[j].ScopeKey()

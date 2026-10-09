@@ -119,7 +119,9 @@ func (r PodStateReport) PodStateSignal() string {
 }
 
 // Validate reports whether the report carries the identity the consumer
-// needs to join it against a pending session wait.
+// needs to join it against a pending session wait: the join keys must be
+// present and the phase must be a PodPhase* constant, so the consumer's
+// boundary/terminal logic always sees vocabulary it knows.
 func (r PodStateReport) Validate() error {
 	if r.AdapterType == "" {
 		return fmt.Errorf("pod-state report: empty adapter_type")
@@ -127,8 +129,10 @@ func (r PodStateReport) Validate() error {
 	if r.ScopeID == "" {
 		return fmt.Errorf("pod-state report: empty scope_instance_id")
 	}
-	if r.Phase == "" {
-		return fmt.Errorf("pod-state report: empty phase")
+	switch r.Phase {
+	case PodPhasePending, PodPhaseRunning, PodPhaseSucceeded, PodPhaseFailed, PodPhaseUnknown:
+	default:
+		return fmt.Errorf("pod-state report: unsupported phase %q", r.Phase)
 	}
 	return nil
 }
@@ -137,6 +141,14 @@ func (r PodStateReport) Validate() error {
 // line: the nested AdapterEvent envelope shape, snake_case keys, flat data
 // keys, empty strings included. Seq is 0 (castle stamps the real sequence
 // before persistence and fan-out, as with agent submissions).
+//
+// This function models the persisted ndjson line on the run's castle event
+// stream (schema_version/run_id/payload_type/payload): what the runner and
+// the consumer read BACK from castle after the submission hop. The feed
+// submits the typed Envelope proto (protojson camelCase) pinned separately
+// in internal/castle; both serializations carry the same nested
+// AdapterEvent content with the same nine flat data keys, so a consumer
+// parsing either shape sees one event contract.
 func MarshalPodStateEvent(runID string, report PodStateReport) ([]byte, error) {
 	if err := report.Validate(); err != nil {
 		return nil, err

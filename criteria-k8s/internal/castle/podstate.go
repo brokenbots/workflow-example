@@ -21,12 +21,14 @@ import (
 // Pod-state feed limits. Retries stay small so a reconcile pass never spends
 // more than a few seconds inside a failed submit; the reconcile requeues on
 // its regular interval anyway and the pod state is re-emitted until it is
-// accepted.
+// accepted. The dedupe-state TTL bounds the feed's memory over the
+// operator's lifetime (one entry per observed (run, scope) signal).
 const (
 	podStateAttemptTimeout = 5 * time.Second
 	podStateMaxAttempts    = 3
 	podStateBackoffBase    = 250 * time.Millisecond
 	podStateBackoffMax     = 2 * time.Second
+	podStateSignalTTL      = 24 * time.Hour
 )
 
 // PodStateFeedConfig configures the pod-state feed.
@@ -63,9 +65,18 @@ type PodStateFeed struct {
 	maxAttempts    int
 	backoffBase    time.Duration
 
-	// mu guards last: scope key -> last accepted "phase|reason" signal.
-	mu   sync.Mutex
-	last map[string]string
+	// mu guards last: "runID/scopeKey" -> the last accepted phase|reason
+	// signal with its accept time. Keyed per run so concurrent runs sharing
+	// scope identities never suppress each other's reports.
+	mu        sync.Mutex
+	last      map[string]podStateSignalState
+	signalTTL time.Duration
+}
+
+// podStateSignalState is the last accepted emit for one (run, scope) key.
+type podStateSignalState struct {
+	signal string
+	at     time.Time
 }
 
 // NewPodStateFeed builds a feed. A nil httpClient uses http.DefaultClient.
@@ -83,7 +94,8 @@ func NewPodStateFeed(cfg PodStateFeedConfig, httpClient *http.Client) *PodStateF
 		attemptTimeout: podStateAttemptTimeout,
 		maxAttempts:    podStateMaxAttempts,
 		backoffBase:    podStateBackoffBase,
-		last:           map[string]string{},
+		last:           map[string]podStateSignalState{},
+		signalTTL:      podStateSignalTTL,
 	}
 }
 
@@ -144,12 +156,14 @@ func (f *PodStateFeed) Emit(ctx context.Context, runID string, reports []events.
 	}
 
 	// Choose changed reports under one lock, then submit outside it.
+	now := time.Now()
 	pending := make([]events.PodStateReport, 0, len(reports))
 	f.mu.Lock()
+	f.pruneStaleLocked(now)
 	for _, report := range reports {
-		key := report.ScopeKey()
+		key := runID + "/" + report.ScopeKey()
 		signal := report.PodStateSignal()
-		if f.last[key] == signal {
+		if f.last[key].signal == signal {
 			continue
 		}
 		pending = append(pending, report)
@@ -167,13 +181,28 @@ func (f *PodStateFeed) Emit(ctx context.Context, runID string, reports []events.
 			continue
 		}
 		f.mu.Lock()
-		f.last[report.ScopeKey()] = report.PodStateSignal()
+		f.last[runID+"/"+report.ScopeKey()] = podStateSignalState{
+			signal: report.PodStateSignal(),
+			at:     time.Now(),
+		}
 		f.mu.Unlock()
 		logger.V(1).Info("emitted adapter pod-state event",
 			"run", runID, "pod", report.Pod,
 			"adapter", report.AdapterName, "adapter_type", report.AdapterType,
 			"scope_id", report.ScopeID, "scope_name", report.ScopeName,
 			"phase", report.Phase, "reason", report.Reason)
+	}
+}
+
+// pruneStaleLocked drops dedupe entries whose accept time is older than the
+// TTL so the map stays bounded over the operator's lifetime. A dropped
+// entry only causes one benign re-emit of the scope's current state on its
+// next reconcile pass.
+func (f *PodStateFeed) pruneStaleLocked(now time.Time) {
+	for key, state := range f.last {
+		if now.Sub(state.at) > f.signalTTL {
+			delete(f.last, key)
+		}
 	}
 }
 

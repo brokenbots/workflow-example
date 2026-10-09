@@ -194,12 +194,41 @@ func TestPodStateFeedEmitsTransitionsOnly(t *testing.T) {
 	assert.Equal(t, events.PodPhaseRunning, fields["phase"])
 	assert.Equal(t, "", fields["reason"])
 
-	// Runs are separated: another run's scope emits from scratch.
+	// Runs are separated: the SAME signal this run already accepted still
+	// emits for another run sharing the scope identity — dedupe state is
+	// keyed per (run, scope), so concurrent runs never cross-suppress.
 	feed.Emit(ctx, "run-2", []events.PodStateReport{pending}, logger)
 	assert.Equal(t, 1, stub.received("run-2"))
 
 	// The pre-shared token rode the request header.
 	assert.Equal(t, "shared-castle-token", stub.tokenAt(0))
+}
+
+func TestPodStateFeedPrunesStaleSignals(t *testing.T) {
+	stub := &podStateCriteriaStub{envelopes: map[string][]*v1.Envelope{}}
+	url := newPodStateTestServer(t, stub)
+	feed := podStateEmitTestFeed(t, url, "shared-castle-token", true)
+	feed.signalTTL = 5 * time.Millisecond
+
+	ctx := context.Background()
+	pending := podStateTestReport(events.PodPhasePending, "Unschedulable")
+	logger := testLogger()
+
+	// First observation submits and records the accepted signal.
+	feed.Emit(ctx, "run-1", []events.PodStateReport{pending}, logger)
+	assert.Equal(t, 1, stub.received("run-1"))
+
+	// Once the recorded signal ages past the TTL the entry is pruned: the
+	// next pass re-emits the scope's current state (one benign re-emit)
+	// instead of holding the stale dedupe key forever.
+	time.Sleep(10 * time.Millisecond)
+	feed.Emit(ctx, "run-1", []events.PodStateReport{pending}, logger)
+	assert.Equal(t, 2, stub.received("run-1"))
+
+	// A fresh accepted state within the TTL is never pruned: the entry was
+	// refreshed by the re-emit above, so the same signal dedupes again.
+	feed.Emit(ctx, "run-1", []events.PodStateReport{pending}, logger)
+	assert.Equal(t, 2, stub.received("run-1"))
 }
 
 func TestPodStateFeedBestEffortRetries(t *testing.T) {

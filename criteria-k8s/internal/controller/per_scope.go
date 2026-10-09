@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-
 	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -51,11 +50,12 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 
 	active := events.ActiveProvisions(lifecycleEvents)
 
-	// scopeOfPod maps each desired pod to the lifecycle member it hosts and
-	// memberPod maps every active member to its pod, so the observed pod
-	// states are reported per scope (KB-225 pod-state feed).
-	memberPod := make(map[string]*corev1.Pod, len(active))
-	memberScope := make(map[string]events.LifecycleEvent, len(active))
+	// memberPods maps each desired pod to EVERY lifecycle member it hosts,
+	// so the observed pod state is reported per active scope (KB-225
+	// pod-state feed): peer pods host several members of one
+	// (scope, environment) group — intake/shell and review/copilot of one
+	// manifest — and each member's session wait consumes its own report.
+	memberPods := make(map[string][]events.LifecycleEvent, len(active))
 
 	runnerIP := ""
 	needsRunnerIP := false
@@ -114,8 +114,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 			// per-adapter fallback pod, name and shape unchanged.
 			pod := jobbuilder.BuildPerScopeAdapterPod(run, r.Defaults, scope, runnerIP)
 			desired[pod.Name] = pod
-			memberPod[pod.Name] = pod
-			memberScope[pod.Name] = scope
+			memberPods[pod.Name] = append(memberPods[pod.Name], scope)
 			continue
 		}
 		key := envGroupKey{scopeID: scope.ScopeID, environment: scope.Environment}
@@ -132,10 +131,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 			continue
 		}
 		desired[pod.Name] = pod
-		for _, member := range group.members {
-			memberPod[pod.Name] = pod
-			memberScope[pod.Name] = member
-		}
+		memberPods[pod.Name] = append(memberPods[pod.Name], group.members...)
 	}
 
 	var existing corev1.PodList
@@ -155,7 +151,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	// (KB-70 PodStateProbe). A pod that never leaves Pending is surfaced
 	// with its scheduling/wait reason instead of burning the full 15m wait.
 	if !r.PodState.Disabled() && castleRunID != "" {
-		r.PodState.Emit(ctx, castleRunID, podStateReports(&existing, memberScope, time.Now(), logger), logger)
+		r.PodState.Emit(ctx, castleRunID, podStateReports(&existing, memberPods, time.Now(), logger), logger)
 	}
 
 	// Delete pods that are no longer desired first. This ensures a release for
