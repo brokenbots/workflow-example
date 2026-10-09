@@ -1,5 +1,6 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 set -eu
+{{ .gh_retry }}
 pr="$criteria_value_1"
 
 pr_state=$(gh pr view "$pr" --json state --jq '.state')
@@ -23,8 +24,8 @@ owner=$(gh repo view --json owner --jq '.owner.login')
 repo=$(gh repo view --json name --jq '.name')
 
 checks_rc=0
-checks_json=$(gh api "repos/$owner/$repo/commits/$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')/check-runs" \
-    --jq '[.check_runs[] | {name: .name, state: .status, conclusion: .conclusion}]' 2>&1) || checks_rc=$?
+checks_json=$(gh_retry_merged gh api "repos/$owner/$repo/commits/$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')/check-runs" \
+    --jq '[.check_runs[] | {name: .name, state: .status, conclusion: .conclusion}]') || checks_rc=$?
 
 if [ "$checks_rc" -ne 0 ]; then
     echo "status:pending"
@@ -39,7 +40,7 @@ fi
 # observed: CRI-90 on workflow-example). Distinguish by counting the repo's
 # workflows; zero workflows means there is no CI to wait for.
 if [ "$(printf '%s' "$checks_json" | jq 'length')" = "0" ]; then
-    wf_count=$(gh api "repos/$owner/$repo/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+    wf_count=$(gh api "repos/$owner/$repo/actions/workflows" --jq '.total_count' || echo "-1")
     if [ "$wf_count" = "0" ]; then
         echo "checks=none (repo has no Actions workflows; skipping CI wait)" >&2
     else
@@ -76,10 +77,10 @@ review_decision=$(gh pr view "$pr" --json reviewDecision --jq '.reviewDecision /
 # approvals against the CURRENT head SHA only — an approval of an
 # earlier commit must not count for code pushed after it.
 if [ -z "$review_decision" ] || [ "$review_decision" = "REVIEW_REQUIRED" ]; then
-    head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+    head_sha=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid' || echo "")
     if [ -n "$head_sha" ]; then
         approved_head=$(gh api "repos/$owner/$repo/pulls/$pr/reviews" \
-            --jq "[.[] | select(.state == \"APPROVED\") | select(.commit_id == \"$head_sha\")] | length" 2>/dev/null || echo "0")
+            --jq "[.[] | select(.state == \"APPROVED\") | select(.commit_id == \"$head_sha\")] | length" || echo "0")
         if [ "$approved_head" -gt 0 ]; then
             review_decision="APPROVED"
         fi

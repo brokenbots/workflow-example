@@ -258,9 +258,12 @@ step "exhausted_branch_scope" {
 
 step "check_pr" {
     target     = adapter.shell.sh
+    timeout    = "300s"
     max_visits = var.max_pr_poll_visits
     input {
-        command = templatefile("./scripts/check_pr.sh.tftpl", {})
+        command = templatefile("./scripts/check_pr.sh.tftpl", {
+            gh_retry = file("./scripts/gh_retry.sh.tftpl")
+        })
     }
     outcome "success" { next = switch.route_pr }
     outcome "failure" { next = state.failed }
@@ -306,8 +309,13 @@ step "backoff_pr" {
 // guard below reject an empty URL loudly.
 step "store_pr_url" {
     target = adapter.shell.sh
+    // KB-219: bounded-backoff retries on the gh call — worst case ~105s extra
+    // inside the wrapper, so the timeout leaves room for it.
+    timeout = "300s"
     input {
-        command = "set -o pipefail; pr_url=$(gh pr view \"$(git branch --show-current)\" --json url --jq '.url') && printf '%s' \"$pr_url\" | tr -d '\\n'"
+        command = templatefile("./scripts/store_pr_url.sh.tftpl", {
+            gh_retry = file("./scripts/gh_retry.sh.tftpl")
+        })
     }
     outcome "success" {
         next = switch.route_stored_pr
@@ -422,9 +430,12 @@ step "create_pr" {
             criteria_value_1 = var.base_branch
             criteria_value_2 = var.workstream_file
             helper           = file("./scripts/_github_token_git_credentials.sh.tftpl")
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
-    timeout = "60s"
+    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
+    // blips; the step timeout covers the worst-case wall clock.
+    timeout = "300s"
     outcome "success" {
         next = switch.route_created_pr
         write {
@@ -666,13 +677,16 @@ step "exhausted_reviewer_scope" {
 // ── Merge ─────────────────────────────────────────────────────────────────────
 
 step "merge_pr" {
-    target  = adapter.shell.sh
-    timeout = "60s"
+    target = adapter.shell.sh
     input {
         command = templatefile("./scripts/merge_pr.sh.tftpl", {
             criteria_value_1 = data.internal.pr_url.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
+    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
+    // blips; the step timeout covers the worst-case wall clock.
+    timeout = "300s"
     outcome "success" { next = step.teardown_worktree }
     // A refused merge is usually actionable, not terminal: an unresolved review
     // thread (GitHub's required_conversation_resolution), a bot review that
@@ -696,14 +710,17 @@ step "merge_pr" {
 // terminals deliberately leave the worktree in place for inspection. Cleanup
 // problems never fail the run.
 step "teardown_worktree" {
-    target  = adapter.shell.repo
-    timeout = "30s"
+    target = adapter.shell.repo
     input {
         command = templatefile("./scripts/teardown_worktree.sh.tftpl", {
             criteria_value_1 = var.worktree_dir
             criteria_value_2 = data.internal.branch.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
+    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
+    // blips; the step timeout covers the worst-case wall clock.
+    timeout = "150s"
     outcome "success" { next = state.done }
     outcome "failure" { next = state.done }
 }

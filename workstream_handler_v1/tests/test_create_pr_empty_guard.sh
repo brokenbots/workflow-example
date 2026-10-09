@@ -45,10 +45,19 @@ echo "==> Rendering create_pr.sh.tftpl with fixed inputs"
 # test_post_review_pending.sh). The credential helper is stubbed to a no-op:
 # local file:// remotes never consult it and it has its own dedicated test.
 RENDERED="${WORK_ROOT}/create_pr.sh"
+# The gh_retry shim (KB-219) is spliced in raw at its marker — the same
+# wrapper body Criteria injects today — before the sed substitutions.
+RENDER_TEMPLATE="${WORK_ROOT}/create_pr.template"
+gh_retry_line="$(grep -n '{{ *\.gh_retry *}}' "${ROOT_DIR}/scripts/create_pr.sh.tftpl" | head -1 | cut -d: -f1)"
+{
+    head -n $((gh_retry_line - 1)) "${ROOT_DIR}/scripts/create_pr.sh.tftpl"
+    cat "${ROOT_DIR}/scripts/gh_retry.sh.tftpl"
+    tail -n "+$((gh_retry_line + 1))" "${ROOT_DIR}/scripts/create_pr.sh.tftpl"
+} >"${RENDER_TEMPLATE}"
 sed -e 's/{{ *\.criteria_value_1 *| *shellquote *}}/develop/g' \
     -e "s@{{ *\\.criteria_value_2 *| *shellquote *}}@${WORK_ROOT}/workstream.md@g" \
     -e "s@{{ *\\.helper *}}@setup_gh_token_git_credentials() { :; }@" \
-    "${ROOT_DIR}/scripts/create_pr.sh.tftpl" >"${RENDERED}"
+    "${RENDER_TEMPLATE}" >"${RENDERED}"
 chmod +x "${RENDERED}"
 printf '# KB-49 regression body\n\nThe PR body content is irrelevant here.\n' >"${WORK_ROOT}/workstream.md"
 
@@ -233,8 +242,15 @@ fail_step=$(sed -n '/^step "fail_missing_pr_url" {/,/^}/p' "${ROOT_DIR}/main.chc
 printf '%s' "${fail_step}" | grep -q 'KB-49: the PR step completed with an empty pr_url' \
     || fail "fail_missing_pr_url must record the KB-49 failure reason for the run"
 store_step=$(sed -n '/^step "store_pr_url" {/,/^}/p' "${ROOT_DIR}/main.chcl")
-printf '%s' "${store_step}" | grep -q 'set -o pipefail' \
-    || fail "store_pr_url must run its gh pipeline under pipefail (a failed gh may not be masked as success)"
+# KB-219: the gh pipeline moved into scripts/store_pr_url.sh.tftpl (rendered
+# by the step body) so it can sit under the shared gh_retry wrapper; the
+# pipefail contract moves with it.
+printf '%s' "${store_step}" | grep -q 'store_pr_url.sh.tftpl' \
+    || fail "store_pr_url must render scripts/store_pr_url.sh.tftpl (gh retry shim lives there)"
+printf '%s' "${store_step}" | grep -q 'gh_retry' \
+    || fail "store_pr_url render must pass the gh_retry shim into the template"
+grep -q 'set -o pipefail; pr_url=$(gh pr view' "${ROOT_DIR}/scripts/store_pr_url.sh.tftpl" \
+    || fail "store_pr_url script must run its gh pipeline under pipefail (a failed gh may not be masked as success)"
 
 echo "==> The retry budget variable exists with a bounded default"
 grep -q 'variable "max_pr_url_retries"' "${ROOT_DIR}/variables.chcl" \

@@ -1,4 +1,5 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
+{{ .gh_retry }}
 set -euo pipefail
 url="$criteria_value_1"
 if [ -n "$url" ]; then
