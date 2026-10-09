@@ -130,7 +130,7 @@ func TestReconcilePerScopeAdaptersCreatesPodForNestedProvision(t *testing.T) {
 	run := perScopeTestRun(true)
 	r, cl := newPerScopeTestReconciler(t, run)
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
@@ -177,7 +177,7 @@ func TestReconcilePerScopeAdaptersResolvesKindFromAdapterType(t *testing.T) {
 		Digest:      "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{scope}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{scope}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
@@ -221,7 +221,7 @@ func TestReconcilePerScopeAdaptersBuildsFallbackPodWithoutAdapterType(t *testing
 		AdapterName: "intake",
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{scope}, logger)
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{scope}, logger)
 	require.NoError(t, err, "a missing adapter_type must not fail the reconcile; it falls back")
 	assert.Equal(t, 1, active)
 
@@ -254,11 +254,11 @@ func TestReconcilePerScopeAdaptersNestedStreamIdempotent(t *testing.T) {
 	run := perScopeTestRun(true)
 	r, cl := newPerScopeTestReconciler(t, run)
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	require.Equal(t, 1, active)
 
-	active, err = r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	active, err = r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
@@ -273,14 +273,14 @@ func TestReconcilePerScopeAdaptersReleaseDeletesPod(t *testing.T) {
 	run := perScopeTestRun(true)
 	r, cl := newPerScopeTestReconciler(t, run)
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	require.Equal(t, 1, active)
 	require.Len(t, listAdapterPods(t, cl, "default"), 1)
 
 	// The castle client delivers the full accumulated history on every pass.
 	history := []events.LifecycleEvent{capturedProvisionEvent, capturedReleaseEvent}
-	active, err = r.reconcilePerScopeAdapters(context.Background(), run, history, logr.Discard())
+	active, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 0, active)
 	assert.Empty(t, listAdapterPods(t, cl, "default"), "released scope's pod must be deleted")
@@ -302,7 +302,7 @@ func TestReconcilePerScopeAdaptersDisabledIsNoOp(t *testing.T) {
 	}
 	r, cl := newPerScopeTestReconciler(t, run, seed)
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 0, active)
 
@@ -415,7 +415,7 @@ func TestPerScopeAdapterPodsCarryRunOwnerReference(t *testing.T) {
 	run := perScopeTestRun(true)
 	r, cl := newPerScopeTestReconciler(t, run)
 
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 
 	pods := listAdapterPods(t, cl, "default")

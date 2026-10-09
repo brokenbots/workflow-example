@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -42,12 +43,19 @@ import (
 // never built with a dangling dial address. Only the env-less fallback
 // pods run adapter.sh's own discovery polling and can build without a
 // runner IP.
-func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
+func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, castleRunID string, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
 	if !run.Spec.PerScopeSessions {
 		return 0, nil
 	}
 
 	active := events.ActiveProvisions(lifecycleEvents)
+
+	// memberPods maps each desired pod to EVERY lifecycle member it hosts,
+	// so the observed pod state is reported per active scope (KB-225
+	// pod-state feed): peer pods host several members of one
+	// (scope, environment) group — intake/shell and review/copilot of one
+	// manifest — and each member's session wait consumes its own report.
+	memberPods := make(map[string][]events.LifecycleEvent, len(active))
 
 	runnerIP := ""
 	needsRunnerIP := false
@@ -106,6 +114,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 			// per-adapter fallback pod, name and shape unchanged.
 			pod := jobbuilder.BuildPerScopeAdapterPod(run, r.Defaults, scope, runnerIP)
 			desired[pod.Name] = pod
+			memberPods[pod.Name] = append(memberPods[pod.Name], scope)
 			continue
 		}
 		key := envGroupKey{scopeID: scope.ScopeID, environment: scope.Environment}
@@ -122,6 +131,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 			continue
 		}
 		desired[pod.Name] = pod
+		memberPods[pod.Name] = append(memberPods[pod.Name], group.members...)
 	}
 
 	var existing corev1.PodList
@@ -133,6 +143,15 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		}),
 	); err != nil {
 		return 0, fmt.Errorf("listing adapter pods: %w", err)
+	}
+
+	// Report the observed pod state per active scope to castle (KB-225):
+	// best-effort adapter-event emission, deduped on transitions inside the
+	// feed, so the engine's session-wait expiry can name the real pod phase
+	// (KB-70 PodStateProbe). A pod that never leaves Pending is surfaced
+	// with its scheduling/wait reason instead of burning the full 15m wait.
+	if !r.PodState.Disabled() && castleRunID != "" {
+		r.PodState.Emit(ctx, castleRunID, podStateReports(&existing, memberPods, time.Now(), logger), logger)
 	}
 
 	// Delete pods that are no longer desired first. This ensures a release for
