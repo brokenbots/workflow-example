@@ -48,8 +48,12 @@ echo "==> Checking develop keeps its visit bound and default catch-all..."
 # part of the named-outcome set), and its static reachability check does not
 # follow default edges — but the engine honors them at runtime (verified with
 # a local probe: an unmatched outcome transitions viaOutcome="default").
-# Both edges are therefore asserted at source level.
-grep -Eq 'outcome "default"[[:space:]]*\{[[:space:]]*next = step\.push_checkpoint[[:space:]]*\}' "${WORKFLOW_DIR}/main.chcl"
+# Both edges are therefore asserted at source level. The KB-217
+# require_comment attribute may sit anywhere in the arm body, so the
+# assertion tolerates arbitrary body text, closes the arm explicitly, and
+# feeds a newline-flattened copy of the source so the regex works on both
+# BusyBox and GNU grep ([^}]* does not span newlines line-oriented).
+grep -Eq 'outcome "default"[[:space:]]*\{[^}]*next = step\.push_checkpoint[^}]*\}' <(tr '\n' ' ' < "${WORKFLOW_DIR}/main.chcl")
 grep -Eq 'max_visits = var\.max_agent_visits' "${WORKFLOW_DIR}/main.chcl"
 
 echo "==> All checks passed."

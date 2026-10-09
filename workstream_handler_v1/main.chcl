@@ -759,6 +759,7 @@ step "triage_pr_feedback" {
             target = data.internal.developer_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "no_work"  { next = step.push_and_respond }
     outcome "failed"   { next = state.failed }
@@ -798,6 +799,7 @@ step "validate_developer_response" {
             target = data.internal.developer_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failed"     { next = state.failed }
     outcome "failure"    { next = state.failed }

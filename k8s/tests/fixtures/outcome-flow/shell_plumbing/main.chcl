@@ -1,0 +1,49 @@
+// KB-217 over-fire guard: the shell adapter's structured output.stdout flows
+// from a step's arm into a downstream input through a variable. That is
+// ordinary shell plumbing, NOT the adapter reason — require_comment must NOT
+// be demanded for it, and the validator must report ZERO violations.
+workflow {
+    version          = "1"
+    criteria_version = ">=0.5.42"
+    name             = "outcome_flow_shell_plumbing"
+    initial_state    = "run_probe"
+    target_state     = "done"
+}
+
+data "internal" "probe_result" {
+    type  = string
+    value = ""
+}
+
+step "run_probe" {
+    target = adapter.shell.sh
+
+    input {
+        command = "echo probe-ok"
+    }
+
+    outcome "success" {
+        next = step.consume
+        write {
+            target = data.internal.probe_result.value
+            value  = output.stdout
+        }
+    }
+
+    outcome "failure" { next = state.done }
+}
+
+step "consume" {
+    target = adapter.shell.sh
+
+    input {
+        command = "echo got: ${data.internal.probe_result.value}"
+    }
+
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.done }
+}
+
+state "done" {
+    type = "done"
+}

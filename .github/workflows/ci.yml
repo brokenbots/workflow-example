@@ -54,11 +54,16 @@ jobs:
       # Source-mode test tooling for this suite. Rolled to v0.5.32 (b2d0b66)
       # in CRI-300: the flat WorkflowGraphs shape only exists from this
       # release onward, and the smoke test below (test_workflow_graphs_flat.sh)
-      # asserts that emitter contract. This does NOT change the image-mode
-      # pin in linear_intake_v1/Dockerfile (still v0.5.22, coordinator-owned).
-      - name: Install criteria v0.5.32 (SHA256SUMS-verified)
+      # asserts that emitter contract. Rolled again to v0.5.44 (37fd6e5+): the
+      # require_comment outcome attribute (KB-45) landed in v0.5.42, and the
+      # KB-217 tree contracts (outcome arms whose adapter reason renders into
+      # a downstream step's input) need an engine that parses and enforces it.
+      # The trees remain compile-compatible with v0.5.32+ engines; this does
+      # NOT change the image-mode pin in linear_intake_v1/Dockerfile (still
+      # v0.5.22, coordinator-owned).
+      - name: Install criteria v0.5.44 (SHA256SUMS-verified)
         run: |
-          version="v0.5.32"
+          version="v0.5.44"
           archive="criteria-${version}-linux-amd64.tar.gz"
           base="https://github.com/brokenbots/criteria/releases/download/${version}"
           curl -fL "${base}/${archive}" -o "/tmp/${archive}"

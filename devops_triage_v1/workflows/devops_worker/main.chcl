@@ -107,6 +107,7 @@ step "execute" {
             target = data.internal.summary.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "blocked" {
         next = step.write_work_log
@@ -118,6 +119,7 @@ step "execute" {
             target = data.internal.blocked.value
             value  = "yes"
         }
+        require_comment = true
     }
     // The copilot adapter emits "failure" if the session dies or the agent never
     // calls submit_outcome after re-prompts. Any uncommitted work is left in the

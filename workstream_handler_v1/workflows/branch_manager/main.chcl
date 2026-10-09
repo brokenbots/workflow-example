@@ -297,6 +297,7 @@ step "branch_triage_agent" {
             // session loss, nothing else.
             value  = try(output.reason, "") != "" ? try(output.reason, "") : "branch triage agent escalated to a human without a reason"
         }
+        require_comment = true
     }
     outcome "failed" {
         next = state.failed
@@ -306,6 +307,7 @@ step "branch_triage_agent" {
             // look like a lost scope session to the parent.
             value  = try(output.reason, "") != "" ? try(output.reason, "") : "triage agent reported failure without a reason"
         }
+        require_comment = true
     }
     // "failure" is the copilot adapter's built-in outcome when the provider is
     // unreachable or the session crashes. KB-24: try() distinguishes the
@@ -317,6 +319,7 @@ step "branch_triage_agent" {
             target = data.internal.failure_reason.value
             value  = try(output.reason, "")
         }
+        require_comment = true
     }
     outcome "default" {
         next = switch.route_triage_scope_loss
@@ -326,6 +329,7 @@ step "branch_triage_agent" {
             // the session was live; never leave this empty.
             value  = try(output.reason, "malformed triage agent response (no valid outcome)")
         }
+        require_comment = true
     }
 }
 

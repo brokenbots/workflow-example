@@ -307,6 +307,7 @@ step "intake_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "needs_human" {
         next = step.write_ops_report
@@ -318,6 +319,7 @@ step "intake_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -369,6 +371,7 @@ step "triage_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -397,6 +400,7 @@ step "review_no_action" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "disputed" {
         next = step.triage_worklist
@@ -404,6 +408,7 @@ step "review_no_action" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "needs_human" {
         next = step.write_ops_report
@@ -415,6 +420,7 @@ step "review_no_action" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -443,6 +449,7 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = ""
         }
+        require_comment = true
     }
     outcome "worklist_revise" {
         next = step.triage_worklist
@@ -450,6 +457,7 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "worklist_reject" {
         next = step.write_ops_report
@@ -461,6 +469,7 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     // The work is warranted but cannot proceed without an operator action —
     // a repository that must be created, a credential nobody has minted, an
@@ -478,6 +487,7 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -601,6 +611,7 @@ step "final_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "needs_work" {
         next = step.run_devops_worker
@@ -608,6 +619,7 @@ step "final_review" {
             target = data.internal.worker_brief.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "reject" {
         next = step.write_ops_report
@@ -619,6 +631,7 @@ step "final_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "needs_human" {
         next = step.write_ops_report
@@ -630,6 +643,7 @@ step "final_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }

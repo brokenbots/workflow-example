@@ -293,6 +293,7 @@ step "intake_review" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "needs_human" {
         next = step.write_triage_report
@@ -304,6 +305,7 @@ step "intake_review" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -337,6 +339,7 @@ step "plan_repro" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure"     { next = state.failed }
     outcome "default"     { next = state.failed }
@@ -369,6 +372,7 @@ step "review_plan" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "plan_reject" {
         next = step.write_triage_report
@@ -380,6 +384,7 @@ step "review_plan" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -551,6 +556,7 @@ step "verdict" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "regression" {
         next = step.draft_workstream
@@ -562,6 +568,7 @@ step "verdict" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "already_fixed" {
         next = step.write_triage_report
@@ -573,6 +580,7 @@ step "verdict" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "not_reproduced" {
         next = step.write_triage_report
@@ -584,6 +592,7 @@ step "verdict" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "insufficient_evidence" {
         next = step.plan_repro
@@ -591,6 +600,7 @@ step "verdict" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "needs_human" {
         next = step.write_triage_report
@@ -602,6 +612,7 @@ step "verdict" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -633,6 +644,7 @@ step "draft_workstream" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "need_help" {
         next = step.write_triage_report
@@ -644,6 +656,7 @@ step "draft_workstream" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure"   { next = state.failed }
     outcome "default"   { next = state.failed }
@@ -670,6 +683,7 @@ step "approve_workstream" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "reject" {
         next = step.write_triage_report
@@ -681,6 +695,7 @@ step "approve_workstream" {
             target = data.internal.supervisor_feedback.value
             value  = output.reason
         }
+        require_comment = true
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
