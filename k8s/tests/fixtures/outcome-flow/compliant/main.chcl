@@ -1,0 +1,58 @@
+// KB-217 POSITIVE fixture: the outcome arms whose adapter reason renders into
+// downstream inputs all declare require_comment. Two reason paths are covered:
+//   - var flow: arm writes output.reason into data.internal.findings, which the
+//     report step interpolates into its input prompt;
+//   - direct read: the report input also references steps.agent_work.reason.
+// The validator must report ZERO violations for this tree.
+workflow {
+    version          = "1"
+    criteria_version = ">=0.5.42"
+    name             = "outcome_flow_compliant"
+    initial_state    = "agent_work"
+    target_state     = "done"
+}
+
+data "internal" "findings" {
+    type  = string
+    value = ""
+}
+
+step "agent_work" {
+    target = adapter.copilot.worker
+
+    input {
+        prompt = "work the task"
+    }
+
+    outcome "work_done" {
+        next = step.report
+        write {
+            target = data.internal.findings.value
+            value  = output.reason
+        }
+        require_comment = true
+    }
+
+    outcome "failure" {
+        next = state.done
+        require_comment = true
+    }
+}
+
+step "report" {
+    target = adapter.copilot.reporter
+
+    input {
+        prompt = templatefile("./agents/report.md.tftpl", {
+            findings = data.internal.findings.value
+            followup = steps.agent_work.reason
+        })
+    }
+
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.done }
+}
+
+state "done" {
+    type = "done"
+}

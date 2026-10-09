@@ -123,6 +123,10 @@ validate:
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
+	# KB-217: mechanical rule — every outcome arm that renders its adapter
+	# reason into a downstream prompt declares require_comment. Fails closed;
+	# trees are auto-discovered, no allowlists.
+	@node scripts/tree-outcome-flow.mjs
 
 # CRI-241 + CRI-243: apply the criteria-routes ConfigMap live. Deploy
 # ordering for the CRI-243 cutover (the criteria project's routes become
@@ -203,6 +207,8 @@ test: validate test-criteria-k8s
 	./decision_demo_v1/tests/test_decision_demo_standalone.sh
 	@echo "Running decision demo runtime regression test (KB-205, skips without the unpublished adapter)..."
 	./decision_demo_local_v1/tests/test_decision_demo_runtime.sh
+	@echo "Running outcome-reason flow rule regression test (KB-217)..."
+	./k8s/tests/test_outcome_reason_flow.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -239,7 +245,8 @@ lint: lint-criteria-k8s
 		k8s/tests/test_criteria_base_entrypoint.sh \
 		k8s/tests/test_criteria_base_pin.sh \
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
-		decision_demo_local_v1/tests/test_decision_demo_runtime.sh
+		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
+		k8s/tests/test_outcome_reason_flow.sh
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...
