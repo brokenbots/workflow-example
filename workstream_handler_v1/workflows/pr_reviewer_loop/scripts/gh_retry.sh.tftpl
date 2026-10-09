@@ -78,7 +78,11 @@ gh_retry_run() {
     # the rest is the command to run.
     GH_RETRY_SLEEP_USED=${GH_RETRY_SLEEP_USED:-0}
     GH_RETRY_SEQ=${GH_RETRY_SEQ:-0}
-    [ $# -gt 0 ] || { gh_retry_log "attempt=1/0 result=pass_through class=non_transient label=none (no command given)"; return 2; }
+    # Must hold with the mode still in argv, so a bare single-arg call
+    # (just "stream"/"merged", e.g. `gh_retry` with no command) is rejected
+    # here instead of shifting into a post-shift `$1` read that dies under
+    # set -u.
+    [ $# -ge 2 ] || { gh_retry_log "attempt=1/0 result=pass_through class=non_transient label=none (no command given)"; return 2; }
     _gr_mode=$1
     shift
     # If the caller passed `gh` as the command, the sourced shell's gh alias

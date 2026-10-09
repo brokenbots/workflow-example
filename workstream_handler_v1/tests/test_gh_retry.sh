@@ -23,7 +23,10 @@
 #  11. a REAL multi-second deny window (the KB-213/214 shape): the engine
 #      converges while the window is open, with clock-checked backoff.
 #  12. a PATH with no gh left fails honestly in one attempt (no shadow
-#      recursion into the bare-`gh` fallback).
+#      recursion into the bare-`gh` fallback); and
+#  13. a bare `gh_retry` (no command) is rejected with the friendly rc 2
+#      evidence line instead of dying on the engine's post-shift `$1` read
+#      under set -u.
 
 set -uo pipefail
 
@@ -355,8 +358,10 @@ done
 cat >"${WORK_ROOT}/s12.body" <<BODY
 export PATH="${WORK_ROOT}/minimal"
 set +e
-# POSIX `.` (not bash's `source`): this probe runs under /bin/sh, which is
-# dash on CI and has no `source` builtin.
+# POSIX dot-source (not bash's "source" keyword): this probe runs under
+# /bin/sh, which is dash on CI and has no source builtin.
+# NOTE: this heredoc is unquoted so ROOT_DIR expands; keep backticks out of
+# its comments -- an unquoted heredoc executes them as command substitutions.
 . "${ROOT_DIR}/scripts/gh_retry.sh.tftpl"
 GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user >/dev/null 2>"${WORK_ROOT}/s12.stderr"
 echo "rc=\$?"
@@ -367,6 +372,22 @@ s12_status=${s12_rc##*rc=}
 # which fails the assertion instead of hanging the suite.
 check "missing gh failed the call in one honest attempt (rc 127)" 'rc=127' "${s12_rc}"
 err_has "result=pass_through class=non_transient" s12 "exec failure logged as a non-transient pass-through"
+
+# Scenario 13 pins the degenerate-argument guard: `gh_retry` with no
+# command reaches the engine as a lone mode arg; without the `[ $# -ge 2 ]`
+# guard the engine shifted past the mode and died at the post-shift `$1`
+# read under set -u, so the subshell produced no RC line and no evidence
+# at all.
+echo "==> Scenario 13: bare gh_retry — friendly degenerate-arg rejection"
+cat >"${WORK_ROOT}/s13.policy" <<'EOF'
+0|stub-must-not-run|
+EOF
+out=$(scenario s13 "${WORK_ROOT}/s13.policy" 'gh_retry')
+check "bare gh_retry rejected with rc 2, nothing executed" 'RC=2' "$out"
+check "no stub call on a degenerate invocation" 0 "$(call_count s13)"
+err_has "attempt=1/0 result=pass_through class=non_transient label=none (no command given)" s13 \
+    "degenerate call logged the honest pass-through evidence line"
+
 if [ "${FAILED}" -gt 0 ]; then
     echo "FAILED: ${FAILED} assertion(s)" >&2
     exit 1
