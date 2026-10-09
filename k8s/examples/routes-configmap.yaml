@@ -164,7 +164,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "linear-intake-url": {
@@ -216,7 +216,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "linear-develop-url": {
@@ -269,7 +269,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "linear-triage-url": {
@@ -323,7 +323,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "ticket-cleanup-url": {
@@ -377,7 +377,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "kanboard-triage-url": {
@@ -434,7 +434,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "kanboard-develop-url": {
@@ -490,7 +490,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.15"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16"
           }
         },
         "decision-demo-url": {
