@@ -254,6 +254,12 @@ done
 #   (b) EVERY script under the consumer trees that reaches for gh/api.github.com
 #       must reference the wrapper (the shadow covers bare calls only inside
 #       spliced files, so "no gh_retry reference" means "unwrapped call site").
+#
+# The scan is `find`-based so it behaves identically under GNU grep (CI) and
+# busybox grep (local shells that do not implement --include). Paths under a
+# `*/agents/*` directory are excluded: those are AI-reviewer prompt
+# templates (agent instructions like `gh pr diff`), not scripts the
+# wrapper's shell step gates.
 for copy in workstream_handler_v1/scripts/gh_retry.sh.tftpl \
             workstream_handler_v1/workflows/pr_reviewer_loop/scripts/gh_retry.sh.tftpl \
             devops_triage_v1/scripts/gh_retry.sh.tftpl \
@@ -273,10 +279,10 @@ while IFS= read -r script; do
         fail "mechanically-scanned gh call site without the wrapper: ${script}"
     fi
 done <<EOF
-$(grep -rlE 'gh (api|pr|repo)|api\.github\.com' \
-    --include='*.sh' --include='*.tftpl' \
-    "${REPO_ROOT}/workstream_handler_v1" "${REPO_ROOT}/devops_triage_v1" \
-    "${REPO_ROOT}/linear_intake_v1" "${REPO_ROOT}/criteria-k8s" 2>/dev/null \
+$(find "${REPO_ROOT}/workstream_handler_v1" "${REPO_ROOT}/devops_triage_v1" \
+       "${REPO_ROOT}/linear_intake_v1" "${REPO_ROOT}/criteria-k8s" \
+       \( -name '*.sh' -o -name '*.tftpl' \) ! -path '*/agents/*' \
+    -exec grep -lE 'gh (api|pr|repo)|api\.github\.com' {} + 2>/dev/null \
     | sed "s|^${REPO_ROOT}/||" | grep -v 'gh_retry\|_test\|/tests/')
 EOF
 [ "${found_unwrapped}" -eq 0 ] && ok "mechanical scan: every gh-call script references the wrapper"
@@ -349,7 +355,9 @@ done
 cat >"${WORK_ROOT}/s12.body" <<BODY
 export PATH="${WORK_ROOT}/minimal"
 set +e
-source "${ROOT_DIR}/scripts/gh_retry.sh.tftpl"
+# POSIX `.` (not bash's `source`): this probe runs under /bin/sh, which is
+# dash on CI and has no `source` builtin.
+. "${ROOT_DIR}/scripts/gh_retry.sh.tftpl"
 GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user >/dev/null 2>"${WORK_ROOT}/s12.stderr"
 echo "rc=\$?"
 BODY

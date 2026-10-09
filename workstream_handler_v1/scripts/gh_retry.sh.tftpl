@@ -32,8 +32,17 @@
 gh_retry_is_transient() {
     # Classifies combined command output as a transient transport error.
     # Sets GH_RETRY_ERR_CLASS and returns 0 when transient, else returns 1.
+    # `tr` is an optional dependency: minimal-PATH shells (busy k8s probe
+    # shells) may not have it, and a missing tr must never crash the
+    # classification or leak "not found" noise into the evidence channel.
+    # Without tr the raw text is classified as-is: lower/mixed-case
+    # spellings still match, all-upper text conservatively reads as
+    # non-transient (pass-through, no retry).
     GH_RETRY_ERR_CLASS=""
-    _grt_text=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    _grt_text=$1
+    if [ -x "${_GH_RETRY_TR_BIN}" ]; then
+        _grt_text=$(printf '%s' "$_grt_text" | "$_GH_RETRY_TR_BIN" '[:upper:]' '[:lower:]' 2>/dev/null)
+    fi
     case "$_grt_text" in
         *"tls handshake"*|*"handshake timeout"*|*"ssl connect"*|*"handshake timed out"*|*"tlsv1"*|*"ssl3"*|*"ssl_read"*|*"ssl_connect_error"*|*"ssl peer certificate"*)
             GH_RETRY_ERR_CLASS="tls_handshake_timeout" ;;
@@ -188,6 +197,10 @@ gh_retry_merged() {
 # Drop-in shadow: wraps /usr/bin/gh in the retry engine without rewriting
 # call sites. gh_retry_run receives the resolved binary path so the shadow
 # cannot recurse into itself.
-_GH_RETRY_GH_BIN=$(command -v gh 2>/dev/null)
+_GH_RETRY_GH_BIN=$(command -v gh 2>/dev/null || true)
 [ -n "$_GH_RETRY_GH_BIN" ] || _GH_RETRY_GH_BIN=gh
+# Optional classification dependency (see gh_retry_is_transient): resolved
+# once at source time, and stays unset when tr is absent so the engine
+# never execs a missing tool.
+_GH_RETRY_TR_BIN=$(command -v tr 2>/dev/null || true)
 gh() { gh_retry_run stream "$_GH_RETRY_GH_BIN" "$@"; }
