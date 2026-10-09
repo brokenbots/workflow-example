@@ -479,7 +479,25 @@ fi
 mkdir -p "$(dirname "$REPO_DIR")"
 rm -rf "$REPO_DIR"
 git config --global credential.https://github.helper '!gh auth git-credential'
-GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"`,
+# KB-219: wrap the clone in the shared bounded-backoff gh_retry whenever the
+# workflow image ships a vendored copy (/workflows/<tree>/scripts/gh_retry.sh);
+# images predating KB-219 keep the plain clone — honest fallback, nothing
+# masked, and a TLS blip no longer kills the job pod at bootstrap.
+_gh_retry_script=""
+for _gh_retry_rel in linear_intake_v1/scripts/gh_retry.sh \
+                     workstream_handler_v1/scripts/gh_retry.sh.tftpl \
+                     devops_triage_v1/scripts/gh_retry.sh.tftpl; do
+    if [ -r "/workflows/${_gh_retry_rel}" ]; then
+        _gh_retry_script="/workflows/${_gh_retry_rel}"
+        break
+    fi
+done
+if [ -n "$_gh_retry_script" ]; then
+    . "${_gh_retry_script}"
+    GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh_retry gh repo clone "$REPO_URL" "$REPO_DIR"
+else
+    GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"
+fi`,
 		},
 		Env: appendEnvDistinct([]corev1.EnvVar{
 			{Name: "REPO_URL", Value: repoURL},
