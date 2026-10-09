@@ -1,0 +1,82 @@
+package controller
+
+import (
+	"sort"
+	"time"
+
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
+)
+
+// podStateReports derives pod-state reports for active scopes from the
+// adapter pods observed in one reconcile pass. Every active scope maps to
+// the pod hosting its member (peer pods host several members of one
+// (scope, environment) group); a scope without a live pod reports nothing —
+// there is nothing observed to name. The returned reports are ordered by
+// scope key so repeated passes behave deterministically.
+func podStateReports(existing *corev1.PodList, memberScope map[string]events.LifecycleEvent, now time.Time, logger logr.Logger) []events.PodStateReport {
+	reports := make([]events.PodStateReport, 0, len(memberScope))
+	for i := range existing.Items {
+		pod := &existing.Items[i]
+		scope, ok := memberScope[pod.Name]
+		if !ok {
+			continue
+		}
+		if scope.AdapterType == "" {
+			// Engines without adapter_type (pre-v0.5.22) cannot be joined
+			// by the consumer's probe key; skip rather than emit an
+			// ambiguous event.
+			logger.V(1).Info("skipping pod-state report: provision carries no adapter_type",
+				"pod", pod.Name, "adapter", scope.AdapterName, "scope_id", scope.ScopeID)
+			continue
+		}
+		phase := pod.Status.Phase
+		if phase == "" {
+			continue
+		}
+		reason, message := podStateWaitReason(pod)
+		reports = append(reports, events.PodStateReport{
+			AdapterName: scope.AdapterName,
+			AdapterType: scope.AdapterType,
+			ScopeName:   scope.ScopeTag,
+			ScopeID:     scope.ScopeID,
+			Pod:         pod.Name,
+			Phase:       string(phase),
+			Reason:      reason,
+			Message:     message,
+			ObservedAt:  now,
+		})
+	}
+	sort.Slice(reports, func(i, j int) bool {
+		return reports[i].ScopeKey() < reports[j].ScopeKey()
+	})
+	return reports
+}
+
+// podStateWaitReason extracts the pod's most informative wait reason and
+// message: a false PodScheduled condition (scheduling problems like
+// Unschedulable/SchedulingGated) first, then container wait/termination
+// reasons (ImagePullBackOff, CrashLoopBackOff, Error, ...), then the pod
+// status message. Running pods without waits return empty values.
+func podStateWaitReason(pod *corev1.Pod) (reason, message string) {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason != "" {
+			return cond.Reason, cond.Message
+		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		state := pod.Status.ContainerStatuses[i].State
+		if w := state.Waiting; w != nil && w.Reason != "" {
+			return w.Reason, w.Message
+		}
+		if t := state.Terminated; t != nil && t.Reason != "" {
+			return t.Reason, t.Message
+		}
+	}
+	if pod.Status.Message != "" {
+		return "", pod.Status.Message
+	}
+	return "", ""
+}

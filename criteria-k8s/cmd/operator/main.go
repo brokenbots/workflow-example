@@ -132,17 +132,23 @@ func main() {
 	}
 
 	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
-	// of reading events.ndjson off the PVC. The operator is read-only
-	// towards castle: the runs themselves populate it (CRI-134 server-mode
-	// dual-write). The token comes from the CASTLE_TOKEN environment only so
-	// it never leaks into argv.
+	// of reading events.ndjson off the PVC. The token comes from the
+	// CASTLE_TOKEN environment only so it never leaks into argv.
 	castleClient := castle.New(castle.Config{Addr: *castleAddr, Token: castleToken}, nil)
+
+	// Feed per-scope adapter pod-state observations (KB-225) back into the
+	// run's castle event stream over the same adapter-event channel the
+	// engine uses, so session-wait expiry names the pod's phase instead of
+	// the blind 15m verdict (KB-70 PodStateProbe). Disabled entirely with
+	// --castle-addr empty.
+	podStateFeed := castle.NewPodStateFeed(castle.PodStateFeedConfig{Addr: *castleAddr, Token: castleToken}, nil)
 
 	reconciler := &controller.CriteriaRunReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   scheme,
 		Recorder: mgr.GetEventRecorderFor("criteria-k8s-operator"),
 		Castle:   castleClient,
+		PodState: podStateFeed,
 		// Probe the operator Deployment's declared env so a run admitted
 		// mid-rollout resolves the image the cluster deploys with instead
 		// of the reconciling pod's stale process env (CRI-264).

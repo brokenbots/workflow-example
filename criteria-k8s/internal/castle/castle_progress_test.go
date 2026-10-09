@@ -186,7 +186,7 @@ func TestObserveWedgeChatterKeepsProgressStale(t *testing.T) {
 	for _, kind := range chatterKinds {
 		ae := &v1.Envelope_AdapterEvent{AdapterEvent: &v1.AdapterEvent{Adapter: "copilot", Kind: kind}}
 		events = append(events, withTs(&v1.Envelope{RunId: "run-24", Seq: seq, Payload: ae}, now))
-		events = append(events, withTs(&v1.Envelope{RunId: "run-24", Seq: seq+1, Payload: &v1.Envelope_CriteriaHeartbeat{CriteriaHeartbeat: &v1.CriteriaHeartbeat{CriteriaId: "crit-24"}}}, now))
+		events = append(events, withTs(&v1.Envelope{RunId: "run-24", Seq: seq + 1, Payload: &v1.Envelope_CriteriaHeartbeat{CriteriaHeartbeat: &v1.CriteriaHeartbeat{CriteriaId: "crit-24"}}}, now))
 		seq += 2
 	}
 	server := &stubServer{

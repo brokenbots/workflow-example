@@ -83,7 +83,7 @@ func TestReconcilePerScopeAdaptersWireTokenDeliveryResolvesRunnerIP(t *testing.T
 	run.UID = types.UID("run-uid")
 	r, cl := newPerScopeTestReconciler(t, run, runnerPod("cri-237-runner", corev1.PodRunning, "10.0.0.10"))
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{wireProvisionEvent()}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{wireProvisionEvent()}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
@@ -123,7 +123,7 @@ func TestReconcilePerScopeAdaptersWireTokenDefersWithoutRunnerPod(t *testing.T) 
 	}
 	r, cl := newPerScopeTestReconciler(t, run, existing)
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{wireProvisionEvent()}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{wireProvisionEvent()}, logr.Discard())
 	require.NoError(t, err, "deferral is not an error: the caller requeues on the next poll")
 	assert.Equal(t, 1, active, "the provision stays active so the poll interval keeps requeueing")
 
@@ -148,7 +148,7 @@ func TestReconcilePerScopeAdaptersLegacyProvisionStaysLegacy(t *testing.T) {
 	run.UID = types.UID("run-uid")
 	r, cl := newPerScopeTestReconciler(t, run, runnerPod("cri-237-runner", corev1.PodRunning, "10.0.0.10"))
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{capturedProvisionEvent}, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 

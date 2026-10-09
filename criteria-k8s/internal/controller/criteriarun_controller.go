@@ -65,6 +65,11 @@ type CriteriaRunReconciler struct {
 	// this long is failed with a StallWatchdog condition (CRITERIA_STALL_WINDOW,
 	// default 30m). Zero disables the watchdog.
 	StallWindow time.Duration
+	// PodState feeds per-scope adapter pod-state observations (KB-225) to
+	// castle over the adapter-event channel, so the engine's session-wait
+	// expiry names the observed pod phase (KB-70 PodStateProbe). Nil or
+	// disabled turns the feed off.
+	PodState *castle.PodStateFeed
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -401,7 +406,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		default:
 			var err error
-			activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.Lifecycle, logger)
+			activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.RunID, obs.Lifecycle, logger)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
