@@ -55,6 +55,25 @@ func podStateReports(existing *corev1.PodList, memberScope map[string]events.Lif
 	return reports
 }
 
+// podStateMaxMessage bounds free-form cluster-provided strings (scheduler
+// condition messages, container wait/termination messages, pod status
+// message) that ride the pod-state event, so one pathological node message
+// cannot flood the run's shared event stream. 2048 keeps every real
+// scheduler/containment message intact.
+const podStateMaxMessage = 2048
+
+// clampMessage truncates s rune-safely to podStateMaxMessage.
+func clampMessage(s string) string {
+	if len(s) <= podStateMaxMessage {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) > podStateMaxMessage {
+		runes = runes[:podStateMaxMessage]
+	}
+	return string(runes)
+}
+
 // podStateWaitReason extracts the pod's most informative wait reason and
 // message: a false PodScheduled condition (scheduling problems like
 // Unschedulable/SchedulingGated) first, then container wait/termination
@@ -63,20 +82,20 @@ func podStateReports(existing *corev1.PodList, memberScope map[string]events.Lif
 func podStateWaitReason(pod *corev1.Pod) (reason, message string) {
 	for _, cond := range pod.Status.Conditions {
 		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse && cond.Reason != "" {
-			return cond.Reason, cond.Message
+			return cond.Reason, clampMessage(cond.Message)
 		}
 	}
 	for i := range pod.Status.ContainerStatuses {
 		state := pod.Status.ContainerStatuses[i].State
 		if w := state.Waiting; w != nil && w.Reason != "" {
-			return w.Reason, w.Message
+			return w.Reason, clampMessage(w.Message)
 		}
 		if t := state.Terminated; t != nil && t.Reason != "" {
-			return t.Reason, t.Message
+			return t.Reason, clampMessage(t.Message)
 		}
 	}
 	if pod.Status.Message != "" {
-		return "", pod.Status.Message
+		return "", clampMessage(pod.Status.Message)
 	}
 	return "", ""
 }

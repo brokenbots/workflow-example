@@ -12,9 +12,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
@@ -210,6 +212,28 @@ func podStateTestFeed(t *testing.T) (*castle.PodStateFeed, *podStateCriteriaWatc
 		},
 	})
 	return feed, stub
+}
+
+func TestPodStateWaitReasonClampsMessage(t *testing.T) {
+	// A pathological cluster-provided message is clamped so one bad node
+	// status cannot flood the run's shared event stream.
+	long := strings.Repeat("x", 3*podStateMaxMessage)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-1"},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodPending,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: long}},
+		},
+	}
+	reason, message := podStateWaitReason(pod)
+	assert.Equal(t, "Unschedulable", reason)
+	assert.Equal(t, podStateMaxMessage, utf8.RuneCountInString(message))
+
+	// The pod-status message fallback clamps the same way.
+	pod.Status.Conditions = nil
+	pod.Status.Message = long
+	_, message = podStateWaitReason(pod)
+	assert.Equal(t, podStateMaxMessage, utf8.RuneCountInString(message))
 }
 
 // dataWithoutObservedAt drops the always-present observation timestamp from
