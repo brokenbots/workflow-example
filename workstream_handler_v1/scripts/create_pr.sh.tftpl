@@ -2,6 +2,7 @@ criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 set -euo pipefail
 
+{{ .gh_retry }}
 {{ .helper }}
 
 branch=$(git branch --show-current)
@@ -9,7 +10,7 @@ branch=$(git branch --show-current)
 title=$(printf '%s' "$branch" | sed 's/-approved$//i; s/-reviewed$//i; s/-draft$//i' | tr '-' ' ')
 
 # Reuse only an active OPEN PR.  Closed or merged PRs get a fresh one.
-existing_json=$(gh pr view "$branch" --json url,state 2>/dev/null || true)
+existing_json=$(gh pr view "$branch" --json url,state || true)
 existing_url=""
 existing_state=""
 if [ -n "$existing_json" ]; then
@@ -30,11 +31,11 @@ else
         echo "push_error=$push_err"
         exit 1
     fi
-    pr_url=$(gh pr create \
+    pr_url=$(gh_retry_merged gh pr create \
         --base "$criteria_value_1" \
         --head "$branch" \
         --title "$title" \
-        --body "$(cat "$criteria_value_2")" 2>&1) || {
+        --body "$(cat "$criteria_value_2")") || {
         echo "pr_create_failed=true branch=$branch"
         echo "pr_create_error=$pr_url"
         exit 1

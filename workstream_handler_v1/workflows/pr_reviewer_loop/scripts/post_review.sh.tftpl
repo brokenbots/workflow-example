@@ -4,6 +4,8 @@ pr_number={{ .criteria_value_1 | shellquote }}
 event={{ .criteria_value_2 | shellquote }}
 body={{ .criteria_value_3 | shellquote }}
 
+{{ .gh_retry }}
+
 reviewer=$(gh api user --jq .login)
 author=$(gh pr view "$pr_number" --json author --jq .author.login)
 if [ "$reviewer" = "$author" ]; then

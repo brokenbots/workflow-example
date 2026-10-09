@@ -66,9 +66,13 @@ data "internal" "_failure_reason" {
 
 step "resolve_pr_number" {
     target = adapter.shell.reviewer
+    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // timeout comfortably above it (matches check_pr_status).
+    timeout    = "300s"
     input {
         command = templatefile("./scripts/resolve_pr_number.sh.tftpl", {
             criteria_value_1 = var.pr_url
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" {
@@ -103,11 +107,12 @@ step "resolve_pr_number" {
 
 step "check_pr_status" {
     target     = adapter.shell.reviewer
-    timeout    = "120s"
+    timeout    = "300s"
     max_visits = var.max_poll_visits
     input {
         command = templatefile("./scripts/check_pr_status.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" {
@@ -147,17 +152,19 @@ step "check_pr_status" {
 // surface (gh api to api.github.com) and dies on transient transport errors
 // (TLS handshake timeout observed live on KB-48's merge leg, 2026-10-02 — a
 // one-off blip parked the run at awaiting_human for a green approved PR).
-// One bounded retry fires before the failure is believed: the API outage
-// class is minute-scale, so a single quick retry almost always recovers and
-// the human hand-off stays reserved for genuine breakage. The retry re-runs
-// the SAME step body; its failure arm keeps the original KB-24 typed reason.
+// KB-219: the transport layer is now handled INSIDE the step body by the
+// shared gh_retry shim (bounded backoff, ~105s worst case — hence the 300s
+// step timeout); the verdict shape is untouched, so this KB-24-era single
+// step-level retry stays exactly as-is and keeps covering non-transport
+// step failures. Its failure arm retains the original KB-24 typed reason.
 step "retry_check_pr_status" {
     target     = adapter.shell.reviewer
-    timeout    = "120s"
+    timeout    = "300s"
     max_visits = var.max_poll_visits
     input {
         command = templatefile("./scripts/check_pr_status.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" {
@@ -350,11 +357,15 @@ switch "route_review_retry" {
 
 step "post_approval" {
     target = adapter.shell.reviewer
+    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // timeout comfortably above it (matches check_pr_status).
+    timeout    = "300s"
     input {
         command = templatefile("./scripts/post_review.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
             criteria_value_2 = "APPROVE"
             criteria_value_3 = data.internal._review_body.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" { next = state.approved }
@@ -373,11 +384,15 @@ step "post_approval" {
 
 step "post_changes_requested" {
     target = adapter.shell.reviewer
+    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // timeout comfortably above it (matches check_pr_status).
+    timeout    = "300s"
     input {
         command = templatefile("./scripts/post_review.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
             criteria_value_2 = "REQUEST_CHANGES"
             criteria_value_3 = data.internal._review_body.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" { next = state.changes_requested }

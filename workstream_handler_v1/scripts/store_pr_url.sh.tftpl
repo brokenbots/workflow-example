@@ -1,0 +1,6 @@
+# Rendered as the store_pr_url step command. KB-219: gh calls are wrapped by
+# the shared retry shim — transient transport blips (TLS handshake timeout,
+# connection reset) are retried with bounded backoff instead of failing the
+# run; verdict-shaped results pass through untouched on first success.
+{{ .gh_retry }}
+set -o pipefail; pr_url=$(gh pr view "$(git branch --show-current)" --json url --jq '.url') && printf '%s' "$pr_url" | tr -d '\n'

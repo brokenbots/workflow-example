@@ -23,11 +23,21 @@ ERR="${WORK_DIR}/stderr"
 
 # Render the template into an executable script with fixed test values.
 # shellquote in Criteria renders string literals safely; for the harness we
-# use simple quoted values.
+# use simple quoted values. The gh_retry shim (KB-219) is spliced in raw at
+# its marker — the same wrapper body Criteria injects today — so pending-PR
+# classification, counters, and exit codes all keep identical shapes.
+RENDER_TEMPLATE="${WORK_DIR}/template.rendered"
+gh_retry_line="$(grep -n '{{ *\.gh_retry *}}' "${TEMPLATE}" | head -1 | cut -d: -f1)"
+{
+    head -n $((gh_retry_line - 1)) "${TEMPLATE}"
+    cat "${SCRIPT_DIR}/../workflows/pr_reviewer_loop/scripts/gh_retry.sh.tftpl"
+    tail -n "+$((gh_retry_line + 1))" "${TEMPLATE}"
+} > "${RENDER_TEMPLATE}"
+
 sed -e 's/{{ *\.criteria_value_1 *| *shellquote *}}/"42"/g' \
     -e 's/{{ *\.criteria_value_2 *| *shellquote *}}/"APPROVE"/g' \
     -e 's/{{ *\.criteria_value_3 *| *shellquote *}}/"looks good"/g' \
-    "${TEMPLATE}" > "${SCRIPT}"
+    "${RENDER_TEMPLATE}" > "${SCRIPT}"
 chmod +x "${SCRIPT}"
 
 # Generate a fake gh that reads scenario state from the environment.

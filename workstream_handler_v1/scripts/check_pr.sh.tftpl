@@ -1,6 +1,7 @@
 set -eu
+{{ .gh_retry }}
 branch=$(git branch --show-current)
-pr_json=$(gh pr view "$branch" --json number,state,reviewDecision,url 2>/dev/null || echo "")
+pr_json=$(gh pr view "$branch" --json number,state,reviewDecision,url || echo "")
 if [ -z "$pr_json" ]; then
     echo "status:no_pr"
     exit 0
@@ -17,7 +18,7 @@ number=$(printf '%s' "$pr_json" | jq -r '.number')
 if [ -z "$review_decision" ] || [ "$review_decision" = "REVIEW_REQUIRED" ]; then
     owner=$(gh repo view --json owner --jq '.owner.login')
     repo=$(gh repo view --json name --jq '.name')
-    approved_count=$(gh api "repos/$owner/$repo/pulls/$number/reviews" --jq '[.[] | select(.state == "APPROVED")] | length' 2>/dev/null || echo "0")
+    approved_count=$(gh api "repos/$owner/$repo/pulls/$number/reviews" --jq '[.[] | select(.state == "APPROVED")] | length' || echo "0")
     if [ "$approved_count" -gt 0 ]; then
         review_decision="APPROVED"
     fi
@@ -26,13 +27,13 @@ fi
 # Inspect ALL checks, not just --required: every gate must be green
 # before merge, and a non-required red check still blocks it.
 checks_rc=0
-checks_json=$(gh pr checks "$number" --json bucket,name,state 2>&1) || checks_rc=$?
+checks_json=$(gh_retry_merged gh pr checks "$number" --json bucket,name,state) || checks_rc=$?
 if [ "$checks_rc" -eq 8 ] || printf '%s' "$checks_json" | grep -q "no checks reported"; then
     # No check runs. Two cases: CI hasn't registered yet after a push
     # (pending), or the repo has no Actions workflows at all and never
     # will (observed: CRI-90 on workflow-example looped pending forever).
     # Count the repo's workflows to distinguish them.
-    wf_count=$(gh api "repos/$(gh repo view --json nameWithOwner --jq '.nameWithOwner')/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+    wf_count=$(gh api "repos/$(gh repo view --json nameWithOwner --jq '.nameWithOwner')/actions/workflows" --jq '.total_count' || echo "-1")
     if [ "$wf_count" = "0" ]; then
         # No CI to wait for; fall through to the review-decision logic.
         checks_json='[]'

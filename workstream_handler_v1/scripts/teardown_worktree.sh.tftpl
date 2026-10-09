@@ -1,5 +1,6 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
+{{ .gh_retry }}
 set -uo pipefail; exec 2>&1
 wt="$criteria_value_1"
 branch="$criteria_value_2"
@@ -17,7 +18,7 @@ echo "removed worktree $wt"
 # -D is safe *only* because the MERGED check gates it. Never move
 # this deletion outside that guard.
 if [ -n "$branch" ]; then
-    state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || echo "")
+    state=$(gh pr view "$branch" --json state --jq .state || echo "")
     if [ "$state" = "MERGED" ]; then
         git branch -D "$branch" 2>&1 || true
         echo "deleted merged branch $branch"

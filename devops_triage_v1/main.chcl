@@ -685,16 +685,19 @@ switch "route_pr" {
 // human or to workstream_handler_v1, and a workflow that both writes a change
 // and merges it has no gate left that it does not control.
 step "open_pr" {
-    target  = adapter.shell.wt
-    timeout = "120s"
+    target = adapter.shell.wt
     input {
         command = templatefile("./scripts/open_pr.sh.tftpl", {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = data.internal.slug.value
             criteria_value_3 = data.internal.run_dir.value
             criteria_value_4 = var.base_branch
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
+    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
+    // blips; the step timeout covers the worst-case wall clock.
+    timeout = "300s"
     outcome "success" {
         next = step.write_ops_report
         write {

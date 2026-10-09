@@ -123,6 +123,16 @@ jobs:
             echo "::endgroup::"
           done
 
+      # KB-219: the shared gh retry wrapper is consumed by every GH call site
+      # (workstream_handler_v1 loop above, plus devops_triage_v1's open_pr and
+      # the linear intake entrypoint) — keep their integration tests gated.
+      - name: Run devops_triage_v1 open_pr retry test (KB-219)
+        run: |
+          bash devops_triage_v1/tests/test_open_pr_retry.sh
+      - name: Run linear_intake entrypoint retry test (KB-219)
+        run: |
+          bash linear_intake_v1/tests/test_container_entrypoint_gh_retry.sh
+
   secret-free-gate:
     name: Secret-free shipped configs (CRI-250)
     runs-on: ubuntu-latest
