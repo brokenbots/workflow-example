@@ -9,7 +9,10 @@ set -euo pipefail
 # name references are representable. Also asserts the example is secret-free
 # and carries the CRI-243 split-pattern cutover: the criteria project's
 # routes fire the pinned linear_triage_v1 / linear_develop_v1 trees (plan
-# CRI-214 exit condition 3).
+# CRI-214 exit condition 3), the git-ref pin duality (url '?ref=' vs the
+# separate "ref" key) agrees per entry, and the adapterImages pins agree
+# three ways: shipped example == RECORDED_PIN_SET == live criteria-routes CM
+# (the live leg skips when no kubectl/cluster is reachable, e.g. CI).
 #
 # Validation always runs a dependency-free structural validator mirroring the
 # schema. When python's jsonschema module is available, the payload and every
@@ -62,6 +65,8 @@ python3 - "$SCHEMA" "$EXAMPLE" <<'PYEOF'
 import copy
 import json
 import re
+import shutil
+import subprocess
 import sys
 
 schema_path, example_path = sys.argv[1], sys.argv[2]
@@ -837,6 +842,95 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
         failures.append(f"shipped example: {kb_name} class = {kb_wf.get('class')}, want {kb_class!r}")
     if "image" in kb_wf:
         failures.append(f"shipped example: {kb_name} must be url-only (no process image)")
+
+# KB-230: adapter-image pin state. The shipped example is the deploy source
+# for the live criteria-routes CM (make apply-routes applies it wholesale),
+# so its adapterImages pins must agree three ways: example == RECORDED_PIN_SET
+# (below) == live CM. The KB-216 fleet leg repinned live copilot-peer
+# everywhere to k8s-0.5.16 (verified 2026-10-09) while this file lagged at
+# 0.5.15 — exactly the drift class both legs below fail on. Version drift of
+# one pin family is caught per kind present; the two deliberately-unpinned
+# url-only objects (linear-intake-url, decision-demo-url) carry no
+# adapterImages and skip the check.
+RECORDED_PIN_SET = {
+    "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16",
+}
+
+
+def check_adapter_pins(where, library):
+    for wf_name, wf_obj in library.items():
+        images = wf_obj.get("adapterImages") if isinstance(wf_obj, dict) else None
+        if not isinstance(images, dict):
+            continue
+        for kind, image in images.items():
+            recorded = RECORDED_PIN_SET.get(kind)
+            if recorded is None:
+                failures.append(
+                    f"{where}: {wf_name} adapterImages pins kind {kind!r} with no recorded pin"
+                    " — record the fleet pin in RECORDED_PIN_SET in k8s/tests/test_routes_config.sh")
+            elif image != recorded:
+                failures.append(
+                    f"{where}: {wf_name} adapterImages.{kind} = {image!r}, want the recorded pin"
+                    f" {recorded!r} (three-way pin agreement: example == recorded pin set == live"
+                    " criteria-routes CM — bump the whole pin family in the same change)")
+
+
+check_adapter_pins("shipped example", base[LIB])
+
+# Pin-duality cross-check (the KB-11/KB-94 gotcha recorded in both headers):
+# a workflow ref is ONE pin recorded twice — the url's '?ref=' query and the
+# separate "ref" key. The go loader never compares them and only the url
+# query reaches the fetch, so a half-bump silently resolves a different
+# tree than the "ref" key advertises. The per-entry SHA assertions above
+# catch half-bumps on the objects they cover; this general cross-check
+# covers every entry, including ones whose assertions pin only one side
+# (ticket-cleanup-url's url prefix stops before the '?ref=').
+for wf_name, wf_obj in base[LIB].items():
+    if not isinstance(wf_obj, dict) or wf_obj.get("type") != "url" or not isinstance(wf_obj.get("url"), str):
+        continue
+    m = re.search(r"\?ref=([0-9a-f]{40})$", wf_obj["url"])
+    url_ref = m.group(1) if m else None
+    key_ref = wf_obj.get("ref") or None
+    if url_ref != key_ref:
+        failures.append(
+            f"shipped example: {wf_name} pin duality mismatch: url ?ref="
+            f"{url_ref if url_ref else '(absent)'} vs \"ref\" {key_ref if key_ref else '(absent)'}"
+            " — one pin, two carriers, bumped together in the same change")
+
+# Third leg of the three-way agreement (recorded pins == live CM): CI has no
+# kubectl/cluster, but on an operator box (make test) the live criteria-routes
+# CM is reachable — assert its adapterImages carry the same recorded set so
+# live-only or example-only drift in either direction fails here. Skipped
+# (not passed) when the CM cannot be reached.
+kubectl = shutil.which("kubectl")
+live_cm_json = None
+if kubectl:
+    try:
+        proc = subprocess.run(
+            [kubectl, "-n", "criteria-jobs", "get", "configmap", "criteria-routes", "-o", "json"],
+            capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            live_cm_json = proc.stdout
+    except Exception:
+        live_cm_json = None
+if live_cm_json is None:
+    print("live criteria-routes CM unreachable; skipping the recorded-pins==live leg")
+else:
+    try:
+        cm = json.loads(live_cm_json)
+        live_payload = json.loads(cm["data"]["routes.json"])
+        live_library = live_payload["workflowLibrary"]
+    except (KeyError, TypeError, ValueError):
+        failures.append("live criteria-routes CM: data['routes.json'] missing or unparsable"
+                        " — the live ConfigMap must carry the same routes.json payload"
+                        " shape as the example (make apply-routes)")
+        live_library = None
+    if live_library is not None:
+        if not isinstance(live_library, dict):
+            failures.append("live criteria-routes CM: workflowLibrary is not an object")
+        else:
+            check_adapter_pins("live criteria-routes CM", live_library)
 
 # ------------------------------------------------------------ schema checks
 schema = json.load(open(schema_path, encoding="utf-8"))
