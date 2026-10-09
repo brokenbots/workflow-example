@@ -22,6 +22,8 @@
 #  10. structural consumer coverage of every gh/API call site; and
 #  11. a REAL multi-second deny window (the KB-213/214 shape): the engine
 #      converges while the window is open, with clock-checked backoff.
+#  12. a PATH with no gh left fails honestly in one attempt (no shadow
+#      recursion into the bare-`gh` fallback).
 
 set -uo pipefail
 
@@ -246,6 +248,39 @@ for probe in k8s/pod-adapter-runner.sh k8s/pod-adapter-adapter.sh; do
     fi
 done
 
+# Reviewer follow-ups on the structural pin, derived mechanically so a new
+# call site cannot slip in silently:
+#   (a) the four vendored copies of the wrapper must stay byte-identical;
+#   (b) EVERY script under the consumer trees that reaches for gh/api.github.com
+#       must reference the wrapper (the shadow covers bare calls only inside
+#       spliced files, so "no gh_retry reference" means "unwrapped call site").
+for copy in workstream_handler_v1/scripts/gh_retry.sh.tftpl \
+            workstream_handler_v1/workflows/pr_reviewer_loop/scripts/gh_retry.sh.tftpl \
+            devops_triage_v1/scripts/gh_retry.sh.tftpl \
+            linear_intake_v1/scripts/gh_retry.sh; do
+    if cmp -s "${REPO_ROOT}/workstream_handler_v1/scripts/gh_retry.sh.tftpl" "${REPO_ROOT}/${copy}"; then
+        ok "vendored copy byte-identical: ${copy}"
+    else
+        fail "vendored copy diverged from the canonical wrapper: ${copy}"
+    fi
+done
+found_unwrapped=0
+while IFS= read -r script; do
+    # An empty substitution leaves one blank heredoc line — skip it.
+    [ -z "${script}" ] && continue
+    if ! grep -q 'gh_retry' "${REPO_ROOT}/${script}"; then
+        found_unwrapped=$((found_unwrapped + 1))
+        fail "mechanically-scanned gh call site without the wrapper: ${script}"
+    fi
+done <<EOF
+$(grep -rlE 'gh (api|pr|repo)|api\.github\.com' \
+    --include='*.sh' --include='*.tftpl' \
+    "${REPO_ROOT}/workstream_handler_v1" "${REPO_ROOT}/devops_triage_v1" \
+    "${REPO_ROOT}/linear_intake_v1" "${REPO_ROOT}/criteria-k8s" 2>/dev/null \
+    | sed "s|^${REPO_ROOT}/||" | grep -v 'gh_retry\|_test\|/tests/')
+EOF
+[ "${found_unwrapped}" -eq 0 ] && ok "mechanical scan: every gh-call script references the wrapper"
+
 
 # Scenario 11 is the KB-213/214 acceptance shape end to end: a REAL wall-clock
 # deny window (like the scripted 20-30s egress deny, compressed to ~3s) stays
@@ -298,6 +333,32 @@ else
 fi
 err_has "attempt=1/4 result=retry class=tls_handshake_timeout wait=1s" s11 "first attempt logged its class"
 err_has "result=success class=none" s11 "convergence after the window logged"
+
+# Scenario 12 is a reviewer follow-up: with NO gh anywhere on PATH, the bare
+# `gh` fallback must fail the call honestly in one attempt. Before the
+# `command`-rebuild guard, the bare fallback re-resolved onto the gh() shadow
+# and recursed until process exhaustion; with the guard the engine resolves
+# through `command` (which suppresses function lookup) and returns the exec
+# failure rc. `timeout` bounds the regression: an engine that recurses again
+# dies at the bound with rc 124 and the rc assertion fails loudly.
+echo "==> Scenario 12: no gh on PATH — engine fails honestly, no shadow recursion"
+mkdir -p "${WORK_ROOT}/minimal"
+for tool in cat rm sleep; do
+    ln -sf "$(command -v "${tool}")" "${WORK_ROOT}/minimal/${tool}"
+done
+cat >"${WORK_ROOT}/s12.body" <<BODY
+export PATH="${WORK_ROOT}/minimal"
+set +e
+source "${ROOT_DIR}/scripts/gh_retry.sh.tftpl"
+GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user >/dev/null 2>"${WORK_ROOT}/s12.stderr"
+echo "rc=\$?"
+BODY
+s12_rc=$(timeout 10 sh "${WORK_ROOT}/s12.body" 2>/dev/null)
+s12_status=${s12_rc##*rc=}
+# `timeout` bounds the regression probe: a recursing engine returns 124 here,
+# which fails the assertion instead of hanging the suite.
+check "missing gh failed the call in one honest attempt (rc 127)" 'rc=127' "${s12_rc}"
+err_has "result=pass_through class=non_transient" s12 "exec failure logged as a non-transient pass-through"
 if [ "${FAILED}" -gt 0 ]; then
     echo "FAILED: ${FAILED} assertion(s)" >&2
     exit 1
