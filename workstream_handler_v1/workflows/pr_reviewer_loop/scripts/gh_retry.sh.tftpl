@@ -35,7 +35,7 @@ gh_retry_is_transient() {
     GH_RETRY_ERR_CLASS=""
     _grt_text=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
     case "$_grt_text" in
-        *"tls handshake"*|*"ssl connect"*|*"handshake timed out"*|*"tlsv1"*|*"ssl3"*|*"ssl_read"*|*"ssl_connect_error"*|*"ssl peer certificate"*)
+        *"tls handshake"*|*"handshake timeout"*|*"ssl connect"*|*"handshake timed out"*|*"tlsv1"*|*"ssl3"*|*"ssl_read"*|*"ssl_connect_error"*|*"ssl peer certificate"*)
             GH_RETRY_ERR_CLASS="tls_handshake_timeout" ;;
         *"connection reset"*|*"broken pipe"*)
             GH_RETRY_ERR_CLASS="connection_reset" ;;
@@ -87,6 +87,10 @@ gh_retry_run() {
     case "$_gr_budget" in ''|*[!0-9]*) _gr_budget=105 ;; esac
     _gr_label=$1
     [ $# -ge 2 ] && _gr_label="$_gr_label $2"
+    # Stable run-evidence label: resolve to the basename so labels like
+    # "gh api" don't embed the resolved binary's full path (which varies by
+    # stub vs. image and rots log-greps).
+    case "$_gr_label" in */*) _gr_label=${_gr_label##*/} ;; esac
     _gr_attempt=0
     _gr_out=""
     _gr_err=""
