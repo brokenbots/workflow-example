@@ -62,8 +62,22 @@ case "$MAX_AGENT_VISITS" in
     0) echo "MAX_AGENT_VISITS must be a positive integer" >&2; exit 2 ;;
 esac
 
-workflow_user=$(GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh api user --jq .login)
-reviewer_user=$(GH_TOKEN="$REVIEWER_GITHUB_TOKEN" gh api user --jq .login)
+# KB-219: source the shared bounded-backoff GitHub retry wrapper. Every gh
+# call below hits api.github.com and previously died on the recurring ~30s
+# TLS-handshake-timeout blips. Repo checkouts resolve the vendored copy via
+# this file's own tree; the image copy (COPY . /workflows, entrypoint at
+# /usr/local/bin/linear-intake) reads it from the canonical image path.
+if [ -r "$(dirname "$0")/scripts/gh_retry.sh" ]; then
+    . "$(dirname "$0")/scripts/gh_retry.sh"
+elif [ -r /workflows/linear_intake_v1/scripts/gh_retry.sh ]; then
+    . /workflows/linear_intake_v1/scripts/gh_retry.sh
+else
+    echo "cannot locate linear_intake_v1/scripts/gh_retry.sh" >&2
+    exit 2
+fi
+
+workflow_user=$(GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh_retry gh api user --jq .login)
+reviewer_user=$(GH_TOKEN="$REVIEWER_GITHUB_TOKEN" gh_retry gh api user --jq .login)
 if [ "$workflow_user" = "$reviewer_user" ]; then
     echo "workflow and reviewer tokens resolve to the same GitHub user: $workflow_user" >&2
     exit 2
@@ -80,7 +94,7 @@ if ! git -C "$REPO_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
         exit 2
     fi
     mkdir -p "$(dirname "$REPO_DIR")"
-    GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh repo clone "$REPO_URL" "$REPO_DIR"
+    GH_TOKEN="$WORKFLOW_GITHUB_TOKEN" gh_retry gh repo clone "$REPO_URL" "$REPO_DIR"
 fi
 
 mkdir -p "$INTAKE_ROOT/$TICKET_ID" "$TRIAGE_ROOT"
