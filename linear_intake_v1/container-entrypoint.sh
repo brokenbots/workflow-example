@@ -68,8 +68,12 @@ esac
 # this file's own tree; the image copy (COPY . /workflows, entrypoint at
 # /usr/local/bin/linear-intake) reads it from the canonical image path.
 if [ -r "$(dirname "$0")/scripts/gh_retry.sh" ]; then
+    # The splice path is computed from "$0" and the image path does not exist
+    # outside the container; shellcheck cannot follow either (KB-219).
+    # shellcheck disable=SC1091
     . "$(dirname "$0")/scripts/gh_retry.sh"
 elif [ -r /workflows/linear_intake_v1/scripts/gh_retry.sh ]; then
+    # shellcheck disable=SC1091
     . /workflows/linear_intake_v1/scripts/gh_retry.sh
 else
     echo "cannot locate linear_intake_v1/scripts/gh_retry.sh" >&2

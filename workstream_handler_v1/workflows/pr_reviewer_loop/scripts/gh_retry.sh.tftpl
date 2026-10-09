@@ -51,7 +51,7 @@ gh_retry_is_transient() {
             GH_RETRY_ERR_CLASS="connection_eof" ;;
         *"http 5"*|*"503"*|*"502"*|*"504"*|*"internal server error"*|*"bad gateway"*|*"service unavailable"*|*"gateway timeout"*|*"requested url returned error"*|*"api error"*|*"server error"*)
             GH_RETRY_ERR_CLASS="http_5xx" ;;
-        *"rate limit"*|*"abuse detection"*|*"secondary rate limit"*)
+        *"rate limit"*|*"abuse detection"*)
             GH_RETRY_ERR_CLASS="rate_limit" ;;
         *)
             return 1 ;;
