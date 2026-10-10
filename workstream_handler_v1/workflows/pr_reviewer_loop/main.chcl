@@ -66,9 +66,9 @@ data "internal" "_failure_reason" {
 
 step "resolve_pr_number" {
     target = adapter.shell.reviewer
-    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // KB-219: gh_retry's worst-case budget adds ~210s; keep the step
     // timeout comfortably above it (matches check_pr_status).
-    timeout    = "300s"
+    timeout    = "600s"
     input {
         command = templatefile("./scripts/resolve_pr_number.sh.tftpl", {
             criteria_value_1 = var.pr_url
@@ -107,7 +107,9 @@ step "resolve_pr_number" {
 
 step "check_pr_status" {
     target     = adapter.shell.reviewer
-    timeout    = "300s"
+    // KB-235: backoff budget doubled (30/60/120s => ~210s worst case) so the
+    // step timeout stays comfortably above the wrapper's ceiling.
+    timeout    = "600s"
     max_visits = var.max_poll_visits
     input {
         command = templatefile("./scripts/check_pr_status.sh.tftpl", {
@@ -123,7 +125,10 @@ step "check_pr_status" {
         }
         write {
             target = data.internal.review_result.value
-            value  = startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : "")
+            // KB-235: a transport-exhausted verdict must not clobber the
+            // reviewer's standing verdict — the run keeps reporting approved
+            // after the gh poll dies (the "merge pending github" class).
+            value  = startswith(output.stdout, "status:transport_failed") ? data.internal.review_result.value : (startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : ""))
         }
         write {
             target = data.internal._failure_reason.value
@@ -132,7 +137,10 @@ step "check_pr_status" {
             // reason so the parent fails the run with the actual status
             // output instead of misclassifying it as a lost scope session.
             // Recognized statuses reset the reason (empty on success paths).
-            value  = startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") || startswith(output.stdout, "status:ready") || startswith(output.stdout, "status:threads_open") || startswith(output.stdout, "status:changes_requested") || startswith(output.stdout, "status:pending") || startswith(output.stdout, "status:checks_failed") ? "" : "unrecognized PR status output: ${output.stdout}"
+            // KB-235: the transport verdict additionally carries the named
+            // "after retries" reason so the parent's awaiting_human report
+            // names the github transport failure instead of a generic one.
+            value  = startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") || startswith(output.stdout, "status:ready") || startswith(output.stdout, "status:threads_open") || startswith(output.stdout, "status:changes_requested") || startswith(output.stdout, "status:pending") || startswith(output.stdout, "status:checks_failed") ? "" : (startswith(output.stdout, "status:transport_failed") ? "github transport failed after retries (merge pending github): ${output.stdout}" : "unrecognized PR status output: ${output.stdout}")
         }
     }
     outcome "failure" {
@@ -153,13 +161,22 @@ step "check_pr_status" {
 // (TLS handshake timeout observed live on KB-48's merge leg, 2026-10-02 — a
 // one-off blip parked the run at awaiting_human for a green approved PR).
 // KB-219: the transport layer is now handled INSIDE the step body by the
-// shared gh_retry shim (bounded backoff, ~105s worst case — hence the 300s
-// step timeout); the verdict shape is untouched, so this KB-24-era single
-// step-level retry stays exactly as-is and keeps covering non-transport
-// step failures. Its failure arm retains the original KB-24 typed reason.
+// shared gh_retry shim (bounded backoff — hence the step timeout); the
+// verdict shape is untouched, so this KB-24-era single step-level retry stays
+// exactly as-is and keeps covering non-transport step failures. Its failure
+// arm retains the original KB-24 typed reason.
+// KB-235: the shim's schedule is now exponential WITH BACKOFF (30s/60s/120s,
+// ~210s worst case), so the step-level retry refires OUTSIDE a 60-90s
+// transport blackout instead of inside it (KB-48/KB-225 evidence). A
+// transport-exhausted run arrives here as status:transport_failed on the
+// SUCCESS path and routes via route_pr_status to the merge_pending_github
+// terminal — review_result stays intact; only non-transport step failures
+// still reach this step.
 step "retry_check_pr_status" {
     target     = adapter.shell.reviewer
-    timeout    = "300s"
+    // KB-235: backoff budget doubled (30/60/120s => ~210s worst case) so the
+    // step timeout stays comfortably above the wrapper's ceiling.
+    timeout    = "600s"
     max_visits = var.max_poll_visits
     input {
         command = templatefile("./scripts/check_pr_status.sh.tftpl", {
@@ -175,7 +192,15 @@ step "retry_check_pr_status" {
         }
         write {
             target = data.internal.review_result.value
-            value  = startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : "")
+            // KB-235: same transport preservation as check_pr_status — the
+            // verdict must not clobber the reviewer's standing verdict.
+            value  = startswith(output.stdout, "status:transport_failed") ? data.internal.review_result.value : (startswith(output.stdout, "status:checks_failed") ? "checks_failed" : (startswith(output.stdout, "status:merged") || startswith(output.stdout, "status:approved") ? "approved" : ""))
+        }
+        write {
+            target = data.internal._failure_reason.value
+            // KB-235: a transport verdict re-emitted through this step carries
+            // the same named reason as the primary step.
+            value  = startswith(output.stdout, "status:transport_failed") ? "github transport failed after retries (merge pending github): ${output.stdout}" : ""
         }
     }
     outcome "failure" {
@@ -215,6 +240,15 @@ switch "route_pr_status" {
     match {
         condition = startswith(steps.check_pr_status.stdout, "status:checks_failed")
         next      = state.checks_failed
+    }
+    // KB-235: transport-exhausted runs are not generic failures. The poll dies
+    // with the verdict after the backoff schedule is spent; the run parks in
+    // the "merge pending github" terminal with review_result intact so the
+    // awaiting_human report names the github transport failure. Must precede
+    // the default arm.
+    match {
+        condition = startswith(steps.check_pr_status.stdout, "status:transport_failed")
+        next      = state.merge_pending_github
     }
     default { next = state.failed }
 }
@@ -361,9 +395,9 @@ switch "route_review_retry" {
 
 step "post_approval" {
     target = adapter.shell.reviewer
-    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // KB-219: gh_retry's worst-case budget adds ~210s; keep the step
     // timeout comfortably above it (matches check_pr_status).
-    timeout    = "300s"
+    timeout    = "600s"
     input {
         command = templatefile("./scripts/post_review.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
@@ -388,9 +422,9 @@ step "post_approval" {
 
 step "post_changes_requested" {
     target = adapter.shell.reviewer
-    // KB-219: gh_retry's worst-case budget adds ~105s; keep the step
+    // KB-219: gh_retry's worst-case budget adds ~210s; keep the step
     // timeout comfortably above it (matches check_pr_status).
-    timeout    = "300s"
+    timeout    = "600s"
     input {
         command = templatefile("./scripts/post_review.sh.tftpl", {
             criteria_value_1 = data.internal._pr_number.value
@@ -426,6 +460,17 @@ state "changes_requested" {
 }
 
 state "checks_failed" {
+    terminal = true
+    success  = false
+}
+
+// KB-235: transport-exhausted network surface with an approving (or any
+// standing) review result. The PR is fine and GitHub is unreachable — the
+// run must NOT report failed (KB-48/KB-225: it parked awaiting_human as
+// failed while the PR merged fine a minute later). The parent surfaces the
+// "merge pending github" diagnostic from failure_reason; review_result is
+// preserved by the step writes.
+state "merge_pending_github" {
     terminal = true
     success  = false
 }
