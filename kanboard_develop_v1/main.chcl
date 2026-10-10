@@ -134,6 +134,7 @@ step "fetch_ticket" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/fetch_ticket.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             intake_root = var.intake_root
             ticket_id   = var.ticket_id
         })
@@ -198,6 +199,7 @@ step "comment_handler_started" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/comment_handler_started.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.workstream_file.value
@@ -215,6 +217,7 @@ step "set_work_state" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_work_column
@@ -317,6 +320,7 @@ step "comment_handler_done" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/comment_handler_done.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             // KB-51: the closing comment is the run's evidence trail — it
@@ -342,6 +346,7 @@ step "set_done_state" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_done_column
@@ -362,6 +367,7 @@ step "comment_handler_failed" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/comment_handler_failed.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.workstream_file.value
@@ -384,6 +390,7 @@ step "comment_develop_failed" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/comment_develop_failed.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.workstream_file.value
@@ -403,6 +410,7 @@ step "comment_done_move_failed" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/comment_done_move_failed.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.pr_url.value
@@ -427,6 +435,7 @@ step "park_after_done_move_failed" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_review_column
@@ -446,6 +455,7 @@ step "set_review_state" {
     target = adapter.shell.develop
     input {
         command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            gh_retry      = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_review_column
