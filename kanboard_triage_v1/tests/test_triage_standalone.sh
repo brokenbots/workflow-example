@@ -72,6 +72,34 @@ else
     ok "no file path into any linear_* tree"
 fi
 
+# ── 1b. KB-235: every Kanboard JSON-RPC surface retries with backoff ────────
+
+# The vendored backoff shim is a byte copy of the workstream_handler_v1
+# canonical wrapper (KB-235 ruling: ONE implementation, vendored per CRI-239
+# for independent trees). Drift in either copy must fail here, not in a run.
+if cmp -s "$TREE_ROOT/scripts/gh_retry.sh.tftpl" \
+    "$TREE_ROOT/../workstream_handler_v1/scripts/gh_retry.sh.tftpl"; then
+    ok "vendored gh_retry shim is byte-identical to the canonical wrapper"
+else
+    fail "kanboard_triage_v1/scripts/gh_retry.sh.tftpl drifted from workstream_handler_v1/scripts/gh_retry.sh.tftpl"
+fi
+
+# Splice + wrap coverage: the nine curl templates each carry the shim marker
+# AND route their transport call through gh_retry; the parent wiring passes
+# the file() arg to all ten templatefile calls; the non-network templates
+# stay unpolluted.
+gh_retry_scripts="$(grep -l '{{ .gh_retry }}' "$TREE_ROOT"/scripts/*.sh.tftpl | wc -l)"
+if [ "$gh_retry_scripts" -eq 9 ] \
+    && [ "$(grep -l 'gh_retry curl' "$TREE_ROOT"/scripts/*.sh.tftpl | wc -l)" -eq 9 ] \
+    && [ "$(grep -c '= file("./scripts/gh_retry.sh.tftpl")' "$TREE_ROOT/main.chcl")" -eq 10 ] \
+    && ! grep -q '{{ .gh_retry }}' "$TREE_ROOT/scripts/check_internal_label.sh.tftpl" \
+    && ! grep -q '{{ .gh_retry }}' "$TREE_ROOT/scripts/write_bug_report.sh.tftpl" \
+    && ! grep -q '{{ .gh_retry }}' "$TREE_ROOT/scripts/write_confirmed_workstream.sh.tftpl"; then
+    ok "gh_retry spliced into all 9 curl templates and wired at all 10 templatefile calls"
+else
+    fail "gh_retry vendoring incomplete: markers=$gh_retry_scripts (want 9), wrapped=$(grep -l 'gh_retry curl' "$TREE_ROOT"/scripts/*.sh.tftpl | wc -l), wired=$(grep -c '= file("./scripts/gh_retry.sh.tftpl")' "$TREE_ROOT/main.chcl")"
+fi
+
 # ── 2. Graph structure ───────────────────────────────────────────────────────
 
 "$CRITERIA" compile "$TREE_ROOT" --format json --out "$TMP/graph.json" 2>"$TMP/compile.err" \
@@ -432,12 +460,20 @@ export KANBOARD_URL
 shquote() {
     printf "'%s'" "${1//\'/\'\\\'\'}"
 }
+# KB-235: rendered scripts carry the vendored backoff shim inline (the engine
+# binds {{ .gh_retry }} to the shim source); splice it the same way here.
+splice_gh_retry() {
+    awk -v w="$TREE_ROOT/scripts/gh_retry.sh.tftpl" '
+        /^\{\{ \.gh_retry \}\}$/ { while ((getline line < w) > 0) print line; next }
+        { print }
+    ' "$@"
+}
 RUN_TAG="k8s-run"
 rearm_script="$TMP/rearm_k8s_run.sh"
 sed -e "s@{{ .criteria_value_1 | shellquote }}@$(shquote "$TMP/intake")@g" \
     -e "s@{{ .criteria_value_2 | shellquote }}@$(shquote "$SLUG")@g" \
     -e "s@{{ .criteria_value_3 | shellquote }}@$(shquote "$RUN_TAG")@g" \
-    "$TREE_ROOT/scripts/rearm_k8s_run.sh.tftpl" > "$rearm_script"
+    "$TREE_ROOT/scripts/rearm_k8s_run.sh.tftpl" | splice_gh_retry > "$rearm_script"
 chmod +x "$rearm_script"
 
 cp "$TREE_ROOT/tests/fixtures/task_tagged.json" "$run_dir/ticket.json"
@@ -570,7 +606,7 @@ render_comment_script() {
         sed_args+=(-e "s@{{ .criteria_value_$1 | shellquote }}@$(shquote "$2")@g")
         shift 2
     done
-    sed "${sed_args[@]}" "$TREE_ROOT/scripts/$tpl" > "$out"
+    sed "${sed_args[@]}" "$TREE_ROOT/scripts/$tpl" | splice_gh_retry > "$out"
     chmod +x "$out"
 }
 
