@@ -34,6 +34,17 @@ if [ "$http" != "200" ]; then
     cat "$run_dir/ticket.json" >&2
     exit 1
 fi
+# KB-231: an outage can return HTTP 200 with an empty or HTML body. Classify
+# the envelope here so a dead API never surfaces as a distant jq parse error.
+if ! jq -e '(type == "object") and (has("data") or has("errors"))' "$run_dir/ticket.json" >/dev/null; then
+    echo "linear rpc transport: issue fetch (non-JSON-RPC body)" >&2
+    cat "$run_dir/ticket.json" >&2
+    exit 1
+fi
+if jq -e 'has("errors")' "$run_dir/ticket.json" >/dev/null; then
+    echo "linear rpc error: issue fetch: $(jq -r '[.errors[]?.message] // [] | join("; ")' "$run_dir/ticket.json")" >&2
+    exit 1
+fi
 
 # GraphQL reports application errors in-band with HTTP 200.
 if [ "$(jq -r '.data.issue.id // empty' "$run_dir/ticket.json")" = "" ]; then

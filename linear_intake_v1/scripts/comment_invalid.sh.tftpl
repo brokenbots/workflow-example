@@ -11,7 +11,7 @@ criteria_value_5={{ .criteria_value_5 | shellquote }}
             notes="$run_dir/review-notes.md"
             [ -s "$notes" ] || printf '(no review notes recorded)\n' > "$notes"
 
-            curl -sS -f \
+            resp=$(curl -sS -f \
                 -H "Authorization: $LINEAR_API_KEY" \
                 -H "Content-Type: application/json" \
                 -d "$(jq -n \
@@ -23,7 +23,20 @@ Reviewer notes:
 " \
                     --rawfile notes "$notes" \
                     '{query: $q, variables: {id: $id, body: ($header + $notes)}}')" \
-                https://api.linear.app/graphql \
-                | jq -e '.data.commentCreate.success == true' >/dev/null
+                https://api.linear.app/graphql) || {
+    echo "linear rpc transport: commentCreate" >&2
+    exit 1
+}
+[ -n "$resp" ] || { echo "linear rpc transport: commentCreate (empty response)" >&2; exit 1; }
+printf '%s' "$resp" | jq -e '(type == "object") and (has("data") or has("errors"))' >/dev/null \
+    || { echo "linear rpc transport: commentCreate (non-JSON-RPC body)" >&2; printf '%s\n' "$resp" >&2; exit 1; }
+if printf '%s' "$resp" | jq -e 'has("errors")' >/dev/null; then
+    echo "linear rpc error: commentCreate: $(printf '%s' "$resp" | jq -r '[.errors[]?.message] // [] | join("; ")')" >&2
+    exit 1
+fi
+if ! printf '%s' "$resp" | jq -e '.data.commentCreate.success == true' >/dev/null; then
+    echo "linear rpc error: commentCreate (success=false)" >&2
+    exit 1
+fi
 
             echo "comment posted"
