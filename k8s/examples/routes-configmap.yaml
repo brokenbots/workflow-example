@@ -382,8 +382,8 @@ data:
         },
         "kanboard-triage-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494",
-          "ref": "9e04399fd8dc0955bc7b77f199fea2e97f176494",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=a81d07a3b13c567f0a4910ac0848e6126b6c4968",
+          "ref": "a81d07a3b13c567f0a4910ac0848e6126b6c4968",
           "class": "triage",
           "namespace": "criteria-jobs",
           "volumes": [
@@ -439,8 +439,8 @@ data:
         },
         "kanboard-develop-url": {
           "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=c1708d9fee1176814c40e583fd5a15b5c607639f",
-          "ref": "c1708d9fee1176814c40e583fd5a15b5c607639f",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=a81d07a3b13c567f0a4910ac0848e6126b6c4968",
+          "ref": "a81d07a3b13c567f0a4910ac0848e6126b6c4968",
           "namespace": "criteria-jobs",
           "volumes": [
             {
