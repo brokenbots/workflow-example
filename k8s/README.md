@@ -6,9 +6,12 @@ a cluster. The recommended deployment is operator-based and autonomous:
 
 * The `criteria-k8s-operator` reconciles a `CriteriaRun` custom resource into
   a runner `Job` plus one adapter `Job` per adapter type.
-* The `criteria-linear-watcher` polls Linear and creates a `CriteriaRun` for each
-  ticket whose state is in a route's declared states list (routes omitting the
-  list default to Triage).
+* The `criteria-kanboard-watcher` (raw `k8s/kanboard-watcher.yaml` overlay,
+  applied after `install.yaml` — not helm-managed) polls Kanboard and creates
+  a `CriteriaRun` for each ticket tagged with the configured trigger tag.
+  The former `criteria-linear-watcher` that did this for Linear was removed
+  from the codebase 2026-10-09 (KB-228) after the Linear → Kanboard cutover
+  completed 2026-10-08.
 * A manual path lets you create `CriteriaRun` objects by hand for testing.
 * The host-based launcher scripts remain available for local testing only.
 
@@ -33,12 +36,12 @@ An operator-based run is driven by the `criteria-k8s-operator` and scheduled as
 a group of batch/v1 Jobs in the `criteria-jobs` namespace.
 
 ```text
-Linear ticket in Triage
+Kanboard ticket tagged with the trigger tag
         |
         v
-+---------------------------+
-| criteria-linear-watcher |  (polls Linear, creates CriteriaRun)
-+---------------------------+
++------------------------------+
+| criteria-kanboard-watcher  |  (polls Kanboard, creates CriteriaRun)
++------------------------------+
         |
         v
 +---------------------------+
@@ -52,10 +55,13 @@ Linear ticket in Triage
    +---------+ +-------------+ +-------------+
 ```
 
+(The same shape used to run with `criteria-linear-watcher` polling Linear;
+that component was retired 2026-10-09, KB-228 — Linear cutover complete.)
+
 | Resource | Role |
 |----------|------|
 | `CriteriaRun` | Custom resource that describes the ticket to process, repository, image, and runtime settings. |
-| `criteria-linear-watcher` | Polls Linear for tickets in the states each route declares (default Triage) and creates a `CriteriaRun` for each one. |
+| `criteria-kanboard-watcher` | Polls Kanboard for tickets tagged with the configured trigger tag and creates a `CriteriaRun` for each one (raw `k8s/kanboard-watcher.yaml` overlay; the `criteria-linear-watcher` counterpart was removed 2026-10-09, KB-228). |
 | `criteria-k8s-operator` | Watches `CriteriaRun` resources and reconciles them into child Jobs. |
 | Runner Job | `repo-clone` init container clones the repository; `workflow-runner` runs `criteria apply` and hosts the remote shim. |
 | Adapter Job | One Job per adapter type (`shell`, `copilot`). Adapters phone home to the runner shim over the pod network. |
@@ -93,11 +99,13 @@ temporary root.
 
 ## Autonomous flow
 
-When a Linear ticket in the watched project is moved to the `Triage` state:
+When a Kanboard ticket tagged with the configured trigger tag arrives in the
+watched project:
 
-1. The `criteria-linear-watcher` reads the ticket, extracts a repository URL
-   from the description, and checks whether a `CriteriaRun` for that ticket is
-   already active.
+1. The `criteria-kanboard-watcher` reads the ticket, resolves a repository URL,
+   and checks whether a `CriteriaRun` for that ticket is already active. (The
+   former `criteria-linear-watcher` did the same for Linear until it was
+   retired 2026-10-09, KB-228.)
 2. If no active run exists, the watcher creates a `CriteriaRun` in the
    `criteria-jobs` namespace. The `CriteriaRun` carries the ticket ID,
    repository URL, image, provider URL, and default gate settings.
@@ -227,29 +235,30 @@ kubectl apply -f criteria-k8s/config/install.yaml
 ```
 
 This creates the `criteria-jobs` namespace, the `CriteriaRun` CRD, the
-operator's RBAC, and the `criteria-k8s-operator` and `criteria-linear-watcher`
-Deployments.
+operator's RBAC, and the `criteria-k8s-operator` Deployment. The
+`criteria-linear-watcher` Deployment that `install.yaml` used to ship here was
+removed 2026-10-09 (KB-228, Linear cutover complete); the kanboard watcher is
+provided by the separate `k8s/kanboard-watcher.yaml` overlay instead.
 
-### 8. Verify the watcher picks up Linear tickets
+### 8. Verify the watcher picks up tickets
 
-Wait for the operator and watcher to be ready:
+Wait for the operator to be ready:
 
 ```sh
 kubectl wait -n criteria-jobs deployment/criteria-k8s-operator \
   --for=condition=Available --timeout=120s
-kubectl wait -n criteria-jobs deployment/criteria-linear-watcher \
-  --for=condition=Available --timeout=120s
 ```
 
-Tail the watcher logs:
+Tail the kanboard watcher logs (raw overlay `k8s/kanboard-watcher.yaml`):
 
 ```sh
-kubectl logs -n criteria-jobs deployment/criteria-linear-watcher -f
+kubectl logs -n criteria-jobs deployment/criteria-kanboard-watcher -f
 ```
 
-Move a Linear ticket in the watched project to the `Triage` state and include a
-repository URL in the ticket. The watcher should log that it created a
-`CriteriaRun` for the ticket.
+Create a Kanboard ticket tagged with the trigger tag and include a repository
+URL in it. The watcher should log that it created a `CriteriaRun` for the
+ticket. (The Linear polling instructions that used to live here refer to the
+retired `criteria-linear-watcher`, removed 2026-10-09 with KB-228.)
 
 ---
 
@@ -257,9 +266,11 @@ repository URL in the ticket. The watcher should log that it created a
 
 ### Autonomous path
 
-Once the watcher is running, move any Linear ticket in the watched project to
-`Triage`. The watcher creates a `CriteriaRun`; the operator reconciles it into
-Jobs automatically.
+Once the watchers are running, tag a Kanboard ticket with the trigger tag
+(`criteria-kanboard-watcher`). The watcher creates a `CriteriaRun`; the
+operator reconciles it into Jobs automatically. (The old Linear flow — move
+any ticket to `Triage` — ended with the `criteria-linear-watcher` retirement
+on 2026-10-09, KB-228.)
 
 ### Manual path
 
