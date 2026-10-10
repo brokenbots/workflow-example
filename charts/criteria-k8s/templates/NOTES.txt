@@ -2,13 +2,16 @@ The criteria-k8s stack has been {{ if .Release.IsUpgrade -}}upgraded{{- else -}}
 
 Resources deployed:
   - criteria-k8s-operator (reconciles CriteriaRun -> runner/adapter Jobs)
-  - criteria-linear-watcher (polls Linear, creates CriteriaRuns)
 {{- if .Values.castle.enabled }}
   - castle (control plane)
 {{- end }}
   - PVCs {{ .Values.pvc.data.name }} and {{ .Values.pvc.repo.name }}
   - SecretProviderClasses linear-spc and copilot-spc (OpenBao CSI provider)
   - pod-adapter-scripts ConfigMap (runner/adapter wrapper scripts)
+
+Ticket polling is not part of this release: the criteria-linear-watcher was
+retired and removed 2026-10-09 (KB-228, Linear cutover complete). The
+kanboard-watcher deploys as a raw overlay (k8s/kanboard-watcher.yaml).
 
 External prerequisites (not managed by this chart):
 
@@ -33,4 +36,6 @@ External prerequisites (not managed by this chart):
 Check the rollout:
 
   kubectl wait -n {{ include "criteria-k8s.namespace" . }} deployment/criteria-k8s-operator --for=condition=Available --timeout=120s
-  kubectl wait -n {{ include "criteria-k8s.namespace" . }} deployment/criteria-linear-watcher --for=condition=Available --timeout=120s
+
+(The criteria-linear-watcher Deployment was retired 2026-10-09, KB-228: 
+Linear cutover complete. There is no chart watcher Deployment to wait for.)
