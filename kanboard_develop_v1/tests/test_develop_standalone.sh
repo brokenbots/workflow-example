@@ -930,9 +930,11 @@ if [ "$rc_exh" -ne 0 ] \
 else
     fail "transport exhaustion must fail with 'kanboard rpc transport: getTask' after 4 attempts: rc=$rc_exh attempts=$attempts_exh err=${err_exh:-<none>}"
 fi
-[ ! -s "$ticket" ] \
-    && ok "an exhausted transport writes no ticket.json" \
-    || fail "an exhausted transport must not write ticket.json"
+if [ ! -s "$ticket" ]; then
+    ok "an exhausted transport writes no ticket.json"
+else
+    fail "an exhausted transport must not write ticket.json"
+fi
 
 # Restore the happy-path config: the sections below share this mock.
 jq -n '{force_tags_error: false}' > "$FETCH_CFG"

@@ -466,7 +466,7 @@ splice_gh_retry() {
     awk -v w="$TREE_ROOT/scripts/gh_retry.sh.tftpl" '
         /^\{\{ \.gh_retry \}\}$/ { while ((getline line < w) > 0) print line; next }
         { print }
-    ' "$@"
+    '
 }
 RUN_TAG="k8s-run"
 rearm_script="$TMP/rearm_k8s_run.sh"
