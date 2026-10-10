@@ -904,14 +904,15 @@ jq -n '{reset_methods: {getTask: 2}}' > "$FETCH_CFG"
 rm -f "$FETCH_LOG"
 rm -f "$ticket"
 out_reset="$(GH_RETRY_BACKOFF_SECONDS="0 0 0" "$fetch_script" 2>/dev/null)" && rc_reset=0 || rc_reset=$?
+get_task_attempts_reset="$(grep -c '^getTask$' "$FETCH_ATTEMPTS")"
 attempts_reset="$(wc -l < "$FETCH_ATTEMPTS" | tr -d ' ')"
 if [ "$rc_reset" -eq 0 ] \
     && [ "$out_reset" = "fetched KB-140: Deploy job races the cache warm step [column: 6]" ] \
-    && [ "$attempts_reset" -eq 3 ] \
-    && [ "$(grep -c '^getTask$' "$FETCH_ATTEMPTS")" -eq 3 ]; then
-    ok "fetch rides the backoff through two transport resets (3 attempts, success output intact)"
+    && [ "$get_task_attempts_reset" -eq 3 ] \
+    && [ "$attempts_reset" -eq 5 ]; then
+    ok "fetch rides the backoff through two transport resets (3 getTask attempts, success output intact)"
 else
-    fail "fetch must ride the backoff through two resets: rc=$rc_reset out=${out_reset:-<none>} attempts=$attempts_reset"
+    fail "fetch must ride the backoff through two resets: rc=$rc_reset out=${out_reset:-<none>} getTask attempts=$get_task_attempts_reset total=$attempts_reset"
 fi
 
 # Case 2 (the failure-injection case): the board kills getTask on every

@@ -2,8 +2,10 @@
 #
 # Rendered into step scripts via templatefile (or file() in the entrypoint tree)
 # before any gh call is made. One copy per tree keeps each tree self-contained:
-# workstream_handler_v1/scripts (canonical), devops_triage_v1/scripts and
-# linear_intake_v1/scripts are vendored copies of this file.
+# this file is vendored VERBATIM into the scripts/ dir of devops_triage_v1, the
+# Linear intake tree, kanboard_develop_v1 and kanboard_triage_v1; the canonical
+# copy lives beside the comment's home tree (workstream_handler_v1). All copies
+# are compared byte-for-byte by the tree suites; edit one, sync all.
 #
 # Contract (KB-219, dave ruling 2026-10-08):
 #   * Retries ONLY transient transport errors (TLS handshake timeout,
