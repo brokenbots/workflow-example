@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Behavioral test for KB-219: the shared bounded-backoff retry wrapper.
+# Behavioral test for KB-219: the shared bounded-backoff retry wrapper, as
+# extended by KB-235 (backoff that spans a 60-90s transport blackout, HTTP 4xx
+# surfaces the named failure instead of being retried, and a cross-subshell
+# exhaustion signal that lets capture sites re-emit a named transport verdict).
 #
 # Backdrop (dave ruling 2026-10-08): two 60m+ run cycles were lost because
 # check_pr_status and its single 10s retry both landed inside the same ~30s
-# api.github.com TLS-handshake-timeout window. The wrapper is the transport
-# layer under every GitHub API / gh call: bounded retries (4 attempts,
-# 15/30/60s, per-call overridable) for transient network classes only — never
-# for verdict-shaped results.
+# api.github.com TLS-handshake-timeout window (KB-48/KB-225: the immediate
+# retry refired inside the same blackout window and failed identically). The
+# wrapper is the transport layer under every GitHub API / gh call: bounded
+# retries (4 attempts, 30/60/120s, per-call overridable) for transient network
+# classes only — never for verdict-shaped results, never for HTTP 4xx.
 #
 # Verified against a scenario-driven stub gh/git:
 #   1. a verdict body (rc 0) passes through with exactly one call;
@@ -27,6 +31,19 @@
 #  13. a bare `gh_retry` (no command) is rejected with the friendly rc 2
 #      evidence line instead of dying on the engine's post-shift `$1` read
 #      under set -u.
+#  14. the KB-235 default schedule (30/60/120s) and sleep budget (210s) are
+#      pinned in the canonical wrapper source;
+#  15. HTTP 4xx texts never retry — curl -f "(22) ... returned error: 404",
+#      gh's HTTP 404 and Bad-credentials pass through in one call — while
+#      429/secondary-rate-limit (transient despite the 4xx shape), 5xx and
+#      TLS classes still retry;
+#  16. after a capture-site schedule exhaustion, gh_retry_transport_dead sees
+#      the exhaustion across the $(...) subshell boundary via the state file
+#      and gh_retry_transport_verdict re-emits the named
+#      status:transport_failed verdict and exits 0; a non-transport failure
+#      exits the ORIGINAL rc instead; and
+#  17. a converged success REWRITES the state file, so a stale exhaustion
+#      never survives a fresh win.
 
 set -uo pipefail
 
@@ -69,6 +86,7 @@ STUB
 mkdir -p "${WORK_ROOT}/bin"
 make_stub "${WORK_ROOT}/bin/gh"
 make_stub "${WORK_ROOT}/bin/git"
+make_stub "${WORK_ROOT}/bin/curl"
 
 # Policy files: each line is a scripted gh/git answer for one call.
 printf '0|{"state":"APPROVED"}|\n' >"${WORK_ROOT}/p1.policy"
@@ -342,6 +360,9 @@ else
 fi
 err_has "attempt=1/4 result=retry class=tls_handshake_timeout wait=1s" s11 "first attempt logged its class"
 err_has "result=success class=none" s11 "convergence after the window logged"
+# Scenario 11 swapped bin/gh for its deny-window stub, which ignores
+# GH_RETRY_STUB_POLICY; later scenarios need the policy-driven stub back.
+make_stub "${WORK_ROOT}/bin/gh"
 
 # Scenario 12 is a reviewer follow-up: with NO gh anywhere on PATH, the bare
 # `gh` fallback must fail the call honestly in one attempt. Before the
@@ -387,6 +408,132 @@ check "bare gh_retry rejected with rc 2, nothing executed" 'RC=2' "$out"
 check "no stub call on a degenerate invocation" 0 "$(call_count s13)"
 err_has "attempt=1/0 result=pass_through class=non_transient label=none (no command given)" s13 \
     "degenerate call logged the honest pass-through evidence line"
+
+if [ "${FAILED}" -gt 0 ]; then
+    echo "FAILED: ${FAILED} assertion(s)" >&2
+    exit 1
+fi
+
+# ── KB-235 scenarios ─────────────────────────────────────────────────────────
+
+# Scenario 14 pins the KB-235 schedule structurally: the contract schedule is
+# 30s/60s/120s with a 210s cumulative script budget. It cannot be exercised
+# with real default sleeps inside a CI-fast test (30+60+120 = 210s), so the
+# default VALUES are pinned here while scenario 2/4/6/11 exercise the same
+# engine paths with compressed backoff and real clocks.
+echo "==> Scenario 14: KB-235 default backoff schedule and budget pinned"
+grep -qF 'GH_RETRY_BACKOFF_SECONDS:-"30 60 120"' "${ROOT_DIR}/scripts/gh_retry.sh.tftpl" \
+    && ok "default backoff schedule pinned at 30/60/120" \
+    || fail "default backoff schedule is not the KB-235 contract 30/60/120"
+grep -qF '_gr_budget=${GH_RETRY_SCRIPT_SLEEP_BUDGET:-210}' "${ROOT_DIR}/scripts/gh_retry.sh.tftpl" \
+    && ok "default sleep budget pinned at 210s" \
+    || fail "default sleep budget is not the KB-235 contract 210s"
+grep -qF '_gr_budget=210 ;; esac' "${ROOT_DIR}/scripts/gh_retry.sh.tftpl" \
+    && ok "invalid budget fallback pinned at 210s" \
+    || fail "invalid budget fallback no longer the KB-235 budget"
+
+echo "==> Scenario 15: HTTP 4xx never retry; 429 and 5xx still do"
+printf '1||HTTP 404: Not Found|\n' >"${WORK_ROOT}/p15a.policy"
+out=$(scenario s15a "${WORK_ROOT}/p15a.policy" 'gh_retry gh api repos/o/r/pulls/42')
+check "gh HTTP 404 passed through in ONE call, no retry" 'RC=1' "$out"
+check "gh HTTP 404 made exactly one call" 1 "$(call_count s15a)"
+err_has "result=pass_through class=non_transient" s15a "4xx surfaced the named failure immediately"
+
+printf '1||curl: (22) The requested URL returned error: 404|\n' >"${WORK_ROOT}/p15b.policy"
+out=$(scenario s15b "${WORK_ROOT}/p15b.policy" 'gh_retry curl -sS -f -X POST -d x https://kanboard.example/jsonrpc.php')
+check "curl -f 4xx error text passed through in ONE call" 'RC=1' "$out"
+check "curl -f 4xx made exactly one call" 1 "$(call_count s15b)"
+err_has "result=pass_through class=non_transient" s15b "curl 4xx text classified non-transient (KB-235 fix)"
+
+printf '1||HTTP 401: Bad credentials|\n' >"${WORK_ROOT}/p15c.policy"
+out=$(scenario s15c "${WORK_ROOT}/p15c.policy" 'GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user')
+check "auth failure (401/Bad credentials) passed through immediately" 'RC=1' "$out"
+check "auth failure made exactly one call" 1 "$(call_count s15c)"
+
+printf '1||curl: (22) The requested URL returned error: 429|\n' >"${WORK_ROOT}/p15d.policy"
+out=$(scenario s15d "${WORK_ROOT}/p15d.policy" 'GH_RETRY_MAX_ATTEMPTS="3" GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry curl -sS -f -X POST -d x https://kanboard.example/jsonrpc.php')
+check "429 retried despite the 4xx shape" 3 "$(call_count s15d)"
+check "429 exhaustion returned the last rc" 'RC=1' "$out"
+err_has "result=exhausted class=rate_limit" s15d "429 classified as rate_limit"
+
+printf '1||API rate limit exceeded for 1.2.3.4. Please wait|\n' >"${WORK_ROOT}/p15e.policy"
+out=$(scenario s15e "${WORK_ROOT}/p15e.policy" 'GH_RETRY_MAX_ATTEMPTS="2" GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user')
+check "gh secondary rate limit text retried" 2 "$(call_count s15e)"
+err_has "result=retry class=rate_limit" s15e "gh rate-limit text classified as rate_limit"
+
+printf '1||HTTP 502: Bad Gateway|\n' >"${WORK_ROOT}/p15f.policy"
+out=$(scenario s15f "${WORK_ROOT}/p15f.policy" 'GH_RETRY_MAX_ATTEMPTS="2" GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user')
+check "5xx still retried" 2 "$(call_count s15f)"
+err_has "result=retry class=http_5xx" s15f "5xx classified as http_5xx"
+
+# Scenario 16 is the KB-235 cross-subshell exhaustion signal: a capture-site
+# call exhausts inside $(...) where in-process env vars cannot survive, then
+# gh_retry_transport_dead reads the terminal state file and
+# gh_retry_transport_verdict re-emits the named protocol verdict and exits 0.
+echo "==> Scenario 16: transport verdict helpers across the capture subshell"
+printf '1||fatal: unable to access .api.github.com/: TLS handshake timeout|\n' >"${WORK_ROOT}/p16.policy"
+out=$(scenario s16 "${WORK_ROOT}/p16.policy" '
+GH_RETRY_BACKOFF_SECONDS="0 0 0"
+if v=$(gh_retry gh api /user 2>/dev/null); then
+    echo "BUG capture succeeded"
+elif gh_retry_transport_dead; then
+    echo "DEAD=${GH_RETRY_DEAD_CLASS}/${GH_RETRY_DEAD_ATTEMPTS}"
+else
+    echo "BUG state file does not report the exhaustion"
+fi')
+check "exhaustion seen across the subshell with class and attempts" \
+    'DEAD=tls_handshake_timeout/4' "$(printf '%s' "$out" | head -n 1)"
+
+out=$(scenario s16b "${WORK_ROOT}/p16.policy" '
+set +e
+( GH_RETRY_BACKOFF_SECONDS="0 0 0" v=$(gh_retry gh api /user 2>/dev/null); gh_retry_transport_verdict "$?" 42 "pr state lookup" )
+og=$?
+if [ "$og" -eq 0 ]; then
+    echo "guard rc=0 (exit inside the guard)"
+else
+    echo "BUG transport guard did not exit 0 for the exhaustion: rc=$og"
+fi')
+lines16b=$(printf '%s' "$out" | sed '$d')
+check "transport guard re-emitted the named verdict before its exit" \
+    'status:transport_failedpr_number=42transport_class=tls_handshake_timeouttransport_attempts=4transport_stage=pr state lookup' \
+    "$(printf '%s' "$out" | sed '$d' | head -n 5 | tr -d '\n')"
+check "transport guard exited 0 and nothing after it ran" \
+    'guard rc=0 (exit inside the guard)' "$(printf '%s' "$out" | sed '$d' | tail -n 1)"
+check "scenario body returned rc 0 after the guard's exit 0" 'RC=0' "$(printf '%s' "$out" | tail -n 1)"
+
+# Scenario 17: the guard's non-transport path exits the ORIGINAL rc (KB-24's
+# honest failure route stays in charge), and a converged success REWRITES the
+# state file so a stale exhaustion never survives a fresh win.
+echo "==> Scenario 17: guard honors non-transport failures; successes clear the signal"
+printf '1||HTTP 404: Not Found|\n' >"${WORK_ROOT}/p17a.policy"
+out=$(scenario s17a "${WORK_ROOT}/p17a.policy" '
+set +e
+( v=$(gh_retry gh api repos/o/r 2>/dev/null); gh_retry_transport_verdict "$?" 42 "pr state lookup" )
+og=$?
+if [ "$og" -eq 1 ]; then
+    echo "original rc propagated: $og"
+else
+    echo "BUG non-transport guard rc: $og"
+fi')
+check "non-transport failure exits the ORIGINAL rc, no transport verdict" \
+    'original rc propagated: 1' "$(printf '%s' "$out" | sed '$d')"
+check "scenario body returned rc 0 after the guard's rc-1 exit" 'RC=0' "$(printf '%s' "$out" | tail -n 1)"
+
+printf '1||fatal: unable to access .api.github.com/: TLS handshake timeout|\n0|{"state":"OPEN"}|\n' >"${WORK_ROOT}/p17b.policy"
+out=$(scenario s17b "${WORK_ROOT}/p17b.policy" '
+set +e
+GH_RETRY_BACKOFF_SECONDS="0 0 0"
+if v=$(gh_retry gh api /user 2>/dev/null); then
+    echo "capture value: $v"
+fi
+if gh_retry_transport_dead; then
+    echo "BUG stale exhaustion survived a fresh success"
+else
+    echo "signal cleared after convergence"
+fi')
+check "converged capture returned its value" 'capture value: {"state":"OPEN"}' "$(printf '%s' "$out" | head -n 1)"
+check "fresh success rewrote the state file (stale exhaustion cleared)" \
+    'signal cleared after convergence' "$(printf '%s' "$out" | sed -n 2p)"
 
 if [ "${FAILED}" -gt 0 ]; then
     echo "FAILED: ${FAILED} assertion(s)" >&2
