@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Template inputs (shellquoted): same missing-assignment fix as the triage
 # tree - without these, $ticket_id / $intake_root are unset under set -u.
 intake_root={{ .intake_root | shellquote }}
