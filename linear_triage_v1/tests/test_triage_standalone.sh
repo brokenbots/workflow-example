@@ -307,58 +307,70 @@ require_equal "$(predecessors rearm_k8s_run)" "$(printf 'route_ready\nset_confir
 
 export LINEAR_API_KEY="mock-key"
 
-MOCK="$TMP/mock_linear.py"
-cat > "$MOCK" <<'PY'
-import json
-import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+# The mock is Node (same dependency every other standalone suite uses) so the
+# suite can run wherever node exists instead of only where python3 does.
+MOCK="$TMP/mock_linear.js"
+cat > "$MOCK" <<'JS'
+const http = require('http');
+const fs = require('fs');
+const [cfgFile, mutFile] = process.argv.slice(2);
 
-CFG_FILE, MUT_FILE = sys.argv[1], sys.argv[2]
+const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+        const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
+        const parsed = JSON.parse(body);
+        const query = parsed.query || '';
+        let resp;
+        // KB-231 outage modes: the same rc-0 responses the 2026-10-09 kanboard
+        // incidents produced. An empty body must never reach the script as
+        // parseable, and an HTML body must surface the transport fatal. The
+        // outage answers before any mutation is recorded — nothing acts.
+        if (cfg.body_mode === 'empty') {
+            res.writeHead(200, { 'Content-Length': 0 });
+            res.end();
+            return;
+        }
+        if (cfg.body_mode === 'html302') {
+            const html = '<html><body>302 Found. Object moved.</body></html>';
+            res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': Buffer.byteLength(html) });
+            res.end(html);
+            return;
+        }
+        if (/issueUpdate/.test(query)) {
+            fs.appendFileSync(mutFile, JSON.stringify(parsed.variables.labelIds) + '\n');
+            if ((cfg.mutation_status || 200) !== 200) {
+                res.writeHead(cfg.mutation_status);
+                res.end();
+                return;
+            }
+            resp = { data: { issueUpdate: { success: cfg.mutation_success !== undefined ? cfg.mutation_success : true } } };
+        } else if (/issueLabels/.test(query)) {
+            resp = { data: {
+                issue: { labels: { nodes: cfg.issue.label_ids.map((id) => ({ id })) } },
+                issueLabels: { nodes: (cfg.run_label_present !== false)
+                    ? [{ id: cfg.run_label_id }] : [] },
+            } };
+        } else {
+            resp = { errors: [{ message: 'unexpected query' }] };
+        }
+        const data = JSON.stringify(resp);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) });
+        res.end(data);
+    });
+});
 
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def do_POST(self):
-        cfg = json.load(open(CFG_FILE))
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        query = body.get("query", "")
-        if "issueUpdate" in query:
-            with open(MUT_FILE, "a") as f:
-                f.write(json.dumps(body["variables"]["labelIds"]) + "\n")
-            if cfg.get("mutation_status", 200) != 200:
-                self.send_response(cfg["mutation_status"])
-                self.end_headers()
-                return
-            resp = {"data": {"issueUpdate": {"success": cfg.get("mutation_success", True)}}}
-        elif "issueLabels" in query:
-            issue = cfg["issue"]
-            resp = {"data": {
-                "issue": {"labels": {"nodes": [{"id": i} for i in issue["label_ids"]]}},
-                "issueLabels": {"nodes": ([{"id": cfg["run_label_id"]}]
-                                          if cfg.get("run_label_present", True) else [])},
-            }}
-        else:
-            resp = {"errors": [{"message": "unexpected query"}]}
-        data = json.dumps(resp).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-
-server = HTTPServer(("127.0.0.1", 0), Handler)
-print(server.server_address[1], flush=True)
-server.serve_forever()
-PY
+server.listen(0, '127.0.0.1', () => {
+    console.log(server.address().port);
+});
+JS
 
 MOCK_CFG="$TMP/mock_config.json"
 MUT_FILE="$TMP/mutations.jsonl"
 MOCK_LOG="$TMP/mock.log"
 
-python3 "$MOCK" "$MOCK_CFG" "$MUT_FILE" >"$MOCK_LOG" 2>&1 &
+node "$MOCK" "$MOCK_CFG" "$MUT_FILE" >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 trap 'kill "$MOCK_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
 
@@ -482,6 +494,30 @@ if "$rearm_script" >/dev/null 2>&1; then
 else
     ok "issueUpdate HTTP error fails the re-arm"
 fi
+
+# KB-231: outage bodies (empty rc-0 body, HTML-302 page) must fail at the
+# named stage — the label read is the first hit — never leak downstream as a
+# generic jq parse failure, and never write.
+for mode in empty html302; do
+    jq -n --argjson ids '["l1", "l2"]' --arg run_id "l-k8s" --argjson ok true \
+        --argjson status 200 --argjson present true --arg mode "$mode" \
+        '{issue: {label_ids: $ids}, run_label_id: $run_id, mutation_success: $ok,
+          mutation_status: $status, run_label_present: $present, body_mode: $mode}' \
+        > "$MOCK_CFG"
+    rm -f "$MUT_FILE"
+    err="$( "$rearm_script" 2>&1 >/dev/null )" && rc_outage=0 || rc_outage=$?
+    if [ "$mode" = empty ]; then want="linear rpc transport: issueLabels (empty response)"; else want="linear rpc transport: issueLabels (non-JSON-RPC body)"; fi
+    if [ "$rc_outage" -ne 0 ] \
+        && printf '%s' "$err" | grep -qF "$want" \
+        && ! printf '%s' "$err" | grep -qF "invalid JSON text"; then
+        ok "an $mode body fails the re-arm at issueLabels with its named fatal"
+    else
+        fail "an $mode body must fail with '$want' (rc=$rc_outage out=$err)"
+    fi
+    [ -z "$(mutations)" ] || fail "an $mode body must not write labels"
+done
+# Restock a healthy config for anything after.
+cfg '["l1", "l2", "l3"]' "l-k8s"
 
 # ── 7. linear_intake_v1 untouched, develop path intact ───────────────────────
 
