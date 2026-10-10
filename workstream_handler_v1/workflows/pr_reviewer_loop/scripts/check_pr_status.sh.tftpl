@@ -1,9 +1,20 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 set -eu
 {{ .gh_retry }}
+# KB-235: transport surfaces (TLS timeout, connection refused/reset) hit a
+# 60-90s api.github.com blackout window where an immediate retry fails
+# identically (KB-48/KB-225). The wrapper retries those classes with the
+# 30/60/120s backoff schedule; when the schedule exhausts across a capture
+# site, gh_retry_transport_verdict re-emits the named status:transport_failed
+# protocol verdict (exit 0) instead of dying under set -eu, so the reviewer
+# loop can park the run as merge_pending_github with review_result intact.
+# Non-transport failures (HTTP 4xx, verdict shapes) exit the original rc and
+# take the pre-existing honest routes; deliberately graceful sites (wf_count,
+# head_sha, approved_head) keep their fallbacks.
 pr="$criteria_value_1"
 
-pr_state=$(gh pr view "$pr" --json state --jq '.state')
+pr_state=$(gh pr view "$pr" --json state --jq '.state') || \
+    gh_retry_transport_verdict "$?" "$pr" "pr state lookup"
 if [ "$pr_state" = "MERGED" ]; then
     echo "status:merged"
     echo "pr_number=$pr"
@@ -20,20 +31,21 @@ fi
 # round in a no_work cycle until max_visits (observed live on CRI-265: PR #61,
 # green CI, six rounds of "status:checks_failed"). The API path is
 # version-stable and needs only `gh api`.
-owner=$(gh repo view --json owner --jq '.owner.login')
-repo=$(gh repo view --json name --jq '.name')
+owner=$(gh repo view --json owner --jq '.owner.login') || \
+    gh_retry_transport_verdict "$?" "$pr" "repo metadata lookup"
+repo=$(gh repo view --json name --jq '.name') || \
+    gh_retry_transport_verdict "$?" "$pr" "repo metadata lookup"
 
-checks_rc=0
-checks_json=$(gh_retry_merged gh api "repos/$owner/$repo/commits/$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')/check-runs" \
-    --jq '[.check_runs[] | {name: .name, state: .status, conclusion: .conclusion}]') || checks_rc=$?
-
-if [ "$checks_rc" -ne 0 ]; then
-    echo "status:pending"
-    echo "pr_number=$pr"
-    echo "checks=api_unreachable"
-    echo "$checks_json" >&2
-    exit 0
-fi
+# KB-235: capture the head SHA as its own guarded transport surface. Nesting the
+# poll inside the checks URL would let one inner transport death starve the
+# URL (commits//check-runs, HTTP 404) and clobber the wrapper's exhaustion
+# record with a non-transient pass-through, dying under set -eu with no named
+# verdict. Guarded, it re-emits the transport verdict like every other surface.
+head_ref=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid') || \
+    gh_retry_transport_verdict "$?" "$pr" "head ref lookup"
+checks_json=$(gh_retry_merged gh api "repos/$owner/$repo/commits/$head_ref/check-runs" \
+    --jq '[.check_runs[] | {name: .name, state: .status, conclusion: .conclusion}]') || \
+    gh_retry_transport_verdict "$?" "$pr" "checks poll"
 
 # No check runs at all: CI has not registered yet (common right after a push)
 # OR the repo has no Actions workflows at all (would loop pending forever,
@@ -68,7 +80,8 @@ if [ "$any_failing" -gt 0 ]; then
     exit 0
 fi
 
-review_decision=$(gh pr view "$pr" --json reviewDecision --jq '.reviewDecision // "REVIEW_REQUIRED"')
+review_decision=$(gh pr view "$pr" --json reviewDecision --jq '.reviewDecision // "REVIEW_REQUIRED"') || \
+    gh_retry_transport_verdict "$?" "$pr" "review decision lookup"
 
 # Viewer-agnostic approval check (mirrors the parent's check_pr):
 # reviewDecision comes back empty for the PR author, and on repos
@@ -91,7 +104,8 @@ threads_json=$(gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated}}}}}' \
     -f owner="$owner" \
     -f repo="$repo" \
-    -F number="$pr")
+    -F number="$pr") || \
+    gh_retry_transport_verdict "$?" "$pr" "review threads lookup"
 unresolved=$(printf '%s' "$threads_json" | \
     jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select((.isOutdated|not) and (.isResolved|not))] | length')
 

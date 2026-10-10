@@ -105,6 +105,32 @@ else
     ok "no file path into any linear_* tree"
 fi
 
+# ── 1b. KB-235: every Kanboard JSON-RPC surface retries with backoff ────────
+
+# The vendored backoff shim is a byte copy of the workstream_handler_v1
+# canonical wrapper (KB-235 ruling: ONE implementation, vendored per CRI-239
+# for independent trees). Drift in either copy must fail here, not in a run.
+if cmp -s "$TREE_ROOT/scripts/gh_retry.sh.tftpl" \
+    "$TREE_ROOT/../workstream_handler_v1/scripts/gh_retry.sh.tftpl"; then
+    ok "vendored gh_retry shim is byte-identical to the canonical wrapper"
+else
+    fail "kanboard_develop_v1/scripts/gh_retry.sh.tftpl drifted from workstream_handler_v1/scripts/gh_retry.sh.tftpl"
+fi
+
+# Splice + wrap coverage: the seven curl templates each carry the shim
+# marker AND route their transport call through gh_retry; the parent wiring
+# passes the file() arg to all ten templatefile calls; the non-network
+# template stays unpolluted.
+gh_retry_scripts="$(grep -l '{{ .gh_retry }}' "$TREE_ROOT"/scripts/*.sh.tftpl | wc -l)"
+if [ "$gh_retry_scripts" -eq 7 ] \
+    && [ "$(grep -l 'gh_retry curl' "$TREE_ROOT"/scripts/*.sh.tftpl | wc -l)" -eq 7 ] \
+    && [ "$(grep -c '= file("./scripts/gh_retry.sh.tftpl")' "$TREE_ROOT/main.chcl")" -eq 10 ] \
+    && ! grep -q '{{ .gh_retry }}' "$TREE_ROOT/scripts/ensure_confirmed_workstream.sh.tftpl"; then
+    ok "gh_retry spliced into all 7 curl templates and wired at all 10 templatefile calls"
+else
+    fail "gh_retry vendoring incomplete: markers=$gh_retry_scripts (want 7), wrapped=$(grep -l 'gh_retry curl' "$TREE_ROOT"/scripts/*.sh.tftpl | wc -l), wired=$(grep -c '= file("./scripts/gh_retry.sh.tftpl")' "$TREE_ROOT/main.chcl")"
+fi
+
 # ── 2. Graph structure ───────────────────────────────────────────────────────
 
 "$CRITERIA" compile "$TREE_ROOT" --format json --out "$TMP/graph.json" 2>"$TMP/compile.err" \
@@ -360,6 +386,15 @@ fi
 EOF
 chmod +x "$STUBBIN/curl"
 
+# KB-235: rendered scripts carry the vendored backoff shim inline (the engine
+# binds {{ .gh_retry }} to the shim source); splice it the same way here.
+splice_gh_retry() {
+    awk -v w="$TREE_ROOT/scripts/gh_retry.sh.tftpl" '
+        /^\{\{ \.gh_retry \}\}$/ { while ((getline line < w) > 0) print line; next }
+        { print }
+    ' "$@"
+}
+
 # Render the template the engine way: bind the criteria_value_N header lines,
 # leave the body untouched (its $refs resolve at runtime from the header).
 render_failed_comment() {
@@ -369,13 +404,15 @@ render_failed_comment() {
         -e "s,{{ .criteria_value_3 | shellquote }},'workstream',g" \
         -e "s,{{ .criteria_value_4 | shellquote }},'Review',g" \
         -e "s,{{ .criteria_value_5 | shellquote }},'${reason}',g" \
-        "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" > "$TMP/failed_comment_case.sh"
+        "$TREE_ROOT/scripts/comment_handler_failed.sh.tftpl" \
+        | splice_gh_retry > "$TMP/failed_comment_case.sh"
 }
 
 run_failed_comment() {
     render_failed_comment "$1"
     rm -f "$TMP/payload.json"
     KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+        GH_RETRY_BACKOFF_SECONDS="0 0 0" \
         E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" \
         bash "$TMP/failed_comment_case.sh" >/dev/null 2>&1
 }
@@ -407,7 +444,7 @@ render_comment_case() {
     local tpl="$1"
     shift
     local out="$TMP/case_comment.sh"
-    cp "$TREE_ROOT/scripts/$tpl" "$out"
+    splice_gh_retry "$TREE_ROOT/scripts/$tpl" > "$out"
     local i=1
     local v quoted
     for v in "$@"; do
@@ -429,6 +466,7 @@ run_comment_case() {
     rm -f "$TMP/payload.json"
     if [ "$expect_rc" = "0" ]; then
         KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+            GH_RETRY_BACKOFF_SECONDS="0 0 0" \
             E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" \
             bash "$TMP/case_comment.sh" >/dev/null 2>&1
         return $?
@@ -436,6 +474,7 @@ run_comment_case() {
     # Loud failure: the stub answers a JSON-RPC error body; the script must
     # exit non-zero.
     KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+        GH_RETRY_BACKOFF_SECONDS="0 0 0" \
         E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" E2E_STUB_ERROR=1 \
         bash "$TMP/case_comment.sh" >/dev/null 2>&1
     [ $? -ne 0 ]
@@ -691,7 +730,7 @@ MOCK="$TMP/mock_kanboard_fetch.js"
 cat > "$MOCK" <<'JS'
 const http = require("http");
 const fs = require("fs");
-const [cfgFile, logFile, tasksFile] = process.argv.slice(2);
+const [cfgFile, logFile, tasksFile, attemptsFile] = process.argv.slice(2);
 
 const server = http.createServer((req, res) => {
     let body = "";
@@ -704,6 +743,21 @@ const server = http.createServer((req, res) => {
         const params = rpc.params || {};
         const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
         const tasks = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
+        // KB-235: count every request that reaches the server (one line per
+        // attempt — the backoff scenarios assert exact attempt counts).
+        if (attemptsFile) fs.appendFileSync(attemptsFile, method + "\n");
+        // KB-235: transport failure injection — destroy the socket before any
+        // response is written, exactly like a connection reset from a flaky
+        // proxy in front of the board. cfg.reset_methods maps method -> how
+        // many incoming requests should still be killed; the state decays on
+        // the cfg file so the same server serves fail-then-recover and
+        // fail-forever scenarios.
+        if ((cfg.reset_methods || {})[method] > 0) {
+            cfg.reset_methods[method]--;
+            fs.writeFileSync(cfgFile, JSON.stringify(cfg));
+            req.socket.destroy();
+            return;
+        }
         let resp;
         // KB-231: real Kanboard answers JSON-RPC envelopes (jsonrpc + id); the
         // scripts' guard classifies any body without those keys as a
@@ -753,6 +807,7 @@ JS
 
 FETCH_CFG="$TMP/fetch_mock_config.json"
 FETCH_LOG="$TMP/fetch_rpc_params.jsonl"
+FETCH_ATTEMPTS="$TMP/fetch_attempts.log"
 TASKS_FILE="$TMP/fetch_tasks.json"
 MOCK_LOG="$TMP/fetch_mock.log"
 
@@ -763,7 +818,7 @@ jq '{task: .task, tags: .tags, comments: (.comments // [])}' \
     "$TREE_ROOT/tests/fixtures/task_ready.json" > "$TASKS_FILE"
 jq -n '{force_tags_error: false}' > "$FETCH_CFG"
 
-node "$MOCK" "$FETCH_CFG" "$FETCH_LOG" "$TASKS_FILE" > "$MOCK_LOG" 2>&1 &
+node "$MOCK" "$FETCH_CFG" "$FETCH_LOG" "$TASKS_FILE" "$FETCH_ATTEMPTS" > "$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 trap 'kill "$MOCK_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
 
@@ -785,7 +840,7 @@ export KANBOARD_URL
 fetch_script="$TMP/fetch_ticket.sh"
 sed -e "s@{{ .intake_root | shellquote }}@$(shquote "$FETCH_DIR")@g" \
     -e "s@{{ .ticket_id | shellquote }}@$(shquote "$SLUG")@g" \
-    "$TREE_ROOT/scripts/fetch_ticket.sh.tftpl" > "$fetch_script"
+    "$TREE_ROOT/scripts/fetch_ticket.sh.tftpl" | splice_gh_retry > "$fetch_script"
 chmod +x "$fetch_script"
 
 rm -f "$FETCH_LOG"
@@ -832,6 +887,59 @@ fi
     && ok "a failed fetch writes no ticket.json" \
     || fail "a failed fetch must not write ticket.json"
 
+# ── 4a. KB-235: transport failures retry WITH BACKOFF, not single-shot ──────
+
+# KB-48/KB-225: the pre-KB-235 transient-retry refired immediately, inside
+# the same transport blackout, and failed identically. The curl transport is
+# now wrapped in gh_retry (KB-235 contract, kanboard RPC surface): reset-style
+# transport failures retry on the bounded exponential schedule — compressed
+# to zero sleeps here via GH_RETRY_BACKOFF_SECONDS="0 0 0" — while the
+# deterministic failures above still fail in a single attempt.
+
+# Case 1 (the KB-235 acceptance case): the board transport-fails on getTask
+# twice, then recovers — the fetch must ride the backoff through the outage
+# and produce the full success result from exactly three server attempts.
+jq -n '{reset_methods: {getTask: 2}}' > "$FETCH_CFG"
+: > "$FETCH_ATTEMPTS"
+rm -f "$FETCH_LOG"
+rm -f "$ticket"
+out_reset="$(GH_RETRY_BACKOFF_SECONDS="0 0 0" "$fetch_script" 2>/dev/null)" && rc_reset=0 || rc_reset=$?
+get_task_attempts_reset="$(grep -c '^getTask$' "$FETCH_ATTEMPTS")"
+attempts_reset="$(wc -l < "$FETCH_ATTEMPTS" | tr -d ' ')"
+if [ "$rc_reset" -eq 0 ] \
+    && [ "$out_reset" = "fetched KB-140: Deploy job races the cache warm step [column: 6]" ] \
+    && [ "$get_task_attempts_reset" -eq 3 ] \
+    && [ "$attempts_reset" -eq 5 ]; then
+    ok "fetch rides the backoff through two transport resets (3 getTask attempts, success output intact)"
+else
+    fail "fetch must ride the backoff through two resets: rc=$rc_reset out=${out_reset:-<none>} getTask attempts=$get_task_attempts_reset total=$attempts_reset"
+fi
+
+# Case 2 (the failure-injection case): the board kills getTask on every
+# attempt — after the 1+3 bounded schedule the fetch must die with the KB-231
+# named fatal carrying the method, from exactly four server attempts.
+jq -n '{reset_methods: {getTask: 99}}' > "$FETCH_CFG"
+: > "$FETCH_ATTEMPTS"
+rm -f "$ticket"
+err_exh="$(GH_RETRY_BACKOFF_SECONDS="0 0 0" "$fetch_script" 2>&1 >/dev/null)" && rc_exh=0 || rc_exh=$?
+attempts_exh="$(wc -l < "$FETCH_ATTEMPTS" | tr -d ' ')"
+if [ "$rc_exh" -ne 0 ] \
+    && [ "$attempts_exh" -eq 4 ] \
+    && printf '%s' "$err_exh" | grep -q "kanboard rpc transport: getTask"; then
+    ok "exhausted transport retries fail with the named method after 4 attempts"
+else
+    fail "transport exhaustion must fail with 'kanboard rpc transport: getTask' after 4 attempts: rc=$rc_exh attempts=$attempts_exh err=${err_exh:-<none>}"
+fi
+if [ ! -s "$ticket" ]; then
+    ok "an exhausted transport writes no ticket.json"
+else
+    fail "an exhausted transport must not write ticket.json"
+fi
+
+# Restore the happy-path config: the sections below share this mock.
+jq -n '{force_tags_error: false}' > "$FETCH_CFG"
+rm -f "$FETCH_LOG" "$FETCH_ATTEMPTS"
+
 # ── 4b. Dead-board outage bodies fail with the named stage (KB-231) ─────────
 
 # The 2026-10-09 outage: kanboard (behind a proxy) returned an empty body and
@@ -868,6 +976,7 @@ run_guard_case() {
         "workstreams/KB-24.md" "https://example.org/org/repo/pull/9" "kb-231-9f24c1a" main \
         >/dev/null
     KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+        GH_RETRY_BACKOFF_SECONDS="0 0 0" \
         E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" E2E_STUB_BODY="$1" \
         bash "$TMP/case_comment.sh" 2>&1 >/dev/null
 }

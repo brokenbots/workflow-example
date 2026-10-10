@@ -709,9 +709,11 @@ step "open_pr" {
             gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
-    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
-    // blips; the step timeout covers the worst-case wall clock.
-    timeout = "300s"
+    // KB-235: the vendored gh_retry wrapper now backs off 30s+60s+120s on
+    // transport blackouts (KB-48/KB-225 class) before the schedule exhausts;
+    // the doubling to 600s covers the worst-case wall clock: ~210s of
+    // transport backoff plus per-attempt gh latency on every surface.
+    timeout = "600s"
     outcome "success" {
         next = step.write_ops_report
         write {

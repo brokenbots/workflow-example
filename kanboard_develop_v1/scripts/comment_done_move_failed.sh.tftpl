@@ -6,6 +6,13 @@ criteria_value_5={{ .criteria_value_5 | shellquote }}
 set -euo pipefail
 : "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
 : "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+# KB-235: transport surfaces (TLS timeout, connection refused/reset) hit
+# 60-90s blackout windows where an immediate retry fails identically
+# (KB-48/KB-225). The shared gh_retry shim (vendored per tree) retries
+# those classes with the exponential 30s/60s/120s schedule; HTTP 4xx
+# passes through in a single call, so the KB-231 named fatals below keep
+# firing exactly once for deterministic failures.
+{{ .gh_retry }}
 run_dir="$criteria_value_1/$criteria_value_2"
 task_id="${criteria_value_2#KB-}"
 
@@ -20,7 +27,7 @@ body="**The implementation PR merged** ($criteria_value_3) **but moving the tick
 # errors, empty bodies and non-JSON-RPC (302 HTML) bodies — an empty body
 # used to ride through the pipe as an rc-0 jq and surface later as
 # "invalid JSON text passed to --argjson" with no failing stage named.
-resp=$(curl -sS -f \
+resp=$(gh_retry curl -sS -f \
     -u "jsonrpc:$KANBOARD_APP_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \

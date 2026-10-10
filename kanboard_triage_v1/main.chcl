@@ -106,6 +106,7 @@ step "fetch_ticket" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/fetch_ticket.sh.tftpl", {
+            gh_retry    = file("./scripts/gh_retry.sh.tftpl")
             intake_root = var.intake_root
             ticket_id   = var.ticket_id
         })
@@ -193,6 +194,7 @@ step "set_confirmed_bug_label" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/set_classification_label.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_bug_tag
@@ -320,6 +322,7 @@ step "comment_triage_failed" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/comment_triage_failed.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
         })
@@ -332,6 +335,7 @@ step "comment_invalid" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/comment_invalid.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.verdict.value
@@ -347,6 +351,7 @@ step "comment_needs_human" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/comment_needs_human.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.triage_root
@@ -365,6 +370,7 @@ step "comment_ready_move_failed" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/comment_ready_move_failed.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.verdict.value
@@ -383,6 +389,7 @@ step "set_review_state" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_review_column
@@ -411,6 +418,7 @@ step "rearm_k8s_run" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/rearm_k8s_run.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_run_tag
@@ -427,6 +435,7 @@ step "comment_rearm_failed" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/comment_rearm_failed.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = data.internal.verdict.value
@@ -445,6 +454,7 @@ step "set_ready_state" {
     target = adapter.shell.triage
     input {
         command = templatefile("./scripts/set_review_state.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             criteria_value_1 = var.intake_root
             criteria_value_2 = var.ticket_id
             criteria_value_3 = var.kanboard_ready_column

@@ -16,6 +16,13 @@ set -euo pipefail
 command -v curl jq >/dev/null
 : "${KANBOARD_APP_TOKEN:?KANBOARD_APP_TOKEN is not set -- export it before criteria apply}"
 : "${KANBOARD_URL:?KANBOARD_URL is not set -- export it before criteria apply}"
+# KB-235: transport surfaces (TLS timeout, connection refused/reset) hit
+# 60-90s blackout windows where an immediate retry fails identically
+# (KB-48/KB-225). The shared gh_retry shim (vendored per tree) retries
+# those classes with the exponential 30s/60s/120s schedule; HTTP 4xx
+# passes through in a single call, so the KB-231 named fatals below keep
+# firing exactly once for deterministic failures.
+{{ .gh_retry }}
 
 # Accept both "10" and "KB-10" (the watcher's Identifier form).
 case "$ticket_id" in
@@ -45,7 +52,7 @@ fi
 rpc() {
     method=$1
     payload=$2
-    resp=$(curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    resp=$(gh_retry curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
         -H "Content-Type: application/json" \
         -d "$(jq -n --arg m "$method" --argjson p "$payload" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
         "$KANBOARD_URL") || {
