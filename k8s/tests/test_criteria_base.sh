@@ -35,8 +35,8 @@ have() {
 }
 
 # --- pinned criteria main commit (v0.5.37-era: KB-57c) -----------------------
-have 'ARG CRITERIA_COMMIT=3bf70c84efdd4d8a75eded1a4fa748a86c8f7975' "$DOCKERFILE" || \
-    fail "Dockerfile does not pin criteria main at 3bf70c84 (v0.5.44 wave carrier: KB-153 shim teardown sync, KB-93/94 peer+shim, KB-172 tunables, KB-155/156 leases, KB-95/96 peer_session, KB-157/160/161 MCP wave)"
+have 'ARG CRITERIA_COMMIT=1865036983fa063951b637dbd86df77deab7b522' "$DOCKERFILE" || \
+    fail "Dockerfile does not pin criteria main at 18650369 (v0.5.45 wave carrier: KB-213 multi-adapter supervision, KB-224 stale-token adoption, KB-227 crash-resume tokens, KB-232 scope sessions, KB-234 boot-gate fresh starts)"
 have 'git clone' "$DOCKERFILE" || fail "Dockerfile does not clone criteria"
 grep -Eq 'test "\$\(git rev-parse HEAD\)" = "\$\{CRITERIA_COMMIT\}"' "$DOCKERFILE" || \
     fail "Dockerfile build does not fail closed if the checkout is not the pinned commit"
