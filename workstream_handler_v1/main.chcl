@@ -258,7 +258,9 @@ step "exhausted_branch_scope" {
 
 step "check_pr" {
     target     = adapter.shell.sh
-    timeout    = "300s"
+    // KB-235: backoff budget doubled (30/60/120s => ~210s worst case) so the
+    // step timeout stays comfortably above the wrapper's ceiling.
+    timeout    = "600s"
     max_visits = var.max_pr_poll_visits
     input {
         command = templatefile("./scripts/check_pr.sh.tftpl", {
@@ -309,9 +311,10 @@ step "backoff_pr" {
 // guard below reject an empty URL loudly.
 step "store_pr_url" {
     target = adapter.shell.sh
-    // KB-219: bounded-backoff retries on the gh call — worst case ~105s extra
-    // inside the wrapper, so the timeout leaves room for it.
-    timeout = "300s"
+    // KB-219: bounded-backoff retries on the gh call — worst case ~210s extra
+    // inside the wrapper (KB-235 doubled the schedule to 30/60/120s), so the
+    // timeout leaves room for it.
+    timeout = "600s"
     input {
         command = templatefile("./scripts/store_pr_url.sh.tftpl", {
             gh_retry = file("./scripts/gh_retry.sh.tftpl")
@@ -433,9 +436,10 @@ step "create_pr" {
             gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
-    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
-    // blips; the step timeout covers the worst-case wall clock.
-    timeout = "300s"
+    // KB-219: gh_retry wrapper can add up to ~210s of backoff on transient
+    // blips (KB-235 doubled the schedule to 30/60/120s); the step timeout
+    // covers the worst-case wall clock.
+    timeout = "600s"
     outcome "success" {
         next = switch.route_created_pr
         write {
@@ -684,9 +688,10 @@ step "merge_pr" {
             gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
-    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
-    // blips; the step timeout covers the worst-case wall clock.
-    timeout = "300s"
+    // KB-219: gh_retry wrapper can add up to ~210s of backoff on transient
+    // blips (KB-235 doubled the schedule to 30/60/120s); the step timeout
+    // covers the worst-case wall clock.
+    timeout = "600s"
     outcome "success" { next = step.teardown_worktree }
     // A refused merge is usually actionable, not terminal: an unresolved review
     // thread (GitHub's required_conversation_resolution), a bot review that
@@ -718,9 +723,10 @@ step "teardown_worktree" {
             gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
-    // KB-219: gh_retry wrapper can add up to ~105s of backoff on transient
-    // blips; the step timeout covers the worst-case wall clock.
-    timeout = "150s"
+    // KB-219: gh_retry wrapper can add up to ~210s of backoff on transient
+    // blips (KB-235 doubled the schedule to 30/60/120s); the step timeout
+    // covers the worst-case wall clock.
+    timeout = "600s"
     outcome "success" { next = state.done }
     outcome "failure" { next = state.done }
 }
