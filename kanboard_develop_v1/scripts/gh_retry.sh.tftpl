@@ -91,7 +91,7 @@ gh_retry_is_transient() {
         # auth/not-found texts are covered too.
         *"http 400"*|*"http 401"*|*"http 403"*|*"http 404"*|*"http 405"*|*"http 409"*|*"http 422"*|*"http 4"*|*"returned error: 4"*|*"not found"*|*"bad credentials"*|*"unauthorized"*|*"unauthorised"*|*"forbidden"*|*"access denied"*|*"resource not accessible"*)
             return 1 ;;
-        *"http 5"*|*"503"*|*"502"*|*"504"*|*"internal server error"*|*"bad gateway"*|*"service unavailable"*|*"gateway timeout"*|*"api error"*|*"server error"*)
+        *"http 5"*|*"503"*|*"502"*|*"504"*|*"internal server error"*|*"bad gateway"*|*"service unavailable"*|*"gateway timeout"*|*"returned error: 5"*|*"api error"*|*"server error"*)
             GH_RETRY_ERR_CLASS="http_5xx" ;;
         *)
             return 1 ;;

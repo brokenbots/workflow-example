@@ -432,7 +432,7 @@ grep -qF '_gr_budget=210 ;; esac' "${ROOT_DIR}/scripts/gh_retry.sh.tftpl" \
     && ok "invalid budget fallback pinned at 210s" \
     || fail "invalid budget fallback no longer the KB-235 budget"
 
-echo "==> Scenario 15: HTTP 4xx never retry; 429 and 5xx still do"
+echo "==> Scenario 15: HTTP 4xx never retry; 429, 5xx (gh and curl -f shapes) still do"
 printf '1||HTTP 404: Not Found|\n' >"${WORK_ROOT}/p15a.policy"
 out=$(scenario s15a "${WORK_ROOT}/p15a.policy" 'gh_retry gh api repos/o/r/pulls/42')
 check "gh HTTP 404 passed through in ONE call, no retry" 'RC=1' "$out"
@@ -465,6 +465,17 @@ printf '1||HTTP 502: Bad Gateway|\n' >"${WORK_ROOT}/p15f.policy"
 out=$(scenario s15f "${WORK_ROOT}/p15f.policy" 'GH_RETRY_MAX_ATTEMPTS="2" GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry gh api /user')
 check "5xx still retried" 2 "$(call_count s15f)"
 err_has "result=retry class=http_5xx" s15f "5xx classified as http_5xx"
+
+printf '1||curl: (22) The requested URL returned error: 500|\n' >"${WORK_ROOT}/p15g.policy"
+out=$(scenario s15g "${WORK_ROOT}/p15g.policy" 'GH_RETRY_MAX_ATTEMPTS="2" GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry curl -sS -f -X POST -d x https://kanboard.example/jsonrpc.php')
+check "curl -f 5xx error text retried" 2 "$(call_count s15g)"
+err_has "result=retry class=http_5xx" s15g "curl 5xx text classified as http_5xx"
+
+printf '1||curl: (22) The requested URL returned error: 501|\n' >"${WORK_ROOT}/p15h.policy"
+out=$(scenario s15h "${WORK_ROOT}/p15h.policy" 'GH_RETRY_MAX_ATTEMPTS="3" GH_RETRY_BACKOFF_SECONDS="0 0 0" gh_retry curl -sS -f -X POST -d x https://kanboard.example/jsonrpc.php')
+check "curl -f 501 error text retried" 3 "$(call_count s15h)"
+check "curl -f 501 exhaustion returned the last rc" 'RC=1' "$out"
+err_has "result=exhausted class=http_5xx" s15h "501 classified as http_5xx (5xx digit coverage)"
 
 # Scenario 16 is the KB-235 cross-subshell exhaustion signal: a capture-site
 # call exhausts inside $(...) where in-process env vars cannot survive, then
