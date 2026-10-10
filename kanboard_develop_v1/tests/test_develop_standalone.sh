@@ -325,6 +325,9 @@ fi
 # resolves to the new comment_id (a number), and E2E_STUB_ERROR (when set)
 # replaces the body with a JSON-RPC error object to exercise the loud-failure
 # path.
+# KB-231: E2E_STUB_BODY adds the outage bodies the guard must name: "empty"
+# (zero-length body) and "html302" (an HTML 302 page an auth-flapping proxy
+# hands curl with rc 0).
 STUBBIN="$TMP/stubbin"
 mkdir -p "$STUBBIN"
 cat > "$STUBBIN/curl" <<'EOF'
@@ -337,15 +340,22 @@ while [ "$#" -gt 0 ]; do
     fi
     shift
 done
+if [ -n "${E2E_STUB_BODY:-}" ]; then
+    if [ "$E2E_STUB_BODY" = "html302" ]; then
+        printf '<html><body>302 Found. Object moved.</body></html>'
+    fi
+    # empty body: print nothing, exit 0
+    exit 0
+fi
 if [ -n "${E2E_STUB_ERROR:-}" ]; then
-    printf '{"error":{"code":1,"message":"stub forced error"}}'
+    printf '{"jsonrpc":"2.0","id":1,"error":{"code":1,"message":"stub forced error"}}'
     exit 0
 fi
     # jq -n emits pretty JSON, so match the method regardless of formatting.
     if [ "$(jq -r '.method // empty' "$E2E_CAPTURE/payload.json" 2>/dev/null)" = "createComment" ]; then
-        printf '{"result": 101}'
+        printf '{"jsonrpc":"2.0","id":1,"result":101}'
     else
-        printf '{"result": true}'
+        printf '{"jsonrpc":"2.0","id":1,"result":true}'
     fi
 EOF
 chmod +x "$STUBBIN/curl"
@@ -695,25 +705,43 @@ const server = http.createServer((req, res) => {
         const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
         const tasks = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
         let resp;
+        // KB-231: real Kanboard answers JSON-RPC envelopes (jsonrpc + id); the
+        // scripts' guard classifies any body without those keys as a
+        // transport failure, so the mock must speak the real shape.
         if (method === "getTask") {
-            resp = { result: tasks.task };
+            resp = { jsonrpc: "2.0", id: 1, result: tasks.task };
         } else if (method === "getAllComments") {
-            resp = { result: tasks.comments };
+            resp = { jsonrpc: "2.0", id: 1, result: tasks.comments };
         } else if (method === "getTaskTags") {
             // Record the exact request params: the regression asserts the
             // script sends {"task_id": N} and nothing else.
             fs.appendFileSync(logFile, JSON.stringify(params) + "\n");
             if (cfg.force_tags_error) {
-                resp = { error: { code: -32602, message: "Invalid params", data: "Too many arguments" } };
+                resp = { jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Invalid params", data: "Too many arguments" } };
             } else if (Object.keys(params).length !== 1 || !("task_id" in params)) {
                 // Real Kanboard: extra params fail with HTTP 200 + JSON-RPC error.
-                resp = { error: { code: -32602, message: "Invalid params", data: "Too many arguments" } };
+                resp = { jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Invalid params", data: "Too many arguments" } };
             } else {
                 // Real Kanboard shape: {tag_link_id: tag_name} map.
-                resp = { result: Object.fromEntries(tasks.tags.map((t, i) => [String(1000 + i), t.name])) };
+                resp = { jsonrpc: "2.0", id: 1, result: Object.fromEntries(tasks.tags.map((t, i) => [String(1000 + i), t.name])) };
             }
         } else {
-            resp = { error: { code: -32601, message: "unexpected method: " + method } };
+            resp = { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "unexpected method: " + method } };
+        }
+        // KB-231: outage modes — a dead board behind a proxy is what serves
+        // curl a zero-length body or an HTML 302 page with HTTP 200; the
+        // fetch must fail with the named stage, never leak an empty string
+        // into a later jq.
+        if (cfg.body_mode === "empty") {
+            res.writeHead(200, { "Content-Type": "application/json", "Content-Length": 0 });
+            res.end("");
+            return;
+        }
+        if (cfg.body_mode === "html302") {
+            const html = "<html><body>302 Found. Object moved.</body></html>";
+            res.writeHead(200, { "Content-Type": "text/html", "Content-Length": Buffer.byteLength(html) });
+            res.end(html);
+            return;
         }
         const data = JSON.stringify(resp);
         res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
@@ -790,17 +818,75 @@ require_equal "$(jq -c '[.comments[].id]' "$ticket")" \
 
 # An RPC error body must fail the fetch loudly, never be stored as tags —
 # the exact defect the smoke run observed (the -32602 error blob stored as
-# ticket.json's tags, the run reporting success).
+# ticket.json's tags, the run reporting success). KB-231: the failure must
+# also be a NAMED fatal carrying the failing method.
 jq -n '{force_tags_error: true}' > "$FETCH_CFG"
 rm -f "$ticket"
-if "$fetch_script" >/dev/null 2>&1; then
-    fail "an RPC error body must fail the fetch, not be stored as tags"
+err_tags="$( "$fetch_script" 2>&1 >/dev/null )" && rc_tags=0 || rc_tags=$?
+if [ "$rc_tags" -ne 0 ] && printf '%s' "$err_tags" | grep -q "kanboard rpc error: getTaskTags: Invalid params"; then
+    ok "an RPC error body fails loudly with the named method (kanboard rpc error: getTaskTags)"
 else
-    ok "an RPC error body fails loudly (no error blob stored as tags)"
+    fail "an RPC error body must fail with 'kanboard rpc error: getTaskTags: Invalid params' (rc=$rc_tags out=$err_tags)"
 fi
 [ ! -s "$ticket" ] \
     && ok "a failed fetch writes no ticket.json" \
     || fail "a failed fetch must not write ticket.json"
+
+# ── 4b. Dead-board outage bodies fail with the named stage (KB-231) ─────────
+
+# The 2026-10-09 outage: kanboard (behind a proxy) returned an empty body and
+# an HTML 302 page with HTTP 200 while it was down. fetch_ticket used to turn
+# that into "jq: invalid JSON text passed to --argjson" from a later call with
+# NO failing stage named. The guard must catch both bodies at the call site
+# and name the method that failed.
+#
+# Case 1+2: the mock serves body_mode empty / html302 for every RPC call, so
+# getTask is the first hit and must die there.
+for mode in empty html302; do
+    jq -n --arg m "$mode" '{force_tags_error: false, body_mode: $m}' > "$FETCH_CFG"
+    rm -f "$ticket"
+    err="$( "$fetch_script" 2>&1 >/dev/null )" && rc_mode=0 || rc_mode=$?
+    if [ "$mode" = empty ]; then want="kanboard rpc transport: getTask (empty response)"; else want="kanboard rpc transport: getTask (non-JSON-RPC body)"; fi
+    if [ "$rc_mode" -ne 0 ] \
+        && printf '%s' "$err" | grep -qF "$want" \
+        && ! printf '%s' "$err" | grep -qF "invalid JSON text passed to --argjson"; then
+        ok "an $mode body fails the fetch at getTask with its named fatal"
+    else
+        fail "an $mode body must fail with '$want', without any 'invalid JSON text' (rc=$rc_mode out=$err)"
+    fi
+    [ ! -s "$ticket" ] \
+        && ok "an $mode body writes no ticket.json" \
+        || fail "an $mode body must not write ticket.json"
+done
+
+# Case 3+4: the standalone comment path under the same outage bodies — a stub
+# curl returns the body an outaged board hands curl (empty / HTML 302), and
+# the createComment call site must name its stage.
+run_guard_case() {
+    # $1 = value for E2E_STUB_BODY; echoes the script's stderr, sets rc.
+    render_comment_case comment_handler_done.sh.tftpl /tmp KB-24 approved \
+        "workstreams/KB-24.md" "https://example.org/org/repo/pull/9" "kb-231-9f24c1a" main \
+        >/dev/null
+    KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+        E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" E2E_STUB_BODY="$1" \
+        bash "$TMP/case_comment.sh" 2>&1 >/dev/null
+}
+guard_err_empty="$(run_guard_case empty)" && rc_guard=0 || rc_guard=$?
+if [ "$rc_guard" -ne 0 ] \
+    && printf '%s' "$guard_err_empty" | grep -qF "kanboard rpc transport: createComment (empty response)" \
+    && ! printf '%s' "$guard_err_empty" | grep -qF "invalid JSON text"; then
+    ok "a comment post on an empty body names createComment as the failed stage"
+else
+    fail "an empty comment response must fail with 'kanboard rpc transport: createComment (empty response)' (rc=$rc_guard out=$guard_err_empty)"
+fi
+guard_err_html="$(run_guard_case html302)" && rc_guard=0 || rc_guard=$?
+if [ "$rc_guard" -ne 0 ] \
+    && printf '%s' "$guard_err_html" | grep -qF "kanboard rpc transport: createComment (non-JSON-RPC body)" \
+    && ! printf '%s' "$guard_err_html" | grep -qF "invalid JSON text"; then
+    ok "a comment post on an HTML 302 body names createComment as the failed stage"
+else
+    fail "an HTML 302 comment response must fail with 'kanboard rpc transport: createComment (non-JSON-RPC body)' (rc=$rc_guard out=$guard_err_html)"
+fi
 
 # ── 5. Handler success without a PR fails loudly (KB-49) ────────────────────
 

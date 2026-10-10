@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Template inputs (shellquoted): the port dropped linear_triage_v1's two
 # assignment lines, leaving $ticket_id / $intake_root unset under set -u —
 # every fetch_ticket step died in 1ms with 'parameter not set'.
@@ -38,22 +38,67 @@ if [ ! -d "$run_dir/workstreams" ]; then
     mkdir -p "$run_dir/workstreams"
 fi
 
+# KB-231: deterministic-catches contract — curl transport failure, empty or
+# non-JSON-RPC body, and a JSON-RPC .error each fail with a named fatal for
+# the exact method; no retries (the workflow's step-retry policy owns it).
 rpc() {
-    curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+    method=$1
+    payload=$2
+    resp=$(curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n --arg m "$1" --argjson p "$2" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
-        "$KANBOARD_URL"
+        -d "$(jq -n --arg m "$method" --argjson p "$payload" '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
+        "$KANBOARD_URL") || {
+        echo "kanboard rpc transport: $method" >&2
+        exit 1
+    }
+    [ -n "$resp" ] || {
+        echo "kanboard rpc transport: $method (empty response)" >&2
+        exit 1
+    }
+    verdict=$(printf '%s' "$resp" | jq -r '
+        # KB-231: classify the envelope in one jq pass so an empty or non-JSON-RPC
+        # body can never ride through as an rc-0 jq result.
+        if (type == "object") and has("jsonrpc") and has("id") then
+            if has("error") then
+                "ERROR:" + (.error | if (type == "object") and (.message != null) then .message else tostring end)
+            else
+                "RESULT:" + tostring
+            end
+        else
+            "TRANSPORT"
+        end' 2>/dev/null) || verdict=TRANSPORT
+    case $verdict in
+        RESULT:*)
+            printf '%s' "${verdict#RESULT:}"
+            ;;
+        ERROR:*)
+            echo "kanboard rpc error: $method: ${verdict#ERROR:}" >&2
+            exit 1
+            ;;
+        *)
+            echo "kanboard rpc transport: $method (non-JSON-RPC body)" >&2
+            exit 1
+            ;;
+    esac
 }
 
-task=$(rpc getTask "{\"task_id\":$task_id}" | jq -c ".result // empty") || {
+envelope=$(rpc getTask "{\"task_id\":$task_id}") || exit 1
+# KB-231: an outage must have died inside rpc() with its named fatal; an
+# empty result here is the caller-visible not-found condition.
+task=$(printf '%s' "$envelope" | jq -c '.result // empty')
+if [ -z "$task" ]; then
     echo "Kanboard task not found: $task_id" >&2
     exit 1
-}
+fi
 # getTaskTags takes ONLY task_id (project_id too fails with -32602) and
 # returns a map {tag_link_id: tag_name}; normalize to [{name}] so downstream
 # scripts read a stable .tags[].name shape.
-tags=$(rpc getTaskTags "{\"task_id\":$task_id}" | jq -c '[.result[]] | map({name: .})')
-comments=$(rpc getAllComments "{\"task_id\":$task_id}" | jq -c ".result // []")
+tags=$(rpc getTaskTags "{\"task_id\":$task_id}") || exit 1
+# KB-231: normalize an absent result to no tags instead of letting jq fail
+# unnamed on null.
+tags=$(printf '%s' "$tags" | jq -c '[(.result // {})[]] | map({name: .})')
+comments=$(rpc getAllComments "{\"task_id\":$task_id}") || exit 1
+comments=$(printf '%s' "$comments" | jq -c '.result // []')
 
 jq -n --argjson task "$task" --argjson tags "$tags" --argjson comments "$comments" \
     '{task: $task, tags: $tags, comments: $comments}' > "$run_dir/ticket.json"

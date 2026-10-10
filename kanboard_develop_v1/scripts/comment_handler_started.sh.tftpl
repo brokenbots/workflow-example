@@ -35,17 +35,44 @@ resp=$(curl -sS -f \
         --arg task_id "$task_id" \
         --arg body "$body" \
         '{jsonrpc:"2.0",method:$m,params:{task_id:($task_id|tonumber),user_id:0,content:$body},id:1}')" \
-    "$KANBOARD_URL" 2>>"$diag")
-rc=$?
-echo "curl_rc=$rc response_len=${#resp}" >> "$diag" 2>&1
-if [ "$rc" -ne 0 ]; then
-    echo "comment post failed (curl_rc=$rc), see $diag" >&2
-    exit 1
-fi
-printf '%s' "$resp" | jq -e '(.error | not) and (.result | type == "number")' >>"$diag" 2>&1 || {
-    echo "createComment result assert failed, see $diag" >&2
+    "$KANBOARD_URL" 2>>"$diag") || {
+    # KB-231: name the failing stage — curl already logged its detail to $diag.
+    echo "kanboard rpc transport: createComment (see $diag)" >&2
     exit 1
 }
+echo "response_len=${#resp}" >> "$diag" 2>&1
+# KB-231: an empty or non-JSON-RPC (302 HTML) body is the same transport
+# failure — never let an empty body ride through as an rc-0 jq.
+[ -n "$resp" ] || {
+    echo "kanboard rpc transport: createComment (empty response, see $diag)" >&2
+    exit 1
+}
+verdict=$(printf '%s' "$resp" | jq -r '
+    # KB-231: classify the envelope in one jq pass so an empty or non-JSON-RPC
+    # body can never ride through as an rc-0 jq result.
+    if (type == "object") and has("jsonrpc") and has("id") then
+        if has("error") then
+            "ERROR:" + (.error | if (type == "object") and (.message != null) then .message else tostring end)
+        else
+            "RESULT:" + tostring
+        end
+    else
+        "TRANSPORT"
+    end' 2>>"$diag") || verdict=TRANSPORT
+case $verdict in
+    RESULT:*)
+        printf '%s' "${verdict#RESULT:}" | jq -e '.result | type == "number"' >>"$diag" 2>&1 \
+            || { echo "kanboard rpc error: createComment (non-numeric comment_id, KB-51), see $diag" >&2; exit 1; }
+        ;;
+    ERROR:*)
+        echo "kanboard rpc error: createComment: ${verdict#ERROR:} (see $diag)" >&2
+        exit 1
+        ;;
+    *)
+        echo "kanboard rpc transport: createComment (non-JSON-RPC body, see $diag)" >&2
+        exit 1
+        ;;
+esac
 # KB-51: createComment resolves to the new comment_id (a number), never the
 # boolean true moveTaskPosition-style calls return — a `.result == true`
 # check marked every successful post as a step failure.

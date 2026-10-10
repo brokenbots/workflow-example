@@ -24,6 +24,13 @@ arm=$(curl -sS -f \
         --arg name "$criteria_value_3" \
         '{query: $q, variables: {id: $id, name: $name}}')" \
     https://api.linear.app/graphql)
+[ -n "$arm" ] || { echo "linear rpc transport: issueLabels (empty response)" >&2; exit 1; }
+printf '%s' "$arm" | jq -e '(type == "object") and (has("data") or has("errors"))' >/dev/null \
+    || { echo "linear rpc transport: issueLabels (non-JSON-RPC body)" >&2; printf '%s\n' "$arm" >&2; exit 1; }
+if printf '%s' "$arm" | jq -e 'has("errors")' >/dev/null; then
+    echo "linear rpc error: issueLabels: $(printf '%s' "$arm" | jq -r '[.errors[]?.message] // [] | join("; ")')" >&2
+    exit 1
+fi
 
 label_id=$(printf '%s' "$arm" | jq -r '.data.issueLabels.nodes[0].id // empty')
 if [ -z "$label_id" ]; then
@@ -40,7 +47,7 @@ fi
 
 label_ids=$(printf '%s' "$current_ids" | jq -c --arg label_id "$label_id" '. + [$label_id]')
 
-curl -sS -f \
+resp=$(curl -sS -f \
     -H "Authorization: $LINEAR_API_KEY" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
@@ -48,7 +55,20 @@ curl -sS -f \
         --arg id "$issue_id" \
         --argjson labelIds "$label_ids" \
         '{query: $q, variables: {id: $id, labelIds: $labelIds}}')" \
-    https://api.linear.app/graphql \
-    | jq -e '.data.issueUpdate.success == true' >/dev/null
+    https://api.linear.app/graphql) || {
+    echo "linear rpc transport: issueUpdate" >&2
+    exit 1
+}
+[ -n "$resp" ] || { echo "linear rpc transport: issueUpdate (empty response)" >&2; exit 1; }
+printf '%s' "$resp" | jq -e '(type == "object") and (has("data") or has("errors"))' >/dev/null \
+    || { echo "linear rpc transport: issueUpdate (non-JSON-RPC body)" >&2; printf '%s\n' "$resp" >&2; exit 1; }
+if printf '%s' "$resp" | jq -e 'has("errors")' >/dev/null; then
+    echo "linear rpc error: issueUpdate: $(printf '%s' "$resp" | jq -r '[.errors[]?.message] // [] | join("; ")')" >&2
+    exit 1
+fi
+if ! printf '%s' "$resp" | jq -e '.data.issueUpdate.success == true' >/dev/null; then
+    echo "linear rpc error: issueUpdate (success=false)" >&2
+    exit 1
+fi
 
 echo "ticket re-armed with $criteria_value_3"

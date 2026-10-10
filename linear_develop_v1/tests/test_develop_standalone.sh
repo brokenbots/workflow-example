@@ -270,7 +270,13 @@ while [ "$#" -gt 0 ]; do
     fi
     shift
 done
-printf '{"data":{"commentCreate":{"success":true}}}'
+# KB-231 outage modes: an empty (rc 0) body and an HTML body that used to
+# surface later as a jq --argjson parse error with no stage named.
+case "${E2E_STUB_BODY:-}" in
+    empty) exit 0 ;;
+    html302) printf '<html><body>302 Found. Object moved.</body></html>' ;;
+    *) printf '{"data":{"commentCreate":{"success":true}}}' ;;
+esac
 EOF
 chmod +x "$STUBBIN/curl"
 
@@ -312,6 +318,26 @@ if run_failed_comment "some reason" \
 else
     fail "handler-failure comment did not append the failure reason"
 fi
+
+# KB-231: a dead Linear API answers rc 0 with an empty or HTML body. The
+# comment scripts must die at the createComment call site with the operation
+# named, never surface a generic jq parse failure downstream.
+run_failed_comment_body() {
+    render_failed_comment "some reason"
+    LINEAR_API_KEY=stub-key E2E_CAPTURE="$TMP" E2E_STUB_BODY="$1" PATH="$STUBBIN:$PATH" \
+        bash "$TMP/failed_comment_case.sh" 2>&1 >/dev/null
+}
+for mode in empty html302; do
+    err="$(run_failed_comment_body "$mode")" && rc_body=0 || rc_body=$?
+    if [ "$mode" = empty ]; then want="linear rpc transport: commentCreate (empty response)"; else want="linear rpc transport: commentCreate (non-JSON-RPC body)"; fi
+    if [ "$rc_body" -ne 0 ] \
+        && printf '%s' "$err" | grep -qF "$want" \
+        && ! printf '%s' "$err" | grep -qF "invalid JSON text"; then
+        ok "an $mode body fails the handler-failed comment at commentCreate with its named fatal"
+    else
+        fail "an $mode body must fail with '$want' (rc=$rc_body out=$err)"
+    fi
+done
 
 # Develop edge wiring: success and failure paths, matching the intake
 # develop path's shape.

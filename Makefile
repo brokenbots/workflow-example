@@ -181,6 +181,10 @@ test: validate test-criteria-k8s
 	./linear_triage_v1/tests/test_triage_standalone.sh
 	@echo "Running linear_develop_v1 standalone extraction regression test (CRI-239)..."
 	./linear_develop_v1/tests/test_develop_standalone.sh
+	@echo "Running kanboard_develop_v1 standalone extraction regression test (KB-231)..."
+	./kanboard_develop_v1/tests/test_develop_standalone.sh
+	@echo "Running kanboard_triage_v1 standalone extraction regression test (KB-231)..."
+	./kanboard_triage_v1/tests/test_triage_standalone.sh
 	@echo "Running flat WorkflowGraphs shape smoke test (CRI-300)..."
 	./linear_intake_v1/tests/test_workflow_graphs_flat.sh
 	@echo "Running container-entrypoint token substitution regression test..."
@@ -227,6 +231,8 @@ lint: lint-criteria-k8s
 		linear_intake_v1/tests/test_engine_pin.sh \
 		linear_triage_v1/tests/test_triage_standalone.sh \
 		linear_develop_v1/tests/test_develop_standalone.sh \
+		kanboard_develop_v1/tests/test_develop_standalone.sh \
+		kanboard_triage_v1/tests/test_triage_standalone.sh \
 		linear_intake_v1/tests/test_workflow_graphs_flat.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
 		k8s/tests/test_per_scope_wire_token.sh \
