@@ -164,6 +164,26 @@ grep -q "^transport_stage=checks poll$" "${OUT}" || fail "verdict must name the 
 grep -q "^transport_attempts=4$" "${OUT}" || fail "verdict must carry 4 attempts"
 grep -q "^transport_class=tls_handshake_timeout$" "${OUT}" || fail "verdict must carry the classified class"
 
+# ── Scenario E: the hoisted head-ref poll fails twice then succeeds ──────────
+run_case "head ref transport fails twice then succeeds" \
+    MOCK_FAIL_CLASS=head MOCK_FAIL_FIRST=2
+[ "$rc" -eq 0 ] || fail "expected the step to succeed after two transient head-ref failures, got rc=$rc"
+grep -q "^status:approved$" "${OUT}" || fail "expected status:approved after the head-ref poll recovered"
+[ "$(counter head)" -eq 3 ] || fail "expected 3 head-ref attempts (2 failed + 1 success), got $(counter head)"
+! grep -q "status:transport_failed" "${OUT}" || fail "no transport verdict when the head-ref poll recovers"
+
+# ── Scenario F: head-ref poll death reaches the named verdict ────────────────
+run_case "head ref transport exhaustion reaches the verdict" \
+    MOCK_FAIL_CLASS=head MOCK_FAIL_FIRST=99
+[ "$rc" -eq 0 ] || fail "the transport verdict must exit 0, got rc=$rc"
+grep -q "^status:transport_failed$" "${OUT}" || fail "expected the named transport verdict"
+grep -q "^transport_stage=head ref lookup$" "${OUT}" || fail "verdict must name the head ref lookup stage"
+grep -q "^transport_attempts=4$" "${OUT}" || fail "verdict must carry 4 attempts (1 initial + 3 retries)"
+grep -q "^transport_class=tls_handshake_timeout$" "${OUT}" || fail "verdict must carry the classified transport class"
+[ "$(counter head)" -eq 4 ] || fail "expected 1 initial attempt + 3 backoff retries on the head-ref poll, got $(counter head)"
+checks_runs="$(cat "${counters}/checks" 2>/dev/null || echo 0)"
+[ "${checks_runs:-0}" -eq 0 ] || fail "the checks poll must not run when the head-ref surface dies first, got ${checks_runs} attempts"
+
 # ── Compile-level pins: merge_pending_github wiring in main.chcl ──────────────
 echo "==> Checking merge_pending_github wiring (KB-235)"
 grep -q '^state "merge_pending_github" {' "${MAIN}" || fail "missing merge_pending_github terminal state"

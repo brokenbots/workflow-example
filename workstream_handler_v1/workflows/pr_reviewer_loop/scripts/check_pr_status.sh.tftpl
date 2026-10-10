@@ -36,7 +36,14 @@ owner=$(gh repo view --json owner --jq '.owner.login') || \
 repo=$(gh repo view --json name --jq '.name') || \
     gh_retry_transport_verdict "$?" "$pr" "repo metadata lookup"
 
-checks_json=$(gh_retry_merged gh api "repos/$owner/$repo/commits/$(gh pr view "$pr" --json headRefOid --jq '.headRefOid')/check-runs" \
+# KB-235: capture the head SHA as its own guarded transport surface. Nesting the
+# poll inside the checks URL would let one inner transport death starve the
+# URL (commits//check-runs, HTTP 404) and clobber the wrapper's exhaustion
+# record with a non-transient pass-through, dying under set -eu with no named
+# verdict. Guarded, it re-emits the transport verdict like every other surface.
+head_ref=$(gh pr view "$pr" --json headRefOid --jq '.headRefOid') || \
+    gh_retry_transport_verdict "$?" "$pr" "head ref lookup"
+checks_json=$(gh_retry_merged gh api "repos/$owner/$repo/commits/$head_ref/check-runs" \
     --jq '[.check_runs[] | {name: .name, state: .status, conclusion: .conclusion}]') || \
     gh_retry_transport_verdict "$?" "$pr" "checks poll"
 
