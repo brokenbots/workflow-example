@@ -94,6 +94,17 @@ jobs:
         run: |
           bash linear_develop_v1/tests/test_develop_standalone.sh
 
+      # KB-231: the kanboard trees must fail deterministically on dead-board
+      # outages (empty / HTML-302 RPC bodies) with the failing stage named,
+      # and their standalone suites cover those outage bodies.
+      - name: Run kanboard_develop_v1 standalone extraction regression test (KB-231)
+        run: |
+          bash kanboard_develop_v1/tests/test_develop_standalone.sh
+
+      - name: Run kanboard_triage_v1 standalone extraction regression test (KB-231)
+        run: |
+          bash kanboard_triage_v1/tests/test_triage_standalone.sh
+
       # CRI-310: the dirty-label cleanup workflow (carrier for CRI-246,
       # validation run C) — minimal single-adapter tree, fired through the
       # criteria-cleanup route on a criteria-dirty ticket.
