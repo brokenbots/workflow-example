@@ -37,5 +37,5 @@ Check the rollout:
 
   kubectl wait -n {{ include "criteria-k8s.namespace" . }} deployment/criteria-k8s-operator --for=condition=Available --timeout=120s
 
-(The criteria-linear-watcher Deployment was retired 2026-10-09, KB-228: 
+(The criteria-linear-watcher Deployment was retired 2026-10-09, KB-228:
 Linear cutover complete. There is no chart watcher Deployment to wait for.)
