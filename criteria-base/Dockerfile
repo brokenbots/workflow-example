@@ -26,6 +26,12 @@ FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 ARG CRITERIA_COMMIT
 ARG TARGETARCH
 RUN apk add --no-cache ca-certificates git
+# The pinned builder patch can trail the module's go directive (go.mod bumped to
+# 1.26.9 by a released-sdk pin while the builder stays 1.26.6): with GOTOOLCHAIN
+# unset the build dies 'requires go >= X (running Y; GOTOOLCHAIN=local)'.
+# auto lets the toolchain self-download the go.mod-pinned version (same fix as
+# castle's Dockerfile).
+ENV GOTOOLCHAIN=auto
 # Pin the exact source commit: the build fails closed if the checkout does not
 # resolve to CRITERIA_COMMIT, so the binary can only come from criteria main at
 # the reviewed commit or its declared replacement.
