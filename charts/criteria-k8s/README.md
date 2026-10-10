@@ -5,7 +5,6 @@ Single declarative install/upgrade unit for the Criteria workflow stack in the
 the live-mutated deployment env. The chart packages:
 
 * `criteria-k8s-operator` Deployment (retention sweep env, `--namespace` flag)
-* `criteria-linear-watcher` Deployment (Linear polling config)
 * Namespaced `Role`/`RoleBinding` for the operator plus both service accounts
   (`criteria-k8s-operator`, `criteria-runner`) and the runner RBAC
 * `CriteriaRun` CRD (`crds/`, installed by helm on install; see the [upgrade
@@ -14,6 +13,12 @@ the live-mutated deployment env. The chart packages:
 * Castle Deployment + Service
 * `linear-spc`/`copilot-spc` SecretProviderClasses for the OpenBao CSI provider
 * `pod-adapter-scripts` ConfigMap (runner/adapter wrapper scripts)
+
+> **Retirement note (2026-10-09, KB-228):** the `criteria-linear-watcher`
+> Deployment (Linear polling config) was removed from this chart — and the
+> repo — after the Linear→Kanboard cutover completed. The live Linear
+> watcher had scaled down to 0/0; ticket polling now ships as the raw
+> `kanboard-watcher` overlay (`k8s/kanboard-watcher.yaml`).
 
 ## Install
 
@@ -58,9 +63,9 @@ helm template criteria-k8s charts/criteria-k8s
 | `namespace` | `criteria-jobs` | Target namespace for every namespaced resource. Empty string falls back to the release namespace (`-n`). Caution: a non-empty value overrides `-n`; keep them aligned. |
 | `namespaceCreate` | `false` | Render a `Namespace` object (with pod-security labels) from the chart. Leave `false` and use helm's `--create-namespace`. |
 | `podSecurity.enforce` | `baseline` | Pod Security Standard label applied to the rendered namespace. |
-| `images.operator.repository` | `localhost:5000/criteria-k8s` | Operator/watcher image repository. |
-| `images.operator.tag` | `dev` | Operator/watcher image tag. |
-| `images.operator.pullPolicy` | `IfNotPresent` | Operator/watcher image pull policy. |
+| `images.operator.repository` | `localhost:5000/criteria-k8s` | Operator image repository. |
+| `images.operator.tag` | `dev` | Operator image tag. |
+| `images.operator.pullPolicy` | `IfNotPresent` | Operator image pull policy. |
 | `images.workflow.repository` | `localhost:5000/linear-intake-remote` | Criteria workflow image repository (runner Jobs). |
 | `images.workflow.tag` | `dev` | Criteria workflow image tag. |
 | `operator.enabled` | `true` | Deploy the operator. |
@@ -70,13 +75,6 @@ helm template criteria-k8s charts/criteria-k8s
 | `operator.providerBaseUrl` | `http://192.168.17.116:11434/v1` | Ollama-compatible provider endpoint handed to adapter workflows. |
 | `operator.jobArch` | `amd64` | `kubernetes.io/arch` nodeSelector value stamped on child Job/pod templates (runner + per-scope adapters). Cluster property: set to `arm64` for an arm64 cluster. |
 | `operator.resources` | `128Mi/100m` requests, `512Mi/500m` limits | Operator pod resources. |
-| `watcher.enabled` | `true` | Deploy the Linear watcher. |
-| `watcher.replicaCount` | `1` | Watcher replicas. |
-| `watcher.linearProjectName` | `Criteria K8s Workflow Runner` | Linear project the watcher polls. |
-| `watcher.pollInterval` | `5m` | How often the watcher polls Linear. Go duration. |
-| `watcher.maxAgentVisits` | `2` | Default max agent visits recorded in created `CriteriaRun`s. |
-| `watcher.providerBaseUrl` | `http://192.168.17.116:11434/v1` | Provider endpoint recorded in created `CriteriaRun`s. |
-| `watcher.resources` | `64Mi/50m` requests, `256Mi/200m` limits | Watcher pod resources. |
 | `castle.enabled` | `true` | Deploy the Castle control plane. |
 | `castle.image.repository` | `localhost:5000/castle` | Castle image repository. |
 | `castle.image.tag` | `dev` | Castle image tag. |
@@ -92,9 +90,9 @@ helm template criteria-k8s charts/criteria-k8s
 | `openbao.provider` | `openbao` | CSI provider name for the SecretProviderClasses. |
 | `openbao.roleName` | `criteria-jobs` | OpenBao kubernetes auth role the CSI provider authenticates as. |
 | `openbao.secretPath` | `criteria/data/linear` | OpenBao KV path the SPC objects read. |
-| `podSecurityContext` | non-root uid/gid 10001, fsGroup 10001, RuntimeDefault | Shared pod security context for operator/watcher/castle. |
-| `nodeSelector` | `kubernetes.io/arch: amd64` | Node selector for operator/watcher pods. |
-| `tolerations` | `catch` taint | Tolerations for operator/watcher pods. |
+| `podSecurityContext` | non-root uid/gid 10001, fsGroup 10001, RuntimeDefault | Shared pod security context for operator/castle. |
+| `nodeSelector` | `kubernetes.io/arch: amd64` | Node selector for operator pods. |
+| `tolerations` | `catch` taint | Tolerations for operator pods. |
 
 ## External prerequisites
 
