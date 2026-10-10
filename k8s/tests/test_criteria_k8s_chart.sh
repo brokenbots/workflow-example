@@ -56,10 +56,10 @@ if grep -rniE 'stringData|secretKeyRef|^kind: Secret$' "$CHART/values.yaml" "$CH
 fi
 
 # Values contract (CRI-129): image repo+tag, namespace, PVC names+sizes,
-# retention period/interval, provider base URL, Linear project, poll
-# interval must all be configurable without editing templates. (The
-# trigger states are per-route since CRI-218 and live in the routes
-# payload, not in values.)
+# retention period/interval and provider base URL must all be configurable
+# without editing templates. (The trigger states are per-route since CRI-218
+# and live in the routes payload, not in values. KB-228 removed the watcher
+# values block with the linear-watcher retirement.)
 grep -q 'repository: localhost:5000/criteria-k8s' "$CHART/values.yaml" || fail "values.yaml missing operator image repository"
 grep -q 'tag: dev' "$CHART/values.yaml" || fail "values.yaml missing image tag"
 grep -q 'namespace: criteria-jobs' "$CHART/values.yaml" || fail "values.yaml missing namespace"
@@ -71,10 +71,11 @@ grep -q 'retentionInterval: 1h' "$CHART/values.yaml" || fail "values.yaml missin
 # configurable without editing templates.
 grep -q 'stallWindow: 30m' "$CHART/values.yaml" || fail "values.yaml missing operator stall window"
 grep -q 'providerBaseUrl:' "$CHART/values.yaml" || fail "values.yaml missing provider base URL"
-grep -q 'linearProjectName:' "$CHART/values.yaml" || fail "values.yaml missing Linear project"
-# CRI-218 removed watcher.linearTriageState: trigger states are per-route.
-grep -q 'linearTriageState:' "$CHART/values.yaml" && fail "values.yaml still declares removed watcher.linearTriageState"
-grep -q 'pollInterval: 5m' "$CHART/values.yaml" || fail "values.yaml missing poll interval"
+# KB-228: the criteria-linear-watcher was retired (Linear cutover complete,
+# 2026-10-09) and the whole watcher values block was removed; it must not
+# come back silently.
+grep -q '^watcher:' "$CHART/values.yaml" && \
+    fail "values.yaml still declares the retired watcher block (removed KB-228)"
 
 if ! command -v helm > /dev/null 2>&1; then
     echo "helm not found; chart structure checks passed, skipping template rendering"
@@ -117,8 +118,9 @@ PY
 }
 
 # Resource inventory with default values (diff-reviewable against k8s/).
-[ "$(count_kind Deployment)" -eq 3 ] || fail "expected 3 Deployments (operator, watcher, castle), got $(count_kind Deployment)"
+[ "$(count_kind Deployment)" -eq 2 ] || fail "expected 2 Deployments (operator, castle), got $(count_kind Deployment)"
 grep -q 'name: castle$' "$RENDERED" || fail "castle Deployment missing"
+grep -q 'name: criteria-k8s-operator$' "$RENDERED" || fail "operator Deployment missing"
 [ "$(count_kind Service)" -eq 1 ] || fail "expected 1 Service (castle), got $(count_kind Service)"
 [ "$(count_kind PersistentVolumeClaim)" -eq 2 ] || fail "expected 2 PVCs, got $(count_kind PersistentVolumeClaim)"
 [ "$(count_kind SecretProviderClass)" -eq 2 ] || fail "expected 2 SecretProviderClasses, got $(count_kind SecretProviderClass)"
@@ -171,24 +173,18 @@ grep -q 'command: \["/manager"\]' "$RENDERED" || fail "operator container comman
 grep -q -- '--namespace' "$RENDERED" || fail "operator deployment missing --namespace flag"
 grep -q 'mountPath: /data$' "$RENDERED" || fail "operator does not mount /data"
 
-# Watcher deployment shape: Linear polling config through CSI only.
-grep -q 'name: criteria-linear-watcher' "$RENDERED" || fail "watcher deployment missing"
-grep -q 'command: \["/linear-watcher"\]' "$RENDERED" || fail "watcher container command missing"
-grep -q 'name: LINEAR_PROJECT_NAME' "$RENDERED" || fail "watcher missing LINEAR_PROJECT_NAME"
-# CRI-218: LINEAR_TRIAGE_STATE was removed; trigger states are per-route.
-grep -q 'name: LINEAR_TRIAGE_STATE' "$RENDERED" && fail "watcher still sets removed LINEAR_TRIAGE_STATE"
-grep -q 'name: POLL_INTERVAL' "$RENDERED" || fail "watcher missing POLL_INTERVAL"
-grep -q 'secretProviderClass: linear-spc' "$RENDERED" || fail "watcher CSI volume does not reference linear-spc"
-grep -q 'mountPath: /secrets/linear_api_key' "$RENDERED" || fail "watcher does not mount the Linear API key file"
-
-# Watcher routes mount (CRI-217): the criteria-routes ConfigMap is mounted at
-# /etc/criteria/routes without a subPath, so the watcher's per-poll re-read
-# observes ConfigMap updates without a restart.
-grep -q 'mountPath: /etc/criteria/routes$' "$RENDERED" || fail "watcher does not mount the routes payload"
-awk '/name: routes-config/{found=1} found && /configMap:/{cm=1} found && /name: criteria-routes/{routed=1} END{exit !(found && cm && routed)}' "$RENDERED" \
-    || fail "watcher routes volume does not reference the criteria-routes configMap"
-awk '/mountPath: \/etc\/criteria\/routes$/{found=1} found && /subPath/{exit 1} /^      volumes:/{if(found) exit 0} END{exit found?0:1}' "$RENDERED" \
-    || fail "watcher routes mount uses subPath (breaks per-poll ConfigMap refresh)"
+# KB-228: the criteria-linear-watcher Deployment was removed from the chart
+# (retired 2026-10-09, Linear cutover complete). The kanboard-watcher keeps
+# running as the raw k8s/kanboard-watcher.yaml overlay, NOT this chart, so
+# the rendered releases in this test must never ship a watcher again.
+grep -q 'name: criteria-linear-watcher' "$RENDERED" && \
+    fail "watcher deployment rendered despite KB-228 removal"
+grep -q 'command: \["/linear-watcher"\]' "$RENDERED" && \
+    fail "watcher container command rendered despite KB-228 removal"
+grep -q 'name: LINEAR_' "$RENDERED" && \
+    fail "watcher Linear env rendered despite KB-228 removal"
+grep -q 'mountPath: /etc/criteria/routes' "$RENDERED" && \
+    fail "watcher routes mount rendered despite KB-228 removal"
 
 # Scripts ConfigMap contents must equal the canonical wrapper scripts.
 extract_configmap_file() { # key -> content on stdout
@@ -244,20 +240,11 @@ check_override() { # description set-expr pattern
 check_override "operator image tag override" "images.operator.tag=1.2.3" 'image: "localhost:5000/criteria-k8s:1.2.3"'
 check_override "retention period override" "operator.retentionPeriod=48h" 'value: "48h"'
 check_override "stall window override" "operator.stallWindow=45m" 'value: "45m"'
-check_override "poll interval override" "watcher.pollInterval=30s" 'value: "30s"'
 check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'
-check_override "Linear project override" "watcher.linearProjectName=Other Project" 'value: "Other Project"'
 check_override "operator job arch override" "operator.jobArch=arm64" 'value: "arm64"'
 check_override "operator legacy secret volumes override" "operator.legacySecretVolumes=true" 'value: "true"'
-check_override "routes ConfigMap override" "watcher.routesConfigMap=my-routes" 'name: my-routes'
 check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
-
-# Empty routesConfigMap drops the routes mount entirely.
-out="$(helm template criteria-k8s "$CHART" --set watcher.routesConfigMap="")" || \
-    fail "helm template failed with empty routesConfigMap"
-[[ "$out" == *'mountPath: /etc/criteria/routes'* ]] && \
-    fail "routes mount rendered despite empty watcher.routesConfigMap"
 
 out="$(helm template criteria-k8s "$CHART" --set "images.workflow.repository=ghcr.io/acme/runner" --set "images.workflow.tag=v5")" \
     || fail "helm template failed for workflow image"
@@ -274,7 +261,7 @@ out="$(helm template criteria-k8s "$CHART" --set castle.enabled=false)" || fail 
 [[ "$out" == *$'\nkind: Service\n'* ]] && fail "castle Service rendered despite castle.enabled=false"
 [[ "$out" == *$'\n  name: castle\n'* ]] && fail "castle Deployment rendered despite castle.enabled=false"
 
-out="$(helm template criteria-k8s "$CHART" --set operator.enabled=false --set watcher.enabled=false --set castle.enabled=false)" \
+out="$(helm template criteria-k8s "$CHART" --set operator.enabled=false --set castle.enabled=false)" \
     || fail "helm template failed with all components disabled"
 [[ "$out" == *$'\nkind: Deployment\n'* ]] && fail "Deployment rendered with all components disabled"
 
@@ -369,8 +356,9 @@ assert_blocks_equal "castle pod securityContext" \
     "$(printf '%s\n' "$castle_dep_r" | sorted_block 'securityContext:' 'nodeSelector:')" \
     "$(printf '%s\n' "$castle_dep_s" | sorted_block 'securityContext:' 'nodeSelector:')"
 
-# Operator/watcher selectors must equal criteria-k8s/config/install.yaml.
-for comp in criteria-k8s-operator criteria-linear-watcher; do
+# Operator selector must equal criteria-k8s/config/install.yaml (the
+# kanboard-watcher is not chart-rendered, so it has no chart side here).
+for comp in criteria-k8s-operator; do
     assert_blocks_equal "$comp Deployment selector" \
         "$(norm_doc "$RENDERED" Deployment "$comp" | sorted_block 'selector:' 'template:')" \
         "$(norm_doc "$REPO_ROOT/criteria-k8s/config/install.yaml" Deployment "$comp" | sorted_block 'selector:' 'template:')"
