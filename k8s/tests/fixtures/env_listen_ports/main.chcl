@@ -1,0 +1,29 @@
+// KB-240 regression fixture: the REAL deployed tree shape that the KB-238
+// engine suite never saw (its variant C declared distinct listen addresses).
+// Three remote environments — two in this root body, one in the loop/
+// subworkflow body — all declaring the SAME listen address, which is what the
+// deployed fleet declares. With `0.0.0.0:0` the engine binds one wildcard
+// shim per declared env and the OS hands each shim a distinct port, so the
+// resolved addresses stay dialable from separate adapter pods (the CRI-293
+// loopback isolation substitute is NOT used).
+//
+// No adapters and no steps past the terminal state: the shim listeners bind
+// at run init for every declared env, so the apply exercises exactly the
+// init-bind path without dispatching (and without needing adapter binaries
+// or a network) into a clean, fast, deterministic run.
+workflow {
+    name             = "env_listen_ports"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "done"
+    target_state     = "done"
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+subworkflow "loop" {
+    source = "./loop"
+}

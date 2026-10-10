@@ -1,0 +1,24 @@
+// Negative control for the KB-240 regression fixture: the SAME three-env
+// root+subworkflow shape as ../env_listen_ports, but with the pre-fix
+// declaration — every env binding the same FIXED port (0.0.0.0:7778). This is
+// the deployed shape that crash-looped canary kb-228-1791669373 on a
+// v0.5.48-line base ("bind: address already in use" at run init) and that
+// shim-era engines answer with the CRI-293 loopback isolation substitute.
+// The test asserts the engine flags this shape on every supported line, so
+// the positive fixture's clean pass cannot be vacuous.
+workflow {
+    name             = "env_listen_ports_shared"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "done"
+    target_state     = "done"
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+subworkflow "loop" {
+    source = "./loop"
+}
