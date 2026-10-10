@@ -1,0 +1,15 @@
+// Subworkflow body declaring its own remote env with the SAME listen address
+// as the root body — the deployed shape KB-238 (v0.5.48) made load-bearing
+// when the engine began hosting a listener per subworkflow-declared env.
+workflow {
+    name             = "env_listen_ports_loop"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "done"
+    target_state     = "done"
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}

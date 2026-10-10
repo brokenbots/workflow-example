@@ -1,0 +1,12 @@
+workflow {
+    name             = "env_listen_ports_shared_loop"
+    version          = "1"
+    criteria_version = ">=0.5.9, <0.6.0"
+    initial_state    = "done"
+    target_state     = "done"
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}

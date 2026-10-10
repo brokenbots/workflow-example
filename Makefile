@@ -213,6 +213,8 @@ test: validate test-criteria-k8s
 	./decision_demo_local_v1/tests/test_decision_demo_runtime.sh
 	@echo "Running outcome-reason flow rule regression test (KB-217)..."
 	./k8s/tests/test_outcome_reason_flow.sh
+	@echo "Running deployed remote env listen-address regression test (KB-240)..."
+	./k8s/tests/test_env_listen_ports.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...

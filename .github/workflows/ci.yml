@@ -39,18 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Run k8s manifest shell tests
-        run: |
-          for t in k8s/tests/test_*.sh; do
-            echo "::group::$t"
-            bash "$t"
-            echo "::endgroup::"
-          done
-
-      - name: Run engine pin regression test (CRI-140)
-        run: |
-          bash linear_intake_v1/tests/test_engine_pin.sh
-
       # Source-mode test tooling for this suite. Rolled to v0.5.32 (b2d0b66)
       # in CRI-300: the flat WorkflowGraphs shape only exists from this
       # release onward, and the smoke test below (test_workflow_graphs_flat.sh)
@@ -61,6 +49,9 @@ jobs:
       # The trees remain compile-compatible with v0.5.32+ engines; this does
       # NOT change the image-mode pin in linear_intake_v1/Dockerfile (still
       # v0.5.22, coordinator-owned).
+      # Installed before the k8s/tests loop: KB-240's
+      # test_env_listen_ports.sh drives the real engine (port-0 shim binds),
+      # and the loop runs every k8s/tests/test_*.sh it finds.
       - name: Install criteria v0.5.44 (SHA256SUMS-verified)
         run: |
           version="v0.5.44"
@@ -85,6 +76,18 @@ jobs:
           mkdir -p "$CRITERIA_HOME/adapters"
           criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.4
           criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15
+
+      - name: Run k8s manifest shell tests
+        run: |
+          for t in k8s/tests/test_*.sh; do
+            echo "::group::$t"
+            bash "$t"
+            echo "::endgroup::"
+          done
+
+      - name: Run engine pin regression test (CRI-140)
+        run: |
+          bash linear_intake_v1/tests/test_engine_pin.sh
 
       - name: Run linear_triage_v1 standalone extraction regression test (CRI-238)
         run: |
