@@ -352,37 +352,51 @@ http.createServer((req, res) => {
                 tasks.tags = params.tags.map((t) => (typeof t === 'string' ? { name: t } : t));
                 writeJson(tasksFile, tasks);
             }
-            resp = { result: cfg.mutation_success !== false };
+            resp = { jsonrpc: "2.0", id: 1, result: cfg.mutation_success !== false };
         } else if (method === 'getTaskTags') {
             // Real Kanboard shape: {tag_link_id: tag_name} map.
-            resp = { result: Object.fromEntries(tasks.tags.map((t, i) => [String(1000 + i), t.name])) };
+            resp = { jsonrpc: "2.0", id: 1, result: Object.fromEntries(tasks.tags.map((t, i) => [String(1000 + i), t.name])) };
         } else if (method === 'createTag') {
-            resp = { result: cfg.tag_id || 7 };
+            resp = { jsonrpc: "2.0", id: 1, result: cfg.tag_id || 7 };
         } else if (method === 'getColumns') {
-            resp = { result: cfg.columns || [
+            resp = { jsonrpc: "2.0", id: 1, result: cfg.columns || [
                 { id: 5, title: 'Backlog' }, { id: 6, title: 'Review' },
                 { id: 7, title: 'Work in progress' }, { id: 8, title: 'Done' },
             ] };
         } else if (method === 'getTask') {
-            resp = { result: tasks.task };
+            resp = { jsonrpc: "2.0", id: 1, result: tasks.task };
         } else if (method === 'createComment') {
             // createComment resolves to the new comment_id (KB-51: a number,
             // never boolean true), so the comment scripts' success check must
             // accept a numeric result.
             if (cfg.comment_error) {
-                resp = { error: { code: 1, message: 'mock comment error' } };
+                resp = { jsonrpc: "2.0", id: 1, error: { code: 1, message: 'mock comment error' } };
             } else {
                 const coms = fs.existsSync(comFile)
                     ? fs.readFileSync(comFile, 'utf8').split('\n').filter(Boolean)
                     : [];
                 const nextId = 701 + coms.length;
                 fs.appendFileSync(comFile, JSON.stringify({ method, params, id: nextId }) + '\n');
-                resp = { result: nextId };
+                resp = { jsonrpc: "2.0", id: 1, result: nextId };
             }
         } else {
-            resp = { error: { code: -32601, message: 'unexpected method: ' + method } };
+            resp = { jsonrpc: "2.0", id: 1, error: { code: -32601, message: 'unexpected method: ' + method } };
         }
-        const data = JSON.stringify(resp);
+        // KB-231: outage modes - a dead board behind a proxy serves curl a
+// zero-length body or an HTML 302 page with HTTP 200; the scripts must fail
+// with the named stage.
+if (cfg.body_mode === 'empty') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': 0 });
+    res.end('');
+    return;
+}
+if (cfg.body_mode === 'html302') {
+    const html = '<html><body>302 Found. Object moved.</body></html>';
+    res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': Buffer.byteLength(html) });
+    res.end(html);
+    return;
+}
+const data = JSON.stringify(resp);
         res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) });
         res.end(data);
     });
@@ -510,6 +524,35 @@ else
     ok "setTaskTags HTTP error fails the re-arm"
 fi
 
+# ── 6a. KB-231: outage bodies fail with the named stage ──────────────────────
+#
+# The 2026-10-09 windows: kanboard behind a proxy answered curl rc 0 with a
+# zero-length body or an HTML 302 page while the board was down. The scripts
+# used to defer that to a later jq -n as "invalid JSON text passed to
+# --argjson" with no failing stage named; now each rpc() hit must die at the
+# call site with the method in the message. The first hit in rearm_k8s_run is
+# getTaskTags, so both outage modes must name it.
+cfg_body() {
+    seed '["internal-reproduced", "Bug"]'
+    jq -n --arg mode "$1" '{mutation_success: true, mutation_status: 200, body_mode: $mode}' > "$MOCK_CFG"
+}
+for mode in empty html302; do
+    cfg_body "$mode"
+    rm -f "$MUT_FILE"
+    err="$( "$rearm_script" 2>&1 >/dev/null )" && rc_outage=0 || rc_outage=$?
+    if [ "$mode" = empty ]; then want="kanboard rpc transport: getTaskTags (empty response)"; else want="kanboard rpc transport: getTaskTags (non-JSON-RPC body)"; fi
+    if [ "$rc_outage" -ne 0 ] \
+        && printf '%s' "$err" | grep -qF "$want" \
+        && ! printf '%s' "$err" | grep -qF "invalid JSON text"; then
+        ok "an $mode body fails the re-arm at getTaskTags with its named fatal"
+    else
+        fail "an $mode body must fail with '$want' (rc=$rc_outage out=$err)"
+    fi
+    [ -z "$(mutations)" ] || fail "an $mode body must not write tags"
+done
+# Restock a healthy config for the comment sections below.
+cfg '["internal-reproduced", "Bug"]' true
+
 # ── 6b. KB-51: every triage comment script posts the verdict evidence ────────
 #
 # The triage comment scripts are the run's evidence trail (KB-51's triage
@@ -556,6 +599,29 @@ check_posted_comment() {
     done
     return 0
 }
+
+# KB-231 on the comment call sites: the same outage bodies must fail
+# createComment with its named stage, never leak an empty body through the
+# pipe and never defer to a distant jq error.
+run_outage_comment() {
+    render_comment_script comment_invalid.sh.tftpl \
+        1 "$TMP/intake" 2 "$SLUG" 3 "reproduced" 4 "$TMP/qa" 5 "Review"
+    bash "$TMP/comment_case.sh" 2>&1 >/dev/null
+}
+for mode in empty html302; do
+    cfg_body "$mode"
+    err="$(run_outage_comment)" && rc_outage=0 || rc_outage=$?
+    if [ "$mode" = empty ]; then want="kanboard rpc transport: createComment (empty response)"; else want="kanboard rpc transport: createComment (non-JSON-RPC body)"; fi
+    if [ "$rc_outage" -ne 0 ] \
+        && printf '%s' "$err" | grep -qF "$want" \
+        && ! printf '%s' "$err" | grep -qF "invalid JSON text"; then
+        ok "an $mode body fails the invalid-verdict comment at createComment with its named fatal"
+    else
+        fail "an $mode body must fail the comment with '$want' (rc=$rc_outage out=$err)"
+    fi
+done
+# Restock a healthy config for the comment cases below.
+cfg '["internal-reproduced", "Bug"]' true
 
 QROOT="$TMP/qa"
 

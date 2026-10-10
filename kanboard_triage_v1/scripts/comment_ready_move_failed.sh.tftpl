@@ -12,7 +12,7 @@ task_id="${criteria_value_2#KB-}"
 notes="$run_dir/review-notes.md"
 [ -s "$notes" ] || printf '(no review notes recorded)\n' > "$notes"
 
-curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
+resp=$(curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
         --arg m 'createComment' \
@@ -22,8 +22,41 @@ curl -sS -f -u "jsonrpc:$KANBOARD_APP_TOKEN" \
 Reviewer notes:
 $(cat "$notes")" '{task_id:$task_id,user_id:0,content:$content}')" \
         '{jsonrpc:"2.0",method:$m,params:$p,id:1}')" \
-    "$KANBOARD_URL" \
-    | jq -e '(.error | not) and (.result | type == "number")' >/dev/null
+    "$KANBOARD_URL") || {
+    # KB-231: name the failing stage on transport errors.
+    echo "kanboard rpc transport: createComment (curl rc $?)" >&2
+    exit 1
+}
+[ -n "$resp" ] || {
+    echo "kanboard rpc transport: createComment (empty response)" >&2
+    exit 1
+}
+verdict=$(printf '%s' "$resp" | jq -r '
+    # KB-231: classify the envelope in one jq pass so an empty or non-JSON-RPC
+    # body can never ride through as an rc-0 jq result.
+    if (type == "object") and has("jsonrpc") and has("id") then
+        if has("error") then
+            "ERROR:" + (.error | if (type == "object") and (.message != null) then .message else tostring end)
+        else
+            "RESULT:" + tostring
+        end
+    else
+        "TRANSPORT"
+    end' 2>/dev/null) || verdict=TRANSPORT
+case $verdict in
+    RESULT:*)
+        printf '%s' "${verdict#RESULT:}" | jq -e '.result | type == "number"' >/dev/null \
+            || { echo "kanboard rpc error: createComment (non-numeric comment_id, KB-51)" >&2; exit 1; }
+        ;;
+    ERROR:*)
+        echo "kanboard rpc error: createComment: ${verdict#ERROR:}" >&2
+        exit 1
+        ;;
+    *)
+        echo "kanboard rpc transport: createComment (non-JSON-RPC body)" >&2
+        exit 1
+        ;;
+esac
 # KB-51: createComment resolves to the new comment_id (a number), never boolean
 # true; a `.result == true` check marked every successful post as a step failure.
 # The error body of a failed RPC carries no result at all.
