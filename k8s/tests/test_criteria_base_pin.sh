@@ -57,7 +57,10 @@ set -euo pipefail
 # CRITERIA_VERSION=<tag of that exact commit> (the 2026-10-01 lesson: a
 # stamp-only bump ships a stale source pin silently).
 #
-# Re-audited to 3bf70c84 (v0.5.44 wave carrier, 2026-10-07): proto delta vs
+# Re-audited to 18650369 (v0.5.45 carrier, 2026-10-10): additive proto delta vs
+# prior pin 3bf70c84 (v0.5.44 wave carrier, 2026-10-07): peer.proto SupervisionRequest
+# gains adapter_type=2 (KB-213 multi-adapter supervision filter) + generated pb sync.
+# Prior re-audit note (v0.5.44, 2026-10-07): proto delta vs
 # 99baa281 (v0.5.42, the deployed image) is peer.proto ONLY and purely
 # ADDITIVE - ADR-0008 arms (CancelChildRun control arm 5, ChildRunStarted 11,
 # ChildRunTerminal 12, ChildRunTeardownPartial 13, new ChildRun* messages);
@@ -79,7 +82,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="3bf70c84efdd4d8a75eded1a4fa748a86c8f7975"
+AUDITED_COMMIT="1865036983fa063951b637dbd86df77deab7b522"
 
 fail() {
     echo "FAIL: $1" >&2
