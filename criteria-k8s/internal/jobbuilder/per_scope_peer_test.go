@@ -79,16 +79,16 @@ func TestBuildPerScopePeerPodSameEnvironmentOnePod(t *testing.T) {
 		"peer pods carry the kinds-set annotation, not the single-kind label")
 
 	env := containerEnvMap(pod.Spec.Containers[0])
-	assert.Equal(t, "copilot,shell", env["CRITERIA_REMOTE_ADAPTERS"],
-		"the manifest env hosts every adapter kind sharing the environment")
+	assert.Equal(t, "copilot.review,shell.intake", env["CRITERIA_REMOTE_ADAPTERS"],
+		"the manifest env hosts every adapter DEFINITION sharing the environment (per-definition grammar, KB-242)")
 	// Scope-set shape: the member set spans two scope instances (the engine
 	// rotates one per adapter), so identity arrives per scanned token file
 	// and no single-scope env is present.
 	assert.Empty(t, env["CRITERIA_SCOPE_ID"])
 	assert.Empty(t, env["CRITERIA_REMOTE_SCOPE"])
-	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_SHELL_DIGEST"],
-		"per-kind digest pins keep the per-member digest env semantics")
-	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_COPILOT_DIGEST"])
+	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_SHELL_INTAKE_DIGEST"],
+		"per-DEFINITION digest pins (KB-242): the pin keys off the definition identity the engine resolves children by")
+	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_COPILOT_REVIEW_DIGEST"])
 	assert.NotContains(t, env, "ADAPTER_KIND",
 		"the peer's hosted identity comes from the manifest, not a single-kind env")
 }
@@ -141,8 +141,8 @@ func TestBuildPerScopePeerPodSeparateEnvironmentsSeparatePods(t *testing.T) {
 	// call hosts exactly the members of one (scope, environment) pair.
 	assert.Equal(t, "ci", ciPod.Labels["criteria.brokenbots.dev/environment"])
 	assert.Equal(t, "prod", prodPod.Labels["criteria.brokenbots.dev/environment"])
-	assert.Equal(t, "shell", containerEnvMap(ciPod.Spec.Containers[0])["CRITERIA_REMOTE_ADAPTERS"])
-	assert.Equal(t, "copilot", containerEnvMap(prodPod.Spec.Containers[0])["CRITERIA_REMOTE_ADAPTERS"])
+	assert.Equal(t, "shell.intake", containerEnvMap(ciPod.Spec.Containers[0])["CRITERIA_REMOTE_ADAPTERS"])
+	assert.Equal(t, "copilot.review", containerEnvMap(prodPod.Spec.Containers[0])["CRITERIA_REMOTE_ADAPTERS"])
 }
 
 func TestBuildPerScopePeerPodDeterministic(t *testing.T) {
@@ -288,9 +288,12 @@ func TestBuildPerScopePeerPodEmptyMembersNil(t *testing.T) {
 	assert.Nil(t, jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci", nil, "10.0.0.10"))
 }
 
-// Dupes from engine retries collapse before the builder runs, but the
-// manifest still dedups kinds defensively: two same-kind members yield the
-// single kind once, and the digest pin keeps the first-seen member's value.
+// Sibling DEFINITIONS of one kind stay separate children (KB-242: the
+// kind-dedup flatten is the defect this whole wave reverts): two same-kind
+// members with different node names are TWO manifest entries, each with its
+// own per-definition digest pin — sibling shell definitions never share one
+// child again. Engine retry dupes of the SAME definition still collapse
+// first-entry-wins (peerAdapterDefinitions dedups by full identity).
 func TestBuildPerScopePeerPodSameKindMembersShareManifestKind(t *testing.T) {
 	run := groupTestRun()
 	first := groupMember("intake", "shell", "scope-a", "ci")
@@ -300,10 +303,16 @@ func TestBuildPerScopePeerPodSameKindMembersShareManifestKind(t *testing.T) {
 	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci",
 		[]events.LifecycleEvent{first, second}, "10.0.0.10")
 	require.NotNil(t, pod)
-	assert.Equal(t, "shell", pod.Annotations[jobbuilder.AnnotationAdapterKinds])
-	assert.Equal(t, "shell", containerEnvMap(pod.Spec.Containers[0])["CRITERIA_REMOTE_ADAPTERS"])
-	assert.Equal(t, "sha256:bbbbbbbb", containerEnvMap(pod.Spec.Containers[0])["CRITERIA_ADAPTER_SHELL_DIGEST"],
-		"the sorted-first member's digest wins the per-kind pin (same normalization as the dial member)")
+	assert.Equal(t, "shell", pod.Annotations[jobbuilder.AnnotationAdapterKinds],
+		"the k8s-display annotation stays kind-keyed: one kind, two definitions")
+	assert.Equal(t, "shell.audit,shell.intake",
+		containerEnvMap(pod.Spec.Containers[0])["CRITERIA_REMOTE_ADAPTERS"],
+		"both sibling definitions are hosted children (per-definition manifest, KB-242)")
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_SHELL_INTAKE_DIGEST"],
+		"each definition pins its OWN member's lockfile digest")
+	assert.Equal(t, "sha256:bbbbbbbb", env["CRITERIA_ADAPTER_SHELL_AUDIT_DIGEST"])
+
 }
 
 // KB-214 accepted trade: the pod name and the manifest are functions of the
@@ -594,12 +603,14 @@ func TestBuildPerScopePeerPodMultiKindStagesAdapterBinaries(t *testing.T) {
 	assert.Equal(t, jobbuilder.PerScopePeerBinVolumePath, mount.MountPath)
 	assert.True(t, mount.ReadOnly, "the peer container only reads the staged binaries")
 	env := containerEnvMap(main)
-	for kind, key := range map[string]string{
-		"copilot": "CRITERIA_ADAPTER_COPILOT_BINARY",
-		"shell":   "CRITERIA_ADAPTER_SHELL_BINARY",
+	// Overrides are per DEFINITION (KB-242); staged binaries are per KIND.
+	for def, kind := range map[string]string{
+		"copilot.review": "copilot",
+		"shell.intake":   "shell",
 	} {
+		key := "CRITERIA_ADAPTER_" + jobbuilder.DefinitionEnvToken(def) + "_BINARY"
 		want := fmt.Sprintf("%s/criteria-adapter-%s", jobbuilder.PerScopePeerBinVolumePath, kind)
-		assert.Equal(t, want, env[key], "kind %q's binary override must point at its staged copy", kind)
+		assert.Equal(t, want, env[key], "definition %q's binary override must point at its kind's staged copy", def)
 	}
 }
 
@@ -633,8 +644,8 @@ func TestBuildPerScopePeerPodSingleKindStaysImageSupplied(t *testing.T) {
 				assert.False(t, strings.HasSuffix(e.Name, "_BINARY"),
 					"single-kind pod must not emit a staged-binary pin: %s=%s", e.Name, e.Value)
 			}
-			assert.Equal(t, tc.members[0].Digest, env["CRITERIA_ADAPTER_SHELL_DIGEST"],
-				"the digest pin contract keeps carrying the member's lockfile digest")
+			assert.Equal(t, tc.members[0].Digest, env["CRITERIA_ADAPTER_"+jobbuilder.DefinitionEnvToken(tc.members[0].AdapterType+"."+tc.members[0].AdapterName)+"_DIGEST"],
+				"the digest pin contract keeps carrying the member's lockfile digest, keyed per definition (KB-242)")
 		})
 	}
 }
@@ -687,8 +698,8 @@ func TestBuildPerScopePeerPodStagingIsDeliveryAgnostic(t *testing.T) {
 				members, "10.0.0.10")
 			require.NotNil(t, pod)
 			env := containerEnvMap(pod.Spec.Containers[0])
-			assert.NotEmpty(t, env["CRITERIA_ADAPTER_COPILOT_BINARY"])
-			assert.NotEmpty(t, env["CRITERIA_ADAPTER_SHELL_BINARY"])
+			assert.NotEmpty(t, env["CRITERIA_ADAPTER_COPILOT_REVIEW_BINARY"])
+			assert.NotEmpty(t, env["CRITERIA_ADAPTER_SHELL_INTAKE_BINARY"])
 			require.Len(t, pod.Spec.InitContainers, 2)
 			// The member set spans two scope instances of one
 			// environment, so BOTH delivery lanes take the scope-set

@@ -38,7 +38,9 @@ func groupProvision(adapter, kind, scopeID, environment string) events.Lifecycle
 		// address and the static per-run token_ref peer pods derive their
 		// discovery root from.
 		ShimAddress: "[::]:7778",
-		TokenFile:   "/data/.criteria/runs/cri-234/tokens/" + adapter + ".token",
+		// KB-242 mint shape: token files carry the DEFINITION identity
+		// ("<type>.<name>.token"), which the peer's scope scan reads back.
+		TokenFile: "/data/.criteria/runs/cri-234/tokens/" + kind + "." + adapter + ".token",
 	}
 }
 
@@ -89,9 +91,9 @@ func podContainerKinds(pod corev1.Pod) []string {
 	return kinds
 }
 
-// podManifestKinds returns the hosted kind set a peer pod's single container
+// podManifestDefinitions returns the hosted kind set a peer pod's single container
 // advertises through CRITERIA_REMOTE_ADAPTERS, as a sorted slice.
-func podManifestKinds(pod corev1.Pod) []string {
+func podManifestDefinitions(pod corev1.Pod) []string {
 	env := containerEnvValue(pod.Spec.Containers[0], "CRITERIA_REMOTE_ADAPTERS")
 	if env == "" {
 		return nil
@@ -122,8 +124,8 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1, "exactly ONE peer container per pod")
 	assert.Equal(t, jobbuilder.PerScopePeerContainerName, pods[0].Spec.Containers[0].Name)
-	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
-		"the peer container's manifest hosts every adapter kind sharing the environment")
+	assert.ElementsMatch(t, []string{"shell.intake", "copilot.review"}, podManifestDefinitions(pods[0]),
+		"the peer container's manifest hosts every adapter DEFINITION sharing the environment (KB-242 per-definition manifest)")
 	assert.Equal(t, "ci", pods[0].Labels[jobbuilder.LabelEnvironment])
 	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
 	// Scope-set shape: two distinct scope instances of one environment, so
@@ -162,9 +164,9 @@ func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 	require.Contains(t, byEnv, "ci")
 	require.Contains(t, byEnv, "prod")
 
-	assert.ElementsMatch(t, []string{"shell"}, podManifestKinds(byEnv["ci"]),
+	assert.ElementsMatch(t, []string{"shell.intake"}, podManifestDefinitions(byEnv["ci"]),
 		"the ci pod's manifest hosts only its own member")
-	assert.ElementsMatch(t, []string{"copilot", "shell"}, podManifestKinds(byEnv["prod"]),
+	assert.ElementsMatch(t, []string{"copilot.review", "shell.audit"}, podManifestDefinitions(byEnv["prod"]),
 		"the prod pod's manifest hosts exactly its two same-environment members — no pod mixes adapters of different environments")
 	assert.NotEqual(t, byEnv["ci"].Name, byEnv["prod"].Name)
 }
@@ -266,8 +268,8 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"membership drift must NOT recreate the peer pod: child cycling happens inside the container")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
-	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
-		"the manifest was pinned at pod creation; the released member's kind stays hosted until the pair is released")
+	assert.ElementsMatch(t, []string{"shell.intake", "copilot.review"}, podManifestDefinitions(pods[0]),
+		"the manifest was pinned at pod creation; the released member's definition stays hosted until the pair is released")
 
 	// The reverse drift — re-provisioning the released member — keeps the
 	// same pod object too.
@@ -312,7 +314,7 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"the peer pod is not recreated for a same-kind member swap")
 	require.Len(t, pods[0].Spec.Containers, 1)
-	assert.ElementsMatch(t, []string{"shell"}, podManifestKinds(pods[0]))
+	assert.ElementsMatch(t, []string{"shell.first"}, podManifestDefinitions(pods[0]))
 }
 
 // A provision for an OLD-shape group pod (from a rollout behind this
@@ -527,8 +529,8 @@ func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) 
 	require.Len(t, pods, 1, "one environment -> exactly one peer pod")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "remote/worktree"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1)
-	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
-		"the peer container's manifest hosts every adapter kind sharing the environment")
+	assert.ElementsMatch(t, []string{"shell.intake", "copilot.review"}, podManifestDefinitions(pods[0]),
+		"the peer container's manifest hosts every adapter DEFINITION sharing the environment (KB-242 per-definition manifest)")
 	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
 	assert.Equal(t, "remote-worktree", pods[0].Labels[jobbuilder.LabelEnvironment])
 }
@@ -560,9 +562,9 @@ func TestReconcilePerScopeAdaptersSeparatesVerbatimFC95449EnvironmentPairs(t *te
 	}
 	require.Contains(t, byEnv, "remote-worktree")
 	require.Contains(t, byEnv, "remote-prod")
-	assert.ElementsMatch(t, []string{"shell"}, podManifestKinds(byEnv["remote-worktree"]),
+	assert.ElementsMatch(t, []string{"shell.intake"}, podManifestDefinitions(byEnv["remote-worktree"]),
 		"the worktree pod's manifest hosts only its own member")
-	assert.ElementsMatch(t, []string{"copilot"}, podManifestKinds(byEnv["remote-prod"]),
+	assert.ElementsMatch(t, []string{"copilot.review"}, podManifestDefinitions(byEnv["remote-prod"]),
 		"the prod pod's manifest hosts only its own member — adapters of different environments never mix")
 	assert.NotEqual(t, byEnv["remote-worktree"].Name, byEnv["remote-prod"].Name)
 }
