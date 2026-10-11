@@ -59,14 +59,20 @@ func shortHash(s string) string {
 // live scope's lifetime never touch the pod.
 //
 // The hosted member set rides the engine's multi-adapter manifest
-// (KB-213): CRITERIA_REMOTE_ADAPTERS carries the deduplicated, sorted
-// adapter kinds for the pair (the env-first resolution manifest), and
-// CRITERIA_ADAPTER_<KIND>_DIGEST pins each member's lockfile digest, the
-// same per-member digest env semantics the group-pod builder carried.
+// (KB-213, re-keyed per KB-242): CRITERIA_REMOTE_ADAPTERS carries the
+// deduplicated, sorted adapter DEFINITION identities ("<type>.<name>") for
+// the pair (the env-first resolution manifest), and
+// CRITERIA_ADAPTER_<DEF>_DIGEST pins each definition's own lockfile digest,
+// the same per-member digest env semantics the group-pod builder carried.
 //
-// Engine contract source (verified 2026-10-08): repo brokenbots/criteria PR
-// #517 (KB-213), merge commit
-// 3a4bac57db1f7c3bd18c04afd7722389fd638836. The manifest variable is
+// Engine contract sources: repo brokenbots/criteria PR #517 (KB-213), merge
+// commit 3a4bac57db1f7c3bd18c04afd7722389fd638836; the per-definition
+// grammar re-key, criteria PR #527 (KB-242), squash
+// 54a967698d2296818ef57a4f205fe3f79223e9a5 — ParseAdaptersEnv entries are
+// definition identities (first-entry-wins dedup), applyAdapterSpecOverrides
+// keys every override by adapterEnvName(definition identity), and the
+// scope-token scan exposes tokens as "<type>.<name>.token" (hostedSpecs
+// looks up by that identity). The manifest variable is
 // CRITERIA_REMOTE_ADAPTERS, NOT the workstream card's literal
 // CRITERIA_ADAPTERS: internal/peer/config.go:54 pins
 // EnvAdapters = "CRITERIA_REMOTE_ADAPTERS", and its const-block comment
@@ -252,12 +258,18 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 		{Name: "CRITERIA_HEARTBEAT_INTERVAL", Value: "5s"},
 		// CRITERIA_REMOTE_ADAPTERS is the engine's env-first multi-adapter
 		// manifest (KB-213; source-of-record citation in
-		// BuildPerScopePeerPod's doc): the deduplicated, sorted kind set
-		// hosted by this peer container. Per-kind
-		// CRITERIA_ADAPTER_<KIND>_DIGEST pins each member's lockfile
-		// digest, mirroring the per-member digest env semantics the
-		// group-pod builder carried.
-		{Name: "CRITERIA_REMOTE_ADAPTERS", Value: adapterKindsLabel(members)},
+		// BuildPerScopePeerPod's doc): the deduplicated, sorted adapter
+		// DEFINITION identity set (KB-242, "<type>.<name>") hosted by this
+		// peer container. The reverted engine (criteria PR #527) keys the
+		// scope-token scan, the hosted-spec lookup (hostedSpecs), and every
+		// child by definition identity — token files are minted as
+		// "<type>.<name>.token" — so kind-only entries can never satisfy a
+		// scanned conn ("peer refuses phone-home conn for an adapter it
+		// does not host"). Per-definition CRITERIA_ADAPTER_<DEF>_DIGEST
+		// pins below carry each member's own lockfile digest.
+		// The k8s-display kind annotation stays kind-keyed
+		// (adapterKindsLabel — see its own comment).
+		{Name: "CRITERIA_REMOTE_ADAPTERS", Value: peerAdapterDefinitionsLabel(members)},
 	}
 	if scopeSetDelivery {
 		// Scope-set mode: identity (scope + token) arrives per scanned
@@ -330,9 +342,10 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 	// A multi-kind pair stages every hosted kind's binary out of its own
 	// per-kind engine image (peerBinCopyContainers) and points the engine's
 	// per-adapter binary-override grammar at the staged copies: one
-	// CRITERIA_ADAPTER_<KIND>_BINARY per kind, mounted read-only. Kinds are
-	// the deduplicated sorted set, so the overrides and the mount land in a
-	// deterministic order. A single-kind pair emits none — its image
+	// CRITERIA_ADAPTER_<DEF>_BINARY per DEFINITION (KB-242), each pointing
+	// at its kind's staged copy, mounted read-only. Definitions and kinds
+	// are deduplicated sorted sets, so the overrides and the mount land in
+	// a deterministic order. A single-kind pair emits none — its image
 	// supplies the (sole) binary conventionally, no emptyDir, no staging.
 	env = append(env, peerAdapterBinariesEnv(members)...)
 
@@ -351,15 +364,21 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 }
 
 // peerAdapterManifestEnv renders the peer container's multi-adapter
-// manifest (KB-213): CRITERIA_REMOTE_ADAPTERS already declares the kind set
-// as an env-first manifest, and this function returns the per-kind digest
-// pins the engine keys each hosted member by — CRITERIA_ADAPTER_<KIND>_
-// DIGEST, rendered with the kind uppercased and non-alphanumerics replaced
-// by underscores (shell -> CRITERIA_ADAPTER_SHELL_DIGEST, triage-reviewer
-// -> CRITERIA_ADAPTER_TRIAGE_REVIEWER_DIGEST). Identical kinds collapse;
-// the sorted-first member's digest wins (the same member that dials, so
-// the pin always matches the conn's handshake identity; same-kind members
-// come from the same lockfile entry in practice).
+// manifest pins (KB-213 + the KB-242 per-definition re-key): the manifest
+// CRITERIA_REMOTE_ADAPTERS already declares the sorted DEFINITION identity
+// set, and this function returns the per-DEFINITION digest pins the engine
+// keys each hosted member by — CRITERIA_ADAPTER_<DEF>_DIGEST, rendered with
+// the definition identity uppercased and every non-alphanumeric character
+// replaced by an underscore (copilot.coordinator ->
+// CRITERIA_ADAPTER_COPILOT_COORDINATOR_DIGEST, shell.repo ->
+// CRITERIA_ADAPTER_SHELL_REPO_DIGEST). The engine's applyAdapterSpecOverrides
+// keys overrides by adapterEnvName(spec.Name) where spec.Name IS the
+// definition identity, so per-definition pins are the only keys that land;
+// the reverted engine resolves sibling definitions of one type independently
+// (lockfileDigestVerifier splits "<type>.<name>" back into type+name), which
+// is exactly what KB-242's per-definition child settings require.
+// Identical definitions collapse first-entry-wins; definitions never share
+// a lockfile entry, so no digest-pickling ambiguity remains.
 //
 // A kind with no digest gets NO digest env var at all, never an empty one:
 // the engine's resolveSpecDigest (internal/peer/adapterset.go, criteria PR
@@ -372,11 +391,11 @@ func peerAdapterManifestEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 	envs := make([]corev1.EnvVar, 0, len(members))
 	seen := make(map[string]struct{}, len(members))
 	for _, member := range members {
-		kind := adapterKind(member)
-		if _, ok := seen[kind]; ok {
+		def := adapterKind(member) + "." + member.AdapterName
+		if _, ok := seen[def]; ok {
 			continue
 		}
-		seen[kind] = struct{}{}
+		seen[def] = struct{}{}
 		if member.Digest == "" {
 			continue
 		}
@@ -385,15 +404,25 @@ func peerAdapterManifestEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 			digest = "sha256:" + digest
 		}
 		envs = append(envs, corev1.EnvVar{
-			Name:  peerAdapterEnvName(kind) + "_DIGEST",
+			Name:  peerAdapterEnvName(def) + "_DIGEST",
 			Value: digest,
 		})
 	}
 	return envs
 }
 
+// DefinitionEnvToken renders the engine's per-definition override token (the
+// uppercased definition identity with non-alphanumerics as underscores, e.g.
+// "copilot.coordinator" -> "COPILOT_COORDINATOR") for tests and callers that
+// need to name the pin keys the builder emits. The builder itself uses the
+// unexported peerAdapterEnvName; this wrapper exists for the contract tests.
+func DefinitionEnvToken(def string) string {
+	return strings.TrimPrefix(peerAdapterEnvName(def), "CRITERIA_ADAPTER_")
+}
+
 // peerAdapterEnvName renders the env name prefix the engine's multi-adapter
-// resolution contract keys per adapter kind.
+// resolution contract keys per adapter name (kind pre-KB-242, definition
+// identity after).
 func peerAdapterEnvName(kind string) string {
 	var b strings.Builder
 	for _, r := range strings.ToUpper(kind) {
@@ -446,11 +475,49 @@ func distinctScopes(members []events.LifecycleEvent) int {
 	return len(seen)
 }
 
+// peerAdapterDefinitions returns the deduplicated, sorted, adapter DEFINITION
+// identities (KB-242: "<type>.<name>") hosted by a peer pod's member set — the
+// set behind the definition-keyed manifest env value. The engine's
+// scope-token scan names each conn's adapter by its DEFINITION identity
+// (writeRotatedToken labels token files "<type>.<name>.token"), and
+// hostedSpecs keys the manifest by exactly those names, so any residual
+// kind-only value ("copilot") can never satisfy the lookup — the manifest
+// must speak definitions. Duplicate members of one definition (the same
+// definition provisioned in several scopes of the environment) collapse
+// first-entry-wins exactly like the engine's ParseAdaptersEnv dedup; the
+// member's own lockfile digest is per definition identical in practice
+// (one lockfile entry pins one definition).
+func peerAdapterDefinitions(members []events.LifecycleEvent) []string {
+	seen := make(map[string]struct{}, len(members))
+	defs := make([]string, 0, len(members))
+	for _, member := range members {
+		def := adapterKind(member) + "." + member.AdapterName
+		if _, ok := seen[def]; ok {
+			continue
+		}
+		seen[def] = struct{}{}
+		defs = append(defs, def)
+	}
+	sort.Strings(defs)
+	return defs
+}
+
+// peerAdapterDefinitionsLabel renders the deduplicated, sorted set of adapter
+// DEFINITION identities (peerAdapterDefinitions) comma-joined for the
+// engine-facing manifest env value (CRITERIA_REMOTE_ADAPTERS). Deliberately
+// distinct from adapterKindsLabel (the k8s-display kind annotation): the
+// annotation stays kind-keyed for triage readability, while the manifest
+// speaks the engine's per-definition grammar (KB-242). Definition labels are
+// NOT k8s-label-safe (the dot), which is exactly why they ride env only.
+func peerAdapterDefinitionsLabel(members []events.LifecycleEvent) string {
+	return strings.Join(peerAdapterDefinitions(members), ",")
+}
+
 // peerAdapterKinds returns the deduplicated, sorted, raw adapter kinds
-// hosted by a peer pod's member set — the set behind the manifest
-// env value (adapterKindsLabel), the staged-binary init containers, and the
-// per-kind binary overrides. Uses the raw kind, the same value the digest
-// pins key off, so every per-kind family keys identically.
+// hosted by a peer pod's member set - the set behind the kind annotation
+// (adapterKindsLabel), the staged-binary init containers, and the
+// per-kind binary staging. Uses the raw kind, the same value the
+// staged-binary families key off.
 func peerAdapterKinds(members []events.LifecycleEvent) []string {
 	seen := make(map[string]struct{}, len(members))
 	kinds := make([]string, 0, len(members))
@@ -528,23 +595,31 @@ func peerBinCopyContainerName(kind string) string {
 	return trimHyphens(b.String())
 }
 
-// peerAdapterBinariesEnv renders the CRITERIA_ADAPTER_<KIND>_BINARY
+// peerAdapterBinariesEnv renders the CRITERIA_ADAPTER_<DEF>_BINARY
 // overrides a multi-kind peer container needs (the engine's per-adapter
 // binary-override grammar, the same keys the digest pins ride), pointing
-// every hosted kind at its staged copy under PerScopePeerBinVolumePath. A
-// single-kind member set emits nothing: its image supplies the sole binary
-// conventionally, and an override would pin it to a directory the pod does
-// not even mount.
+// every hosted DEFINITION at its KIND's staged copy under
+// PerScopePeerBinVolumePath (binaries are per kind; overrides are per
+// definition since the KB-242 re-key — N definitions of one kind each
+// point at that kind's single staged binary). A single-kind member set
+// emits nothing: its image supplies the sole binary conventionally, and an
+// override would pin it to a directory the pod does not even mount.
 func peerAdapterBinariesEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 	kinds := peerAdapterKinds(members)
 	if len(kinds) <= 1 {
 		return nil
 	}
-	envs := make([]corev1.EnvVar, 0, len(kinds))
-	for _, kind := range kinds {
+	envs := make([]corev1.EnvVar, 0, len(members))
+	seen := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		def := adapterKind(member) + "." + member.AdapterName
+		if _, ok := seen[def]; ok {
+			continue
+		}
+		seen[def] = struct{}{}
 		envs = append(envs, corev1.EnvVar{
-			Name:  peerAdapterEnvName(kind) + "_BINARY",
-			Value: peerBinBinaryPath(kind),
+			Name:  peerAdapterEnvName(def) + "_BINARY",
+			Value: peerBinBinaryPath(adapterKind(member)),
 		})
 	}
 	return envs

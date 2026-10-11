@@ -17,14 +17,20 @@ package jobbuilder_test
 //	        pre-existing name is the adapter install DIRECTORY consumed
 //	        by adapterhost discovery); :56 EnvRemoteScopesDir =
 //	        "CRITERIA_REMOTE_SCOPES_DIR".
-//	grammar internal/peer/adapterset.go: ParseAdaptersConfig :65 /
-//	        ParseAdaptersEnv :89 accept a comma-separated NAME[=PATH]
-//	        list (entries trimmed, empty entries skipped, duplicate names
-//	        are an error); applyAdapterSpecOverrides :161 keys per-adapter
-//	        CRITERIA_ADAPTER_<NAME>_DIGEST pins; adapterEnvName :184
-//	        uppercases the kind and maps every non-alphanumeric character
-//	        to an underscore; resolveSpecDigest :289 treats an absent pin
-//	        exactly like an empty one (spec.Digest == "" => no pinning).
+//	grammar internal/peer/adapterset.go: ParseAdaptersConfig /
+//	        ParseAdaptersEnv accept a comma-separated NAME[=PATH] list
+//	        (entries trimmed, empty entries skipped; entries are adapter
+//	        DEFINITION identities "<type>.<name>" since the KB-242 revert,
+//	        criteria PR #527 squash 54a9676 — duplicate names dedupe
+//	        first-entry-wins); applyAdapterSpecOverrides keys per-adapter
+//	        CRITERIA_ADAPTER_<NAME>_* overrides by the definition identity
+//	        (adapterEnvName uppercases the name and maps every
+//	        non-alphanumeric character to an underscore);
+//	        resolveSpecDigest treats an absent pin exactly like an empty
+//	        one (spec.Digest == "" => no pinning). The scope-token scan
+//	        (ScanRemoteScopes) names each conn by the token file's
+//	        definition identity, so the emitted manifest MUST speak
+//	        definitions, never bare kinds.
 //
 // If the engine renames any of these surfaces, update this source-of-record
 // block and the mirrors below together — the point of the mirrors is that
@@ -106,22 +112,23 @@ func TestPeerEnvConsumedAsMultiAdapterManifest(t *testing.T) {
 	env := containerEnvMap(pod.Spec.Containers[0])
 
 	raw := env["CRITERIA_REMOTE_ADAPTERS"]
-	require.Equal(t, "copilot,shell", raw, "sorted comma-joined kind set per the engine's ParseAdaptersEnv grammar")
+	require.Equal(t, "copilot.copilot-agent,shell.intake", raw,
+		"sorted comma-joined DEFINITION identity set per the engine's per-definition grammar (KB-242)")
 
-	kinds, err := engineParseAdaptersEnv(raw)
+	defs, err := engineParseAdaptersEnv(raw)
 	require.NoError(t, err, "the engine's manifest reader must accept the emitted list verbatim")
-	assert.Equal(t, []string{"copilot", "shell"}, kinds)
+	assert.Equal(t, []string{"copilot.copilot-agent", "shell.intake"}, defs)
 
-	for kind, wantDigest := range map[string]string{
-		"shell":   shell.Digest,
-		"copilot": copilot.Digest,
+	for def, wantDigest := range map[string]string{
+		"shell.intake":          shell.Digest,
+		"copilot.copilot-agent": copilot.Digest,
 	} {
-		assert.Equal(t, wantDigest, engineDigestPin(env, kind),
-			"digest pin for kind %q must carry the member's lockfile digest under the engine's override grammar", kind)
+		assert.Equal(t, wantDigest, engineDigestPin(env, def),
+			"digest pin for definition %q must carry the member's lockfile digest under the engine's per-definition override grammar (KB-242)", def)
 	}
 
-	assert.Equal(t, raw, pod.Annotations[jobbuilder.AnnotationAdapterKinds],
-		"the kind annotation and the engine-facing manifest declare the same hosted set")
+	assert.Equal(t, "copilot,shell", pod.Annotations[jobbuilder.AnnotationAdapterKinds],
+		"the k8s-display kind annotation stays kind-keyed while the manifest speaks per-definition identities")
 }
 
 // The engine normalizes multi-word kinds for its per-adapter override
@@ -138,9 +145,10 @@ func TestPeerDigestPinKeysMatchEngineNormalization(t *testing.T) {
 		assert.Equal(t, want, engineAdapterEnvName(kind), "engine-side normalization of %q", kind)
 	}
 
-	// Behavioral cross-check on a real member rendering: the operator must
-	// emit the pin under exactly the key the engine's adapterEnvName
-	// grammar derives from the kind.
+	// Behavioral cross-checks on a real member rendering (both layers of the
+	// KB-242 re-key): the operator emits the pin under exactly the key the
+	// engine's adapterEnvName grammar derives from the DEFINITION identity,
+	// and the definition's DOT carries through as an underscore.
 	run := groupTestRun()
 	reviewer := groupMember("triage", "triage-reviewer", "scope-a", "ci")
 	pod := jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci",
@@ -148,8 +156,10 @@ func TestPeerDigestPinKeysMatchEngineNormalization(t *testing.T) {
 	require.NotNil(t, pod)
 	env := containerEnvMap(pod.Spec.Containers[0])
 	assert.Equal(t, reviewer.Digest,
-		env["CRITERIA_ADAPTER_"+engineAdapterEnvName("triage-reviewer")+"_DIGEST"],
-		"operator's rendered pin key must equal the engine-normalized grammar key")
+		env["CRITERIA_ADAPTER_"+engineAdapterEnvName("triage-reviewer.triage")+"_DIGEST"],
+		"operator's rendered pin key must equal the engine-normalized grammar key for the definition identity")
+	assert.Equal(t, "TRIAGE_REVIEWER_TRIAGE", engineAdapterEnvName("triage-reviewer.triage"),
+		"the definition's dot normalizes to an underscore exactly as the engine's adapterEnvName handles it")
 }
 
 // A member with no lockfile digest must get NO digest pin variable, and the
@@ -167,12 +177,12 @@ func TestPeerAbsentDigestPinEquivalence(t *testing.T) {
 	require.NotNil(t, pod)
 	env := containerEnvMap(pod.Spec.Containers[0])
 
-	_, present := env["CRITERIA_ADAPTER_COPILOT_DIGEST"]
-	require.False(t, present, "an unpinned member gets no digest env var at all")
-	assert.Empty(t, engineDigestPin(env, "copilot"),
+	_, present := env["CRITERIA_ADAPTER_COPILOT_COPILOT_AGENT_DIGEST"]
+	require.False(t, present, "an unpinned definition gets no digest env var at all (per-definition keys, KB-242)")
+	assert.Empty(t, engineDigestPin(env, "copilot.copilot-agent"),
 		"the engine reads an absent pin as an empty spec digest = no pinning (resolveSpecDigest)")
-	assert.Equal(t, pinned.Digest, engineDigestPin(env, "shell"),
-		"the pinned sibling is unaffected by the unpinned member")
+	assert.Equal(t, pinned.Digest, engineDigestPin(env, "shell.intake"),
+		"the pinned sibling definition is unaffected by the unpinned member")
 
 	for _, e := range pod.Spec.Containers[0].Env {
 		if strings.HasSuffix(e.Name, "_DIGEST") {
@@ -206,9 +216,15 @@ func TestPeerMultiKindChildrenResolveWithinMountedStage(t *testing.T) {
 	require.NotNil(t, pod)
 	env := containerEnvMap(pod.Spec.Containers[0])
 
-	kinds, err := engineParseAdaptersEnv(env["CRITERIA_REMOTE_ADAPTERS"])
+	defs, err := engineParseAdaptersEnv(env["CRITERIA_REMOTE_ADAPTERS"])
 	require.NoError(t, err)
-	require.Greater(t, len(kinds), 1, "a multi-kind pod is the subject of this test")
+	require.Greater(t, len(defs), 1, "a multi-child pod is the subject of this test")
+	// Every override keys per DEFINITION; the staged binary is per KIND.
+	childKind := map[string]string{
+		"shell.intake":   "shell",
+		"copilot.review": "copilot",
+	}
+	require.Contains(t, childKind, defs[0], "fixture members expected")
 
 	// The stage path the overrides point at must be the mount path of the
 	// volume the container itself mounts.
@@ -222,15 +238,17 @@ func TestPeerMultiKindChildrenResolveWithinMountedStage(t *testing.T) {
 	}
 	require.NotNil(t, stageMount, "the peer container must mount the staged binaries volume")
 
-	for _, kind := range kinds {
-		pin := engineBinaryPin(env, kind)
+	for _, def := range defs {
+		kind, ok := childKind[def]
+		require.True(t, ok, "test fixture covers %q", def)
+		pin := engineBinaryPin(env, def)
 		require.NotEmpty(t, pin,
-			"every hosted child in a multi-kind pod gets a binary override (the kind's per-kind image supplies exactly one binary)")
+			"every hosted child in a multi-child pod gets a binary override (the kind's per-kind image supplies exactly one binary)")
 		require.True(t, filepath.IsAbs(pin))
 		require.Equal(t, *stageMount, filepath.Dir(pin),
 			"the child's resolved binary must stat THROUGH the container's own mount for the engine's os.Stat to succeed")
 		require.Equal(t, "criteria-adapter-"+kind, filepath.Base(pin),
-			"the staged binary keeps the Dockerfile.peer install spelling, scannable by the engine's directory fallback too")
+			"the staged binary keeps the Dockerfile.peer install spelling (per KIND), scannable by the engine's directory fallback too")
 	}
 }
 
@@ -247,14 +265,14 @@ func TestPeerSingleKindChildStaysImageSupplied(t *testing.T) {
 	require.NotNil(t, pod)
 	env := containerEnvMap(pod.Spec.Containers[0])
 
-	kinds, err := engineParseAdaptersEnv(env["CRITERIA_REMOTE_ADAPTERS"])
+	defs, err := engineParseAdaptersEnv(env["CRITERIA_REMOTE_ADAPTERS"])
 	require.NoError(t, err)
-	require.Len(t, kinds, 1)
+	require.Len(t, defs, 1)
 
-	for _, kind := range kinds {
-		assert.Empty(t, engineBinaryPin(env, kind),
-			"a single-kind pod must not pin a staged binary: the image supplies the sole binary conventionally")
+	for _, def := range defs {
+		assert.Empty(t, engineBinaryPin(env, def),
+			"a single-child pod must not pin a staged binary: the image supplies the sole binary conventionally")
 	}
-	assert.Contains(t, pod.Spec.Containers[0].Image, "criteria-adapter-"+kinds[0]+"-peer",
+	assert.Contains(t, pod.Spec.Containers[0].Image, "criteria-adapter-shell-peer",
 		"the container image must be the manifest kind's own per-kind peer image for the conventional resolution to hold")
 }
