@@ -572,10 +572,16 @@ function analyzeFile(treeFile) {
 // Main.
 // ---------------------------------------------------------------------------
 
-function hasRequireComment(arm) {
-  const attr = arm.attrs.find((a) => a.key === "require_comment");
+// KB-242 direction change (dave 2026-10-11): require_comment is DEPRECATED
+// (warn-only, then removed — cards KB-247/248/249). The reason-flow rule now
+// requires a typed payload SCHEMA on reason-feeding arms instead: the
+// adapter's reason renders downstream, so the arm must type it
+// (schema = object({ reason = string }) or any schema attr naming reason).
+function hasSchemaTypedReason(arm) {
+  const attr = arm.attrs.find((a) => a.key === "schema");
   if (!attr) return false;
-  return attr.tokens.some((t) => t.type === T_IDENT && t.value === "true");
+  return attr.tokens.some((t) => t.type === T_IDENT && t.value === "reason")
+    || (attr.raw ?? "").includes("reason");
 }
 
 function main() {
@@ -607,16 +613,16 @@ function main() {
 
   const report = [];
   for (const v of violations) {
-    if (hasRequireComment(v.arm)) continue; // compliant arm
+    if (hasSchemaTypedReason(v.arm)) continue; // compliant arm: reason typed
     report.push(`  ${v.file}:${v.line}: ${v.desc} renders its adapter reason into ${v.sink}`);
-    report.push(`    fix: add "require_comment = true" to that ${v.arm.kind} arm (a schema alone does not satisfy the rule)`);
+    report.push(`    fix: declare "schema = object({ reason = string })" on that ${v.arm.kind} arm (require_comment is deprecated — KB-247/248/249)`);
   }
 
   if (report.length === 0) {
     if (!args.quiet) console.log(`outcome-reason flow rule: OK (${treeFiles.length} tree files, 0 violations)`);
     process.exit(0);
   }
-  console.error(`outcome-reason flow rule: ${violations.filter((v) => !hasRequireComment(v.arm)).length} violation(s) across ${treeFiles.length} tree files`);
+  console.error(`outcome-reason flow rule: ${violations.filter((v) => !hasSchemaTypedReason(v.arm)).length} violation(s) across ${treeFiles.length} tree files`);
   for (const line of report) console.error(line);
   process.exit(1);
 }
