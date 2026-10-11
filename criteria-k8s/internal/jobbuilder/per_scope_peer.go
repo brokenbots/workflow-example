@@ -596,19 +596,25 @@ func peerBinCopyContainerName(kind string) string {
 }
 
 // peerAdapterBinariesEnv renders the CRITERIA_ADAPTER_<DEF>_BINARY
-// overrides a multi-kind peer container needs (the engine's per-adapter
-// binary-override grammar, the same keys the digest pins ride), pointing
-// every hosted DEFINITION at its KIND's staged copy under
-// PerScopePeerBinVolumePath (binaries are per kind; overrides are per
-// definition since the KB-242 re-key — N definitions of one kind each
-// point at that kind's single staged binary). A single-kind member set
-// emits nothing: its image supplies the sole binary conventionally, and an
-// override would pin it to a directory the pod does not even mount.
+// overrides for EVERY hosted DEFINITION (the engine's per-adapter
+// binary-override grammar, the same keys the digest pins ride):
+//   - multi-kind pairs point each definition at its KIND's staged copy
+//     under PerScopePeerBinVolumePath (binaries are per kind; overrides are
+//     per definition since the KB-242 re-key — N definitions of one kind
+//     each point at that kind's single staged binary);
+//   - single-kind pairs point each definition at the image's conventional
+//     install path /usr/local/bin/criteria-adapter-<kind> — the SAME file
+//     the legacy (type-keyed) grammar would have resolved, named explicitly.
+//     This is KB-246's live lesson (refires 1791757465/1791757945/1791758425):
+//     the peer's locateSpecBinary derives defaultBinaryPath from the FULL
+//     definition identity ("criteria-adapter-shell.develop"), a path no
+//     image carries, so the name-only fallback misses and the pod fails
+//     closed at boot. Binaries install BY TYPE; until the engine derives the
+//     binary name from the type half (its #528 discovery.go precedent),
+//     the operator names the type-keyed path explicitly for every child.
 func peerAdapterBinariesEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 	kinds := peerAdapterKinds(members)
-	if len(kinds) <= 1 {
-		return nil
-	}
+	multiKind := len(kinds) > 1
 	envs := make([]corev1.EnvVar, 0, len(members))
 	seen := make(map[string]struct{}, len(members))
 	for _, member := range members {
@@ -617,9 +623,17 @@ func peerAdapterBinariesEnv(members []events.LifecycleEvent) []corev1.EnvVar {
 			continue
 		}
 		seen[def] = struct{}{}
+		value := peerBinBinaryPath(adapterKind(member))
+		if !multiKind {
+			// The in-image conventional install path (binaries install by
+			// type; the peer container's own image carries it) — named
+			// explicitly because the engine's definition-keyed defaultBinary
+			// derivation cannot resolve it (KB-246 refire evidence).
+			value = engineImageAdapterBinaryPath + adapterKind(member)
+		}
 		envs = append(envs, corev1.EnvVar{
 			Name:  peerAdapterEnvName(def) + "_BINARY",
-			Value: peerBinBinaryPath(adapterKind(member)),
+			Value: value,
 		})
 	}
 	return envs

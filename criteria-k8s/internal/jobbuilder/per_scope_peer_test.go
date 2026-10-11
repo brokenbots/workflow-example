@@ -3,7 +3,6 @@ package jobbuilder_test
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -614,11 +613,12 @@ func TestBuildPerScopePeerPodMultiKindStagesAdapterBinaries(t *testing.T) {
 	}
 }
 
-// TestBuildPerScopePeerPodSingleKindStaysImageSupplied pins the flip side:
-// a single-kind peer pod never stages — its image is image-complete for the
-// one manifest kind, so no init containers, no emptyDir, no binary
-// overrides, no extra mounts (an override would point at a directory the
-// pod does not even mount).
+// TestBuildPerScopePeerPodSingleKindStaysImageSupplied pins the single-kind
+// flip side: no staging machinery (no init containers, no emptyDir, no extra
+// mounts), but the per-definition _BINARY override IS emitted (KB-246
+// refire evidence: the engine's definition-keyed binary derivation misses
+// images that install by type) — pointing at the image's own conventional
+// install path, byte-identical to the legacy type-keyed resolution.
 func TestBuildPerScopePeerPodSingleKindStaysImageSupplied(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -640,10 +640,19 @@ func TestBuildPerScopePeerPodSingleKindStaysImageSupplied(t *testing.T) {
 			for _, m := range pod.Spec.Containers[0].VolumeMounts {
 				assert.NotEqual(t, jobbuilder.PerScopePeerBinVolumePath, m.MountPath)
 			}
-			for _, e := range pod.Spec.Containers[0].Env {
-				assert.False(t, strings.HasSuffix(e.Name, "_BINARY"),
-					"single-kind pod must not emit a staged-binary pin: %s=%s", e.Name, e.Value)
+			// The explicit conventional-path override (KB-246): keyed per
+			// definition, pointing at the per-type install path the image
+			// carries — the exact resolution the type-keyed grammar produced.
+			kind := tc.members[0].AdapterType
+			for _, member := range tc.members {
+				def := member.AdapterType + "." + member.AdapterName
+				key := "CRITERIA_ADAPTER_" + jobbuilder.DefinitionEnvToken(def) + "_BINARY"
+				assert.Equal(t, "/usr/local/bin/criteria-adapter-"+member.AdapterType, env[key],
+					"single-kind pod pins each definition's binary at the image's per-type install path")
 			}
+			assert.NotContains(t, env, jobbuilder.PerScopePeerBinVolumePath,
+				"no staged path leaks into a single-kind pod")
+			_ = kind
 			assert.Equal(t, tc.members[0].Digest, env["CRITERIA_ADAPTER_"+jobbuilder.DefinitionEnvToken(tc.members[0].AdapterType+"."+tc.members[0].AdapterName)+"_DIGEST"],
 				"the digest pin contract keeps carrying the member's lockfile digest, keyed per definition (KB-242)")
 		})
