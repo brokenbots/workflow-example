@@ -120,20 +120,22 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing
 	// identity; the scope-id segment is the empty-string hash because the
 	// pod spans ALL of the environment's scope instances.
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
-	require.Len(t, pods[0].Spec.Containers, 1, "exactly ONE peer container per pod")
-	assert.Equal(t, jobbuilder.PerScopePeerContainerName, pods[0].Spec.Containers[0].Name)
+	require.Len(t, pods[0].Spec.Containers, 2, "one single-conn peer container per adapter instance")
+	for _, c := range pods[0].Spec.Containers {
+		assert.Equal(t, jobbuilder.PerScopePeerContainerName, c.Name)
+	}
 	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
 		"the peer container's manifest hosts every adapter kind sharing the environment")
 	assert.Equal(t, "ci", pods[0].Labels[jobbuilder.LabelEnvironment])
 	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
-	// Scope-set shape: two distinct scope instances of one environment, so
-	// identity arrives per scanned token file — no single-scope env vars.
-	env := containerEnvByName(pods[0].Spec.Containers[0])
-	assert.Empty(t, env["CRITERIA_REMOTE_SCOPE"], "per-environment pods take identity from scanned tokens, not env")
-	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
-	assert.Equal(t, "/data/.criteria/runs/cri-234/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"])
-	assert.Empty(t, env["CRITERIA_REMOTE_TOKEN"])
-	assert.Empty(t, env["CRITERIA_REMOTE_TOKEN_FILE"])
+	// Single-conn shape: every container presents its own member's scope
+	// identity via env and no token-file discovery lane is wired.
+	for _, c := range pods[0].Spec.Containers {
+		env := containerEnvByName(c)
+		assert.NotEmpty(t, env["CRITERIA_REMOTE_SCOPE"], "each container presents its own scope identity")
+		assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
+		assert.NotContains(t, env, "CRITERIA_REMOTE_SCOPES_DIR")
+	}
 }
 
 // Separate envs -> separate pods: adapters declaring different environments
@@ -186,7 +188,10 @@ func TestReconcilePerScopeAdaptersPeerContainerRunsDirectEntrypoint(t *testing.T
 
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
-	require.Len(t, pods[0].Spec.Containers, 1)
+	require.Len(t, pods[0].Spec.Containers, 2)
+	for _, c := range pods[0].Spec.Containers {
+		assert.Nil(t, c.Command)
+	}
 	container := pods[0].Spec.Containers[0]
 	assert.Nil(t, container.Command,
 		"the peer container must run the image's ENTRYPOINT (`criteria peer`) with no command override")
@@ -308,10 +313,14 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	assert.Equal(t, 1, active)
 
 	pods = listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "the (scope, environment) keeps exactly one pod")
+	require.Len(t, pods, 1, "the environment keeps exactly one pod")
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"the peer pod is not recreated for a same-kind member swap")
+	// Single member active -> one container.
 	require.Len(t, pods[0].Spec.Containers, 1)
+	for _, c := range pods[0].Spec.Containers {
+		assert.Nil(t, c.Command)
+	}
 	assert.ElementsMatch(t, []string{"shell"}, podManifestKinds(pods[0]))
 }
 
@@ -356,7 +365,10 @@ func TestReconcilePerScopeAdaptersEvictsRetiredGroupPodShape(t *testing.T) {
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "the retired group pod is evicted; only the peer pod remains")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
-	require.Len(t, pods[0].Spec.Containers, 1)
+	require.Len(t, pods[0].Spec.Containers, 2)
+	for _, c := range pods[0].Spec.Containers {
+		assert.Nil(t, c.Command)
+	}
 	assert.Nil(t, pods[0].Spec.Containers[0].Command,
 		"the surviving pod is the peer pod, not the retired adapter.sh group pod")
 }
@@ -526,7 +538,10 @@ func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) 
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "one environment -> exactly one peer pod")
 	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "remote/worktree"), pods[0].Name)
-	require.Len(t, pods[0].Spec.Containers, 1)
+	require.Len(t, pods[0].Spec.Containers, 2)
+	for _, c := range pods[0].Spec.Containers {
+		assert.Nil(t, c.Command)
+	}
 	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
 		"the peer container's manifest hosts every adapter kind sharing the environment")
 	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])

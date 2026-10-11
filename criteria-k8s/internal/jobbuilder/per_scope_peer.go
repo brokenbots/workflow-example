@@ -138,16 +138,16 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 		}
 		return a.AdapterName < b.AdapterName
 	})
-	dial := members[0]
 
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	plan := newWorkflowPlan(run)
+	// Single-connection peer shape: identity (scope + token) rides each
+	// container's env from its own provision event. The token-file
+	// discovery lanes are not wired — the data volume mounts only when the
+	// workflow's declared volumes require it (plan.declaresDataMount) or
+	// the engine predates wire delivery.
 	wireDelivery := peerWireDelivery(members, runnerIP)
-	// Scope-set pods read every scope's rotated token from the shared data
-	// volume (ScanRemoteScopes), so the volume mounts regardless of the
-	// wire delivery shape — the wire lane never fires for them.
-	scopeSet := len(members) > 1 || distinctScopes(members) > 1
-	includeData := !wireDelivery || plan.declaresDataMount() || scopeSet
+	includeData := !wireDelivery || plan.declaresDataMount()
 
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
@@ -196,10 +196,16 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 					Type: corev1.SeccompProfileTypeRuntimeDefault,
 				},
 			},
-			Containers: []corev1.Container{
-				perScopePeerContainer(run, defaults, plan, dial, members, runnerIP, includeData),
-			},
-			Volumes: peerPodVolumes(plan, dataPVC, includeData, members),
+			// One single-connection peer container per adapter instance:
+			// each presents its own scope/token identity via env and
+			// advertises the environment's full kind manifest, so every
+			// dial passes the host's declared-adapter coverage check
+			// (KB-213) — the externally-proven peer shape. Adapter
+			// supervision, cycling, and crash policy live inside each
+			// peer; the pod (one per environment) is the isolation
+			// boundary.
+			Containers:    peerContainers(run, defaults, plan, members, runnerIP, includeData),
+			Volumes:       peerPodVolumes(plan, dataPVC, includeData, members),
 		},
 	}
 	if plan.hasSecrets() {
@@ -215,6 +221,20 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 // maxLabelValueLength is the Kubernetes label value limit.
 const maxLabelValueLength = 63
 
+// peerContainers builds one single-connection peer container per adapter
+// instance of the environment's member set (sorted member order, so the spec
+// is deterministic across reconciles). Each container runs the
+// criteria-adapter-<kind>-peer image's ENTRYPOINT (`criteria peer`) with
+// its OWN provision event's scope/token identity on env and the WHOLE
+// environment's kind manifest — the externally-proven single-conn shape.
+func peerContainers(run *criteriav1.CriteriaRun, defaults Defaults, plan *workflowPlan, members []events.LifecycleEvent, runnerIP string, includeData bool) []corev1.Container {
+	containers := make([]corev1.Container, 0, len(members))
+	for _, member := range members {
+		containers = append(containers, perScopePeerContainer(run, defaults, plan, member, members, runnerIP, includeData))
+	}
+	return containers
+}
+
 // perScopePeerContainer builds the peer pod's single container: no command
 // override (the Dockerfile.peer image's ENTRYPOINT runs `criteria peer`),
 // the multi-adapter manifest env, per-kind digest pins, the dial member's
@@ -225,93 +245,53 @@ const maxLabelValueLength = 63
 // CRITERIA_ADAPTER_<KIND>_BINARY override for every hosted kind (the
 // peerBinCopyContainers staging contract); a single-kind pair stays
 // image-supplied with no overrides.
-func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan *workflowPlan, dial events.LifecycleEvent, members []events.LifecycleEvent, runnerIP string, includeData bool) corev1.Container {
-	dialKind := adapterKind(dial)
-	wireDelivery := peerWireDelivery(members, runnerIP)
-	// A per-environment pod spans MANY scope instances (the engine rotates
-	// one scope per adapter), so the scope/token identity cannot ride the
-	// pod env: the peer's scope-set mode reads one (scope, adapter) token
-	// per scanned file and each conn presents its own scope identity
-	// (KB-213 scope-set dialing). Wire delivery would otherwise pin the
-	// whole pod to ONE member's scope+token and the other scopes' sessions
-	// would never be dialed.
-	scopeSetDelivery := len(members) > 1 || distinctScopes(members) > 1
+func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan *workflowPlan, member events.LifecycleEvent, allMembers []events.LifecycleEvent, runnerIP string, includeData bool) corev1.Container {
+	dialKind := adapterKind(member)
+	wireDelivery := peerWireDelivery([]events.LifecycleEvent{member}, runnerIP)
 
 	env := []corev1.EnvVar{
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
 		// CRITERIA_REMOTE_ADAPTERS is the engine's env-first multi-adapter
-		// manifest (KB-213; source-of-record citation in
-		// BuildPerScopePeerPod's doc): the deduplicated, sorted kind set
-		// hosted by this peer container. Per-kind
-		// CRITERIA_ADAPTER_<KIND>_DIGEST pins each member's lockfile
-		// digest, mirroring the per-member digest env semantics the
-		// group-pod builder carried.
-		{Name: "CRITERIA_REMOTE_ADAPTERS", Value: adapterKindsLabel(members)},
+		// manifest (KB-213): the deduplicated, sorted kind set of the WHOLE
+		// ENVIRONMENT. Every adapter instance's peer advertises the full
+		// set, so every dial satisfies the host's declared-adapter
+		// coverage check no matter which scope it serves. Per-kind
+		// CRITERIA_ADAPTER_<KIND>_DIGEST pins each hosted kind's lockfile
+		// digest.
+		{Name: "CRITERIA_REMOTE_ADAPTERS", Value: adapterKindsLabel(allMembers)},
+		// Single-connection peer shape (the externally-proven contract):
+		// identity rides the env — the remote-runner binary presents
+		// CRITERIA_REMOTE_SCOPE/TOKEN in the identity handshake of ONE
+		// phone-home connection. No token-file discovery, no scan mode.
+		{Name: "CRITERIA_REMOTE_SCOPE", Value: member.ScopeTag + "/" + member.ScopeID},
+		{Name: "CRITERIA_SCOPE_ID", Value: member.ScopeID},
 	}
-	if scopeSetDelivery {
-		// Scope-set mode: identity (scope + token) arrives per scanned
-		// token file, not via env. The manifest declares the hosted child
-		// set; every conn advertises the FULL set, satisfying the host's
-		// declared-adapter coverage check for each scope it dials.
-		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_SET", Value: "1"})
-	} else {
-		// Single-scope pair: the remote-runner binary presents
-		// CRITERIA_REMOTE_SCOPE in the identity handshake; the shim
-		// registers scope tokens under <scopeName>/<scopeInstanceID> and
-		// rejects an empty scope in per-scope mode. ScopeTag is the
-		// human-readable tag (empty for the root scope) — the
-		// registration key is the name/scopeID pair.
-		env = append(env, corev1.EnvVar{Name: "CRITERIA_REMOTE_SCOPE", Value: dial.ScopeTag + "/" + dial.ScopeID})
-		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_ID", Value: dial.ScopeID})
-		if dial.ScopeTag != "" {
-			env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_TAG", Value: dial.ScopeTag})
-		}
+	if member.ScopeTag != "" {
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_TAG", Value: member.ScopeTag})
 	}
-	env = append(env, peerAdapterManifestEnv(members)...)
-	if wireDelivery && !scopeSetDelivery {
-		// Wire token delivery (CRI-237): the token reaches the peer pod on
-		// the wire through its authenticated shim channel, so the pod
-		// mounts no shared data volume and reads no rotated token file.
+	env = append(env, peerAdapterManifestEnv(allMembers)...)
+	if wireDelivery {
+		// Wire token delivery (CRI-237): the token reaches the peer on the
+		// wire through its authenticated channel, so the pod mounts no
+		// shared data volume and reads no rotated token file.
 		// CRITERIA_REMOTE_HOST is the runner pod's routable dial address
-		// (the event's shim_listen_address is the engine's bind address,
-		// e.g. "[::]:7778" — only its port is usable; the host would not
-		// route from a separate pod).
+		// (the event's listen address is the engine's bind address, e.g.
+		// "[::]:7778" — only its port is usable; the host would not route
+		// from a separate pod).
 		env = append(env,
-			corev1.EnvVar{Name: "CRITERIA_REMOTE_HOST", Value: runnerDialAddr(runnerIP, dial.ShimAddress)},
-			corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN", Value: dial.AcceptToken},
+			corev1.EnvVar{Name: "CRITERIA_REMOTE_HOST", Value: runnerDialAddr(runnerIP, member.ShimAddress)},
+			corev1.EnvVar{Name: "CRITERIA_REMOTE_TOKEN", Value: member.AcceptToken},
 		)
 	} else {
 		// Legacy delivery (pre-eae0181 engines): no accept_token rode the
-		// event, so the token cannot ride the wire either — and the peer
-		// is a direct `criteria peer` ENTRYPOINT with no adapter.sh
-		// wrapper to poll the per-run discovery files. The operator
-		// therefore resolves the dial address itself and points the peer
-		// at the runner's rotating-token root:
-		//   - CRITERIA_REMOTE_HOST is baked from the runner pod's
-		//     routable IP (the event's shim_listen_address supplies only
-		//     the port); the peer's own config Resolve() requires it at
-		//     boot, so the reconcile must defer pod creation while no
-		//     runner pod carries an IP instead of baking a half-shaped
-		//     env.
-		//   - CRITERIA_REMOTE_SCOPES_DIR (internal/peer ScanRemoteScopes)
-		//     makes the peer scan (scope, adapter) token files under the
-		//     run discovery dir's remote-tokens root on the shared data
-		//     volume and dial ONE conn per file, reading the rotated
-		//     token material itself — the token never crosses the
-		//     operator or the pod spec.
-		// An unusable CRITERIA_REMOTE_SCOPES_DIR is not fatal at boot:
-		// an empty scan leaves the peer waiting (a re-scan recovers on
-		// the next rotation), while a missing host fails the boot loudly.
+		// event. The operator-baked host is set; the token-file lanes are
+		// deliberately NOT wired (no shim-era discovery in peer pods) — a
+		// pre-eae0181 engine cannot serve the single-conn peer shape and
+		// fails loudly at the pod instead of silently degrading.
 		if runnerIP != "" {
 			env = append(env, corev1.EnvVar{
 				Name:  "CRITERIA_REMOTE_HOST",
-				Value: runnerDialAddr(runnerIP, dial.ShimAddress),
-			})
-		}
-		if root := peerDiscoveryRoot(dial.TokenFile); root != "" {
-			env = append(env, corev1.EnvVar{
-				Name:  "CRITERIA_REMOTE_SCOPES_DIR",
-				Value: root,
+				Value: runnerDialAddr(runnerIP, member.ShimAddress),
 			})
 		}
 	}
@@ -323,19 +303,19 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 	// the deduplicated sorted set, so the overrides and the mount land in a
 	// deterministic order. A single-kind pair emits none — its image
 	// supplies the (sole) binary conventionally, no emptyDir, no staging.
-	env = append(env, peerAdapterBinariesEnv(members)...)
+	env = append(env, peerAdapterBinariesEnv(allMembers)...)
 
 	return corev1.Container{
 		Name:            PerScopePeerContainerName,
-		Image:           resolvePeerAdapterImage(plan, dial, dialKind, defaults),
+		Image:           resolvePeerAdapterImage(plan, member, dialKind, defaults),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		// No Command: the criteria-adapter-<kind>-peer image's ENTRYPOINT
 		// runs `criteria peer`, hosting the manifest's adapters directly
 		// (ADR-0008). adapter.sh is never passed through in peer mode.
 		SecurityContext: restrictedContainerSecurityContext(),
 		Env:             appendEnvDistinct(env, plan.adapterEnvs()),
-		VolumeMounts:    peerContainerMounts(plan, includeData, members),
-		Resources:       peerContainerResources(members),
+		VolumeMounts:    peerContainerMounts(plan, includeData, allMembers),
+		Resources:       peerContainerResources([]events.LifecycleEvent{member}),
 	}
 }
 
