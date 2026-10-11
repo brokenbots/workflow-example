@@ -115,19 +115,21 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing
 	assert.Equal(t, 2, active)
 
 	pods := listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "exactly ONE pod per (scope, environment)")
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
+	require.Len(t, pods, 1, "exactly ONE pod per environment, hosting every scope's adapters")
+	// The per-environment pod name pins the owning job and the environment
+	// identity; the scope-id segment is the empty-string hash because the
+	// pod spans ALL of the environment's scope instances.
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1, "exactly ONE peer container per pod")
 	assert.Equal(t, jobbuilder.PerScopePeerContainerName, pods[0].Spec.Containers[0].Name)
 	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
 		"the peer container's manifest hosts every adapter kind sharing the environment")
 	assert.Equal(t, "ci", pods[0].Labels[jobbuilder.LabelEnvironment])
 	assert.Equal(t, "copilot,shell", pods[0].Annotations[jobbuilder.AnnotationAdapterKinds])
-	assert.Equal(t, "scope-a", pods[0].Labels[jobbuilder.LabelScopeID])
-	// fc95449-shaped provisions carry no accept_token: the peer pod bakes
-	// the runner dial address and the run's remote-tokens discovery root —
-	// never a token.
+	// Scope-set shape: two distinct scope instances of one environment, so
+	// identity arrives per scanned token file — no single-scope env vars.
 	env := containerEnvByName(pods[0].Spec.Containers[0])
+	assert.Empty(t, env["CRITERIA_REMOTE_SCOPE"], "per-environment pods take identity from scanned tokens, not env")
 	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
 	assert.Equal(t, "/data/.criteria/runs/cri-234/remote-tokens", env["CRITERIA_REMOTE_SCOPES_DIR"])
 	assert.Empty(t, env["CRITERIA_REMOTE_TOKEN"])
@@ -209,22 +211,25 @@ func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing
 	}
 	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", provisions, logr.Discard())
 	require.NoError(t, err)
-	require.Len(t, listAdapterRolePods(t, cl, "default"), 3)
+	require.Len(t, listAdapterRolePods(t, cl, "default"), 2,
+		"one pod per environment: ci hosts both ci scopes' members, prod its own")
 
-	// Full per-scope teardown: releases for every member of scope-a,
-	// delivered over the accumulated history as the castle client does. The
-	// release path resolves the adapter before the controller sees it.
+	// Full per-environment teardown: releases for every member of the ci
+	// and prod environments' scope-a instances, delivered over the
+	// accumulated history as the castle client does.
 	releases := append(append([]events.LifecycleEvent(nil), provisions...),
 		groupRelease("intake", "scope-a", "ci"),
 		groupRelease("review", "scope-a", "prod"),
 	)
+	// scope-b's ci member is still active, so the ci pod survives; only
+	// prod's environment group fully tears down.
 	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", releases, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active, "only scope-b's member stays active")
 
 	pods := listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "scope-a's environment groups are fully torn down; scope-b survives")
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-b", "ci"), pods[0].Name)
+	require.Len(t, pods, 1, "prod's environment group is torn down; ci survives on scope-b")
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 }
 
 // KB-214 core guarantee: a partial release (one member goes away while its
@@ -246,7 +251,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
 	beforeUID := string(pods[0].UID)
-	require.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
+	require.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 
 	// Release one member; its co-tenant stays active. The castle client
 	// delivers the full accumulated history on every pass.
@@ -260,7 +265,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	require.Len(t, pods, 1, "the peer pod persists for the remaining member")
 	assert.Equal(t, beforeUID, string(pods[0].UID),
 		"membership drift must NOT recreate the peer pod: child cycling happens inside the container")
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
 		"the manifest was pinned at pod creation; the released member's kind stays hosted until the pair is released")
 
@@ -350,7 +355,7 @@ func TestReconcilePerScopeAdaptersEvictsRetiredGroupPodShape(t *testing.T) {
 
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "the retired group pod is evicted; only the peer pod remains")
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1)
 	assert.Nil(t, pods[0].Spec.Containers[0].Command,
 		"the surviving pod is the peer pod, not the retired adapter.sh group pod")
@@ -384,7 +389,7 @@ func TestReconcilePerScopeAdaptersPeerGroupDefersUntilRunnerIP(t *testing.T) {
 
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"), pods[0].Name)
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 	env := containerEnvByName(pods[0].Spec.Containers[0])
 	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"],
 		"the deferred build bakes the runner dial host once the IP resolves")
@@ -519,8 +524,8 @@ func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) 
 	assert.Equal(t, 2, active)
 
 	pods := listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "one (scope, environment) -> exactly one peer pod")
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46", "remote/worktree"), pods[0].Name)
+	require.Len(t, pods, 1, "one environment -> exactly one peer pod")
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "remote/worktree"), pods[0].Name)
 	require.Len(t, pods[0].Spec.Containers, 1)
 	assert.ElementsMatch(t, []string{"shell", "copilot"}, podManifestKinds(pods[0]),
 		"the peer container's manifest hosts every adapter kind sharing the environment")

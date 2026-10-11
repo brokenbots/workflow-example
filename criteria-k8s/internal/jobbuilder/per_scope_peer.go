@@ -143,7 +143,11 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	plan := newWorkflowPlan(run)
 	wireDelivery := peerWireDelivery(members, runnerIP)
-	includeData := !wireDelivery || plan.declaresDataMount()
+	// Scope-set pods read every scope's rotated token from the shared data
+	// volume (ScanRemoteScopes), so the volume mounts regardless of the
+	// wire delivery shape — the wire lane never fires for them.
+	scopeSet := len(members) > 1 || distinctScopes(members) > 1
+	includeData := !wireDelivery || plan.declaresDataMount() || scopeSet
 
 	labels := baseLabels(run)
 	labels[LabelRole] = RoleAdapter
@@ -224,6 +228,14 @@ const maxLabelValueLength = 63
 func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan *workflowPlan, dial events.LifecycleEvent, members []events.LifecycleEvent, runnerIP string, includeData bool) corev1.Container {
 	dialKind := adapterKind(dial)
 	wireDelivery := peerWireDelivery(members, runnerIP)
+	// A per-environment pod spans MANY scope instances (the engine rotates
+	// one scope per adapter), so the scope/token identity cannot ride the
+	// pod env: the peer's scope-set mode reads one (scope, adapter) token
+	// per scanned file and each conn presents its own scope identity
+	// (KB-213 scope-set dialing). Wire delivery would otherwise pin the
+	// whole pod to ONE member's scope+token and the other scopes' sessions
+	// would never be dialed.
+	scopeSetDelivery := len(members) > 1 || distinctScopes(members) > 1
 
 	env := []corev1.EnvVar{
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
@@ -235,19 +247,28 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 		// digest, mirroring the per-member digest env semantics the
 		// group-pod builder carried.
 		{Name: "CRITERIA_REMOTE_ADAPTERS", Value: adapterKindsLabel(members)},
-		// The remote-runner binary presents CRITERIA_REMOTE_SCOPE in the
-		// identity handshake; the shim registers scope tokens under
-		// <scopeName>/<scopeInstanceID> and rejects an empty scope in
-		// per-scope mode. ScopeTag is the human-readable tag (empty for the
-		// root scope) - the registration key is the name/scopeID pair.
-		{Name: "CRITERIA_REMOTE_SCOPE", Value: dial.ScopeTag + "/" + dial.ScopeID},
-		{Name: "CRITERIA_SCOPE_ID", Value: dial.ScopeID},
 	}
-	if dial.ScopeTag != "" {
-		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_TAG", Value: dial.ScopeTag})
+	if scopeSetDelivery {
+		// Scope-set mode: identity (scope + token) arrives per scanned
+		// token file, not via env. The manifest declares the hosted child
+		// set; every conn advertises the FULL set, satisfying the host's
+		// declared-adapter coverage check for each scope it dials.
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_SET", Value: "1"})
+	} else {
+		// Single-scope pair: the remote-runner binary presents
+		// CRITERIA_REMOTE_SCOPE in the identity handshake; the shim
+		// registers scope tokens under <scopeName>/<scopeInstanceID> and
+		// rejects an empty scope in per-scope mode. ScopeTag is the
+		// human-readable tag (empty for the root scope) — the
+		// registration key is the name/scopeID pair.
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_REMOTE_SCOPE", Value: dial.ScopeTag + "/" + dial.ScopeID})
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_ID", Value: dial.ScopeID})
+		if dial.ScopeTag != "" {
+			env = append(env, corev1.EnvVar{Name: "CRITERIA_SCOPE_TAG", Value: dial.ScopeTag})
+		}
 	}
 	env = append(env, peerAdapterManifestEnv(members)...)
-	if wireDelivery {
+	if wireDelivery && !scopeSetDelivery {
 		// Wire token delivery (CRI-237): the token reaches the peer pod on
 		// the wire through its authenticated shim channel, so the pod
 		// mounts no shared data volume and reads no rotated token file.
@@ -399,6 +420,19 @@ const engineImageAdapterBinaryPath = "/usr/local/bin/criteria-adapter-"
 // so the staged dir stays scannable by the engine's directory fallback too.
 func peerBinBinaryPath(kind string) string {
 	return filepath.Join(PerScopePeerBinVolumePath, "criteria-adapter-"+kind)
+}
+
+// distinctScopes counts the distinct scope identities in a member set. The
+// engine provisions one scope instance per adapter, so a member set that
+// carries more than one scope identity spans multiple scope instances of
+// one environment — the per-environment pod shape whose token identity
+// arrives per scanned token file rather than pod env.
+func distinctScopes(members []events.LifecycleEvent) int {
+	seen := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		seen[member.ScopeTag+"/"+member.ScopeID] = struct{}{}
+	}
+	return len(seen)
 }
 
 // peerAdapterKinds returns the deduplicated, sorted, raw adapter kinds
