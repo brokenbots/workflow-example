@@ -239,6 +239,17 @@ func perScopePeerContainer(run *criteriav1.CriteriaRun, defaults Defaults, plan 
 
 	env := []corev1.EnvVar{
 		{Name: "CRITERIA_RUN_JOB_NAME", Value: JobName(run)},
+		// The peer's scope-set rescan rides the shared heartbeat cadence
+		// (tunables EnvHeartbeatInterval, default 30s). A per-environment
+		// pod boots its children at the FIRST provision of the environment
+		// while later scopes (subworkflow bodies provision after their
+		// parent's) write their tokens afterward — a 30s rescan cadence
+		// raced the adapter children's idle-exit and the handshake hit a
+		// dead child (three canary deaths, KB-242: copilot child
+		// idle-exit exit_code=0 idle_ms=34000 the instant the dial
+		// arrived). 5s closes the window: new scopes dial within ~5s of
+		// their token landing.
+		{Name: "CRITERIA_HEARTBEAT_INTERVAL", Value: "5s"},
 		// CRITERIA_REMOTE_ADAPTERS is the engine's env-first multi-adapter
 		// manifest (KB-213; source-of-record citation in
 		// BuildPerScopePeerPod's doc): the deduplicated, sorted kind set
