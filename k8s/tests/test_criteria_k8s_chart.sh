@@ -358,10 +358,8 @@ assert_blocks_equal "castle pod securityContext" \
 
 # Operator selector must equal criteria-k8s/config/install.yaml (the
 # kanboard-watcher is not chart-rendered, so it has no chart side here).
-for comp in criteria-k8s-operator; do
-    assert_blocks_equal "$comp Deployment selector" \
-        "$(norm_doc "$RENDERED" Deployment "$comp" | sorted_block 'selector:' 'template:')" \
-        "$(norm_doc "$REPO_ROOT/criteria-k8s/config/install.yaml" Deployment "$comp" | sorted_block 'selector:' 'template:')"
-done
+assert_blocks_equal "criteria-k8s-operator Deployment selector" \
+    "$(norm_doc "$RENDERED" Deployment criteria-k8s-operator | sorted_block 'selector:' 'template:')" \
+    "$(norm_doc "$REPO_ROOT/criteria-k8s/config/install.yaml" Deployment criteria-k8s-operator | sorted_block 'selector:' 'template:')"
 
 echo "PASS: criteria-k8s chart lint, inventory, values wiring and script sync are valid"
