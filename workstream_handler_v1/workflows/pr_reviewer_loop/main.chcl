@@ -297,6 +297,7 @@ step "pr_review" {
 
     outcome "approve" {
         next = step.post_approval
+        schema = object({ reason = string })
         write {
             target = data.internal.review_result.value
             value  = "approved"
@@ -309,10 +310,11 @@ step "pr_review" {
             target = data.internal._review_repair_context.value
             value  = ""
         }
-        require_comment = true
+
     }
     outcome "changes_requested" {
         next = step.post_changes_requested
+        schema = object({ reason = string })
         write {
             target = data.internal.review_result.value
             value  = "changes_requested"
@@ -325,10 +327,11 @@ step "pr_review" {
             target = data.internal._review_repair_context.value
             value  = ""
         }
-        require_comment = true
+
     }
     outcome "failure" {
         next = switch.route_review_retry
+    schema = object({ reason = string })
         write {
             target = data.internal._failure_reason.value
             // try(): an engine-synthesized failure (timeout / crash / lost
@@ -344,10 +347,10 @@ step "pr_review" {
             target = data.internal._review_repair_context.value
             value  = "The previous reviewer attempt reported failure: ${try(output.reason, "no reason reported")}\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
         }
-        require_comment = true
     }
     outcome "default" {
         next = switch.route_review_retry
+        schema = object({ reason = string })
         write {
             target = data.internal._failure_reason.value
             // The engine classified a response but not its outcome name, so
@@ -366,7 +369,7 @@ step "pr_review" {
             target = data.internal._review_repair_context.value
             value  = "The previous reviewer attempt returned an unrecognised or malformed outcome (e.g. malformed tool-call text, missing submit_outcome, or an invalid outcome name).\n\nRetry now. You must call submit_outcome with outcome 'approve' or 'changes_requested', and you must not emit malformed tool-call text."
         }
-        require_comment = true
+
     }
 }
 

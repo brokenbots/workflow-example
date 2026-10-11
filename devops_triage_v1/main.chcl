@@ -299,6 +299,7 @@ step "intake_review" {
     outcome "actionable" { next = step.triage_worklist }
     outcome "insufficient" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "insufficient_report"
@@ -307,10 +308,11 @@ step "intake_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "needs_human" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_intake"
@@ -319,7 +321,7 @@ step "intake_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -363,6 +365,7 @@ step "triage_worklist" {
     outcome "no_action_needed" { next = step.review_no_action }
     outcome "need_help" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_triage"
@@ -371,7 +374,7 @@ step "triage_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -392,6 +395,7 @@ step "review_no_action" {
 
     outcome "confirmed" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "no_action_needed"
@@ -400,18 +404,20 @@ step "review_no_action" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "disputed" {
         next = step.triage_worklist
+        schema = object({ reason = string })
         write {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "needs_human" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_triage"
@@ -420,7 +426,7 @@ step "review_no_action" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -441,6 +447,7 @@ step "review_worklist" {
 
     outcome "worklist_approved" {
         next = step.run_devops_worker
+        schema = object({ reason = string })
         write {
             target = data.internal.worker_brief.value
             value  = output.reason
@@ -449,18 +456,20 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = ""
         }
-        require_comment = true
+
     }
     outcome "worklist_revise" {
         next = step.triage_worklist
+        schema = object({ reason = string })
         write {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "worklist_reject" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "worklist_rejected"
@@ -469,7 +478,7 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     // The work is warranted but cannot proceed without an operator action —
     // a repository that must be created, a credential nobody has minted, an
@@ -479,6 +488,7 @@ step "review_worklist" {
     // brief, which is how a forbidden action becomes an instruction.
     outcome "needs_human" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_worklist"
@@ -487,7 +497,7 @@ step "review_worklist" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }
@@ -603,6 +613,7 @@ step "final_review" {
 
     outcome "approved" {
         next = switch.route_delivery
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = var.deliver == "none" ? "completed_local" : ""
@@ -611,18 +622,20 @@ step "final_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "needs_work" {
         next = step.run_devops_worker
+        schema = object({ reason = string })
         write {
             target = data.internal.worker_brief.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "reject" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "work_rejected"
@@ -631,10 +644,11 @@ step "final_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "needs_human" {
         next = step.write_ops_report
+        schema = object({ reason = string })
         write {
             target = data.internal.verdict.value
             value  = "needs_human_at_final"
@@ -643,7 +657,7 @@ step "final_review" {
             target = data.internal.manager_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "failure" { next = state.failed }
     outcome "default" { next = state.failed }

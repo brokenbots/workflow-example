@@ -162,15 +162,18 @@ step "develop" {
 
     outcome "ready_for_review" {
         next = step.write_work_log
-        require_comment = true
+    schema = object({ reason = string })
+
     }
     outcome "checkpoint" {
         next = step.push_checkpoint
-        require_comment = true
+    schema = object({ reason = string })
+
     }
     outcome "need_help" {
         next = state.failed
-        require_comment = true
+    schema = object({ reason = string })
+
     }
     // CRI-275: a turn that ends without a verdict routes through the
     // checkpoint loop instead of failing the run — push_checkpoint verifies
@@ -182,11 +185,13 @@ step "develop" {
     // cannot proceed); max_visits still bounds the whole cycle.
     outcome "failure" {
         next = step.push_checkpoint
-        require_comment = true
+    schema = object({ reason = string })
+
     }
     outcome "default" {
         next = step.push_checkpoint
-        require_comment = true
+    schema = object({ reason = string })
+
     }
 }
 
@@ -442,18 +447,21 @@ step "review" {
 
     outcome "need_help" {
         next = state.failed
-        require_comment = true
+    schema = object({ reason = string })
+
     }
     outcome "approved" {
         next = step.write_review_log
+        schema = object({ reason = string })
         write {
             target = data.internal.review_verdict.value
             value  = "approved"
         }
-        require_comment = true
+
     }
     outcome "changes_requested" {
         next = step.write_review_log
+        schema = object({ reason = string })
         write {
             target = data.internal.review_verdict.value
             value  = "changes_requested"
@@ -473,17 +481,18 @@ step "review" {
                 findings = output.reason
             })
         }
-        require_comment = true
     }
     // The copilot adapter emits "failure" if the session dies or the agent
     // never calls submit_outcome after re-prompts — route it somewhere terminal.
     outcome "failure" {
         next = state.failed
-        require_comment = true
+    schema = object({ reason = string })
+
     }
     outcome "default" {
         next = state.failed
-        require_comment = true
+    schema = object({ reason = string })
+
     }
 }
 

@@ -761,11 +761,12 @@ step "triage_pr_feedback" {
 
     outcome "has_work" {
         next = step.run_pair_programming_loop_with_feedback
+        schema = object({ reason = string })
         write {
             target = data.internal.developer_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "no_work"  { next = step.push_and_respond }
     outcome "failed"   { next = state.failed }
@@ -801,11 +802,12 @@ step "validate_developer_response" {
     outcome "approved"   { next = step.push_and_respond }
     outcome "needs_work" {
         next = step.run_pair_programming_loop_with_feedback
+        schema = object({ reason = string })
         write {
             target = data.internal.developer_feedback.value
             value  = output.reason
         }
-        require_comment = true
+
     }
     outcome "failed"     { next = state.failed }
     outcome "failure"    { next = state.failed }

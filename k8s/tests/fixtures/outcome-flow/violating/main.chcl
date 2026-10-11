@@ -1,6 +1,6 @@
 // KB-217 NEGATIVE fixture: the reason-feeding arm of step "agent_work" writes
 // output.reason into a variable and a subworkflow call input but declares NO
-// require_comment. The validator must FAIL this tree and name the file, the
+// schema (typed reason). The validator must FAIL this tree and name the file, the
 // step, the outcome arm, both sinks, and the fix hint. Deliberately not
 // compile-ready (the violating state is only meaningful to the validator);
 // the compliant twin of this tree lives next door.
@@ -39,7 +39,7 @@ step "agent_work" {
 // arm of agent_work is a reason producer for the rule (the conservative
 // model: a steps.S.reason reference cannot name which arm's reason renders).
 // The violating tree therefore fails on work_done AND failure; the compliant
-// twin declares require_comment on both.
+// twin declares schema (typed reason) on both.
 
 step "report" {
     target = adapter.copilot.reporter

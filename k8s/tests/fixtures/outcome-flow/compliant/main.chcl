@@ -1,5 +1,5 @@
 // KB-217 POSITIVE fixture: the outcome arms whose adapter reason renders into
-// downstream inputs all declare require_comment. Two reason paths are covered:
+// downstream inputs all declare schema (typed reason). Two reason paths are covered:
 //   - var flow: arm writes output.reason into data.internal.findings, which the
 //     report step interpolates into its input prompt;
 //   - direct read: the report input also references steps.agent_work.reason.
@@ -30,12 +30,12 @@ step "agent_work" {
             target = data.internal.findings.value
             value  = output.reason
         }
-        require_comment = true
+        schema = object({ reason = string })
     }
 
     outcome "failure" {
         next = state.done
-        require_comment = true
+        schema = object({ reason = string })
     }
 }
 
