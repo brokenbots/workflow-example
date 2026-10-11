@@ -57,7 +57,11 @@ set -euo pipefail
 # CRITERIA_VERSION=<tag of that exact commit> (the 2026-10-01 lesson: a
 # stamp-only bump ships a stale source pin silently).
 #
-# Re-audited to 56264d0f (v0.5.48 carrier, 2026-10-10): delta vs fb7b4ae7 (v0.5.46
+# Re-audited to 75b12d96 (v0.5.50 carrier, 2026-10-11): delta vs 56264d0f (v0.5.48 carrier) is
+# ENGINE-INTERNAL ONLY — proto/ diff empty (the KB-242 per-definition child-keying revert #527 +
+# KB-246 adapterhost definition-identity name grammar #528; no proto, no event contract, no wire
+# change; castlegate ingest envelope-verbatim consumer-safe).
+# Prior: Re-audited to 56264d0f (v0.5.48 carrier, 2026-10-10): delta vs fb7b4ae7 (v0.5.46
 # carrier, 2026-10-10) is ENGINE-INTERNAL ONLY — proto/ diff empty. Payload: KB-237
 # finalize comment reconstruction (#525) + KB-238 subworkflow-declared env shims
 # (#526). Castle ingest is envelope-verbatim, consumer-safe.
@@ -88,7 +92,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="56264d0f602a66c2ac80aabdbf5f70bf7dc18b31"
+AUDITED_COMMIT="75b12d96bc6a0736767d08815c4d33c92340524b"
 
 fail() {
     echo "FAIL: $1" >&2
