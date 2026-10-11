@@ -56,8 +56,17 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
+        # Fleet-roll discipline (KB-241): the criteria-k8s image carries ALL
+        # THREE components (manager/operator, linear-watcher, kanboard-watcher),
+        # so this deployment rides the same image as the operator and moves on
+        # every fleet roll — a private tag here fossilizes an operator-shaped
+        # binary that predates the fleet (KB-241: kanboard-watcher-8 predated
+        # the KB-213/214 multi-adapter peer builder while the operator rolled
+        # ahead). Rolls go through `make deploy-images`, which sets THIS
+        # deployment and the operator from the same freshly built tag and gates
+        # on both rollout statuses; verify pod imageID digests after each roll.
         - name: watcher
-          image: localhost:5000/criteria-k8s:kanboard-watcher-8
+          image: localhost:5000/criteria-k8s:dev
           imagePullPolicy: IfNotPresent
           command: ["/kanboard-watcher"]
           # Health endpoints served by the watcher (KB-22): /readyz fails

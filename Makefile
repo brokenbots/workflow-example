@@ -82,6 +82,7 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "Deploy the watcher with:"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
+	@echo "  kubectl -n criteria-jobs set image deploy/criteria-kanboard-watcher watcher=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "Deploy pairing (CRI-234/CRI-237): the per-(scope,environment) co-location reads"
@@ -96,8 +97,16 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 
 deploy-images: images-push
 ifneq ($(CONTAINER_TOOL),)
+	# Fleet-roll discipline (KB-241): ONE criteria-k8s image carries all
+	# three binaries (manager/operator, linear-watcher, kanboard-watcher), so
+	# the operator and the kanboard watcher roll TOGETHER from this same tag —
+	# rolling the operator alone leaves the watcher on a fossilized tag with a
+	# binary that predates the fleet (KB-241: the deployed kanboard-watcher-8
+	# tag predated the KB-213/214 multi-adapter peer builder and provisioned
+	# the legacy per-kind peer shape that engine v0.5.48+ rejects).
 	kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
+	kubectl -n criteria-jobs set image deploy/criteria-kanboard-watcher watcher=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)
 	# Deploy pairing (CRI-234/CRI-237): the per-(scope,environment)
 	# co-location needs provision events carrying environment identity, and
@@ -114,6 +123,14 @@ ifneq ($(CONTAINER_TOOL),)
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs rollout status deploy/criteria-linear-watcher --timeout=120s
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
+	kubectl -n criteria-jobs rollout status deploy/criteria-kanboard-watcher --timeout=120s
+	# Post-roll fleet verification (KB-241): read back the running pods'
+	# imageID DIGESTS (not just spec.image tags) to prove every rolled pod
+	# actually runs this tag's layers — a stale IfNotPresent cache can mask a
+	# tag reuse, and the roll is only complete when the digest read-back
+	# agrees across the operator and both watchers:
+	#   kubectl -n criteria-jobs get pods \
+	#     -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].imageID}{"\n"}{end}'
 endif
 
 validate:
@@ -215,6 +232,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_outcome_reason_flow.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
 	./k8s/tests/test_env_listen_ports.sh
+	@echo "Running criteria-k8s fleet-roll single-image regression test (KB-241)..."
+	./k8s/tests/test_fleet_roll_single_image.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -254,7 +273,8 @@ lint: lint-criteria-k8s
 		k8s/tests/test_criteria_base_pin.sh \
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
-		k8s/tests/test_outcome_reason_flow.sh
+		k8s/tests/test_outcome_reason_flow.sh \
+		k8s/tests/test_fleet_roll_single_image.sh
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...
