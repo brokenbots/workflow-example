@@ -270,8 +270,13 @@ func TestPeerSingleKindChildStaysImageSupplied(t *testing.T) {
 	require.Len(t, defs, 1)
 
 	for _, def := range defs {
-		assert.Empty(t, engineBinaryPin(env, def),
-			"a single-child pod must not pin a staged binary: the image supplies the sole binary conventionally")
+		// KB-246 refire evidence: the single-child pod pins its definition at
+		// the image's conventional per-type install path — the exact file the
+		// legacy type-keyed grammar resolved. No staged path.
+		pin := engineBinaryPin(env, def)
+		assert.Equal(t, "/usr/local/bin/criteria-adapter-shell", pin,
+			"single-child pod pins the definition's binary at the image's per-type install path")
+		assert.True(t, filepath.IsAbs(pin))
 	}
 	assert.Contains(t, pod.Spec.Containers[0].Image, "criteria-adapter-shell-peer",
 		"the container image must be the manifest kind's own per-kind peer image for the conventional resolution to hold")
