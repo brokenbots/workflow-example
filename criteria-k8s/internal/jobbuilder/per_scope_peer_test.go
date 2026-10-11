@@ -81,8 +81,11 @@ func TestBuildPerScopePeerPodSameEnvironmentOnePod(t *testing.T) {
 	env := containerEnvMap(pod.Spec.Containers[0])
 	assert.Equal(t, "copilot,shell", env["CRITERIA_REMOTE_ADAPTERS"],
 		"the manifest env hosts every adapter kind sharing the environment")
-	assert.Equal(t, "scope-a", env["CRITERIA_SCOPE_ID"])
-	assert.Equal(t, "root-scope/scope-a", env["CRITERIA_REMOTE_SCOPE"])
+	// Scope-set shape: the member set spans two scope instances (the engine
+	// rotates one per adapter), so identity arrives per scanned token file
+	// and no single-scope env is present.
+	assert.Empty(t, env["CRITERIA_SCOPE_ID"])
+	assert.Empty(t, env["CRITERIA_REMOTE_SCOPE"])
 	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_SHELL_DIGEST"],
 		"per-kind digest pins keep the per-member digest env semantics")
 	assert.Equal(t, "sha256:deadbeef", env["CRITERIA_ADAPTER_COPILOT_DIGEST"])
@@ -352,17 +355,16 @@ func TestBuildPerScopePeerPodWireDelivery(t *testing.T) {
 
 	require.Len(t, pod.Spec.Containers, 1)
 	env := containerEnvMap(pod.Spec.Containers[0])
-	// The dial member is the sorted-first member (adapter node name
-	// ordering: "intake" < "review", so the shell member dials); the single
-	// conn presents its accept token and the runner's routable port.
-	assert.Equal(t, "accept-shell", env["CRITERIA_REMOTE_TOKEN"])
+	// Scope-set shape: two scope instances of one environment never take a
+	// single-member wire token — identity arrives per scanned token file,
+	// and the data volume stays mounted for the scan. (A genuine
+	// single-scope, single-conn pair keeps the wire shape — that lane is
+	// pinned by the same-name single-scope tests below.)
+	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN",
+		"a multi-scope peer never pins one member's token on the pod")
 	assert.Equal(t, "10.0.0.10:7778", env["CRITERIA_REMOTE_HOST"])
-	assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN_FILE")
-	for _, m := range pod.Spec.Containers[0].VolumeMounts {
-		assert.NotEqual(t, "data", m.Name)
-	}
-	assert.False(t, hasVolume(pod.Spec.Volumes, "data"),
-		"the peer pod must not mount the shared /data PVC for wire delivery")
+	assert.True(t, hasVolume(pod.Spec.Volumes, "data"),
+		"the per-environment peer mounts /data to scan every scope's tokens")
 }
 
 func TestBuildPerScopePeerPodMixedMembersKeepDataVolume(t *testing.T) {
@@ -688,10 +690,15 @@ func TestBuildPerScopePeerPodStagingIsDeliveryAgnostic(t *testing.T) {
 			assert.NotEmpty(t, env["CRITERIA_ADAPTER_COPILOT_BINARY"])
 			assert.NotEmpty(t, env["CRITERIA_ADAPTER_SHELL_BINARY"])
 			require.Len(t, pod.Spec.InitContainers, 2)
-			assert.Equal(t, members[0].AcceptToken, env["CRITERIA_REMOTE_TOKEN"],
-				"staging must not disturb the wire handshake on wire-shaped pairs")
-			assert.Equal(t, members[0].AcceptToken == "", hasVolume(pod.Spec.Volumes, "data"),
-				"the data-volume rule follows the delivery shape, never the staging")
+			// The member set spans two scope instances of one
+			// environment, so BOTH delivery lanes take the scope-set
+			// shape: identity arrives per scanned token file, the data
+			// volume stays mounted for the scan, and no single-member
+			// token rides the pod spec regardless of delivery shape.
+			assert.NotContains(t, env, "CRITERIA_REMOTE_TOKEN",
+				"staging must not pin one member's wire token on a multi-scope peer")
+			assert.True(t, hasVolume(pod.Spec.Volumes, "data"),
+				"the data-volume rule follows the multi-scope scope-set shape, never the staging")
 		})
 	}
 }

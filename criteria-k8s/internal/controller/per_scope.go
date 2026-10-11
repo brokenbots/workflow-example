@@ -117,10 +117,20 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 			memberPods[pod.Name] = append(memberPods[pod.Name], scope)
 			continue
 		}
-		key := envGroupKey{scopeID: scope.ScopeID, environment: scope.Environment}
+		// The environment is the isolation boundary (user doctrine,
+		// KB-213/KB-214): ONE peer pod per ENVIRONMENT hosts every adapter
+		// kind that environment declares, across ALL of its scopes. The
+		// engine provisions a separate scope instance per adapter, so
+		// grouping by (scope, environment) would split one environment's
+		// kinds across single-kind pods and every dial would fail the
+		// host's declared-adapter coverage check. Grouping by environment
+		// alone puts the whole declared kind set in one peer; the peer's
+		// scope-set mode (CRITERIA_REMOTE_SCOPES_DIR) serves every scope
+		// of the environment from that one pod.
+		key := envGroupKey{environment: scope.Environment}
 		group, ok := groups[key]
 		if !ok {
-			group = &envGroup{scopeID: scope.ScopeID, environment: scope.Environment}
+			group = &envGroup{environment: scope.Environment}
 			groups[key] = group
 		}
 		group.members = append(group.members, scope)
