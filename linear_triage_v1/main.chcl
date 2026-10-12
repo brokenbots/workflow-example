@@ -293,11 +293,26 @@ step "review_qa_output" {
     // The outcome token keeps its intake-era name (valid_run_handler): the
     // reviewer's system prompt contract is copied verbatim. Here it routes to
     // the ready-for-development terminal — no handler is invoked.
-    outcome "valid_run_handler" { next = switch.route_ready }
-    outcome "invalid_close"     { next = step.comment_invalid }
-    outcome "needs_human"       { next = step.comment_needs_human }
-    outcome "failure"           { next = step.comment_triage_failed }
-    outcome "default"           { next = step.comment_triage_failed }
+    outcome "valid_run_handler" {
+        schema = object({ reason = string })
+        next = switch.route_ready
+    }
+    outcome "invalid_close" {
+        schema = object({ reason = string })
+        next = step.comment_invalid
+    }
+    outcome "needs_human" {
+        schema = object({ reason = string })
+        next = step.comment_needs_human
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = step.comment_triage_failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = step.comment_triage_failed
+    }
 }
 
 // The reviewer ruled the finding valid, but a confirmed finding needs a

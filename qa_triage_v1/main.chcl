@@ -282,7 +282,10 @@ step "intake_review" {
         })
     }
 
-    outcome "actionable" { next = step.plan_repro }
+    outcome "actionable" {
+        schema = object({ reason = string })
+        next = step.plan_repro
+    }
     outcome "insufficient" {
         next = step.write_triage_report
         schema = object({ reason = string })
@@ -309,8 +312,14 @@ step "intake_review" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Plan ─────────────────────────────────────────────────────────────────────
@@ -330,7 +339,10 @@ step "plan_repro" {
         })
     }
 
-    outcome "plan_ready"  { next = step.review_plan }
+    outcome "plan_ready" {
+        schema = object({ reason = string })
+        next = step.review_plan
+    }
     outcome "need_help" {
         next = step.write_triage_report
         schema = object({ reason = string })
@@ -344,8 +356,14 @@ step "plan_repro" {
         }
 
     }
-    outcome "failure"     { next = state.failed }
-    outcome "default"     { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Gate 1: is the plan adequate, before it costs a build and a run? ─────────
@@ -363,6 +381,7 @@ step "review_plan" {
     }
 
     outcome "plan_approved" {
+        schema = object({ reason = string })
         next = step.persist_approved_plan
         write {
             target = data.internal.supervisor_feedback.value
@@ -391,8 +410,14 @@ step "review_plan" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // Persist the supervisor-approved plan to a durable path supplied by the parent
@@ -625,8 +650,14 @@ step "verdict" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Workstream drafting ──────────────────────────────────────────────────────
@@ -644,7 +675,10 @@ step "draft_workstream" {
         })
     }
 
-    outcome "draft_ready"  { next = step.approve_workstream }
+    outcome "draft_ready" {
+        schema = object({ reason = string })
+        next = step.approve_workstream
+    }
     outcome "needs_design" {
         next = step.write_triage_report
         schema = object({ reason = string })
@@ -671,8 +705,14 @@ step "draft_workstream" {
         }
 
     }
-    outcome "failure"   { next = state.failed }
-    outcome "default"   { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Gate 3: final authority over whether a workstream file exists ────────────
@@ -689,7 +729,10 @@ step "approve_workstream" {
         })
     }
 
-    outcome "approved" { next = step.publish_workstream }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next = step.publish_workstream
+    }
     outcome "revise" {
         next = step.draft_workstream
         schema = object({ reason = string })
@@ -712,8 +755,14 @@ step "approve_workstream" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 step "publish_workstream" {

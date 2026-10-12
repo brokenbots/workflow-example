@@ -177,6 +177,7 @@ step "execute_plan" {
     }
 
     outcome "reproduced" {
+        schema = object({ reason = string })
         next = state.done
         write {
             target = data.internal.reproduced.value
@@ -184,6 +185,7 @@ step "execute_plan" {
         }
     }
     outcome "not_reproduced" {
+        schema = object({ reason = string })
         next = state.done
         write {
             target = data.internal.reproduced.value
@@ -191,6 +193,7 @@ step "execute_plan" {
         }
     }
     outcome "inconclusive" {
+        schema = object({ reason = string })
         next = state.done
         write {
             target = data.internal.reproduced.value
@@ -198,6 +201,7 @@ step "execute_plan" {
         }
     }
     outcome "need_help" {
+        schema = object({ reason = string })
         next = state.done
         write {
             target = data.internal.reproduced.value
@@ -205,6 +209,7 @@ step "execute_plan" {
         }
     }
     outcome "failure" {
+        schema = object({ reason = string })
         next = state.done
         write {
             target = data.internal.reproduced.value
@@ -212,6 +217,7 @@ step "execute_plan" {
         }
     }
     outcome "default" {
+        schema = object({ reason = string })
         next = state.done
         write {
             target = data.internal.reproduced.value
