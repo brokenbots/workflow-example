@@ -32,7 +32,7 @@ fail() {
 
 # Pinned criteria main commit built into the image.
 pinned_sha="$(awk -F= '/^ARG CRITERIA_COMMIT=/ {print $2}' "$REPO_ROOT/criteria-base/Dockerfile" | tr -d '[:space:]')"
-[ "$pinned_sha" = "75b12d96bc6a0736767d08815c4d33c92340524b" ] || \
+[ "$pinned_sha" = "e3d7b354706ea341f0f0f6e5ae274ad4292225ee" ] || \
     fail "criteria-base/Dockerfile pins unexpected commit: $pinned_sha"
 pinned_short="${pinned_sha:0:7}"
 # Stamp paired with the pin for the smoke build (must match a published criteria

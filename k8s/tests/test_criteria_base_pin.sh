@@ -57,7 +57,11 @@ set -euo pipefail
 # CRITERIA_VERSION=<tag of that exact commit> (the 2026-10-01 lesson: a
 # stamp-only bump ships a stale source pin silently).
 #
-# Re-audited to 75b12d96 (v0.5.50 carrier, 2026-10-11): delta vs 56264d0f (v0.5.48 carrier) is
+# Re-audited to e3d7b354 (v0.5.51 carrier, 2026-10-12): delta vs 75b12d96 (v0.5.50 carrier) is
+# ENGINE-INTERNAL ONLY — proto/ diff empty (KB-251: removes the KB-213 child-set coverage gate +
+# its inert declared-adapter machinery, dave's no-pod-concepts-in-the-accept-path ruling; no proto,
+# no event contract, no wire change; castle ingest envelope-verbatim consumer-safe).
+# Prior: Re-audited to 75b12d96 (v0.5.50 carrier, 2026-10-11): delta vs 56264d0f (v0.5.48 carrier) is
 # ENGINE-INTERNAL ONLY — proto/ diff empty (the KB-242 per-definition child-keying revert #527 +
 # KB-246 adapterhost definition-identity name grammar #528; no proto, no event contract, no wire
 # change; castlegate ingest envelope-verbatim consumer-safe).
@@ -92,7 +96,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="75b12d96bc6a0736767d08815c4d33c92340524b"
+AUDITED_COMMIT="e3d7b354706ea341f0f0f6e5ae274ad4292225ee"
 
 fail() {
     echo "FAIL: $1" >&2
