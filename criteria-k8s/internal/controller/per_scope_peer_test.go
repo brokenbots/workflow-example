@@ -264,25 +264,21 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 
 	pods = listAdapterRolePods(t, cl, "default")
 
-	// KB-251 manifest drift: the member set IS the peer container's manifest
-	// identity — a released member must not stay hosted on a live pod (the
-	// stale manifest wedges its future re-provision's dials), and the name
-	// never changes, so the reconcile recreates the pod with the fresh
-	// manifest. The recreate is async (delete → create on a later pass), so
-	// within THIS pass the pod is gone or still the old shape.
-	if len(pods) == 1 {
-		assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name,
-			"within the same pass the pod keeps its stable name")
-	}
-
-	// The next pass completes the recreate: the peer pod exists again with a
-	// manifest matching the remaining member.
+	// KB-253: membership changes after boot NEVER delete a pod. The released
+	// member's definition stops being served by a boot child; if the engine
+	// re-requests it later, the peer's scan+spawn path serves it (the
+	// boot-manifest env stays the pod's boot shape for the pod's lifetime).
+	pods = listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1, "the peer pod survives a member release")
+	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
+	// Repeat passes converge without recreating: the pod object identity is
+	// stable (same UID across passes proves no delete/create cycle).
+	uid := pods[0].UID
 	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
 	require.NoError(t, err)
 	pods = listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "the peer pod is recreated for the remaining member")
-	assert.ElementsMatch(t, []string{"shell.intake"}, podManifestDefinitions(pods[0]),
-		"the recreated manifest hosts exactly the remaining member (KB-251)")
+	require.Len(t, pods, 1)
+	assert.Equal(t, uid, pods[0].UID, "the reconcile must not recreate the pod on membership release")
 }
 
 // A count-preserving, same-kind membership change in one (scope,
@@ -314,15 +310,15 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 
 	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1, "the (scope, environment) keeps exactly one pod name")
-	// Same-kind swap = the manifest's DEFINITION set changes (shell.first →
-	// shell.second): the manifest is the peer's identity, so the pod
-	// recreates (async — the old object may persist within this pass).
+	// KB-253: the same-kind swap must NOT recreate the pod — membership
+	// changes after boot are the peer's scan+spawn job; the pod object
+	// identity is stable across the swap (UID preserved across passes).
+	uid := pods[0].UID
 	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
 	require.NoError(t, err)
 	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
-	assert.ElementsMatch(t, []string{"shell.second"}, podManifestDefinitions(pods[0]),
-		"the manifest hosts exactly the swapped member (KB-251)")
+	assert.Equal(t, uid, pods[0].UID, "a same-kind member swap must not recreate the pod")
 }
 
 // A provision for an OLD-shape group pod (from a rollout behind this
