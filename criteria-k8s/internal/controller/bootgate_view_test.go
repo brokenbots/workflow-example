@@ -16,11 +16,13 @@ func TestBootgateViewVerdicts(t *testing.T) {
 	if err := criteriav1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	live := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-42", Namespace: "ns"},
+	live := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-42-100", Namespace: "ns", Labels: map[string]string{"ticket": "kb-42"}},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Running"}}
-	dead := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-43", Namespace: "ns"},
+	old := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-42-99", Namespace: "ns", Labels: map[string]string{"ticket": "kb-42"}},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Failed"}}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(live, dead).Build()
+	dead := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-43-1", Namespace: "ns", Labels: map[string]string{"ticket": "kb-43"}},
+		Status: criteriav1.CriteriaRunStatus{Phase: "Failed"}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(live, dead, old).Build()
 	v := &BootgateView{Client: cl, Namespace: "ns"}
 
 	for _, tc := range []struct {

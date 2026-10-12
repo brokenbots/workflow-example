@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -38,6 +39,20 @@ func (v *BootgateView) namespaceOr(requested string) string {
 	return "criteria-jobs"
 }
 
+// unixSuffix extracts the trailing numeric unix segment of a kb-<ticket>-<unix>
+// CR name, 0 when absent.
+func unixSuffix(name string) int64 {
+	i := strings.LastIndexByte(name, '-')
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.ParseInt(name[i+1:], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 var bootgateTerminalPhases = map[string]bool{
 	"Succeeded": true,
 	"Failed":    true,
@@ -59,18 +74,36 @@ func (v *BootgateView) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var run criteriav1.CriteriaRun
 	var found bool
+	var hasTicket bool
+	ticketLabel := ""
+	if ticket != "" {
+		hasTicket = true
+		ticketLabel = "kb-" + strings.ToLower(strings.TrimPrefix(ticket, "KB-"))
+	}
 	switch {
-	case ticket != "":
-		err := v.Client.Get(r.Context(), client.ObjectKey{Namespace: v.namespaceOr(r.URL.Query().Get("ns")), Name: "kb-" + strings.ToLower(strings.TrimPrefix(ticket, "KB-"))}, &run)
-		switch {
-		case err == nil:
-			found = true
-		case client.IgnoreNotFound(err) == nil:
-			found = false
-		default:
-			http.Error(w, fmt.Sprintf("bootgate view: CR read: %v", err), http.StatusInternalServerError)
+	case hasTicket:
+		// The ticket's CRs are named kb-<ticket>-<unix> — the name is not
+		// derivable from the ticket alone. The ticket label (the watcher
+		// stamps it) selects the family; the NEWEST run is the live one.
+		var list criteriav1.CriteriaRunList
+		if err := v.Client.List(r.Context(), &list,
+			client.InNamespace(v.namespaceOr(r.URL.Query().Get("ns"))),
+			client.MatchingLabels{"ticket": ticketLabel}); err != nil {
+			http.Error(w, fmt.Sprintf("bootgate view: CR list: %v", err), http.StatusInternalServerError)
 			return
 		}
+		for i := range list.Items {
+			c := &list.Items[i]
+			// Newest wins: real CRs carry monotonic creation timestamps;
+			// where they tie (fake-client granularity), the larger unix
+			// suffix breaks the tie — numeric, not lexicographic (100 > 99
+			// though the names sort 'kb-42-100' < 'kb-42-99').
+			if run.Status.Phase == "" || run.CreationTimestamp.Before(&c.CreationTimestamp) ||
+				(run.CreationTimestamp.Equal(&c.CreationTimestamp) && unixSuffix(c.Name) > unixSuffix(run.Name)) {
+				run = *c
+			}
+		}
+		found = len(list.Items) > 0
 	default:
 		var list criteriav1.CriteriaRunList
 		if job == "" {
