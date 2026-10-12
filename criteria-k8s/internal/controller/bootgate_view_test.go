@@ -21,13 +21,16 @@ func TestBootgateViewVerdicts(t *testing.T) {
 	dead := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-43", Namespace: "ns"},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Failed"}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(live, dead).Build()
-	v := &BootgateView{Client: cl}
+	v := &BootgateView{Client: cl, Namespace: "ns"}
 
 	for _, tc := range []struct {
 		name, url, wantPhase string
 		wantTerminal         bool
 	}{{
 		name: "live run reports Running open", url: "/operator-view?ticket=KB-42&ns=ns", wantPhase: "Running",
+
+	}, {
+		name: "missing ns defaults to the operator namespace", url: "/operator-view?ticket=KB-42", wantPhase: "Running",
 	}, {
 		name: "terminal run reports Failed terminal", url: "/operator-view?ticket=KB-43&ns=ns", wantPhase: "Failed", wantTerminal: true,
 	}, {

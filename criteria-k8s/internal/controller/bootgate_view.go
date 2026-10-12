@@ -21,6 +21,21 @@ import (
 // cached view (the CRI-264 posture).
 type BootgateView struct {
 	Client client.Client
+	// Namespace is the operator's managed namespace; the runner's request
+	// carries no namespace and cross-namespace Gets are invalid.
+	Namespace string
+}
+
+// namespaceOr resolves the CR namespace: the request's ns when supplied,
+// else the operator's own managed namespace.
+func (v *BootgateView) namespaceOr(requested string) string {
+	if requested != "" {
+		return requested
+	}
+	if v.Namespace != "" {
+		return v.Namespace
+	}
+	return "criteria-jobs"
 }
 
 var bootgateTerminalPhases = map[string]bool{
@@ -46,7 +61,7 @@ func (v *BootgateView) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var found bool
 	switch {
 	case ticket != "":
-		err := v.Client.Get(r.Context(), client.ObjectKey{Namespace: r.URL.Query().Get("ns"), Name: "kb-" + strings.ToLower(strings.TrimPrefix(ticket, "KB-"))}, &run)
+		err := v.Client.Get(r.Context(), client.ObjectKey{Namespace: v.namespaceOr(r.URL.Query().Get("ns")), Name: "kb-" + strings.ToLower(strings.TrimPrefix(ticket, "KB-"))}, &run)
 		switch {
 		case err == nil:
 			found = true

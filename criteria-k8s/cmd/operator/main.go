@@ -220,7 +220,8 @@ func main() {
 	// a boot decision never rides a stale informer view.
 	if *bootgateViewAddr != "" {
 		mux := http.NewServeMux()
-		mux.Handle("/operator-view", &controller.BootgateView{Client: directClient})
+		view := &controller.BootgateView{Client: directClient, Namespace: *namespaceFlag}
+		mux.Handle("/operator-view", view)
 		bgSrv := &http.Server{Addr: *bootgateViewAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			<-ctx.Done()
