@@ -1,7 +1,7 @@
 workflow {
     name          = "qa_triage_v1"
     version       = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state = "read_report"
     target_state  = "workstream_published"
 
