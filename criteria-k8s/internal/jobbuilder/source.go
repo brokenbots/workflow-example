@@ -204,7 +204,18 @@ if [ -s "$criteria_home/secret-vars.args" ]; then
     rm -f "$criteria_home/secret-vars.args"
 fi
 
+set +e
 "$criteria_bin" "$@" --output concise
+engine_exit=$?
+set -e
+# KB-227/KB-251: the engine's stable awaiting-human exit (6) is a DELIBERATE
+# park, not a failure — the pod's OnFailure restart policy must not replay a
+# parked run. The verdict already lives on the CR/wire; exit 0 and stop.
+if [ "$engine_exit" -eq 6 ]; then
+    echo "run parked at awaiting_human; no restart (KB-227)"
+    exit 0
+fi
+exit "$engine_exit"
 `
 
 // buildSourceRunnerJob constructs the runner Job for a spec.workflowSource
