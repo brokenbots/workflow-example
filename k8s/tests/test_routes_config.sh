@@ -853,8 +853,8 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
 # url-only objects (linear-intake-url, decision-demo-url) carry no
 # adapterImages and skip the check.
 RECORDED_PIN_SET = {
-    "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
-    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.16",
+    "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
+    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1",
 }
 
 
