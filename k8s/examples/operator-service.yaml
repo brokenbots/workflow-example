@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+  labels:
+    app.kubernetes.io/name: criteria-k8s-operator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: criteria-k8s
+  ports:
+    - name: bootgate-view
+      port: 8082
+      targetPort: 8082
+      protocol: TCP
