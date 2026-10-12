@@ -30,7 +30,6 @@ func TestBootgateViewVerdicts(t *testing.T) {
 		wantTerminal         bool
 	}{{
 		name: "live run reports Running open", url: "/operator-view?ticket=KB-42&ns=ns", wantPhase: "Running",
-
 	}, {
 		name: "missing ns defaults to the operator namespace", url: "/operator-view?ticket=KB-42", wantPhase: "Running",
 	}, {

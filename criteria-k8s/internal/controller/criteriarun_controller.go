@@ -406,7 +406,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 		default:
 			var err error
-			activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.RunID, obs.Lifecycle, logger)
+			activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.RunID, obs.Lifecycle, obs.WorkflowGraphs, logger)
 			if err != nil {
 				return ctrl.Result{}, err
 			}

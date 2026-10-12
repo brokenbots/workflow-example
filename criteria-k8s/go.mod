@@ -1,10 +1,10 @@
 module github.com/brokenbots/workflow-example/criteria-k8s
 
-go 1.26.6
+go 1.26.9
 
 require (
 	connectrpc.com/connect v1.21.0
-	github.com/brokenbots/criteria/sdk v0.0.0-20261003031147-773c4042287b
+	github.com/brokenbots/criteria/sdk v0.0.0-20261012210349-0ce237de2084
 	github.com/go-logr/logr v1.4.1
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/net v0.58.0

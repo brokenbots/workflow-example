@@ -295,7 +295,7 @@ func TestReconcileEmitsPodStateOnTransitions(t *testing.T) {
 
 	// Pass 1: the pod does not exist yet; reconcile creates it and reports
 	// nothing — nothing was observed.
-	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, logr.Discard())
+	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, nil, logr.Discard())
 	require.NoError(t, err)
 	require.Equal(t, 1, created)
 	assert.Zero(t, stub.received("castle-run-1"))
@@ -314,7 +314,7 @@ func TestReconcileEmitsPodStateOnTransitions(t *testing.T) {
 
 	// Pass 2: the stuck scope reports Pending/Unschedulable with the
 	// scheduler's message — the named-phase verdict the session wait needs.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, stub.received("castle-run-1"))
 	data := stub.dataFor(t, "castle-run-1", 0)
@@ -332,14 +332,14 @@ func TestReconcileEmitsPodStateOnTransitions(t *testing.T) {
 	})
 
 	// Pass 3: unchanged state — transition-only emission, no resubmission.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, stub.received("castle-run-1"))
 
 	// Pass 4: the pod reaches Running — the handshake budget boundary.
 	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning}
 	require.NoError(t, cl.Status().Update(ctx, pod))
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, stub.received("castle-run-1"))
 	running := stub.dataFor(t, "castle-run-1", 1)
@@ -353,14 +353,14 @@ func TestReconcileEmitsPodStateOnTransitions(t *testing.T) {
 	require.NoError(t, err, "observed_at must be RFC3339")
 
 	// Pass 5: unchanged again — no resubmission.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, stub.received("castle-run-1"))
 
 	// A reconciler with a nil feed is safe and silently emits nothing (also
 	// the state exercised by every pre-existing nested test).
 	r.PodState = nil
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{scope}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, stub.received("castle-run-1"))
 }
@@ -372,7 +372,7 @@ func TestReconcileSkipsEmitWithoutCastleRunID(t *testing.T) {
 	r.PodState = feed
 
 	ctx := context.Background()
-	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{podStateProvisionEvent}, logr.Discard())
+	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{podStateProvisionEvent}, nil, logr.Discard())
 	require.NoError(t, err)
 	require.Equal(t, 1, created)
 	pods := listAdapterPods(t, cl, "default")
@@ -383,13 +383,13 @@ func TestReconcileSkipsEmitWithoutCastleRunID(t *testing.T) {
 
 	// An unknown castle run id reports nothing: the engine cannot join an
 	// event to a run it has not registered.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "", []events.LifecycleEvent{podStateProvisionEvent}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "", []events.LifecycleEvent{podStateProvisionEvent}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Zero(t, stub.received("castle-run-1"))
 
 	// The same reconcile with the real run id emits, proving the skip above
 	// was the run-id guard and not unreportable pod state.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{podStateProvisionEvent}, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{podStateProvisionEvent}, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, stub.received("castle-run-1"))
 }
@@ -420,7 +420,7 @@ func TestReconcileEmitsPodStateForEveryPeerMember(t *testing.T) {
 
 	// Pass 1: the peer pod does not exist yet; reconcile creates ONE pod for
 	// both members and reports nothing — nothing was observed.
-	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, logr.Discard())
+	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, nil, logr.Discard())
 	require.NoError(t, err)
 	require.Equal(t, 2, created, "two active members")
 	assert.Zero(t, stub.received("castle-run-1"))
@@ -439,7 +439,7 @@ func TestReconcileEmitsPodStateForEveryPeerMember(t *testing.T) {
 
 	// Pass 2: BOTH members report the stuck pod under their own scope keys —
 	// neither scope's session wait stays blind.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, stub.received("castle-run-1"))
 
@@ -465,7 +465,7 @@ func TestReconcileEmitsPodStateForEveryPeerMember(t *testing.T) {
 	assert.Equal(t, "Unschedulable", second["reason"])
 
 	// Pass 3: unchanged state — transition-only emission, no resubmission.
-	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, stub.received("castle-run-1"))
 }

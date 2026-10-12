@@ -112,7 +112,7 @@ func TestReconcilePerScopeAdaptersGroupsSameEnvironmentIntoOnePeerPod(t *testing
 		groupProvision("review", "copilot", "scope-a", "ci"),
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
@@ -150,7 +150,7 @@ func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 		groupProvision("audit", "shell", "scope-a", "prod"),
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 3, active)
 
@@ -183,7 +183,7 @@ func TestReconcilePerScopeAdaptersPeerContainerRunsDirectEntrypoint(t *testing.T
 		groupProvision("review", "copilot", "scope-a", "ci"),
 	}
 
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 
 	pods := listAdapterRolePods(t, cl, "default")
@@ -211,7 +211,7 @@ func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing
 		groupProvision("review", "copilot", "scope-a", "prod"),
 		groupProvision("audit", "shell", "scope-b", "ci"),
 	}
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", provisions, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", provisions, nil, logr.Discard())
 	require.NoError(t, err)
 	require.Len(t, listAdapterRolePods(t, cl, "default"), 2,
 		"one pod per environment: ci hosts both ci scopes' members, prod its own")
@@ -225,7 +225,7 @@ func TestReconcilePerScopeAdaptersTeardownRemovesAllEnvironmentGroups(t *testing
 	)
 	// scope-b's ci member is still active, so the ci pod survives; only
 	// prod's environment group fully tears down.
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", releases, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", releases, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active, "only scope-b's member stays active")
 
@@ -248,7 +248,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 		groupProvision("intake", "shell", "scope-a", "ci"),
 		groupProvision("review", "copilot", "scope-a", "ci"),
 	}
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", provisions, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", provisions, nil, logr.Discard())
 	require.NoError(t, err)
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
@@ -258,7 +258,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	// delivers the full accumulated history on every pass.
 	history := append(append([]events.LifecycleEvent(nil), provisions...),
 		groupRelease("review", "scope-a", "ci"))
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", history, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
@@ -274,7 +274,7 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	// Repeat passes converge without recreating: the pod object identity is
 	// stable (same UID across passes proves no delete/create cycle).
 	uid := pods[0].UID
-	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, nil, logr.Discard())
 	require.NoError(t, err)
 	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
@@ -291,7 +291,7 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 
 	first := groupProvision("first", "shell", "scope-a", "ci")
 	first.Digest = "sha256:aaaaaaaa"
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{first}, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{first}, nil, logr.Discard())
 	require.NoError(t, err)
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
@@ -304,7 +304,7 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	history := append([]events.LifecycleEvent{first},
 		groupRelease("first", "scope-a", "ci"), second)
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", history, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
@@ -314,7 +314,7 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	// changes after boot are the peer's scan+spawn job; the pod object
 	// identity is stable across the swap (UID preserved across passes).
 	uid := pods[0].UID
-	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
+	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, nil, logr.Discard())
 	require.NoError(t, err)
 	pods = listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
@@ -356,7 +356,7 @@ func TestReconcilePerScopeAdaptersEvictsRetiredGroupPodShape(t *testing.T) {
 		groupProvision("intake", "shell", "scope-a", "ci"),
 		groupProvision("review", "copilot", "scope-a", "ci"),
 	}
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 
 	pods := listAdapterRolePods(t, cl, "default")
@@ -380,7 +380,7 @@ func TestReconcilePerScopeAdaptersPeerGroupDefersUntilRunnerIP(t *testing.T) {
 		groupProvision("intake", "shell", "scope-a", "ci"),
 		groupProvision("review", "copilot", "scope-a", "ci"),
 	}
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err, "deferral is not an error: the caller requeues on the next poll")
 	assert.Equal(t, 2, active, "the provisions stay active so the poll interval keeps requeueing")
 	require.Empty(t, listAdapterRolePods(t, cl, "default"),
@@ -389,7 +389,7 @@ func TestReconcilePerScopeAdaptersPeerGroupDefersUntilRunnerIP(t *testing.T) {
 	// The runner pod appears with a routable IP; the next poll builds the
 	// peer pods.
 	require.NoError(t, cl.Create(context.Background(), groupRunnerPod(run, "10.0.0.10")))
-	active, err = r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	active, err = r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
@@ -414,7 +414,7 @@ func TestReconcilePerScopeAdaptersEnvLessEventsFallBackToPerAdapterPods(t *testi
 			ScopeID: "13d83326-f18d-49ed-942d-29c5f291a305", AdapterName: "copilot"},
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", envLess, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", envLess, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
@@ -442,7 +442,7 @@ func TestReconcilePerScopeAdaptersMixedShapesStaySeparate(t *testing.T) {
 		groupProvision("intake", "copilot", "scope-a", "ci"),
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
@@ -478,7 +478,7 @@ func TestReconcilePerScopeAdaptersGroupedIdempotent(t *testing.T) {
 		groupProvision("review", "copilot", "scope-a", "ci"),
 	}
 
-	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 	require.NoError(t, err)
 	uid := func() string {
 		pods := listAdapterRolePods(t, cl, "default")
@@ -487,7 +487,7 @@ func TestReconcilePerScopeAdaptersGroupedIdempotent(t *testing.T) {
 	}()
 
 	for i := 0; i < 2; i++ {
-		_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", events, logr.Discard())
+		_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", events, nil, logr.Discard())
 		require.NoError(t, err)
 		pods := listAdapterRolePods(t, cl, "default")
 		require.Len(t, pods, 1)
@@ -525,7 +525,7 @@ func TestReconcilePerScopeAdaptersGroupsFromVerbatimFC95449Stream(t *testing.T) 
 			"the fc95449 emission keys must form the co-location identity")
 	}
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events.ActiveProvisions(parsed), logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events.ActiveProvisions(parsed), nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
@@ -553,7 +553,7 @@ func TestReconcilePerScopeAdaptersSeparatesVerbatimFC95449EnvironmentPairs(t *te
 	require.NotEqual(t, parsed[0].Environment, parsed[1].Environment,
 		"different (type,name) pairs parse to distinct identities")
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events.ActiveProvisions(parsed), logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events.ActiveProvisions(parsed), nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, active)
 
@@ -585,7 +585,7 @@ func TestReconcilePerScopeAdaptersVerbatimPreFC95449StreamFallsBack(t *testing.T
 	require.Len(t, parsed, 1)
 	assert.Empty(t, parsed[0].Environment, "the pre-fc95449 emission carries no environment pair")
 
-	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events.ActiveProvisions(parsed), logr.Discard())
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", events.ActiveProvisions(parsed), nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 1, active)
 
