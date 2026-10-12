@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -120,6 +121,14 @@ func main() {
 	scheme := runtime.NewScheme()
 	if err := criteriav1.AddToScheme(scheme); err != nil {
 		logger.Error(err, "registering CriteriaRun scheme")
+		os.Exit(1)
+	}
+	// KB-250: PinConfigRef reads corev1.ConfigMaps (the per-repo config
+	// pin). A scheme without corev1 fails every read with "no kind is
+	// registered for the type v1.ConfigMap", which degrades CI gate
+	// stamping to the bare routes value — the sh: make: not found class.
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		logger.Error(err, "registering k8s client scheme (corev1 ConfigMap)")
 		os.Exit(1)
 	}
 
