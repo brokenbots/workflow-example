@@ -528,9 +528,23 @@ func baseBranchOrDefault(spec string) string {
 	return "main"
 }
 
+// operatorViewURL is the in-cluster boot-gate view endpoint the operator
+// serves (cmd/operator --bootgate-view-addr). The service is created with
+// the operator manifest (k8s/examples).
+func operatorViewURL(ns string) string {
+	return "http://criteria-k8s-operator." + ns + ".svc.cluster.local:8082/operator-view"
+}
+
 func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
 	env := []corev1.EnvVar{
 		{Name: "TICKET_ID", Value: run.Spec.TicketID},
+		// KB-234 operator leg: the boot gate's identity + operator-view URL.
+		// The operator serves the view (cmd/operator bootgate-view-addr);
+		// a runner whose CR turned terminal (or was deleted under it)
+		// exits 0 before registering with castle.
+		{Name: "CRITERIA_RUN_TICKET", Value: run.Spec.TicketID},
+		{Name: "CRITERIA_RUN_JOB", Value: JobName(run)},
+		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace)},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
 		{Name: "REPO_DIR", Value: repoDir},
 		{Name: "INTAKE_ROOT", Value: intakeRoot},

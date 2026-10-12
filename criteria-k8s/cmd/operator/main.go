@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"net/http"
 	"fmt"
 	"os"
 	"strconv"
@@ -82,6 +83,10 @@ var (
 	// runner Job template.
 	operatorDeployment = flag.String("operator-deployment", getenv("OPERATOR_DEPLOYMENT", "criteria-k8s-operator"), "Operator Deployment the reconciler probes for the live CRITERIA_BASE_IMAGE / DEFAULT_CRITERIA_IMAGE values (CRI-264)")
 	development        = flag.Bool("development", false, "Enable development logging")
+	// KB-234 operator leg: the boot gate's operator-view endpoint. The
+	// runner's boot gate (internal/bootgate) resolves its CR's phase here
+	// before registering with castle; ":8082" default, empty disables.
+	bootgateViewAddr = flag.String("bootgate-view-addr", getenv("BOOTGATE_VIEW_ADDR", ":8082"), "Boot gate operator-view listen address serving GET /operator-view (KB-234; empty disables)")
 )
 
 func main() {
@@ -208,6 +213,28 @@ func main() {
 		logger.Info("adapter sweep enabled", "interval", adapterSweepInterval.String(), "namespace", *namespaceFlag)
 	} else {
 		logger.Info("adapter sweep disabled (adapter-sweep-interval=0)")
+	}
+
+	// KB-234 operator leg: serve the boot gate's operator view. The
+	// endpoint reads the CR through the DIRECT client (never the cache) so
+	// a boot decision never rides a stale informer view.
+	if *bootgateViewAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/operator-view", &controller.BootgateView{Client: directClient})
+		bgSrv := &http.Server{Addr: *bootgateViewAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			<-ctx.Done()
+			_ = bgSrv.Shutdown(context.Background())
+		}()
+		go func() {
+			logger.Info("boot gate operator view enabled", "addr", *bootgateViewAddr)
+			if err := bgSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error(err, "boot gate view server exited")
+				os.Exit(1)
+			}
+		}()
+	} else {
+		logger.Info("boot gate operator view disabled (bootgate-view-addr empty)")
 	}
 
 	logger.Info("starting criteria-k8s operator")
