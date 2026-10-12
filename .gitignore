@@ -6,3 +6,5 @@ criteria-linear-intake-evaluations.md
 linear_intake_v1/.env.workflow-example
 criteria-k8s/.kube/
 .kube/
+
+criteria-k8s/operator
