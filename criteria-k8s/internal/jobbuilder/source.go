@@ -447,6 +447,11 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		{Name: "TEST_CMD", Value: run.Spec.TestCmd},
 		{Name: "CI_GATE_CMD", Value: run.Spec.CIGateCmd},
 		{Name: "BASE_BRANCH", Value: baseBranchOrDefault(run.Spec.BaseBranch)},
+		// KB-234 operator leg: the boot gate's identity + operator-view URL
+		// (the CR's phase gate at every server-mode boot).
+		{Name: "CRITERIA_RUN_TICKET", Value: run.Spec.TicketID},
+		{Name: "CRITERIA_RUN_JOB", Value: JobName(run)},
+		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace)},
 		{Name: "WORKFLOW_URL", Value: source.URL},
 	}
 	if source.Ref != "" {
