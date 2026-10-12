@@ -282,7 +282,10 @@ step "branch_triage_agent" {
                 })
     }
 
-    outcome "success" { next = state.done }
+    outcome "success" {
+        schema = object({ reason = string })
+        next = state.done
+    }
     outcome "needs_human" {
         next = state.needs_human
         schema = object({ reason = string })
