@@ -252,7 +252,6 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	require.NoError(t, err)
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
-	beforeUID := string(pods[0].UID)
 	require.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
 
 	// Release one member; its co-tenant stays active. The castle client
@@ -264,21 +263,26 @@ func TestReconcilePerScopeAdaptersPeerPodPersistsThroughPartialRelease(t *testin
 	assert.Equal(t, 1, active)
 
 	pods = listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "the peer pod persists for the remaining member")
-	assert.Equal(t, beforeUID, string(pods[0].UID),
-		"membership drift must NOT recreate the peer pod: child cycling happens inside the container")
-	assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name)
-	assert.ElementsMatch(t, []string{"shell.intake", "copilot.review"}, podManifestDefinitions(pods[0]),
-		"the manifest was pinned at pod creation; the released member's definition stays hosted until the pair is released")
 
-	// The reverse drift — re-provisioning the released member — keeps the
-	// same pod object too.
-	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", provisions, logr.Discard())
+	// KB-251 manifest drift: the member set IS the peer container's manifest
+	// identity — a released member must not stay hosted on a live pod (the
+	// stale manifest wedges its future re-provision's dials), and the name
+	// never changes, so the reconcile recreates the pod with the fresh
+	// manifest. The recreate is async (delete → create on a later pass), so
+	// within THIS pass the pod is gone or still the old shape.
+	if len(pods) == 1 {
+		assert.Equal(t, jobbuilder.PerScopePeerPodName(run, "", "ci"), pods[0].Name,
+			"within the same pass the pod keeps its stable name")
+	}
+
+	// The next pass completes the recreate: the peer pod exists again with a
+	// manifest matching the remaining member.
+	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
 	require.NoError(t, err)
 	pods = listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1)
-	assert.Equal(t, beforeUID, string(pods[0].UID),
-		"re-provisioning the released member must keep the same peer pod object")
+	require.Len(t, pods, 1, "the peer pod is recreated for the remaining member")
+	assert.ElementsMatch(t, []string{"shell.intake"}, podManifestDefinitions(pods[0]),
+		"the recreated manifest hosts exactly the remaining member (KB-251)")
 }
 
 // A count-preserving, same-kind membership change in one (scope,
@@ -295,7 +299,6 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	require.NoError(t, err)
 	pods := listAdapterRolePods(t, cl, "default")
 	require.Len(t, pods, 1)
-	beforeUID := string(pods[0].UID)
 
 	// Same pass, same (scope, environment), same kind: release "first" and
 	// provision "second". The castle client delivers the full accumulated
@@ -310,11 +313,16 @@ func TestReconcilePerScopeAdaptersPeerPodUnchangedBySameKindMemberSwap(t *testin
 	assert.Equal(t, 1, active)
 
 	pods = listAdapterRolePods(t, cl, "default")
-	require.Len(t, pods, 1, "the (scope, environment) keeps exactly one pod")
-	assert.Equal(t, beforeUID, string(pods[0].UID),
-		"the peer pod is not recreated for a same-kind member swap")
-	require.Len(t, pods[0].Spec.Containers, 1)
-	assert.ElementsMatch(t, []string{"shell.first"}, podManifestDefinitions(pods[0]))
+	require.Len(t, pods, 1, "the (scope, environment) keeps exactly one pod name")
+	// Same-kind swap = the manifest's DEFINITION set changes (shell.first →
+	// shell.second): the manifest is the peer's identity, so the pod
+	// recreates (async — the old object may persist within this pass).
+	_, err = r.reconcilePerScopeAdapters(context.Background(), run, "", history, logr.Discard())
+	require.NoError(t, err)
+	pods = listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1)
+	assert.ElementsMatch(t, []string{"shell.second"}, podManifestDefinitions(pods[0]),
+		"the manifest hosts exactly the swapped member (KB-251)")
 }
 
 // A provision for an OLD-shape group pod (from a rollout behind this

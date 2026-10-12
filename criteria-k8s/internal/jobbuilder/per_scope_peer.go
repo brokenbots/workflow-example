@@ -30,6 +30,10 @@ const PerScopePeerContainerName = "criteria-peer"
 // the name in its own family, away from both the retired CRI-234 group-pod
 // names and the per-adapter fallback names, so a rollout evicts the old
 // shapes by name without any spec comparison.
+// EnvAdapters is the engine multi-adapter manifest env name
+// (internal/peer/config.go EnvAdapters).
+const EnvAdapters = "CRITERIA_REMOTE_ADAPTERS"
+
 func PerScopePeerPodName(run *criteriav1.CriteriaRun, scopeID, environment string) string {
 	name := fmt.Sprintf("%s-peer-%s-%s",
 		JobName(run),

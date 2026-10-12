@@ -176,7 +176,25 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	deletedNames := make(map[string]struct{})
 	for i := range existing.Items {
 		pod := &existing.Items[i]
-		if _, ok := desired[pod.Name]; ok {
+		if want, ok := desired[pod.Name]; ok {
+			// KB-251 manifest drift: the env-keyed name is stable, so a
+			// member kind that arrives after the pod was built changes the
+			// DESIRED manifest without changing the name. The kind set IS
+			// the pod identity the peer booted with — a running peer can
+			// never host a kind its manifest lacks (the scanned token conn
+			// is refused: peer/serve.go), so drift here wedges the new
+			// member's dials forever. Recreate the pod with the full
+			// desired manifest (delete now; the create loop rebuilds it
+			// after termination converges).
+			got, want := peerManifestKinds(pod), peerManifestKinds(want)
+			if got != want && got != "" && want != "" {
+				logger.Info("recreating per-scope adapter pod for manifest drift (new member kind)",
+					"pod", pod.Name, "hosted", got, "desired", want)
+				if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+					return 0, fmt.Errorf("recreating adapter pod %s for manifest drift: %w", pod.Name, err)
+				}
+				deletedNames[pod.Name] = struct{}{}
+			}
 			continue
 		}
 		logger.Info("deleting per-scope adapter pod", "pod", pod.Name)
@@ -219,6 +237,20 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	}
 
 	return len(active), nil
+}
+
+// peerManifestKinds reads a peer pod's manifest kind set from the
+// CRITERIA_REMOTE_ADAPTERS env of its single peer container (empty for
+// non-peer pods — per-adapter fallback pods, the runner).
+func peerManifestKinds(pod *corev1.Pod) string {
+	for i := range pod.Spec.Containers {
+		for _, ev := range pod.Spec.Containers[i].Env {
+			if ev.Name == jobbuilder.EnvAdapters {
+				return ev.Value
+			}
+		}
+	}
+	return ""
 }
 
 // adapterPodLogLabel renders the pod's adapter identification for the
