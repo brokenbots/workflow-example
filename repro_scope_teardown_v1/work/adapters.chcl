@@ -1,11 +1,9 @@
-// repro_scope_teardown_v1/work — the twice-entered subworkflow. Declares the
-// shared per-scope-sessions environment and the adapters entry N provisions on
-// each of its scopes (the re-declaration shape pr_reviewer_loop /
-// pair_programming_loop use against the handler's worktree env).
-
-variable "probe_root" {
-    type = string
-}
+// repro_scope_teardown_v1/work — the twice-entered subworkflow. Declares ONLY
+// the agent adapter; the shell steps ride the PARENT's shell.comp (re-declared
+// borrow) — mirroring the production shape where shell.sh was provisioned by
+// the parent scope, REUSED by both pair-loop entries, while the copilot pair
+// went through fresh per-entry provision/teardown cycles. The fatal entry's
+// fresh copilot provision against the still-live pod is the target.
 
 variable "workflow_github_token" {
     description = "Copilot adapter's GitHub token over the secret channel (copilot >= 0.5.2)."
@@ -14,6 +12,8 @@ variable "workflow_github_token" {
 }
 
 environment "remote" "probe_env" {
+    // SAME environment composition as the parent's root env: the production
+    // race ran inside ONE remote environment shared across scopes.
     per_scope_sessions = true
     working_directory  = "/data"
     process = {
@@ -22,12 +22,6 @@ environment "remote" "probe_env" {
     listen_address     = "0.0.0.0:0"
     accept_token       = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
     accept_digest_from = "lockfile"
-}
-
-adapter "shell" "work" {
-    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.4"
-    environment = remote.probe_env
 }
 
 // The agent probe: a real copilot session is what died mid-handshake in the
@@ -47,4 +41,14 @@ adapter "copilot" "agent" {
         provider_wire_api = "responses"
         working_directory = "/data"
     }
+}
+
+// Re-declaration borrow of the parent's shell adapter: same type + name +
+// environment so the engine routes the child's shell steps through the
+// parent's live session (CRI-145 re-declared-adapter shape; the child never
+// provisions or releases it — the borrow ride).
+adapter "shell" "comp" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.4"
+    environment = remote.probe_env
 }

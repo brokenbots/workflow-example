@@ -13,7 +13,7 @@ adapter "copilot" "agent" {
     }
   }
 }
-adapter "shell" "work" {
+adapter "shell" "comp" {
   reference            = "ghcr.io/brokenbots/criteria-adapter-shell:0.5.4"
   version              = "0.5.4"
   resolved_digest      = "sha256:2530b8251d00c44e714418ae2b59b9237e1d673cb81ddb81eb54eb37ee00ef11"

@@ -37,7 +37,6 @@ workflow {
 subworkflow "probe_loop" {
     source = "./work"
     input = {
-        probe_root            = var.probe_root
         workflow_github_token = var.workflow_github_token
     }
 }

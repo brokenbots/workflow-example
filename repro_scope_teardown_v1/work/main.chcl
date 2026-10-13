@@ -1,4 +1,8 @@
-// repro_scope_teardown_v1/work — body of the twice-entered subworkflow.
+// repro_scope_teardown_v1/work — body of the twice-entered subworkflow. Shell
+// steps target the PARENT's shell.comp (borrowed session; the parent scope
+// keeps it open across both entries). The copilot agent is fresh per entry —
+// entry 2's fresh copilot provision against the still-live pod's shim is the
+// production death shape.
 
 workflow {
     name             = "repro_probe_loop"
@@ -17,9 +21,8 @@ data "internal" "marker_log" {
     value = "/tmp/repro253.log"
 }
 
-// Shell step first so the scope's shell session is live before the agent boots.
 step "wake" {
-    target = adapter.shell.work
+    target = adapter.shell.comp
     input {
         command = <<-EOT
             set -eu
@@ -30,8 +33,9 @@ step "wake" {
     outcome "failure" { next = state.entry_failed }
 }
 
-// The copilot probe: one turn, typed outcomes on BOTH arms (contract mode, the
-// authoring rule) so a clean handshake+turn is the only green path.
+// The copilot probe: fresh session per entry, one turn, typed outcomes on BOTH
+// arms (contract mode, the authoring rule) so a clean handshake+turn is the
+// only green path.
 step "agent_probe" {
     target = adapter.copilot.agent
     allow_tools = []
@@ -51,7 +55,7 @@ step "agent_probe" {
 }
 
 step "confirm" {
-    target = adapter.shell.work
+    target = adapter.shell.comp
     input {
         command = <<-EOT
             set -eu
