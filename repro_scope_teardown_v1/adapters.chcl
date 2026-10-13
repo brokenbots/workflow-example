@@ -1,4 +1,4 @@
-environment "remote" "probe_env" {
+environment "remote" "boot_env" {
     per_scope_sessions = true
     working_directory  = "/data"
     process = {
@@ -12,5 +12,5 @@ environment "remote" "probe_env" {
 adapter "shell" "comp" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.4"
-    environment = remote.probe_env
+    environment = remote.boot_env
 }
