@@ -1,0 +1,73 @@
+// repro_scope_teardown_v1/work — body of the twice-entered subworkflow.
+
+workflow {
+    name             = "repro_probe_loop"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "wake"
+    target_state     = "entry_done"
+
+    policy {
+        max_total_steps = 30
+    }
+}
+
+data "internal" "marker_log" {
+    type  = string
+    value = "/tmp/repro253.log"
+}
+
+// Shell step first so the scope's shell session is live before the agent boots.
+step "wake" {
+    target = adapter.shell.work
+    input {
+        command = <<-EOT
+            set -eu
+            echo "== work scope entered $(date -u +%FT%TZ)" | tee -a ${data.internal.marker_log.value}
+        EOT
+    }
+    outcome "success" { next = step.agent_probe }
+    outcome "failure" { next = state.entry_failed }
+}
+
+// The copilot probe: one turn, typed outcomes on BOTH arms (contract mode, the
+// authoring rule) so a clean handshake+turn is the only green path.
+step "agent_probe" {
+    target = adapter.copilot.agent
+    allow_tools = []
+
+    input {
+        prompt = "Submit outcome success with reason 'probe ok'. Do not use any tools."
+    }
+
+    outcome "success" {
+        schema = object({ reason = string })
+        next   = step.confirm
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.entry_failed
+    }
+}
+
+step "confirm" {
+    target = adapter.shell.work
+    input {
+        command = <<-EOT
+            set -eu
+            echo "S_OK:scope completed $(date -u +%FT%TZ)" | tee -a ${data.internal.marker_log.value}
+        EOT
+    }
+    outcome "success" { next = state.entry_done }
+    outcome "failure" { next = state.entry_failed }
+}
+
+state "entry_failed" {
+    terminal = true
+    success  = false
+}
+
+state "entry_done" {
+    terminal = true
+    success  = true
+}

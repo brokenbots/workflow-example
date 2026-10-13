@@ -1,0 +1,16 @@
+environment "remote" "probe_root" {
+    per_scope_sessions = true
+    working_directory  = "/tmp"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "CRITERIA_REMOTE_TOKEN_PLACEHOLDER"
+    accept_digest_from = "lockfile"
+}
+
+adapter "shell" "comp" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.4"
+    environment = remote.probe_root
+}

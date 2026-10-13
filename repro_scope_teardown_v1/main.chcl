@@ -1,0 +1,85 @@
+// repro_scope_teardown_v1 — minimal reproduction of the kb-246-1791847775
+// failure: the same subworkflow tree is entered TWICE in sequence. Each entry
+// is a fresh scope re-declaring the work adapters against ONE shared
+// per-scope-sessions remote environment. Entry 1 exits and releases its
+// sessions; entry 2 re-provisions the copilot adapter mid-run against the
+// still-live pod — the fatal handshake race shape (engine events, seq 2429-2431
+// on d34a4574: provision_wanted -> peer adapter connected -> child exit 0 ->
+// `adapter "copilot" handshake: rpc error: code = Canceled desc = grpc: the
+// client connection is closing`).
+
+variable "probe_root" {
+    description = "Run-scoped scratch dir for markers."
+    type        = string
+}
+
+variable "workflow_github_token" {
+    description = "Shared GitHub token for the copilot adapter's secret channel."
+    type        = string
+    secret      = true
+}
+
+workflow {
+    name             = "repro_scope_teardown_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "stamp"
+    target_state     = "done"
+
+    policy {
+        max_total_steps = 30
+    }
+}
+
+// ── Subworkflow ─────────────────────────────────────────────────────────────
+
+subworkflow "probe_loop" {
+    source = "./work"
+    input = {
+        probe_root            = var.probe_root
+        workflow_github_token = var.workflow_github_token
+    }
+}
+
+data "internal" "marker_log" {
+    type  = string
+    value = "/tmp/repro253.log"
+}
+
+step "stamp" {
+    target = adapter.shell.comp
+    input {
+        command = <<-EOT
+            set -eu
+            mkdir -p ${var.probe_root}
+            echo "== root stamp $(date -u +%FT%TZ)" | tee -a ${data.internal.marker_log.value}
+        EOT
+    }
+    outcome "success" { next = step.entry_one }
+    outcome "failure" { next = state.failed }
+}
+
+// Entry 1: provisions the work scope's adapters, runs the probe, EXITS.
+step "entry_one" {
+    target = subworkflow.probe_loop
+    outcome "success" { next = step.entry_two }
+    outcome "failure" { next = state.failed }
+}
+
+// Entry 2: SAME tree, fresh scope — the second mid-run re-provision that
+// raced the live pod and killed d34a4574.
+step "entry_two" {
+    target = subworkflow.probe_loop
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
