@@ -15,7 +15,7 @@ variable "workflow_github_token" {
 
 environment "remote" "probe_env" {
     per_scope_sessions = true
-    working_directory  = "/tmp"
+    working_directory  = "/data"
     process = {
         exec = ["*"]
     }
@@ -45,6 +45,6 @@ adapter "copilot" "agent" {
         system_prompt     = "You are a workflow probe. Submit exactly one outcome: success with reason 'probe ok'. Never use tools."
         provider_base_url = "http://192.168.17.116:11434/v1"
         provider_wire_api = "responses"
-        working_directory = "/tmp"
+        working_directory = "/data"
     }
 }

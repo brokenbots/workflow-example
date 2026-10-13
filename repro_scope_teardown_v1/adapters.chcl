@@ -1,6 +1,6 @@
 environment "remote" "probe_root" {
     per_scope_sessions = true
-    working_directory  = "/tmp"
+    working_directory  = "/data"
     process = {
         exec = ["*"]
     }
