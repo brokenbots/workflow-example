@@ -11,6 +11,7 @@
 variable "probe_root" {
     description = "Run-scoped scratch dir for markers."
     type        = string
+    default     = "/tmp"
 }
 
 variable "workflow_github_token" {
