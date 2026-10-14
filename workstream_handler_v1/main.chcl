@@ -775,14 +775,29 @@ step "triage_pr_feedback" {
     outcome "failed" {
         schema = object({ reason = string })
         next = state.failed
+        // KB-262: carry the typed reason through the boundary — the parent's
+        // failure comment interpolates failure_reason; an unwritten
+        // data.internal here resolves empty and the reason is lost.
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
     outcome "failure" {
         schema = object({ reason = string })
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
     outcome "default" {
         schema = object({ reason = string })
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
 }
 
@@ -827,14 +842,29 @@ step "validate_developer_response" {
     outcome "failed" {
         schema = object({ reason = string })
         next = state.failed
+        // KB-262: carry the typed reason through the boundary — the parent's
+        // failure comment interpolates failure_reason; an unwritten
+        // data.internal here resolves empty and the reason is lost.
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
     outcome "failure" {
         schema = object({ reason = string })
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
     outcome "default" {
         schema = object({ reason = string })
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
 }
 
@@ -860,14 +890,29 @@ step "push_and_respond" {
     outcome "failed" {
         schema = object({ reason = string })
         next = state.failed
+        // KB-262: carry the typed reason through the boundary — the parent's
+        // failure comment interpolates failure_reason; an unwritten
+        // data.internal here resolves empty and the reason is lost.
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
     outcome "failure" {
         schema = object({ reason = string })
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
     outcome "default" {
         schema = object({ reason = string })
         next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
     }
 }
 
