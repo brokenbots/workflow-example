@@ -35,7 +35,7 @@ have() {
 }
 
 # --- pinned criteria main commit (v0.5.37-era: KB-57c) -----------------------
-have 'ARG CRITERIA_COMMIT=e3d7b354706ea341f0f0f6e5ae274ad4292225ee' "$DOCKERFILE" || \
+have 'ARG CRITERIA_COMMIT=6e77270ad57f347980cd1749afd78ba70129c27b' "$DOCKERFILE" || \
     fail "Dockerfile does not pin criteria main at 75b12d96 (v0.5.50 carrier: KB-242 per-definition revert + KB-246 adapterhost definition-identity grammar)"
 have 'git clone' "$DOCKERFILE" || fail "Dockerfile does not clone criteria"
 grep -Eq 'test "\$\(git rev-parse HEAD\)" = "\$\{CRITERIA_COMMIT\}"' "$DOCKERFILE" || \

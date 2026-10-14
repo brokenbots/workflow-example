@@ -96,7 +96,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="e3d7b354706ea341f0f0f6e5ae274ad4292225ee"
+AUDITED_COMMIT="6e77270ad57f347980cd1749afd78ba70129c27b"
 
 fail() {
     echo "FAIL: $1" >&2
