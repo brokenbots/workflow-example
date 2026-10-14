@@ -43,13 +43,24 @@ import (
 // never built with a dangling dial address. Only the env-less fallback
 // pods run adapter.sh's own discovery polling and can build without a
 // runner IP.
-func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, castleRunID string, lifecycleEvents []events.LifecycleEvent, logger logr.Logger) (int, error) {
+func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, run *criteriav1.CriteriaRun, castleRunID string, lifecycleEvents []events.LifecycleEvent, graphsRaw []byte, logger logr.Logger) (int, error) {
 	if !run.Spec.PerScopeSessions {
 		return 0, nil
 	}
 
 	active := events.ActiveProvisions(lifecycleEvents)
-
+	// KB-253 composition: the compiled graphs (castle WorkflowGraphs
+	// payload, observed on the same drain) name every definition the
+	// environment's scopes will EVER dial, with environment bindings and
+	// compile-time pins. Definitions that have not provisioned yet join
+	// their environment group as graph members so the peer boots hosting
+	// the complete set; nothing can arrive late.
+	graphs, err := envGraphDefs(graphsRaw)
+	if err != nil {
+		logger.Info("unusable WorkflowGraphs payload; keeping provision-derived manifests",
+			"run", run.Name, "error", err)
+		graphs = nil
+	}
 	// memberPods maps each desired pod to EVERY lifecycle member it hosts,
 	// so the observed pod state is reported per active scope (KB-225
 	// pod-state feed): peer pods host several members of one
@@ -135,6 +146,36 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		}
 		group.members = append(group.members, scope)
 	}
+	// KB-253: graph members complete each environment group. A definition
+	// bound to the environment whose provision has not been observed yet
+	// (scopes that initialize later, for_each iterations, subworkflow
+	// bodies) joins the group as a synthetic member carrying the
+	// graph-published digest so the pod boots with the FULL manifest:
+	// every child exists at boot with its pin — membership never grows
+	// after boot, so nothing recreate-shaped is ever needed. Synthetic
+	// members carry no tokens; they contribute definitions only.
+	if len(graphs) > 0 {
+		for key, group := range groups {
+			existing := map[string]struct{}{}
+			for _, m := range group.members {
+				existing[localAdapterKind(m)+"."+m.AdapterName] = struct{}{}
+			}
+			graphDefs := graphs[key.environment]
+			for _, def := range graphDefs {
+				defKey := def.Type + "." + def.Name
+				if _, ok := existing[defKey]; ok {
+					continue
+				}
+				group.members = append(group.members, syntheticManifestMember(def))
+				existing[defKey] = struct{}{}
+			}
+			groups[key] = group
+		}
+		// An environment the graphs name but no provision has ever touched
+		// is skipped deliberately: no runner-registered scope exists for it,
+		// so there is nothing to dial it with yet (the pre-bake card covers
+		// bringing those up).
+	}
 	for _, group := range groups {
 		pod := jobbuilder.BuildPerScopePeerPod(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
 		if pod == nil {
@@ -176,25 +217,19 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	deletedNames := make(map[string]struct{})
 	for i := range existing.Items {
 		pod := &existing.Items[i]
-		if want, ok := desired[pod.Name]; ok {
-			// KB-251 manifest drift: the env-keyed name is stable, so a
-			// member kind that arrives after the pod was built changes the
-			// DESIRED manifest without changing the name. The kind set IS
-			// the pod identity the peer booted with — a running peer can
-			// never host a kind its manifest lacks (the scanned token conn
-			// is refused: peer/serve.go), so drift here wedges the new
-			// member's dials forever. Recreate the pod with the full
-			// desired manifest (delete now; the create loop rebuilds it
-			// after termination converges).
-			got, want := peerManifestKinds(pod), peerManifestKinds(want)
-			if got != want && got != "" && want != "" {
-				logger.Info("recreating per-scope adapter pod for manifest drift (new member kind)",
-					"pod", pod.Name, "hosted", got, "desired", want)
-				if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-					return 0, fmt.Errorf("recreating adapter pod %s for manifest drift: %w", pod.Name, err)
-				}
-				deletedNames[pod.Name] = struct{}{}
-			}
+		if _, ok := desired[pod.Name]; ok {
+			// KB-253: membership growth after boot must NEVER delete a pod.
+			// The peer (engine-side) now serves scanned non-manifest
+			// definitions by spawning their children from the per-kind
+			// staged binary plus the engine's token-file digest sidecar, so
+			// a definition that starts serving late is the peer's job, not a
+			// pod-identity change. The old manifest-drift recreate here
+			// EOF-killed every in-flight session the pod hosted (three
+			// canary deaths: kb-246 refires, kb-252, kb-253-1791822860),
+			// including on RELEASE direction (teardown shrinking the set
+			// also triggered it). A pod whose manifest matches its boot
+			// shape is converged; anything the pod does not host arrives
+			// exclusively via the peer's scan + spawn path now.
 			continue
 		}
 		logger.Info("deleting per-scope adapter pod", "pod", pod.Name)

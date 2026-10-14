@@ -1,7 +1,7 @@
 workflow {
     name          = "devops_triage_v1"
     version       = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state = "stage_report"
     target_state  = "delivered"
 
@@ -296,7 +296,10 @@ step "intake_review" {
         })
     }
 
-    outcome "actionable" { next = step.triage_worklist }
+    outcome "actionable" {
+        schema = object({ reason = string })
+        next = step.triage_worklist
+    }
     outcome "insufficient" {
         next = step.write_ops_report
         schema = object({ reason = string })
@@ -323,8 +326,14 @@ step "intake_review" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Triage: call 1 of 2 ──────────────────────────────────────────────────────
@@ -357,12 +366,18 @@ step "triage_worklist" {
         })
     }
 
-    outcome "worklist_ready" { next = step.review_worklist }
+    outcome "worklist_ready" {
+        schema = object({ reason = string })
+        next = step.review_worklist
+    }
     // The premise was wrong, the problem is already fixed, or the behavior is
     // working as designed. Reviewed like any other finding — an unreviewed "it's
     // fine" from the agent that would otherwise have to do the work is the one
     // conclusion this workflow should trust least.
-    outcome "no_action_needed" { next = step.review_no_action }
+    outcome "no_action_needed" {
+        schema = object({ reason = string })
+        next = step.review_no_action
+    }
     outcome "need_help" {
         next = step.write_ops_report
         schema = object({ reason = string })
@@ -376,8 +391,14 @@ step "triage_worklist" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Gate 1a: is "nothing is wrong" actually true? ────────────────────────────
@@ -428,8 +449,14 @@ step "review_no_action" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Gate 1b: is the work list right, before it costs a work cycle? ───────────
@@ -499,8 +526,14 @@ step "review_worklist" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Work cycle ───────────────────────────────────────────────────────────────
@@ -569,6 +602,7 @@ step "validate_state" {
     }
 
     outcome "state_complete" {
+        schema = object({ reason = string })
         next = step.final_review
         write {
             target = data.internal.triage_state.value
@@ -576,6 +610,7 @@ step "validate_state" {
         }
     }
     outcome "state_incomplete" {
+        schema = object({ reason = string })
         next = step.final_review
         write {
             target = data.internal.triage_state.value
@@ -583,14 +618,21 @@ step "validate_state" {
         }
     }
     outcome "state_blocked" {
+        schema = object({ reason = string })
         next = step.final_review
         write {
             target = data.internal.triage_state.value
             value  = "blocked"
         }
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Gate 2: final authority over whether this work ships ─────────────────────
@@ -659,8 +701,14 @@ step "final_review" {
         }
 
     }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Delivery ─────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 workflow {
     name             = "linear_intake_v1"
     version          = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state    = "fetch_ticket"
     target_state     = "handler_complete"
 
@@ -266,8 +266,12 @@ step "classify_ticket" {
         })
     }
 
-    outcome "bug_written" { next = step.set_bug_label }
+    outcome "bug_written" {
+        schema = object({ reason = string })
+        next = step.set_bug_label
+    }
     outcome "confirmed_bug_written" {
+        schema = object({ reason = string })
         next = step.set_confirmed_bug_label
         write {
             target = data.internal.verdict.value
@@ -279,6 +283,7 @@ step "classify_ticket" {
         }
     }
     outcome "feature_written" {
+        schema = object({ reason = string })
         next = step.set_feature_label
         write {
             target = data.internal.verdict.value
@@ -289,10 +294,22 @@ step "classify_ticket" {
             value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"
         }
     }
-    outcome "already_complete" { next = state.already_complete }
-    outcome "needs_human"      { next = step.comment_unusable_ticket }
-    outcome "failure"     { next = state.failed }
-    outcome "default"     { next = state.failed }
+    outcome "already_complete" {
+        schema = object({ reason = string })
+        next = state.already_complete
+    }
+    outcome "needs_human" {
+        schema = object({ reason = string })
+        next = step.comment_unusable_ticket
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 step "set_bug_label" {
@@ -414,11 +431,26 @@ step "review_qa_output" {
         })
     }
 
-    outcome "valid_run_handler" { next = switch.route_handler }
-    outcome "invalid_close"     { next = step.comment_invalid }
-    outcome "needs_human"       { next = step.comment_needs_human }
-    outcome "failure"           { next = step.comment_triage_failed }
-    outcome "default"           { next = step.comment_triage_failed }
+    outcome "valid_run_handler" {
+        schema = object({ reason = string })
+        next = switch.route_handler
+    }
+    outcome "invalid_close" {
+        schema = object({ reason = string })
+        next = step.comment_invalid
+    }
+    outcome "needs_human" {
+        schema = object({ reason = string })
+        next = step.comment_needs_human
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = step.comment_triage_failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = step.comment_triage_failed
+    }
 }
 
 // The reviewer ruled the finding valid, but the handler needs a workstream

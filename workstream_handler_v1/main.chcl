@@ -1,7 +1,7 @@
 workflow {
     name          = "workstream_handler_v1"
     version       = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state = "read_workstream"
     target_state  = "done"
 
@@ -768,10 +768,22 @@ step "triage_pr_feedback" {
         }
 
     }
-    outcome "no_work"  { next = step.push_and_respond }
-    outcome "failed"   { next = state.failed }
-    outcome "failure"  { next = state.failed }
-    outcome "default"  { next = state.failed }
+    outcome "no_work" {
+        schema = object({ reason = string })
+        next = step.push_and_respond
+    }
+    outcome "failed" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // max_visits bounds the coordinator's needs_work <-> developer cycle — a brief
@@ -799,7 +811,10 @@ step "validate_developer_response" {
                 })
     }
 
-    outcome "approved"   { next = step.push_and_respond }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next = step.push_and_respond
+    }
     outcome "needs_work" {
         next = step.run_pair_programming_loop_with_feedback
         schema = object({ reason = string })
@@ -809,9 +824,18 @@ step "validate_developer_response" {
         }
 
     }
-    outcome "failed"     { next = state.failed }
-    outcome "failure"    { next = state.failed }
-    outcome "default"    { next = state.failed }
+    outcome "failed" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // Coordinator pushes the branch and closes every open review thread on the PR.
@@ -829,10 +853,22 @@ step "push_and_respond" {
         })
     }
 
-    outcome "success" { next = switch.route_reviewer_creds }
-    outcome "failed"  { next = state.failed }
-    outcome "failure" { next = state.failed }
-    outcome "default" { next = state.failed }
+    outcome "success" {
+        schema = object({ reason = string })
+        next = switch.route_reviewer_creds
+    }
+    outcome "failed" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 // ── Terminal states ───────────────────────────────────────────────────────────

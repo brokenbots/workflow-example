@@ -1,7 +1,7 @@
 workflow {
     name             = "credential_isolation"
     version          = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state    = "workflow_identity"
     target_state     = "passed"
 }

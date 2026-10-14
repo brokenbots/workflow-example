@@ -52,9 +52,9 @@ jobs:
       # Installed before the k8s/tests loop: KB-240's
       # test_env_listen_ports.sh drives the real engine (port-0 shim binds),
       # and the loop runs every k8s/tests/test_*.sh it finds.
-      - name: Install criteria v0.5.44 (SHA256SUMS-verified)
+      - name: Install criteria v0.5.52-rc4 (SHA256SUMS-verified)
         run: |
-          version="v0.5.44"
+          version="v0.5.52-rc4"
           archive="criteria-${version}-linux-amd64.tar.gz"
           base="https://github.com/brokenbots/criteria/releases/download/${version}"
           curl -fL "${base}/${archive}" -o "/tmp/${archive}"

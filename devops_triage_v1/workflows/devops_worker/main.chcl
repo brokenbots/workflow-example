@@ -1,7 +1,7 @@
 workflow {
     name          = "devops_worker"
     version       = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state = "assert_worktree"
     target_state  = "done"
 
@@ -125,9 +125,18 @@ step "execute" {
     // The copilot adapter emits "failure" if the session dies or the agent never
     // calls submit_outcome after re-prompts. Any uncommitted work is left in the
     // worktree; the parent keeps that worktree on a failed cycle.
-    outcome "need_help" { next = state.failed }
-    outcome "failure"   { next = state.failed }
-    outcome "default"   { next = state.failed }
+    outcome "need_help" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
+    outcome "default" {
+        schema = object({ reason = string })
+        next = state.failed
+    }
 }
 
 step "write_work_log" {

@@ -148,7 +148,18 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 		}
 		return a.AdapterName < b.AdapterName
 	})
+	// dial member: the first member carrying real dial identity (token
+	// material / shim address). KB-253 graph members contribute manifest
+	// shape only — they must never set the pod's dial address or discovery
+	// root (a synthetic's empty shim address degenerates to the static
+	// runner port, which nothing listens on).
 	dial := members[0]
+	for _, m := range members {
+		if m.TokenFile != "" || m.AcceptToken != "" || m.ShimAddress != "" {
+			dial = m
+			break
+		}
+	}
 
 	dataPVC := firstNonEmpty(defaults.DataPVC, "criteria-data")
 	plan := newWorkflowPlan(run)

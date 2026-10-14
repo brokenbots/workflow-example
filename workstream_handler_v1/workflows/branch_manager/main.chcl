@@ -1,7 +1,7 @@
 workflow {
     name          = "branch_manager"
     version       = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state = "resolve_branch"
     target_state  = "done"
 
@@ -282,7 +282,10 @@ step "branch_triage_agent" {
                 })
     }
 
-    outcome "success" { next = state.done }
+    outcome "success" {
+        schema = object({ reason = string })
+        next = state.done
+    }
     outcome "needs_human" {
         next = state.needs_human
         schema = object({ reason = string })

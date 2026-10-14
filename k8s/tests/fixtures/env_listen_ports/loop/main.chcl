@@ -4,7 +4,7 @@
 workflow {
     name             = "env_listen_ports_loop"
     version          = "1"
-    criteria_version = ">=0.5.9, <0.6.0"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state    = "done"
     target_state     = "done"
 }

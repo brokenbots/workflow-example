@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/encoding/protojson"
 	"net/http"
 	"strings"
 	"sync"
@@ -86,6 +87,13 @@ type Observation struct {
 	// RunID is the castle run id backing the CriteriaRun, empty when the run
 	// has not been registered in castle (yet).
 	RunID string
+	// WorkflowGraphs is the raw bytes of the newest WorkflowGraphs payload
+	// drained from the run's event stream (KB-253: the root layer plus every
+	// compiled subworkflow layer, each body carrying per-adapter
+	// environment/source/pinned_digest bindings). Empty until the envelopes
+	// arrive; the per-scope reconcile composes peer manifests from it.
+	// Consumers parse leniently (layers without bindings compose nothing).
+	WorkflowGraphs []byte
 	// Lifecycle is the full lifecycle event history known to this client
 	// (provision-wanted and release events, in stream order). It is the
 	// castle-sourced equivalent of the events.ndjson lifecycle stream and
@@ -136,6 +144,8 @@ type Client struct {
 	scopes    map[string]map[string]string // runID -> scopeInstanceID -> provisioned adapter
 	lifecycle map[string][]events.LifecycleEvent
 	terminals map[string]*Terminal
+	// graphs tracks the newest WorkflowGraphs payload per run (KB-253).
+	graphs map[string][]byte
 	// progress tracks the newest step-progress event timestamp per run
 	// (KB-24): the stall watchdog's baseline. Retained like cursors so a
 	// controller restart's full drain replay recomputes it from history.
@@ -158,6 +168,7 @@ func New(cfg Config, httpClient *http.Client) *Client {
 		scopes:    map[string]map[string]string{},
 		lifecycle: map[string][]events.LifecycleEvent{},
 		terminals: map[string]*Terminal{},
+		graphs:    map[string][]byte{},
 		progress:  map[string]time.Time{},
 	}
 }
@@ -201,6 +212,7 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	obs.Lifecycle = lifecycle
 	obs.Terminal = terminal
 	obs.LastProgress = lastProgress
+	obs.WorkflowGraphs = c.graphs[runID]
 
 	// The run record is authoritative for its terminal status and pr_url:
 	// terminal envelopes carry neither, so enrich from GetRun (and fall back
@@ -420,6 +432,14 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 			if t := terminalFromEnvelope(env); t != nil {
 				terminal = t
 				c.terminals[runID] = t
+			}
+			if wg := env.GetWorkflowGraphs(); wg != nil {
+				// KB-253: hold the newest compiled-graphs payload (raw
+				// protojson) for the per-scope reconcile's manifest
+				// composition. A resend replaces the previous payload.
+				if raw, err := protojson.Marshal(wg); err == nil {
+					c.graphs[runID] = raw
+				}
 			}
 			if ev, ok := lifecycleFromEnvelope(env); ok {
 				ev = c.resolveReleaseAdapter(runID, ev)
