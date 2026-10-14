@@ -70,23 +70,27 @@ wg="$(jq -s '[.[] | select(.payload_type == "WorkflowGraphs")]' "$TMP/events.ndj
 
 require_equal "$wg_count" "1" "exactly one WorkflowGraphs event in the stream"
 require_equal "$(jq -r '.[0].payload | keys | join(" ")' <<<"$wg")" "subworkflows" \
-    "payload carries only the flat subworkflows array (no nested root graph)"
+    "payload carries the flat layers array"
 
 require_equal "$(jq -r '.[0].payload.subworkflows[].name' <<<"$wg" | sort | paste -sd' ' -)" \
-    "flat_l1 flat_l2 flat_l3" "all subworkflow layers are siblings in the flat payload"
+    "flat_l1 flat_l2 flat_l3 root" "all layers are siblings in the flat payload (KB-253: root layer added)"
 
 bodies_with_key="$(jq -r '[ .[0].payload.subworkflows[] | .body | fromjson | .. | objects
                           | select(has("subworkflows")) ] | length' <<<"$wg")"
 require_equal "$bodies_with_key" "0" "no layer body string contains a subworkflows key at any depth"
 
-mismatched="$(jq -r '[ .[0].payload.subworkflows[] | select((.body | fromjson | .name) != .name) | .name ]
+mismatched="$(jq -r '[ .[0].payload.subworkflows[] | select(.name != "root") | select((.body | fromjson | .name) != .name) | .name ]
                      | join(" ")' <<<"$wg")"
-if [ -z "$mismatched" ]; then ok "every layer body parses and matches its layer name"; else fail "body name mismatches layer name for: $mismatched"; fi
+rname="$(jq -r '[.[0].payload.subworkflows[] | select(.name == "root")][0].body | fromjson | .name' <<<"$wg")"
+if [ "$rname" = "workflow_graphs_flat" ] && [ -z "$mismatched" ]; then ok "every layer body parses and matches its layer name (root body carries the root graph)"; else fail "body name mismatch: nested=$mismatched root_name=$rname"; fi
 
-misplaced="$(jq -r '[ .[0].payload.subworkflows[] | . as $l
+misplaced="$(jq -r '[ .[0].payload.subworkflows[] | select(.name != "root") | . as $l
                      | select(($l.sourcePath | contains($l.name)) | not) | $l.name ]
                     | join(" ")' <<<"$wg")"
-if [ -z "$misplaced" ]; then ok "sourcePath embeds each layer's nested path (depth-3 reaches the emitter)"; else fail "sourcePath does not embed the layer path for: $misplaced"; fi
+if [ -z "$misplaced" ]; then ok "sourcePath embeds each nested layer's path (depth-3 reaches the emitter)"; else fail "sourcePath does not embed the layer path for: $misplaced"; fi
+
+root_name="$(jq -r '[.[0].payload.subworkflows[] | select(.name == "root")][0].body | fromjson | .name' <<<"$wg")"
+require_equal "$root_name" "workflow_graphs_flat" "root layer body carries the root graph (name = workflow name; KB-253)"
 
 if [ "$FAILED" -gt 0 ]; then
     echo "FAILED: $FAILED assertion(s)" >&2
