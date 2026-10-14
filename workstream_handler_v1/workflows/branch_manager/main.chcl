@@ -84,7 +84,12 @@ step "resolve_branch" {
 
 step "setup_worktree" {
     target  = adapter.shell.repo
-    timeout = "60s"
+    // KB-246 refire #2 (kb-246-1791989261): worktree add over the PVC with a
+    // full fetch exceeded the 60s budget on the v0.5.53 fleet; a timeout here
+    // is a transport-shaped dead end, not a triage signal. Branch work is the
+    // long pole of the body — budget it at 10 minutes like the other git-heavy
+    // steps.
+    timeout = "600s"
     input {
         command = templatefile("./scripts/setup_worktree.sh.tftpl", {
             criteria_value_1 = data.internal._branch.value
