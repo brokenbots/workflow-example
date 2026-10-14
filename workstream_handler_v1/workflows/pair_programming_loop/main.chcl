@@ -89,9 +89,16 @@ step "read_workstream" {
     outcome "failure" { next = state.failed }
 }
 
-// The isolated worktree is already on the feature branch (branch_manager created
-// it). Assert that rather than checking out, so a misconfigured worktree fails
-// loudly instead of silently developing on the wrong branch.
+// The isolated worktree is created on the feature branch by branch_manager, but
+// the worktree is SHARED across body entries (initial pair loop + each
+// feedback-cycle pair loop): a previous body may have left HEAD moved
+// (observed: a triage leg left the worktree on a dependabot branch and the
+// next body's entry assertion failed in 2ms — KB-258). So the step asserts the
+// branch and, on mismatch, re-asserts it deterministically (fetch + checkout,
+// untracked scratch carried safely) instead of failing on the mere mismatch;
+// only a true conflict (git refuses the switch) fails, with a typed reason
+// naming the unexpected ref. No agent judgment at entry — the branch contract
+// is asserted by the step.
 step "checkout_branch" {
     target = adapter.shell.sh
     input {

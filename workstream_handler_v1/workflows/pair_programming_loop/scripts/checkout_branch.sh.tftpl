@@ -1,9 +1,40 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 set -euo pipefail
+# KB-258: the worktree is SHARED across body entries (initial pair loop +
+# every feedback-cycle pair loop), so HEAD may have moved since the last body
+# exited (observed: a triage leg left the worktree on
+# 'dependabot/go_modules/minor-and-patch-91744db657'; the next body's entry
+# assertion failed in 2ms and parked the run after a green develop leg).
+# A mismatch is therefore NOT a failure by itself: re-assert the expected
+# branch deterministically — best-effort fetch, then checkout — and fail
+# only when git refuses the switch (a true conflict between the incoming
+# branch and untracked scratch / modified tracked files), with a typed reason
+# carrying the unexpected ref. The branch contract stays stepped, not
+# agent-judged.
 expected=$(basename "$criteria_value_1" .md)
 current=$(git branch --show-current)
-if [ "$current" != "$expected" ]; then
-    echo "expected branch '$expected' but worktree is on '$current'" >&2
+if [ "$current" = "$expected" ]; then
+    echo "on_branch=$current"
+    exit 0
+fi
+
+# Best-effort: the expected branch normally exists locally (branch_manager
+# attached the worktree to it), so an unreachable origin must not block the
+# re-assert from the local ref.
+if ! git fetch --quiet origin 2>/dev/null; then
+    echo "fetch_skipped=true (origin unavailable - re-asserting from the local ref)" >&2
+fi
+
+if ! checkout_err=$(git checkout -q "$expected" 2>&1); then
+    # True conflict: git refused the switch rather than losing untracked or
+    # modified files. The worktree stays on '$current' (checkout aborts
+    # atomically) — report the observed mismatch signature plus a typed
+    # marker so the tree routes deliberately.
+    echo "expected branch '$expected' but worktree is on '$current'; re-assert refused (KB-258)" >&2
+    echo "checkout_conflict=true" >&2
+    printf '%s\n' "$checkout_err" >&2
     exit 1
 fi
-echo "on_branch=$current"
+
+echo "reasserted_from=$current"
+echo "on_branch=$(git branch --show-current)"
