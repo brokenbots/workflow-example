@@ -39,6 +39,13 @@ data "internal" "branch_notes" {
 
 // Coordinator's distilled brief for the developer, written by triage_pr_feedback
 // and updated by validate_developer_response on needs_work cycles.
+// KB-265: feedback rounds spent (incremented per needs_work pass; read by
+// validate_round_check against var.max_pair_cycles).
+data "internal" "validate_rounds" {
+    type  = string
+    value = "0"
+}
+
 data "internal" "developer_feedback" {
     type  = string
     value = ""
@@ -801,13 +808,108 @@ step "triage_pr_feedback" {
     }
 }
 
+// KB-265: branch manager has the FINAL SAY on convergence. Reached when the
+// feedback round budget is spent: the coordinator re-verifies actual state
+// (branch vs PR vs CI) and decides — converge_on_state routes to the normal
+// completion path (merge), blocked fails loud with a typed reason.
+step "branch_manager_final_say" {
+    target      = adapter.copilot.coordinator
+    max_visits  = var.max_feedback_visits
+    allow_tools = ["*"]
+
+    input {
+        prompt = templatefile("./agents/branch_manager_final_say.md.tftpl", {
+            pr_url             = data.internal.pr_url.value
+            branch             = data.internal.branch.value
+            developer_feedback = data.internal.developer_feedback.value
+            rounds             = data.internal.validate_rounds.value
+        })
+    }
+    outcome "converge_on_state" {
+        next   = step.push_and_respond
+        schema = object({ reason = string })
+    }
+    outcome "blocked" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value  = output.reason
+        }
+    }
+}
+
 // max_visits bounds the coordinator's needs_work <-> developer cycle — a brief
 // that never converges fails the run instead of looping indefinitely.
 step "run_pair_programming_loop_with_feedback" {
     target     = subworkflow.pair_programming_loop_feedback
     max_visits = var.max_pair_cycles
-    outcome "success" { next = step.validate_developer_response }
+    outcome "success" { next = step.validate_round_check }
     outcome "failure" { next = state.failed }
+}
+
+// KB-265: the feedback loop is bounded by rounds, not by the validator's
+// mood. Each pass through run_pair_programming_loop_with_feedback with a
+// needs_work verdict increments validate_rounds before re-entry; once the
+// round budget is spent the BRANCH MANAGER gets the final say on
+// convergence (dave ruling): reviewer-approved + CI-green + nothing-new
+// converges (merge), a real blocker fails loud. A validator that keeps
+// needs_work'ing a finished diff ends here with a typed decision, never an
+// unterminable cycle.
+step "validate_round_check" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/validate_round_check.sh.tftpl", {
+            criteria_value_1 = var.max_pair_cycles
+            criteria_value_2 = data.internal.validate_rounds.value
+        })
+    }
+
+    // KB-265: untyped outcomes take the adapter default output type
+    // (exit_code/stdout/stderr). The incremented round count rides stdout;
+    // budget spent → the branch manager decides convergence; a real shell
+    // failure fails loud with stderr/stdout via KB-262 boundary writes.
+    outcome "continue" {
+        next = step.validate_developer_response
+        write {
+            target = data.internal.validate_rounds.value
+            value  = output.stdout
+        }
+    }
+    outcome "budget_spent" {
+        next = step.branch_manager_final_say
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "validate_round_check failed: "+output.stderr
+        }
+    }
+    outcome "default" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "validate_round_check failed (unmapped outcome: "+output.stdout+")"
+        }
+    }
 }
 
 // Coordinator inspects the developer's commits against the brief it wrote.
