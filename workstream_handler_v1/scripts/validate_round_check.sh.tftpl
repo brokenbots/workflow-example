@@ -1,0 +1,35 @@
+#!/bin/sh
+# KB-265: pair-feedback round budget check (branch manager final say).
+#
+# Rendered inputs (shellquoted, the repo-conventional criteria_value_N):
+#   criteria_value_1 — var.max_pair_cycles: the round budget, i.e. how many
+#                      validator entries a diff gets before the branch
+#                      manager takes the final convergence say.
+#   criteria_value_2 — data.internal.validate_rounds.value: validator
+#                      entries spent so far (empty/garbage counts as 0).
+#
+# stdout contract, read by switch.validate_round_check_route and the
+# success-outcome write on step.validate_round_check (trimspace'd):
+#   "budget_spent" — no entries remain; branch_manager_final_say decides
+#                    converge_vs_blocked from actual branch/PR/CI state
+#   "<n>"          — incremented entry count; validation re-enters with it
+#
+# The budget is never unbounded: an empty or zero budget means the branch
+# manager gets the final say right after the first completed cycle. A
+# non-zero exit is a genuine failure (the failure outcome carries stderr as
+# the typed reason), never a silent budget bypass.
+set -eu
+
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+
+budget=$(printf '%s' "$criteria_value_1" | tr -dc '0-9')
+rounds=$(printf '%s' "$criteria_value_2" | tr -dc '0-9')
+[ -n "$budget" ] || budget=0
+[ -n "$rounds" ] || rounds=0
+
+if [ "$rounds" -lt "$budget" ]; then
+    printf '%s\n' "$((rounds + 1))"
+else
+    printf '%s\n' "budget_spent"
+fi
