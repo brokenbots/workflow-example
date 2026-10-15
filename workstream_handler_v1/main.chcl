@@ -865,13 +865,12 @@ step "run_pair_programming_loop_with_feedback" {
 }
 
 // KB-265: the feedback loop is bounded by rounds, not by the validator's
-// mood. Each pass through run_pair_programming_loop_with_feedback with a
-// needs_work verdict increments validate_rounds before re-entry; once the
-// round budget is spent the BRANCH MANAGER gets the final say on
-// convergence (dave ruling): reviewer-approved + CI-green + nothing-new
-// converges (merge), a real blocker fails loud. A validator that keeps
-// needs_work'ing a finished diff ends here with a typed decision, never an
-// unterminable cycle.
+// mood. Each entry into validation increments validate_rounds before
+// re-entry; once the round budget is spent the BRANCH MANAGER gets the
+// final say on convergence (dave ruling): reviewer-approved + CI-green +
+// nothing-new converges (merge), a real blocker fails loud. A validator
+// that keeps needs_work'ing a finished diff ends here with a typed
+// decision, never an unterminable cycle.
 step "validate_round_check" {
     target  = adapter.shell.sh
     timeout = "10s"
@@ -882,34 +881,44 @@ step "validate_round_check" {
         })
     }
 
-    // KB-265: untyped outcomes take the adapter default output type
-    // (exit_code/stdout/stderr). The incremented round count rides stdout;
-    // budget spent → the branch manager decides convergence; a real shell
-    // failure fails loud with stderr/stdout via KB-262 boundary writes.
-    outcome "continue" {
-        next = step.validate_developer_response
+    // KB-264: the shell adapter emits only the adapter-default
+    // success/failure pair over the default output type
+    // (exit_code/stdout/stderr) — custom verdict names never fire on a
+    // shell step. The round decision rides stdout instead (KB-265):
+    //   "budget_spent"        — no entries remain → the branch manager
+    //                           decides (switch below)
+    //   "<incremented count>" — validation re-enters with the count
+    // The success arm stores the trimmed counter but must not store the
+    // budget_spent marker (it feeds branch_manager_final_say's prompt);
+    // the guard keeps the step-entry value there, matching the
+    // transport-preserving write pattern on the reviewer loop.
+    outcome "success" {
+        next = switch.validate_round_check_route
         write {
             target = data.internal.validate_rounds.value
-            value  = output.stdout
+            value  = trimspace(output.stdout) == "budget_spent" ? data.internal.validate_rounds.value : trimspace(output.stdout)
         }
-    }
-    outcome "budget_spent" {
-        next = step.branch_manager_final_say
     }
     outcome "failure" {
         next = state.failed
+        // KB-262: carry the typed reason through the boundary — the
+        // parent's failure comment interpolates failure_reason.
         write {
             target = data.internal.failure_reason.value
             value  = "validate_round_check failed: "+output.stderr
         }
     }
-    outcome "default" {
-        next = state.failed
-        write {
-            target = data.internal.failure_reason.value
-            value  = "validate_round_check failed (unmapped outcome: "+output.stdout+")"
-        }
+}
+
+// KB-265: budget spent → the branch manager's final say on convergence;
+// otherwise the coordinator validates the state against the outstanding
+// brief (normal completion path).
+switch "validate_round_check_route" {
+    match {
+        condition = trimspace(steps.validate_round_check.stdout) == "budget_spent"
+        next      = step.branch_manager_final_say
     }
+    default { next = step.validate_developer_response }
 }
 
 // Coordinator inspects the developer's commits against the brief it wrote.
