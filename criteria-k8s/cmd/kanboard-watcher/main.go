@@ -65,9 +65,9 @@ const (
 	// because a Completed pod is not a succeeded workflow.
 	// KB-269: the trees' human-handoff terminal is need_assistance now.
 	// The legacy awaiting_human spelling stays admitted during the
-	// transition window (old pinned trees still declare it) and is
-	// normalized onto need_assistance before the verdict branch sees it
-	// (isHumanHandoffFinalState).
+	// transition window (old pinned trees still declare it): both spellings
+	// are accepted by the reconcile membership check (isHumanHandoffFinalState);
+	// no normalization is performed.
 	finalStateHandlerComplete = "handler_complete"
 	finalStateFailed          = "failed"
 	finalStateNeedAssistance  = "need_assistance"

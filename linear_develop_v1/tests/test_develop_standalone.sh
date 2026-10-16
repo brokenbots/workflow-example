@@ -391,6 +391,17 @@ output_names="$(jq -r '[.outputs[]? | .name] | sort | join(" ")' "$GRAPH")"
 require_equal "$output_names" "assistance_reason" "outputs declare exactly assistance_reason (KB-269 shape contract)"
 output_type="$(jq -r '.outputs[]? | select(.name == "assistance_reason") | .type' "$GRAPH")"
 require_equal "$output_type" "string" "assistance_reason output is a string"
+# The reason transport itself (the KB-256 point): the output must be sourced
+# from the KB-24 handler_error lane, not stubbed empty. The compiled graph
+# exposes only name/type, so assert the declaration on the tree source — the
+# same wiring-gate pattern as workstream_handler_v1's KB-51 review_result test.
+output_block="$(sed -n '/^output "assistance_reason" {/,/^}/p' "$TREE_ROOT/main.chcl")"
+if printf '%s' "$output_block" | grep -q 'type  = string' \
+    && printf '%s' "$output_block" | grep -q 'value = data.internal.handler_error.value'; then
+    ok "output assistance_reason is sourced from data.internal.handler_error.value (KB-24 lane)"
+else
+    fail "output assistance_reason missing or not sourced from data.internal.handler_error.value (KB-269 reason transport)"
+fi
 
 # ── 3. Confirmed-workstream gate on real fixture shapes ──────────────────────
 

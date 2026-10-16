@@ -128,6 +128,10 @@ output_names="$(jq -r '[.outputs[]? | .name] | sort | join(" ")' "$GRAPH")"
 require_equal "$output_names" "assistance_reason" "outputs declare exactly assistance_reason (KB-269 shape contract)"
 output_type="$(jq -r '.outputs[]? | select(.name == "assistance_reason") | .type' "$GRAPH")"
 require_equal "$output_type" "string" "assistance_reason output is a string"
+# and the declared value stays the empty string (no failure_reason lane exists
+# in this tree to source one from).
+grep -q 'value = ""' "$TREE_ROOT/main.chcl" \
+    || fail "output assistance_reason value no longer declares the empty string (KB-269 shape contract)"
 
 # Every step, switch and terminal reachable from initial_state; both terminal
 # outcomes reachable in tests is asserted by membership here.
