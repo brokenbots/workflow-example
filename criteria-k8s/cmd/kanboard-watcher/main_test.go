@@ -990,7 +990,7 @@ func TestDevSucceededWithFailedVerdictMovesTaskToReview(t *testing.T) {
 // off the empty verdict — that stamping is exactly how failed develop runs
 // ended up in Done (KB-39/KB-40). The late verdict still reconciles: a
 // Done stamp predating the verdict — here left behind by a pre-KB-50
-// watcher — is repaired into Review when the awaiting_human verdict lands
+// watcher — is repaired into Review when the need_assistance verdict lands
 // (abstaining there would park the ticket in Done forever).
 func TestDevSucceededLateVerdictRepairsDoneToReview(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
@@ -1003,29 +1003,46 @@ func TestDevSucceededLateVerdictRepairsDoneToReview(t *testing.T) {
 	assert.Equal(t, 8, tw.kbS.taskColumn(27),
 		"the pre-verdict poll abstains: no Done move, no other move (KB-50)")
 
-	// Second poll: the castle observation landed the awaiting_human
+	// Second poll: the castle observation landed the need_assistance
 	// verdict; the stale Done stamp must be repaired into Review.
-	tw.setRunFinalStateByName(t, "kb-27-0000000001", "awaiting_human")
+	tw.setRunFinalStateByName(t, "kb-27-0000000001", "need_assistance")
 	tw.pollOnce(t)
 	assert.Equal(t, 6, tw.kbS.taskColumn(27),
-		"the late awaiting_human verdict reconciles the ticket out of Done into Review")
+		"the late need_assistance verdict reconciles the ticket out of Done into Review")
 }
 
 // KB-23 mirror (review R1): a non-Done column is left untouched by a
 // non-handler_complete verdict — the ticket in the develop route's trigger
 // column Ready must stay put so the firing loop can re-fire, and the run
 // actually firing from Ready is what proves the loop survived the repair.
-func TestDevSucceededAwaitingHumanKeepsReadyForRefire(t *testing.T) {
+func TestDevSucceededWithNeedAssistanceVerdictKeepsReadyForRefire(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(28, 9, "k8s-run", "internal-reproduced") // Ready: the develop route's trigger column
 	tw.addRun(t, "kb-28-0000000001", "KB-28", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
-	tw.setRunFinalStateByName(t, "kb-28-0000000001", "awaiting_human")
+	tw.setRunFinalStateByName(t, "kb-28-0000000001", "need_assistance")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 9, tw.kbS.taskColumn(28),
-		"an awaiting_human verdict leaves a non-Done column untouched (re-fire path)")
+		"a need_assistance verdict leaves a non-Done column untouched (re-fire path)")
 	require.Len(t, tw.runs(t), 2, "the develop route still fires from Ready after the verdict is observed")
+}
+
+// KB-269 transition window: the pre-rename awaiting_human spelling is
+// still admitted by the reconcile verdict branch — old pinned trees keep
+// declaring the awaiting_human terminal until their pins are re-armed, and
+// a Done stamp stamped before their verdict lands must still repair into
+// Review exactly as need_assistance verdicts do.
+func TestDevSucceededWithLegacyAwaitingHumanVerdictRepairsDoneToReview(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(33, 8, "k8s-run", "internal-reproduced") // Done: stamped before the legacy verdict landed
+	tw.addRun(t, "kb-33-0000000001", "KB-33", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-33-0000000001", "awaiting_human")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 6, tw.kbS.taskColumn(33),
+		"the legacy awaiting_human verdict repairs a Done stamp into Review (transition window)")
 }
 
 // An unrecognized terminal value (a future terminal this watcher predates)
@@ -1043,20 +1060,20 @@ func TestDevSucceededUnknownVerdictLeavesColumn(t *testing.T) {
 		"an unrecognized terminal state leaves the column untouched instead of stamping Done")
 }
 
-// KB-23 companion: an awaiting_human verdict handed the ticket to a human
+// KB-23 companion: a need_assistance verdict handed the ticket to a human
 // with the workflow's own bookkeeping (set_review_state) already applied —
 // the ticket sits in Review and must not be reconciled out from under that
 // handoff by a Done stamp.
-func TestDevSucceededWithAwaitingHumanVerdictLeavesColumn(t *testing.T) {
+func TestDevSucceededWithNeedAssistanceVerdictLeavesColumn(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(25, 6, "k8s-run", "internal-reproduced") // Review: parked by set_review_state
 	tw.addRun(t, "kb-25-0000000001", "KB-25", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
-	tw.setRunFinalStateByName(t, "kb-25-0000000001", "awaiting_human")
+	tw.setRunFinalStateByName(t, "kb-25-0000000001", "need_assistance")
 
 	tw.pollOnce(t)
 
 	assert.Equal(t, 6, tw.kbS.taskColumn(25),
-		"an awaiting_human verdict leaves the ticket where the workflow parked it")
+		"a need_assistance verdict leaves the ticket where the workflow parked it")
 }
 
 // KB-23 companion: a handler_complete verdict delivered the work and keeps

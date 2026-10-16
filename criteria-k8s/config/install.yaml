@@ -342,7 +342,7 @@ spec:
                     workflow ended in (RunCompleted.final_state), stamped
                     from the castle terminal envelope. "failed" is the
                     failure verdict, "handler_complete" delivered the work,
-                    and "awaiting_human" handed the ticket to a human. Empty
+                    and "need_assistance" handed the ticket to a human. Empty
                     when the terminal came from the castle run record or
                     castle observation is disabled.
                 lastStepProgress:
