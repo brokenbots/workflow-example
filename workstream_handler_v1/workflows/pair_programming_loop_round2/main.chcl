@@ -40,6 +40,12 @@ data "internal" "review_verdict" {
     value = ""
 }
 
+data "internal" "failure_reason" {
+    type  = string
+    value = ""
+}
+
+
 step "get_branch_name" {
     target = adapter.shell.sh
 
@@ -180,7 +186,10 @@ step "develop" {
     outcome "need_help" {
         next = state.failed
     schema = object({ reason = string })
-
+    write {
+        target = data.internal.failure_reason.value
+        value  = output.reason
+    }
     }
     // CRI-275: a turn that ends without a verdict routes through the
     // checkpoint loop instead of failing the run — push_checkpoint verifies
@@ -455,7 +464,10 @@ step "review" {
     outcome "need_help" {
         next = state.failed
     schema = object({ reason = string })
-
+    write {
+        target = data.internal.failure_reason.value
+        value  = output.reason
+    }
     }
     outcome "approved" {
         next = step.write_review_log
@@ -494,12 +506,18 @@ step "review" {
     outcome "failure" {
         next = state.failed
     schema = object({ reason = string })
-
+    write {
+        target = data.internal.failure_reason.value
+        value  = output.reason
+    }
     }
     outcome "default" {
         next = state.failed
     schema = object({ reason = string })
-
+    write {
+        target = data.internal.failure_reason.value
+        value  = output.reason
+    }
     }
 }
 

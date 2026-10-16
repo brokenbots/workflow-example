@@ -461,7 +461,14 @@ switch "route_pr_action" {
 step "run_pair_programming_loop" {
     target = subworkflow.pair_programming_loop
     outcome "success" { next = step.sync_head_branch }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value = try(output.reason, "")
+        }
+    }
 }
 
 // CRI-273 defense in depth: the developer may have worked in a second clone
@@ -994,14 +1001,28 @@ step "run_pair_programming_loop_with_feedback_r2" {
     target     = subworkflow.pair_programming_loop_feedback_r2
     max_visits = var.max_pair_cycles
     outcome "success" { next = step.validate_round_check }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value = try(output.reason, "")
+        }
+    }
 }
 
 step "run_pair_programming_loop_with_feedback_r3" {
     target     = subworkflow.pair_programming_loop_feedback_r3
     max_visits = var.max_pair_cycles
     outcome "success" { next = step.validate_round_check }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value = try(output.reason, "")
+        }
+    }
 }
 
 // max_visits bounds the coordinator's needs_work <-> developer cycle — a brief
@@ -1010,7 +1031,14 @@ step "run_pair_programming_loop_with_feedback" {
     target     = subworkflow.pair_programming_loop_feedback
     max_visits = var.max_pair_cycles
     outcome "success" { next = step.validate_round_check }
-    outcome "failure" { next = state.failed }
+    outcome "failure" {
+        next = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value = try(output.reason, "")
+        }
+    }
 }
 
 // KB-265: the feedback loop is bounded by rounds, not by the validator's
