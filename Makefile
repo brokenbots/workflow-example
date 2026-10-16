@@ -300,6 +300,12 @@ ci: validate
 	else \
 		echo "SKIP go tests: go not installed on this runner (CI's go-tests job covers it)"; \
 	fi
+	@echo "== ci: root-module gate-anchor tests (repogate; the ci_gate line's root go-test leg) =="
+	@if command -v go >/dev/null 2>&1; then \
+		(go test ./... -count=1); \
+	else \
+		echo "SKIP root go tests: go not installed on this runner"; \
+	fi
 	@echo "== ci: k8s manifest shell tests =="
 	@for t in k8s/tests/test_*.sh; do \
 		case "$$t" in \

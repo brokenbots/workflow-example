@@ -34,6 +34,15 @@ jobs:
         working-directory: criteria-k8s
         run: go test ./... -count=1
 
+      # The repo root is a Go module whose repogate/ package pins the
+      # gate-contract make targets the develop-loop ci_gate line invokes
+      # (`make build && make lint-go && make validate && go test ./...`);
+      # this root-level leg mirrors that gate leg so contract drift fails in
+      # CI too, not only at fire time. ./... here matches only the root
+      # module (nested criteria-k8s is its own module, covered above).
+      - name: Repo gate-anchor tests (root module)
+        run: go test ./... -count=1
+
   k8s-shell-tests:
     runs-on: ubuntu-latest
     steps:
