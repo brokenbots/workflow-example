@@ -1,4 +1,4 @@
-.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint apply-routes ci
+.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint apply-routes ci vuln-scan
 
 # Workflow (linear_intake_v1) image. Unique tags are mandatory for the k3s
 # local registry: the kubelet never re-resolves a reused tag with
@@ -261,6 +261,25 @@ lint: lint-criteria-k8s
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...
+
+# `vuln-scan` — the standalone security gate (the develop-run CI gate runs
+# `make ci && make vuln-scan`). Legs:
+#  1. Go dependency vulnerability scan: govulncheck (tool pinned for
+#     reproducibility, vulnerability database fetched live) on criteria-k8s;
+#     reachable findings gate the run, uncalled module-level findings are
+#     informational by govulncheck semantics. Loud-skip without go — same
+#     graceful-degrade convention as the ci target.
+#  2. CRI-250 secret-free shipped-configs gate (credential material scan).
+vuln-scan:
+	@echo "== vuln-scan: Go dependency vulnerability scan (govulncheck, criteria-k8s) =="
+	@if command -v go >/dev/null 2>&1; then \
+		(cd criteria-k8s && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...); \
+	else \
+		echo "SKIP govulncheck: go not installed on this runner; install go to run the dependency vulnerability scan"; \
+	fi
+	@echo "== vuln-scan: secret-free shipped configs (CRI-250) =="
+	bash k8s/tests/test_secret_free_gate.sh
+	@echo "vuln-scan: all legs green"
 
 # `ci` — single full-gate entrypoint for gate runners that invoke `make ci`
 # (KB-267: the develop-run ci gate). Mirrors .github/workflows/ci.yml leg
