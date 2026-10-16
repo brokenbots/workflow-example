@@ -1,0 +1,8 @@
+Continue the workstream. Your previous session ended with a checkpoint; all your work is safe as pushed commits on the branch.
+
+Do NOT re-do work: your first and only orientation is `git log --oneline -15` — read the commits you already made and continue from the last one. Do not re-read files you have already analyzed in prior sessions unless you need them for the current edit.
+
+Workstream (title only; full spec was provided in your first session and is at docs/ or the workstream file):
+{{ .workstream }}
+
+Discipline: same as before — a checkpoint is a mid-turn `git commit` + `git push` and then CONTINUE working; do not call `submit_outcome` for a checkpoint. End the turn with outcome `checkpoint` only when the turn approaches the session limit (~45 min) and you are between units. `ready_for_review` only when the FULL gate is green and the workstream is complete. Then end by calling the `submit_outcome` tool with the correct value.

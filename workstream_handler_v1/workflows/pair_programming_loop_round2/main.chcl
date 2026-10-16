@@ -1,0 +1,568 @@
+workflow {
+    version       = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    name          = "pair_loop_r2"
+    initial_state = "get_branch_name"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 100
+    }
+}
+
+data "internal" "branch" {
+    type  = string
+    value = ""
+}
+
+data "internal" "_log_file" {
+    type  = string
+    value = ""
+}
+
+data "internal" "developer_prompt" {
+    type  = string
+    value = templatefile("./agents/missing_developer_prompt.md.tftpl", {})
+}
+
+
+data "internal" "reviewer_prompt" {
+    type  = string
+    value = ""
+}
+
+// Verdict of the last review pass ("approved" / "changes_requested"). Written
+// by the review step's outcome handlers and read by triage_review — the copilot
+// adapter does not expose an `outcome` step output, so the workflow tracks the
+// verdict itself rather than reading steps.review.outcome.
+data "internal" "review_verdict" {
+    type  = string
+    value = ""
+}
+
+step "get_branch_name" {
+    target = adapter.shell.sh
+
+    input {
+        command = "basename '${var.workstream_file}' .md"
+    }
+
+    outcome "success" { next = step.read_workstream }
+    outcome "failure" { next = state.failed }
+}
+
+step "read_workstream" {
+    target = adapter.shell.sh
+
+    input {
+        command = "cat ${var.workstream_file}"
+    }
+
+    outcome "success" {
+        next = step.checkout_branch
+        write {
+            target = data.internal.branch.value
+            // basename's stdout carries a trailing newline; without the trim the
+            // newline rides along into every consumer of data.internal.branch —
+            // push_checkpoint rendered it into `git ls-remote origin
+            // "refs/heads/CRI-287\n"`, which matched nothing and failed the
+            // checkpoint loop on a branch that was verifiably pushed (CRI-295).
+            value  = trimspace(steps.get_branch_name.stdout)
+        }
+        write {
+            target = data.internal._log_file.value
+            value  = (var.log_file != null && var.log_file != "") ? var.log_file : "/tmp/${trimspace(steps.get_branch_name.stdout)}.log"
+        }
+        write {
+            target = data.internal.developer_prompt.value
+            value = var.developer_initial_prompt != "" ? var.developer_initial_prompt : (var.developer.initial_prompt != "" ? var.developer.initial_prompt : templatefile("./agents/develop_workstream.md.tftpl", {
+                workstream = output.stdout
+            }))
+        }
+        write {
+            target = data.internal.reviewer_prompt.value
+            value = templatefile("./agents/review_workstream.md.tftpl", {
+                workstream = output.stdout
+            })
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// The isolated worktree is created on the feature branch by branch_manager, but
+// the worktree is SHARED across body entries (initial pair loop + each
+// feedback-cycle pair loop): a previous body may have left HEAD moved
+// (observed: a triage leg left the worktree on a dependabot branch and the
+// next body's entry assertion failed in 2ms — KB-258). So the step asserts the
+// branch and, on mismatch, re-asserts it deterministically (fetch + checkout,
+// untracked scratch carried safely) instead of failing on the mere mismatch;
+// only a true conflict (git refuses the switch) fails, with a typed reason
+// naming the unexpected ref. No agent judgment at entry — the branch contract
+// is asserted by the step.
+step "checkout_branch" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/checkout_branch.sh.tftpl", {
+            criteria_value_1 = var.workstream_file
+        })
+    }
+    timeout = "10s"
+    outcome "success" { next = step.check_working_tree }
+    outcome "failure" { next = state.failed }
+}
+
+// Inspect the working tree before handing off to the developer. A dirty tree is
+// no longer rejected — branch_manager intentionally restores stashed work after a
+// rebase, so uncommitted changes here are expected. Instead, fold the status (and
+// any branch_manager stash report) into the developer's prompt so they can commit
+// what belongs to the workstream and discard the rest.
+
+step "check_working_tree" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/check_working_tree.sh.tftpl", {
+            criteria_value_1 = format("%s", var.allow_dirty)
+            criteria_value_2 = var.branch_notes
+        })
+    }
+    outcome "success" {
+        next = step.develop
+        write {
+            target = data.internal.developer_prompt.value
+            value = trimspace(output.stdout) != "" ? templatefile("./agents/developer_with_worktree_status.md.tftpl", {
+                prompt          = data.internal.developer_prompt.value
+                worktree_status = output.stdout
+            }) : data.internal.developer_prompt.value
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// max_visits bounds the develop <-> review / ci_gate / verify_committed
+// cycles — a stuck exchange fails the run instead of looping forever.
+// The develop turn is bounded by THREE budgets: max_visits (workflow-level,
+// bounds the checkpoint loop), the session-crash window observed at
+// ~64 minutes of a single streaming turn (CRI-271), and the step timeout
+// below (CRI-275). The agent ends each turn with outcome=checkpoint once
+// its current unit of work is committed and pushed, committing the loop
+// back into itself; a turn that stays under the provider timeout survives,
+// and progress persists across turns as pushed commits. A turn that dies to
+// the session crash loses only the delta since the last checkpoint.
+step "develop" {
+    target     = adapter.copilot.developer_r2
+    max_visits = var.max_agent_visits
+    // CRI-275: step-level ceiling for a single turn. The engine cannot judge
+    // agent-call duration, so the workflow declares it: a turn wedged on a
+    // provider request that never answers (observed: 51+ min silent before a
+    // manual kill) otherwise runs unbounded. Sized to the checkpoint
+    // discipline's ~45-60m turn limit. A timed-out step produces outcome
+    // "failure" (engine emits "context deadline exceeded" as failure), so it
+    // routes through the checkpoint loop below; the next turn resumes from
+    // the last pushed commit.
+    timeout = "60m"
+
+    allow_tools = ["*"]
+
+    input {
+        prompt = data.internal.developer_prompt.value
+    }
+
+    outcome "ready_for_review" {
+        next = step.write_work_log
+    schema = object({ reason = string })
+
+    }
+    outcome "checkpoint" {
+        next = step.push_checkpoint
+    schema = object({ reason = string })
+
+    }
+    outcome "need_help" {
+        next = state.failed
+    schema = object({ reason = string })
+
+    }
+    // CRI-275: a turn that ends without a verdict routes through the
+    // checkpoint loop instead of failing the run — push_checkpoint verifies
+    // the last pushed commit and the next turn resumes from it. Two sources
+    // of no-verdict turns: the engine emits outcome "failure" when the step
+    // timeout above fires (verified: "context deadline exceeded" — CRI-275)
+    // and when the copilot adapter's session dies or the agent never calls
+    // submit_outcome. need_help stays terminal (the agent itself declared it
+    // cannot proceed); max_visits still bounds the whole cycle.
+    outcome "failure" {
+        next = step.push_checkpoint
+    schema = object({ reason = string })
+
+    }
+    outcome "default" {
+        next = step.push_checkpoint
+    schema = object({ reason = string })
+
+    }
+}
+
+// Pushed by the agent inside the turn (checkpoint discipline); this step
+// verifies the push landed so the loop never continues on unpushed work.
+step "push_checkpoint" {
+    target     = adapter.shell.sh
+    max_visits = var.max_checkpoint_push_visits
+    timeout    = "120s"
+
+    input {
+        command = templatefile("./scripts/verify_checkpoint_pushed.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = var.base_branch
+        })
+    }
+
+    // CRI-272: loop-back sessions get a SLIM continuation prompt (branch + git-log
+    // orientation + workstream title only). Re-sending the full workstream spec on
+    // every checkpoint iteration cost minutes of re-orientation per checkpoint.
+    //
+    // KB-211: a checkpoint verdict with nothing pushed (benign first-turn shape) is
+    // deterministic shell truth from the verifier (`resumed_no_work=1`), not agent
+    // judgment: the continuation prompt switches to the correction template stating
+    // the checkpoint precondition. An agent is never handed an option whose
+    // preconditions cannot hold without being told what they are.
+    outcome "success" {
+        next = step.develop
+        write {
+            target = data.internal.developer_prompt.value
+            value = contains(split(output.stdout, "\n"), "resumed_no_work=1") ? templatefile("./agents/checkpoint_recover.md.tftpl", {
+                workstream = steps.read_workstream.stdout
+            }) : templatefile("./agents/develop_continue.md.tftpl", {
+                workstream = steps.read_workstream.stdout
+            })
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+step "write_work_log" {
+    target = adapter.shell.sh
+
+    input {
+        command = templatefile("./scripts/write_work_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+            criteria_value_2 = steps.develop.reason
+        })
+    }
+
+    outcome "success" { next = step.commit_work_log }
+    outcome "failure" { next = state.failed }
+}
+
+// Auto-commit the log file if it is tracked in the repo so verify_committed
+// does not see a dirty tree caused by the log write above.
+step "commit_work_log" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/commit_work_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+        })
+    }
+    outcome "success" { next = step.push_wip_checkpoint }
+    outcome "failure" { next = state.failed }
+}
+
+// Durability checkpoint: push the branch so committed work survives container
+// loss (see EXPERIMENT-ANALYSIS-2026-09-02.md, recommendation 1 — CRI-54/69/75
+// lost uncommitted developer work when the run container died mid-loop). The
+// push is best-effort and offsets work/review-log commit churn, so it fires
+// only when the branch carries real commits the remote has not seen. A
+// checkpoint miss never fails the run.
+step "push_wip_checkpoint" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {
+            helper = var.git_credential_helper
+        })
+    }
+    timeout = "60s"
+    outcome "success" { next = step.verify_committed }
+    outcome "failure" { next = step.verify_committed }
+}
+
+// Ensure the developer committed all changes before we run CI or review.
+// Uncommitted files at this point mean the agent forgot to commit; send it back.
+
+step "verify_committed" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/verify_committed.sh.tftpl", {})
+    }
+    outcome "success" { next = step.ci_gate }
+    outcome "failure" {
+        next = step.develop
+        write {
+            target = data.internal.developer_prompt.value
+            value = templatefile("./agents/uncommitted_changes.md.tftpl", {
+                stdout = output.stdout
+            })
+        }
+    }
+}
+
+// Runs var.ci_gate_cmd when set; skipped (trivially succeeds) when empty so
+// the workflow works on repos without a standard CI entry point.
+step "ci_gate" {
+    target = adapter.shell.sh
+    // KB-95 (2026-10-06): the shell adapter's default step timeout is 5m.
+    // Full-CI gates (make build && make lint-go && make validate &&
+    // go test ./...) run 10-20m cold, so the 5m default kills the gate with
+    // empty output — the developer gets an unexplainable blank failure and
+    // the develop<->ci_gate loop burns visits with no progress. Give the
+    // gate the same generous budget as the develop/reviewer steps; a gate
+    // that fails for real exits nonzero long before this.
+    timeout = "60m"
+
+    input {
+        // KB-156 (2026-10-07, wave driver): the shell adapter carries its OWN
+        // hard timeout input (default 5m) and never sees the engine's
+        // step.Timeout — the KB-95 '60m' step attribute alone still got the
+        // gate killed at exactly 300s (kb-95 + kb-156 runs, warm-cache attempt
+        // 3 passed at 217s). The ceiling must be stated in the adapter's own
+        // input as well.
+        timeout = "60m"
+        command = var.ci_gate_cmd != "" ? var.ci_gate_cmd : "echo 'ci_gate skipped: no ci_gate_cmd configured'"
+    }
+
+    outcome "success" { next = step.review }
+
+    outcome "failure" {
+        next = step.develop
+        write {
+            target = data.internal.developer_prompt.value
+            value = templatefile("./agents/ci_gate_failed.md.tftpl", {
+                stdout = output.stdout
+                stderr = output.stderr
+            })
+        }
+    }
+}
+
+step "review" {
+    target     = adapter.copilot.reviewer_r2
+    max_visits = var.max_agent_visits
+    // KB-72/KB-65: the review adapter declares a bounded turn budget
+    // (var.reviewer.max_turns = 12) — on the cap the adapter exits through
+    // its failure semantics, which route below (need_help/failure/default
+    // -> state.failed), so an unconcluded review parks the run for a human
+    // instead of looping. agents/reviewer.md carries the matching rule:
+    // deliver the verdict inside the budget; by the stated turn budget call
+    // submit_outcome even when the verdict is need_help; a review that ends
+    // without a verdict is a failed review, not a longer review.
+    // CRI-275: same turn ceiling as the develop step — a wedged reviewer turn
+    // (provider request that never answers) would otherwise hang the run
+    // forever. On timeout the step produces no verdict, which falls through
+    // to the failure/default routes below; the run ends through its terminal
+    // failure state and the caller's park-for-human path takes over.
+    timeout = "60m"
+
+    // CRI-260: reviewer tool policy — deny-by-default. Anything not listed
+    // below is refused, so test/CI execution is denied deterministically:
+    // no "shell:make *" beyond the build target (make ci, make test, make
+    // validate all fail to match), no "shell:gh *" (gh pr checks, gh run
+    // watch), and no test-runner patterns (go test, npm test). The gate is
+    // the only execution authority (see agents/reviewer.md role charter).
+    // File reads go through the read kinds; shell reads are fallbacks.
+    // Note: glob matching cannot express deny-lists, so a compound command
+    // whose first segment is allowed and whose rest contains a denied
+    // command (e.g. "git status && make ci") would still match — reviewers
+    // are additionally instructed by charter not to chain commands.
+    allow_tools = [        "read",
+        // KB-61/57c: complete depth bands for read-only git subcommands,
+        // shell: + bash: forms (copilot names its command tool bash).
+        // No write verbs (add/commit/push/checkout/reset); no wrappers.
+        // KB-55/57: the --no-pager forms the reviewer habitually emits.
+        "shell:git --no-pager status", "shell:git --no-pager status *", "shell:git --no-pager status */**", "shell:git --no-pager status */**/**", "shell:git --no-pager status */**/**/**", "shell:git --no-pager status */**/**/**/**", "shell:git --no-pager status */**/**/**/**/**", "shell:git --no-pager status */**/**/**/**/**/**",
+        "bash:git --no-pager status", "bash:git --no-pager status *", "bash:git --no-pager status */**", "bash:git --no-pager status */**/**", "bash:git --no-pager status */**/**/**", "bash:git --no-pager status */**/**/**/**", "bash:git --no-pager status */**/**/**/**/**", "bash:git --no-pager status */**/**/**/**/**/**",
+        "shell:git --no-pager diff", "shell:git --no-pager diff *", "shell:git --no-pager diff */**", "shell:git --no-pager diff */**/**", "shell:git --no-pager diff */**/**/**", "shell:git --no-pager diff */**/**/**/**", "shell:git --no-pager diff */**/**/**/**/**", "shell:git --no-pager diff */**/**/**/**/**/**",
+        "bash:git --no-pager diff", "bash:git --no-pager diff *", "bash:git --no-pager diff */**", "bash:git --no-pager diff */**/**", "bash:git --no-pager diff */**/**/**", "bash:git --no-pager diff */**/**/**/**", "bash:git --no-pager diff */**/**/**/**/**", "bash:git --no-pager diff */**/**/**/**/**/**",
+        "shell:git --no-pager log", "shell:git --no-pager log *", "shell:git --no-pager log */**", "shell:git --no-pager log */**/**", "shell:git --no-pager log */**/**/**", "shell:git --no-pager log */**/**/**/**", "shell:git --no-pager log */**/**/**/**/**", "shell:git --no-pager log */**/**/**/**/**/**",
+        "bash:git --no-pager log", "bash:git --no-pager log *", "bash:git --no-pager log */**", "bash:git --no-pager log */**/**", "bash:git --no-pager log */**/**/**", "bash:git --no-pager log */**/**/**/**", "bash:git --no-pager log */**/**/**/**/**", "bash:git --no-pager log */**/**/**/**/**/**",
+        "shell:git --no-pager show", "shell:git --no-pager show *", "shell:git --no-pager show */**", "shell:git --no-pager show */**/**", "shell:git --no-pager show */**/**/**", "shell:git --no-pager show */**/**/**/**", "shell:git --no-pager show */**/**/**/**/**", "shell:git --no-pager show */**/**/**/**/**/**",
+        "bash:git --no-pager show", "bash:git --no-pager show *", "bash:git --no-pager show */**", "bash:git --no-pager show */**/**", "bash:git --no-pager show */**/**/**", "bash:git --no-pager show */**/**/**/**", "bash:git --no-pager show */**/**/**/**/**", "bash:git --no-pager show */**/**/**/**/**/**",
+        "shell:git --no-pager rev-parse", "shell:git --no-pager rev-parse *", "shell:git --no-pager rev-parse */**", "shell:git --no-pager rev-parse */**/**", "shell:git --no-pager rev-parse */**/**/**", "shell:git --no-pager rev-parse */**/**/**/**", "shell:git --no-pager rev-parse */**/**/**/**/**", "shell:git --no-pager rev-parse */**/**/**/**/**/**",
+        "bash:git --no-pager rev-parse", "bash:git --no-pager rev-parse *", "bash:git --no-pager rev-parse */**", "bash:git --no-pager rev-parse */**/**", "bash:git --no-pager rev-parse */**/**/**", "bash:git --no-pager rev-parse */**/**/**/**", "bash:git --no-pager rev-parse */**/**/**/**/**", "bash:git --no-pager rev-parse */**/**/**/**/**/**",
+        "shell:git --no-pager branch", "shell:git --no-pager branch *", "shell:git --no-pager branch */**", "shell:git --no-pager branch */**/**", "shell:git --no-pager branch */**/**/**", "shell:git --no-pager branch */**/**/**/**", "shell:git --no-pager branch */**/**/**/**/**", "shell:git --no-pager branch */**/**/**/**/**/**",
+        "bash:git --no-pager branch", "bash:git --no-pager branch *", "bash:git --no-pager branch */**", "bash:git --no-pager branch */**/**", "bash:git --no-pager branch */**/**/**", "bash:git --no-pager branch */**/**/**/**", "bash:git --no-pager branch */**/**/**/**/**", "bash:git --no-pager branch */**/**/**/**/**/**",
+        "shell:git --no-pager ls-remote", "shell:git --no-pager ls-remote *", "shell:git --no-pager ls-remote */**", "shell:git --no-pager ls-remote */**/**", "shell:git --no-pager ls-remote */**/**/**", "shell:git --no-pager ls-remote */**/**/**/**", "shell:git --no-pager ls-remote */**/**/**/**/**", "shell:git --no-pager ls-remote */**/**/**/**/**/**",
+        "bash:git --no-pager ls-remote", "bash:git --no-pager ls-remote *", "bash:git --no-pager ls-remote */**", "bash:git --no-pager ls-remote */**/**", "bash:git --no-pager ls-remote */**/**/**", "bash:git --no-pager ls-remote */**/**/**/**", "bash:git --no-pager ls-remote */**/**/**/**/**", "bash:git --no-pager ls-remote */**/**/**/**/**/**",
+        "shell:git status", "shell:git status *", "shell:git status */**", "shell:git status */**/**", "shell:git status */**/**/**", "shell:git status */**/**/**/**", "shell:git status */**/**/**/**/**", "shell:git status */**/**/**/**/**/**",
+        "shell:git diff", "shell:git diff *", "shell:git diff */**", "shell:git diff */**/**", "shell:git diff */**/**/**", "shell:git diff */**/**/**/**", "shell:git diff */**/**/**/**/**", "shell:git diff */**/**/**/**/**/**",
+        "shell:git log", "shell:git log *", "shell:git log */**", "shell:git log */**/**", "shell:git log */**/**/**", "shell:git log */**/**/**/**", "shell:git log */**/**/**/**/**", "shell:git log */**/**/**/**/**/**",
+        "shell:git show", "shell:git show *", "shell:git show */**", "shell:git show */**/**", "shell:git show */**/**/**", "shell:git show */**/**/**/**", "shell:git show */**/**/**/**/**", "shell:git show */**/**/**/**/**/**",
+        "shell:git rev-parse", "shell:git rev-parse *", "shell:git rev-parse */**", "shell:git rev-parse */**/**", "shell:git rev-parse */**/**/**", "shell:git rev-parse */**/**/**/**", "shell:git rev-parse */**/**/**/**/**", "shell:git rev-parse */**/**/**/**/**/**",
+        "shell:git branch", "shell:git branch *", "shell:git branch */**", "shell:git branch */**/**", "shell:git branch */**/**/**", "shell:git branch */**/**/**/**", "shell:git branch */**/**/**/**/**", "shell:git branch */**/**/**/**/**/**",
+        "shell:git ls-remote", "shell:git ls-remote *", "shell:git ls-remote */**", "shell:git ls-remote */**/**", "shell:git ls-remote */**/**/**", "shell:git ls-remote */**/**/**/**", "shell:git ls-remote */**/**/**/**/**", "shell:git ls-remote */**/**/**/**/**/**",
+        "shell:git remote", "shell:git remote *", "shell:git remote */**", "shell:git remote */**/**", "shell:git remote */**/**/**", "shell:git remote */**/**/**/**", "shell:git remote */**/**/**/**/**", "shell:git remote */**/**/**/**/**/**",
+        "bash:git status", "bash:git status *", "bash:git status */**", "bash:git status */**/**", "bash:git status */**/**/**", "bash:git status */**/**/**/**", "bash:git status */**/**/**/**/**", "bash:git status */**/**/**/**/**/**",
+        "bash:git diff", "bash:git diff *", "bash:git diff */**", "bash:git diff */**/**", "bash:git diff */**/**/**", "bash:git diff */**/**/**/**", "bash:git diff */**/**/**/**/**", "bash:git diff */**/**/**/**/**/**",
+        "bash:git log", "bash:git log *", "bash:git log */**", "bash:git log */**/**", "bash:git log */**/**/**", "bash:git log */**/**/**/**", "bash:git log */**/**/**/**/**", "bash:git log */**/**/**/**/**/**",
+        "bash:git show", "bash:git show *", "bash:git show */**", "bash:git show */**/**", "bash:git show */**/**/**", "bash:git show */**/**/**/**", "bash:git show */**/**/**/**/**", "bash:git show */**/**/**/**/**/**",
+        "bash:git rev-parse", "bash:git rev-parse *", "bash:git rev-parse */**", "bash:git rev-parse */**/**", "bash:git rev-parse */**/**/**", "bash:git rev-parse */**/**/**/**", "bash:git rev-parse */**/**/**/**/**", "bash:git rev-parse */**/**/**/**/**/**",
+        "bash:git branch", "bash:git branch *", "bash:git branch */**", "bash:git branch */**/**", "bash:git branch */**/**/**", "bash:git branch */**/**/**/**", "bash:git branch */**/**/**/**/**", "bash:git branch */**/**/**/**/**/**",
+        "bash:git ls-remote", "bash:git ls-remote *", "bash:git ls-remote */**", "bash:git ls-remote */**/**", "bash:git ls-remote */**/**/**", "bash:git ls-remote */**/**/**/**", "bash:git ls-remote */**/**/**/**/**", "bash:git ls-remote */**/**/**/**/**/**",
+        "bash:git remote", "bash:git remote *", "bash:git remote */**", "bash:git remote */**/**", "bash:git remote */**/**/**", "bash:git remote */**/**/**/**", "bash:git remote */**/**/**/**/**", "bash:git remote */**/**/**/**/**/**",
+        // build (the one allowed execution: build once, then run the binary)
+        "shell:make build", "bash:make build",
+        "shell:go build", "shell:go build *", "shell:go build */*", "shell:go build */*/*", "shell:go build */*/*/*", "shell:go build */*/*/*/*",
+        "bash:go build", "bash:go build *", "bash:go build */*", "bash:go build */*/*", "bash:go build */*/*/*", "bash:go build */*/*/*/*",
+        // run the built binary (bin/build dirs) — scripts stay denied
+        "shell:./bin/*", "shell:./bin/*/*", "shell:./bin/*/*/*", "shell:./bin/*/*/*/*",
+        "shell:./build/*", "shell:./build/*/*", "shell:./build/*/*/*", "shell:./build/*/*/*/*",
+        "shell:./*",
+        "bash:./bin/*", "bash:./bin/*/*", "bash:./bin/*/*/*", "bash:./bin/*/*/*/*",
+        "bash:./build/*", "bash:./build/*/*", "bash:./build/*/*/*", "bash:./build/*/*/*/*",
+        "bash:./*",
+        // kb57-wave: evidence-loop reads the reviewer legitimately needs —
+        // denied probes during the CRI-205/206 reviews: find (docs discovery)
+        // and go env (module cache introspection). Suffix-star only: under
+        // the #490 matcher a trailing star is slash-permissive prefix match,
+        // so one entry covers every depth (the per-depth */** bands above are
+        // vestigial and kept only for this wave's stability).
+        "shell:find", "shell:find *", "bash:find", "bash:find *",
+        "shell:go env", "shell:go env *", "bash:go env", "bash:go env *",
+        // reads, fixture inspection, log tailing
+        "shell:echo", "shell:echo *", "bash:echo", "bash:echo *",
+        "shell:cat", "shell:cat *", "shell:cat */**", "shell:cat */**/**", "shell:cat */**/**/**", "shell:cat */**/**/**/**", "shell:cat */**/**/**/**/**", "shell:cat */**/**/**/**/**/**",
+        "bash:cat", "bash:cat *", "bash:cat */**", "bash:cat */**/**", "bash:cat */**/**/**", "bash:cat */**/**/**/**", "bash:cat */**/**/**/**/**", "bash:cat */**/**/**/**/**/**",
+        "shell:head", "shell:head *", "shell:head */**", "shell:head */**/**", "shell:head */**/**/**", "shell:head */**/**/**/**", "shell:head */**/**/**/**/**", "shell:head */**/**/**/**/**/**",
+        "bash:head", "bash:head *", "bash:head */**", "bash:head */**/**", "bash:head */**/**/**", "bash:head */**/**/**/**", "bash:head */**/**/**/**/**", "bash:head */**/**/**/**/**/**",
+        "shell:tail", "shell:tail *", "shell:tail */**", "shell:tail */**/**", "shell:tail */**/**/**", "shell:tail */**/**/**/**", "shell:tail */**/**/**/**/**", "shell:tail */**/**/**/**/**/**",
+        "bash:tail", "bash:tail *", "bash:tail */**", "bash:tail */**/**", "bash:tail */**/**/**", "bash:tail */**/**/**/**", "bash:tail */**/**/**/**/**", "bash:tail */**/**/**/**/**/**",
+        "shell:grep", "shell:grep *", "shell:grep */**", "shell:grep */**/**", "shell:grep */**/**/**", "shell:grep */**/**/**/**", "shell:grep */**/**/**/**/**", "shell:grep */**/**/**/**/**/**",
+        "bash:grep", "bash:grep *", "bash:grep */**", "bash:grep */**/**", "bash:grep */**/**/**", "bash:grep */**/**/**/**", "bash:grep */**/**/**/**/**", "bash:grep */**/**/**/**/**/**",
+        "shell:rg", "shell:rg *", "shell:rg */**", "shell:rg */**/**", "shell:rg */**/**/**", "shell:rg */**/**/**/**", "shell:rg */**/**/**/**/**", "shell:rg */**/**/**/**/**/**",
+        "bash:rg", "bash:rg *", "bash:rg */**", "bash:rg */**/**", "bash:rg */**/**/**", "bash:rg */**/**/**/**", "bash:rg */**/**/**/**/**", "bash:rg */**/**/**/**/**/**",
+        "shell:ls", "shell:ls *", "shell:ls */**", "shell:ls */**/**", "shell:ls */**/**/**", "shell:ls */**/**/**/**", "shell:ls */**/**/**/**/**", "shell:ls */**/**/**/**/**/**",
+        "bash:ls", "bash:ls *", "bash:ls */**", "bash:ls */**/**", "bash:ls */**/**/**", "bash:ls */**/**/**/**", "bash:ls */**/**/**/**/**", "bash:ls */**/**/**/**/**/**",
+        "shell:wc", "shell:wc *", "shell:wc */**", "shell:wc */**/**", "shell:wc */**/**/**", "shell:wc */**/**/**/**", "shell:wc */**/**/**/**/**", "shell:wc */**/**/**/**/**/**",
+        "bash:wc", "bash:wc *", "bash:wc */**", "bash:wc */**/**", "bash:wc */**/**/**", "bash:wc */**/**/**/**", "bash:wc */**/**/**/**/**", "bash:wc */**/**/**/**/**/**",
+        "shell:diff", "shell:diff *", "shell:diff */**", "shell:diff */**/**", "shell:diff */**/**/**", "shell:diff */**/**/**/**", "shell:diff */**/**/**/**/**", "shell:diff */**/**/**/**/**/**",
+        "bash:diff", "bash:diff *", "bash:diff */**", "bash:diff */**/**", "bash:diff */**/**/**", "bash:diff */**/**/**/**", "bash:diff */**/**/**/**/**", "bash:diff */**/**/**/**/**/**",
+        "shell:jq", "shell:jq *", "shell:jq */**", "shell:jq */**/**", "shell:jq */**/**/**", "shell:jq */**/**/**/**", "shell:jq */**/**/**/**/**", "shell:jq */**/**/**/**/**/**",
+        "bash:jq", "bash:jq *", "bash:jq */**", "bash:jq */**/**", "bash:jq */**/**/**", "bash:jq */**/**/**/**", "bash:jq */**/**/**/**/**", "bash:jq */**/**/**/**/**/**",]
+    input {
+        prompt = templatefile("./agents/review_developer_update.md.tftpl", {
+            reviewer_prompt = data.internal.reviewer_prompt.value
+            developer_update = steps.develop.reason
+        })
+    }
+
+    outcome "need_help" {
+        next = state.failed
+    schema = object({ reason = string })
+
+    }
+    outcome "approved" {
+        next = step.write_review_log
+        schema = object({ reason = string })
+        write {
+            target = data.internal.review_verdict.value
+            value  = "approved"
+        }
+
+    }
+    outcome "changes_requested" {
+        next = step.write_review_log
+        schema = object({ reason = string })
+        write {
+            target = data.internal.review_verdict.value
+            value  = "changes_requested"
+        }
+        // Feed the findings forward on both sides of the loop: the developer
+        // gets the remediation list as its next prompt, and the reviewer gets
+        // its own prior findings for the re-review pass.
+        write {
+            target = data.internal.developer_prompt.value
+            value = templatefile("./agents/address_review_findings.md.tftpl", {
+                findings = output.reason
+            })
+        }
+        write {
+            target = data.internal.reviewer_prompt.value
+            value = templatefile("./agents/review_latest_changes.md.tftpl", {
+                findings = output.reason
+            })
+        }
+    }
+    // The copilot adapter emits "failure" if the session dies or the agent
+    // never calls submit_outcome after re-prompts — route it somewhere terminal.
+    outcome "failure" {
+        next = state.failed
+    schema = object({ reason = string })
+
+    }
+    outcome "default" {
+        next = state.failed
+    schema = object({ reason = string })
+
+    }
+}
+
+step "write_review_log" {
+    target = adapter.shell.sh
+
+    input {
+        command = templatefile("./scripts/write_review_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+            criteria_value_2 = steps.review.reason
+        })
+    }
+
+    outcome "success" { next = step.commit_review_log }
+    outcome "failure" { next = state.failed }
+}
+
+step "commit_review_log" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/commit_review_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+        })
+    }
+    outcome "success" { next = step.push_review_checkpoint }
+    outcome "failure" { next = state.failed }
+}
+
+// Second durability checkpoint after the review pass: an approved head (or a
+// changes-requested head) is exactly the state a restart must be able to find
+// on the remote. Same best-effort, churn-offsetting semantics as
+// push_wip_checkpoint.
+step "push_review_checkpoint" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {
+            helper = var.git_credential_helper
+        })
+    }
+    timeout = "60s"
+    outcome "success" { next = switch.triage_review }
+    outcome "failure" { next = switch.triage_review }
+}
+
+switch "triage_review" {
+    match {
+        condition = data.internal.review_verdict.value == "approved"
+        next      = state.done
+    }
+    // changes_requested: back to the developer, whose prompt now carries the
+    // review findings (written by the review step's changes_requested outcome).
+    default {
+        next = step.develop
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+// The parent receives this terminal failure directly on Criteria v0.5.9.
