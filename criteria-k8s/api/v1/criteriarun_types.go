@@ -330,8 +330,10 @@ type CriteriaRunStatus struct {
 	// failure terminal (KB-23), so a Job- or envelope-success-derived
 	// Succeeded phase can mask a failed workflow verdict. "failed" is the
 	// failure verdict, "handler_complete" delivered the work, and
-	// "awaiting_human" handed the ticket to a human with the bookkeeping
-	// intact. Empty when the terminal came from the castle run record
+	// "need_assistance" handed the ticket to a human with the bookkeeping
+	// intact (the pre-KB-269 "awaiting_human" spelling stays valid while
+	// old pinned trees still emit it). Empty when the terminal came from
+	// the castle run record
 	// (which carries no final_state column) or when castle observation is
 	// disabled. Not part of the terminal-completion gate.
 	FinalState string `json:"finalState,omitempty"`

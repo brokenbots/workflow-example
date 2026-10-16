@@ -9,7 +9,7 @@
 //
 //   handler_complete      — the handler merged its PR and the ticket was
 //                           moved to the done state.
-//   awaiting_human        — FAILURE ending: the run hands the ticket to a human
+//   need_assistance       — FAILURE ending: the run hands the ticket to a human
 //                           (success=false — humans are for broken things):
 //                           the reviewer loop could not conclude (the handler
 //                           fails the run when its bounded review/fix cycle
@@ -126,7 +126,7 @@ step "fetch_ticket" {
     // no comment or state move is possible. Exit to the awaiting-human
     // terminal; the run record carries the failure and the watcher re-fires
     // the ticket while it sits in its current state.
-    outcome "failure" { next = state.awaiting_human }
+    outcome "failure" { next = state.need_assistance }
 }
 
 // ── Confirmed workstream: write or reuse ─────────────────────────────────────
@@ -406,8 +406,8 @@ step "park_after_done_move_failed" {
 // Parks the ticket in the review state for a human. CRI-275: the two
 // outcomes now split — a failed state move is a bookkeeping failure (the
 // ticket is not in the review state the run promised), so the run ends
-// failed; a clean parking still ends the run awaiting a human, which is a
-// legitimate success (the run record carries the handler's error, and the
+// failed; a clean parking still ends the run awaiting a human, a legitimate
+// need_assistance ending (the run record carries the handler's error, and the
 // ticket sits In Review with an accurate comment).
 step "set_review_state" {
     target = adapter.shell.develop
@@ -418,28 +418,33 @@ step "set_review_state" {
             criteria_value_3 = var.linear_review_state
         })
     }
-    outcome "success" { next = state.awaiting_human }
+    outcome "success" { next = state.need_assistance }
     outcome "failure" { next = state.failed }
 }
 
 // ── Terminal states ──────────────────────────────────────────────────────────
 
-// Exactly three terminal states (CRI-275), two of them successful (CRI-238
-// doctrine — a run either delivers the work or hands the ticket to a human
-// with the bookkeeping intact; a failed Linear write on the way out is a
-// legitimate awaiting_human ending, not a run failure). The failed terminal
+// Exactly three terminal states (CRI-275). A run either delivers the work
+// (handler_complete) or hands the ticket to a human with the bookkeeping
+// intact (need_assistance): the reviewer loop could not conclude, so the
+// ticket is parked In Review and the run record carries the handoff —
+// a legitimate route, and per the 2026-10-02 ruling a failure ending
+// (success=false; the handoff reason rides the assistance_reason output).
+// The failed terminal
 // records bookkeeping failures: the parking comment or the state move did
 // not land, so the ticket is not in a discoverable state and castle must
 // record the run as failed (success=false) — that record is what lets the
 // watcher raise the dirty label and refire the ticket while it sits in a
 // watched state, instead of a human discovering stuck tickets by reading
 // raw events.
+// KB-269: the terminal renamed awaiting_human -> need_assistance — the
+// name is the tree's own (the engine passes it through verbatim).
 state "handler_complete" {
     terminal = true
     success  = true
 }
 
-state "awaiting_human" {
+state "need_assistance" {
     terminal = true
     success  = false
 }
@@ -447,4 +452,16 @@ state "awaiting_human" {
 state "failed" {
     terminal = true
     success  = false
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+
+// KB-269: the reason a run ended in need_assistance, recorded at the terminal
+// so the run record carries it (the handoff comment stays the narrative
+// surface). Sourced from the KB-24 lane — the handler's typed failure_reason
+// captured at the run_handler failure arm into data.internal.handler_error
+// (empty when the handler died without reporting one).
+output "assistance_reason" {
+    type  = string
+    value = data.internal.handler_error.value
 }

@@ -41,7 +41,7 @@ import (
 // not its end: the triage workflow's re-arm path moves the ticket into the
 // develop route's trigger column and the watcher leaves that move in place
 // (KB-9). A dev-class success is judged by the workflow verdict stamped on
-// the run (KB-23): a failed/awaiting_human verdict repairs a Done stamp
+// the run (KB-23): a failed/need_assistance verdict repairs a Done stamp
 // into the review column and otherwise leaves the ticket where the
 // workflow's own bookkeeping put it. Even a success verdict does not stamp
 // Done on its own (KB-50): Done is the confirmation of delivered work, and
@@ -56,17 +56,31 @@ const (
 
 	// Workflow terminal state names (RunCompleted.final_state) the watcher
 	// judges a dev-class success by (KB-23). handler_complete delivered
-	// the work; awaiting_human handed the ticket to a human with the
+	// the work; need_assistance handed the ticket to a human with the
 	// bookkeeping intact; failed is the workflow's failure verdict. The
-	// triage workflow ends in awaiting_human/ready_for_development but is
+	// triage workflow ends in need_assistance/ready_for_development but is
 	// excluded from the verdict branch by its class.
 	// KB-50: a judgeable verdict is necessary but no longer sufficient for
 	// the Done move — even handler_complete needs the run to carry a PR,
 	// because a Completed pod is not a succeeded workflow.
+	// KB-269: the trees' human-handoff terminal is need_assistance now.
+	// The legacy awaiting_human spelling stays admitted during the
+	// transition window (old pinned trees still declare it): both spellings
+	// are accepted by the reconcile membership check (isHumanHandoffFinalState);
+	// no normalization is performed.
 	finalStateHandlerComplete = "handler_complete"
 	finalStateFailed          = "failed"
+	finalStateNeedAssistance  = "need_assistance"
 	finalStateAwaitingHuman   = "awaiting_human"
 )
+
+// isHumanHandoffFinalState reports whether a workflow verdict parked the
+// ticket with a human (the work is not complete): the need_assistance
+// terminal or its legacy awaiting_human spelling (old pinned trees still
+// declare awaiting_human until their pins are re-armed; KB-269).
+func isHumanHandoffFinalState(finalState string) bool {
+	return finalState == finalStateNeedAssistance || finalState == finalStateAwaitingHuman
+}
 
 var (
 	namespace         = flag.String("namespace", getenv("NAMESPACE", "criteria-jobs"), "Namespace to watch and create CriteriaRuns in")
@@ -730,7 +744,7 @@ type runPhases struct {
 // live on KB-17, run kb-17-1790397477: the workflow's verdict was failure —
 // comment_handler_failed logged outcome=failure — but the run read
 // Succeeded and the watcher moved the ticket to Done). A "failed" or
-// "awaiting_human" verdict means the work is not complete — the develop
+// "need_assistance" verdict means the work is not complete — the develop
 // workflow's failure path parks the ticket in review (set_review_state ran
 // before the terminal) — so a Done stamp that predates the verdict is
 // repaired into the review column, and any other column is left untouched:
@@ -769,8 +783,10 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 		// KB-23: judge a dev-class success by the workflow's verdict, not
 		// the phase — the runner job exits 0 even when the workflow ended
 		// in its failure terminal.
-		switch ph.latestFinalState {
-		case finalStateFailed, finalStateAwaitingHuman:
+		switch {
+		case isHumanHandoffFinalState(ph.latestFinalState) || ph.latestFinalState == finalStateFailed:
+			// KB-269: the need_assistance terminal and its legacy
+			// awaiting_human spelling both mean a human holds the ticket.
 			// The work is not complete. A Done stamp that predates the
 			// verdict — applied by a poll that saw the Job-derived
 			// Succeeded phase while the castle observation had not yet
@@ -782,7 +798,7 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 				return task.ColumnID, false
 			}
 			target = reviewColumnName
-		case finalStateHandlerComplete:
+		case ph.latestFinalState == finalStateHandlerComplete:
 			// handler_complete delivered the work — and since the KB-49
 			// route guard the workflow itself refuses a handler success with
 			// an empty pr_url (flag_missing_pr_url fails the run loudly), a
@@ -792,7 +808,7 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 			// permanently empty and could never gate anything): the verdict
 			// plus the workflow's own KB-49 guard are the PR evidence now.
 			target = doneColumnName
-		case "":
+		case ph.latestFinalState == "":
 			// KB-50: an empty verdict is an unverified run — the workflow's
 			// terminal has not been observed yet (castle observation lag), or
 			// will not be (record-derived terminal, castle observation

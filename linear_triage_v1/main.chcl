@@ -6,7 +6,7 @@
 // gate (semantics unchanged from intake), then run external QA triage. Every
 // run ends in exactly one of two terminal states, both human-facing:
 //
-//   awaiting_human        — FAILURE ending: the ticket moves In Review with a
+//   need_assistance       — FAILURE ending: the ticket moves In Review with a
 //                           Linear comment carrying the evidence a human needs (success=false):
 //                           No re-arm happens on this path: humans promote In
 //                           Review tickets by label + state — the human IS the
@@ -127,7 +127,7 @@ step "fetch_ticket" {
     // no comment or state move is possible. Exit to the awaiting-human
     // terminal; the run record carries the failure and the watcher re-fires
     // the ticket while it sits in Triage.
-    outcome "failure" { next = state.awaiting_human }
+    outcome "failure" { next = state.need_assistance }
 }
 
 // ── Routing gate: internal-reproduced ────────────────────────────────────────
@@ -413,8 +413,8 @@ step "set_review_state" {
     // Both outcomes land in the same terminal: a failed state move still ends
     // the run awaiting a human (the run record carries the error, and the
     // watcher re-fires the ticket while it sits in Triage).
-    outcome "success" { next = state.awaiting_human }
-    outcome "failure" { next = state.awaiting_human }
+    outcome "success" { next = state.need_assistance }
+    outcome "failure" { next = state.need_assistance }
 }
 
 // ── Ready-for-development re-arm (CRI-240) ───────────────────────────────────
@@ -487,7 +487,9 @@ step "set_ready_state" {
 // finding, ambiguous triage, crashed subworkflow, failed state move — is a
 // legitimate and useful conclusion: the ticket carries the context and sits
 // in the review state. Step errors surface in the run record.
-state "awaiting_human" {
+// KB-269: the terminal renamed awaiting_human -> need_assistance — the
+// name is the tree's own (the engine passes it through verbatim).
+state "need_assistance" {
     terminal = true
     success  = false
 }
@@ -495,4 +497,17 @@ state "awaiting_human" {
 state "ready_for_development" {
     terminal = true
     success  = true
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+
+// KB-269: the reason a run ended in need_assistance, recorded at the terminal
+// so the run record carries it (the handoff comment stays the narrative
+// surface). This tree has no failure_reason lane (KB-24/256) — no handler
+// subworkflow to report one — and its QA verdict is the triage result, not a
+// failure reason, so the declared shape is the contract and the payload is
+// the empty string.
+output "assistance_reason" {
+    type  = string
+    value = ""
 }

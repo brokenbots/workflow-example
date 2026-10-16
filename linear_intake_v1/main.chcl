@@ -621,7 +621,7 @@ step "set_review_state" {
             criteria_value_3 = var.linear_review_state
         })
     }
-    outcome "success" { next = state.awaiting_human }
+    outcome "success" { next = state.need_assistance }
     outcome "failure" { next = state.failed }
 }
 
@@ -641,7 +641,11 @@ state "already_complete" {
 // success=false — humans are for broken things). The ticket carries the
 // context and sits in the review state; the run record reads failed so a
 // human hand-off is never reported as a successful outcome.
-state "awaiting_human" {
+// KB-269: renamed awaiting_human -> need_assistance — the terminal name is
+// the tree's own, passed through the engine's name-transparent
+// OnRunCompleted; need_assistance is the verdict a run awaiting human
+// assistance records.
+state "need_assistance" {
     terminal = true
     success  = false
 }
@@ -654,4 +658,17 @@ state "ticket_not_found" {
 state "failed" {
     terminal = true
     success  = false
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+
+// KB-269: the reason a run ended in need_assistance, recorded at the terminal
+// so the run record carries it (the handoff comment stays the narrative
+// surface). This tree has no failure_reason lane (KB-24/256) to read it from
+// — the intake handoff context lives in the ticket comment and the run
+// record — so the declared shape is the contract and the payload is the
+// empty string.
+output "assistance_reason" {
+    type  = string
+    value = ""
 }

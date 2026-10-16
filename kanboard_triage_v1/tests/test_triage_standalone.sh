@@ -17,7 +17,7 @@ set -euo pipefail
 #   5. the linear_* source trees are untouched;
 #   6. the ready_for_development terminal path re-arms the development route
 #      (CRI-240 semantics): the re-arm step is reached only from the
-#      confirmed-finding gates (no awaiting_human path reaches it), its merged
+#      confirmed-finding gates (no need_assistance path reaches it), its merged
 #      tag write preserves every existing tag against a mock Kanboard API, and
 #      a missing arming tag or failed write fails loudly;
 #   7. every comment script posts a createComment carrying the numeric task
@@ -110,15 +110,28 @@ terminals="$(jq -r '[.states[] | select(.terminal)] | length' "$GRAPH")"
 [ "$terminals" -eq 2 ] || fail "expected exactly 2 terminal states, got $terminals"
 
 terminal_names="$(jq -r '[.states[] | select(.terminal) | .name] | sort | join(" ")' "$GRAPH")"
-require_equal "$terminal_names" "awaiting_human ready_for_development" "terminal states are exactly awaiting_human and ready_for_development"
+require_equal "$terminal_names" "need_assistance ready_for_development" "terminal states are exactly need_assistance and ready_for_development"
 
 # 2026-10-02 dave ruling: a human hand-off is a FAILURE ending (success=false);
 # only the delivery terminal (ready_for_development = confirmed workstream handed
 # to development) stays success=true.
-jq -e '.states[] | select(.terminal and .name == "awaiting_human" and (.success | not))' "$GRAPH" >/dev/null \
-    || fail "terminal awaiting_human must be success=false: a human hand-off is a failure ending"
+jq -e '.states[] | select(.terminal and .name == "need_assistance" and (.success | not))' "$GRAPH" >/dev/null \
+    || fail "terminal need_assistance must be success=false: a human hand-off is a failure ending"
 jq -e '.states[] | select(.terminal and .name == "ready_for_development" and .success)' "$GRAPH" >/dev/null \
     || fail "terminal ready_for_development must be success=true"
+
+# KB-269: the run's need_assistance terminal declares the handoff reason as a
+# run-level output. The triage tree has no KB-24 failure_reason lane (the QA
+# verdict is the triage result, not a failure reason), so the value is an
+# empty string — the shape is the contract, not the payload's provenance.
+output_names="$(jq -r '[.outputs[]? | .name] | sort | join(" ")' "$GRAPH")"
+require_equal "$output_names" "assistance_reason" "outputs declare exactly assistance_reason (KB-269 shape contract)"
+output_type="$(jq -r '.outputs[]? | select(.name == "assistance_reason") | .type' "$GRAPH")"
+require_equal "$output_type" "string" "assistance_reason output is a string"
+# and the declared value stays the empty string (no failure_reason lane exists
+# in this tree to source one from).
+grep -q 'value = ""' "$TREE_ROOT/main.chcl" \
+    || fail "output assistance_reason value no longer declares the empty string (KB-269 shape contract)"
 
 # Every step, switch and terminal reachable from initial_state; both terminal
 # outcomes reachable in tests is asserted by membership here.
@@ -157,7 +170,7 @@ unreachable_steps="$(jq -r '.steps[] | .name' "$GRAPH" | while read -r s; do
 done)"
 [ -z "$unreachable_steps" ] || fail "steps not reachable from initial_state: $unreachable_steps"
 
-for state_name in awaiting_human ready_for_development; do
+for state_name in need_assistance ready_for_development; do
     if [ "${reachable[$state_name]+set}" = "set" ]; then
         ok "terminal outcome reachable: $state_name"
     else
@@ -323,7 +336,7 @@ predecessors() {
 #   - set_ready_state's ONLY predecessor is the re-arm, so every run that
 #     terminates ready_for_development re-arms first;
 #   - the re-arm's ONLY predecessors are the two confirmed-finding gates —
-#     no awaiting_human path (comment steps, set_review_state) can reach it,
+#     no need_assistance path (comment steps, set_review_state) can reach it,
 #     so review-column tasks are never re-armed: the human IS the signal.
 require_equal "$(predecessors set_ready_state)" "rearm_k8s_run" \
     "every ready_for_development run passes through the re-arm step"
