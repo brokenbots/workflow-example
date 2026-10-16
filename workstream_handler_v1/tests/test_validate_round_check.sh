@@ -43,6 +43,14 @@ fail() {
     echo "FAIL: $1" >&2
 }
 
+# Call-site contract (live kb-264-1792105840): templatefile vars keep their HCL
+# types — a NUMBER variable piped straight into shellquote() kills the step at
+# render ("wrong type for value; expected string; got int64"). Any numeric var
+# reaching this template must be rendered with format() at the call site first.
+if grep -n 'criteria_value_1 = var\.' "$TREE_ROOT/../main.chcl" 2>/dev/null | grep -v 'format(' >/dev/null; then
+    fail "raw numeric variable fed to templatefile without format() (shellquote renders int64 fatal)"
+fi
+
 test -f "$SCRIPT" || {
     echo "FAIL: missing $SCRIPT — the round check renders a nonexistent template at runtime" >&2
     exit 1

@@ -876,7 +876,10 @@ step "validate_round_check" {
     timeout = "10s"
     input {
         command = templatefile("./scripts/validate_round_check.sh.tftpl", {
-            criteria_value_1 = var.max_pair_cycles
+            // templatefile vars keep their HCL types: max_pair_cycles is a number and
+            // shellquote() in the template rejects int64 (live kb-264-1792105840: died at
+            // first arm execution). Render the number canonically BEFORE the template.
+            criteria_value_1 = format("%d", var.max_pair_cycles)
             criteria_value_2 = data.internal.validate_rounds.value
         })
     }
