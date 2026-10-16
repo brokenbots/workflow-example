@@ -8,7 +8,7 @@ set -euo pipefail
 #   1. the tree validates standalone and references no linear_intake_v1 or
 #      linear_triage_v1 asset;
 #   2. the graph has exactly three terminal states — two success
-#      (handler_complete, awaiting_human) and one failed bookkeeping
+#      (handler_complete, need_assistance) and one failed bookkeeping
 #      terminal (CRI-275: a parking comment or state move that does not
 #      land records the run failed so the watcher can refire/alert) — all
 #      reachable, its only subworkflow is workstream_handler_v1, and no
@@ -97,7 +97,7 @@ terminals="$(jq -r '[.states[] | select(.terminal)] | length' "$GRAPH")"
 [ "$terminals" -eq 3 ] || fail "expected exactly 3 terminal states, got $terminals"
 
 terminal_names="$(jq -r '[.states[] | select(.terminal) | .name] | sort | join(" ")' "$GRAPH")"
-require_equal "$terminal_names" "awaiting_human failed handler_complete" "terminal states are exactly awaiting_human, failed and handler_complete"
+require_equal "$terminal_names" "failed handler_complete need_assistance" "terminal states are exactly need_assistance, failed and handler_complete"
 
 # 2026-10-02 dave ruling: waiting on a human is a FAILURE ending — humans
 # are for broken things. The delivery terminal (handler_complete: PR merged)
@@ -106,8 +106,8 @@ require_equal "$terminal_names" "awaiting_human failed handler_complete" "termin
 jq -e '.states[] | select(.terminal and .name == "handler_complete" and .success)' "$GRAPH" >/dev/null \
     || fail "terminal handler_complete must be success=true"
 ok "delivery terminal is success=true"
-jq -e '.states[] | select(.terminal and .name == "awaiting_human" and (.success | not))' "$GRAPH" >/dev/null \
-    || fail "terminal awaiting_human must be success=false: a human hand-off is a failure ending"
+jq -e '.states[] | select(.terminal and .name == "need_assistance" and (.success | not))' "$GRAPH" >/dev/null \
+    || fail "terminal need_assistance must be success=false: a human hand-off is a failure ending"
 ok "human hand-off terminal is success=false"
 jq -e '.states[] | select(.terminal and .name == "failed" and (.success | not))' "$GRAPH" >/dev/null \
     || fail "terminal failed must be success=false: bookkeeping failures must be recorded as run failures"
@@ -150,7 +150,7 @@ unreachable_steps="$(jq -r '.steps[] | .name' "$GRAPH" | while read -r s; do
 done)"
 [ -z "$unreachable_steps" ] || fail "steps not reachable from initial_state: $unreachable_steps"
 
-for state_name in awaiting_human failed handler_complete; do
+for state_name in need_assistance failed handler_complete; do
     if [ "${reachable[$state_name]+set}" = "set" ]; then
         ok "terminal outcome reachable: $state_name"
     else
@@ -350,7 +350,7 @@ assert_edge() {
 }
 
 assert_edge "fetch_ticket" "success" "ensure_confirmed_workstream"
-assert_edge "fetch_ticket" "failure" "awaiting_human"
+assert_edge "fetch_ticket" "failure" "need_assistance"
 assert_edge "ensure_confirmed_workstream" "success" "comment_handler_started"
 assert_edge "ensure_confirmed_workstream" "failure" "comment_develop_failed"
 assert_edge "comment_handler_started" "success" "set_work_state"
@@ -379,8 +379,18 @@ assert_edge "comment_done_move_failed" "success" "park_after_done_move_failed"
 assert_edge "comment_done_move_failed" "failure" "failed"
 assert_edge "park_after_done_move_failed" "success" "failed"
 assert_edge "park_after_done_move_failed" "failure" "failed"
-assert_edge "set_review_state" "success" "awaiting_human"
+assert_edge "set_review_state" "success" "need_assistance"
 assert_edge "set_review_state" "failure" "failed"
+
+# KB-269: the run's need_assistance terminal records the handoff reason as a
+# declared run-level output. The compiled shape is the contract: the output
+# exists on the graph and is a string (the develop tree sources the value
+# from the KB-24 handler_error lane; the payload's provenance is the tree's
+# own concern).
+output_names="$(jq -r '[.outputs[]? | .name] | sort | join(" ")' "$GRAPH")"
+require_equal "$output_names" "assistance_reason" "outputs declare exactly assistance_reason (KB-269 shape contract)"
+output_type="$(jq -r '.outputs[]? | select(.name == "assistance_reason") | .type' "$GRAPH")"
+require_equal "$output_type" "string" "assistance_reason output is a string"
 
 # ── 3. Confirmed-workstream gate on real fixture shapes ──────────────────────
 
