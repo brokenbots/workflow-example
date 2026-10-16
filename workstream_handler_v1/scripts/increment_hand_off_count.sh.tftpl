@@ -1,0 +1,25 @@
+#!/bin/sh
+# KB-267: increment the branch-manager hand-off counter.
+#
+# Rendered inputs (shellquoted, the repo-conventional criteria_value_N):
+#   criteria_value_1 — data.internal.hand_off_count.value: remediation
+#                      hand-offs spent so far (empty/garbage counts as 0).
+#
+# stdout contract, read by the success-outcome write on
+# step.increment_hand_off_count (trimspace'd): the incremented count.
+# switch.hand_off_route matches "1"/"2" to pick the round-fresh dial
+# (2 fresh-context rounds are provisioned); the branch manager template
+# must verdict blocked beyond the second hand-off.
+#
+# The increment is deterministic shell truth, not agent math: the branch
+# manager decides the hand-off, this step counts it. A non-zero exit is a
+# genuine failure (the failure outcome carries stderr as the typed
+# reason), never a silent hand-off bypass.
+set -eu
+
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+
+count=$(printf '%s' "$criteria_value_1" | tr -dc '0-9')
+[ -n "$count" ] || count=0
+
+printf '%s\n' "$((count + 1))"

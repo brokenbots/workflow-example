@@ -51,6 +51,22 @@ data "internal" "developer_feedback" {
     value = ""
 }
 
+// KB-267: branch-manager hand-off accounting. hand_off_count — remediation
+// hand-offs already emitted by branch_manager_final_say; two fresh-context
+// rounds are provisioned (pair_programming_loop_feedback_r2/_r3), so the
+// manager must verdict blocked beyond the second. last_hand_off_brief — the
+// prior hand-off's brief, so the manager can name the same finding returning
+// with no state change as the typed blocked reason.
+data "internal" "hand_off_count" {
+    type  = string
+    value = "0"
+}
+
+data "internal" "last_hand_off_brief" {
+    type  = string
+    value = ""
+}
+
 data "internal" "review_result" {
     type  = string
     value = ""
@@ -129,6 +145,54 @@ subworkflow "pair_programming_loop" {
 // Re-uses the same loop with coordinator feedback injected as the initial prompt.
 subworkflow "pair_programming_loop_feedback" {
     source = "./workflows/pair_programming_loop"
+    input = {
+        workstream_file          = var.workstream_file
+        ci_gate_cmd              = var.ci_gate_cmd
+        developer_initial_prompt = data.internal.developer_feedback.value
+        log_file                 = var.log_file != "" ? var.log_file : null
+        allow_dirty              = var.allow_dirty
+        branch_notes             = data.internal.branch_notes.value
+        worktree_dir             = var.worktree_dir
+        max_agent_visits         = var.max_pair_agent_visits
+        provider_base_url        = var.provider_base_url
+        workflow_github_token    = var.workflow_github_token
+        git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
+        base_branch              = var.base_branch
+    }
+}
+
+// KB-267: round-fresh feedback rounds for post-budget hand-offs. Each
+// re-entry of the develop leg after a hand-off goes through a NEW dial step
+// whose subworkspace declares round-suffixed copilot instances
+// (developer_r2/reviewer_r2, developer_r3/reviewer_r3). The engine keys
+// copilot conversations by adapter instance name and reuses open sessions on
+// re-entry (KB-257 detach + the CRI-145 open-session skip), so only a
+// never-opened instance yields a conversation wipe — plain re-entry of the
+// base dial inherits the prior round's developer session. The branch
+// manager's remediation brief travels as developer_initial_prompt, so the
+// fresh session's first prompt IS the brief (KB-262 developer_feedback
+// boundary write); the shell instance stays shared on purpose: commands are
+// stateless and the worktree/branch must stay the same.
+subworkflow "pair_programming_loop_feedback_r2" {
+    source = "./workflows/pair_programming_loop_round2"
+    input = {
+        workstream_file          = var.workstream_file
+        ci_gate_cmd              = var.ci_gate_cmd
+        developer_initial_prompt = data.internal.developer_feedback.value
+        log_file                 = var.log_file != "" ? var.log_file : null
+        allow_dirty              = var.allow_dirty
+        branch_notes             = data.internal.branch_notes.value
+        worktree_dir             = var.worktree_dir
+        max_agent_visits         = var.max_pair_agent_visits
+        provider_base_url        = var.provider_base_url
+        workflow_github_token    = var.workflow_github_token
+        git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
+        base_branch              = var.base_branch
+    }
+}
+
+subworkflow "pair_programming_loop_feedback_r3" {
+    source = "./workflows/pair_programming_loop_round3"
     input = {
         workstream_file          = var.workstream_file
         ci_gate_cmd              = var.ci_gate_cmd
@@ -823,11 +887,33 @@ step "branch_manager_final_say" {
             branch             = data.internal.branch.value
             developer_feedback = data.internal.developer_feedback.value
             rounds             = data.internal.validate_rounds.value
+            hand_off_count     = data.internal.hand_off_count.value
+            last_hand_off      = data.internal.last_hand_off_brief.value
         })
     }
     outcome "converge_on_state" {
         next   = step.push_and_respond
         schema = object({ reason = string })
+    }
+    // KB-267: the blocker is developer-actionable — emit the typed
+    // remediation brief and hand it back to the develop leg through a
+    // FRESH round (new dial step -> round-suffixed instances -> new
+    // developer/reviewer sessions whose first prompt is the brief). The
+    // hand-off consumes budget: the incremented count routes the next
+    // round dial via switch.hand_off_route, and after the second hand-off
+    // the manager must verdict blocked (the parked-run protection of
+    // KB-265 is preserved — the hand-off is bounded, not a reopen).
+    outcome "hand_off" {
+        next   = step.increment_hand_off_count
+        schema = object({ reason = string })
+        write {
+            target = data.internal.developer_feedback.value
+            value  = output.reason
+        }
+        write {
+            target = data.internal.last_hand_off_brief.value
+            value  = output.reason
+        }
     }
     outcome "blocked" {
         next   = state.failed
@@ -853,6 +939,69 @@ step "branch_manager_final_say" {
             value  = output.reason
         }
     }
+}
+
+// KB-267: deterministic hand-off counter increment. The branch manager
+// never counts its own hand-offs (agent math is untrustworthy); a shell
+// step increments and the router picks the fresh-round dial from the
+// stored count. Failure here is a genuine run failure with a typed reason,
+// never a silent hand-off bypass.
+step "increment_hand_off_count" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/increment_hand_off_count.sh.tftpl", {
+            criteria_value_1 = data.internal.hand_off_count.value
+        })
+    }
+    outcome "success" {
+        next = switch.hand_off_route
+        write {
+            target = data.internal.hand_off_count.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "increment_hand_off_count failed: " + output.stderr
+        }
+    }
+}
+
+// KB-267: route the hand-off to the round-fresh develop leg. Two counts are
+// representable — two fresh rounds are provisioned (r2, r3) and the branch
+// manager template forbids a third hand-off (blocked beyond two with a
+// typed reason), so the default arm is a defensive terminus only.
+switch "hand_off_route" {
+    match {
+        condition = trimspace(steps.increment_hand_off_count.stdout) == "1"
+        next      = step.run_pair_programming_loop_with_feedback_r2
+    }
+    match {
+        condition = trimspace(steps.increment_hand_off_count.stdout) == "2"
+        next      = step.run_pair_programming_loop_with_feedback_r3
+    }
+    default { next = state.failed }
+}
+
+// Round-fresh dial steps mirror the base dial: success flows into the same
+// validate_round_check (the budget counter is spent for real by then, so
+// the check hands the final say back to the branch manager), failure fails
+// loud. max_visits kept form-compliant with the base dial.
+step "run_pair_programming_loop_with_feedback_r2" {
+    target     = subworkflow.pair_programming_loop_feedback_r2
+    max_visits = var.max_pair_cycles
+    outcome "success" { next = step.validate_round_check }
+    outcome "failure" { next = state.failed }
+}
+
+step "run_pair_programming_loop_with_feedback_r3" {
+    target     = subworkflow.pair_programming_loop_feedback_r3
+    max_visits = var.max_pair_cycles
+    outcome "success" { next = step.validate_round_check }
+    outcome "failure" { next = state.failed }
 }
 
 // max_visits bounds the coordinator's needs_work <-> developer cycle — a brief

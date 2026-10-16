@@ -1,0 +1,65 @@
+environment "remote" "worktree" {
+    // Per-scope sessions: each scope gets its own adapter pod, torn down at
+    // scope exit. Requires the run data dir wiring (CRI-128).
+    per_scope_sessions = true
+    working_directory = var.worktree_dir
+    process = {
+        exec = ["*"]
+    }
+    listen_address = "0.0.0.0:0"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.4"
+    environment = remote.worktree
+    secrets {
+        GH_TOKEN = var.workflow_github_token
+    }
+}
+
+adapter "copilot" "developer_r2" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.15"
+    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
+    }
+    config {
+        model             = var.developer.model
+        max_turns         = "${var.developer.max_turns}"
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.developer.provider.base_url
+        provider_wire_api = var.developer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+// Review runs on the copilot harness alongside the developer, resolving
+// through the local Ollama endpoint. deepseek-v4.1-flash is the review model.
+// KB-72/KB-65: max_turns is bounded low on purpose — a review leg that
+// exhausts its turns without emitting a verdict routes as failure (agents/
+// reviewer.md carries the matching turn-discipline rule).
+adapter "copilot" "reviewer_r2" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.15"
+    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+        GH_TOKEN     = var.workflow_github_token
+    }
+    config {
+        model             = var.reviewer.model
+        max_turns         = "${var.reviewer.max_turns}"
+        reasoning_effort  = var.reviewer.reasoning_effort
+        system_prompt     = file("./agents/reviewer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.reviewer.provider.base_url
+        provider_wire_api = var.reviewer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}

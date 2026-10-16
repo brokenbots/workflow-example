@@ -5,20 +5,54 @@ Given:
 - Branch under development: {{ .branch }}
 - The last outstanding brief given to the developer:
 {{ .developer_feedback }}
+- Remediation hand-offs already spent: {{ .hand_off_count }} (two round-fresh
+  developer sessions are provisioned; a hand-off after the second is not
+  available)
+- The previous hand-off's remediation brief (empty on the first decision):
+{{ .last_hand_off }}
 
 Verify the ACTUAL state of the branch (and the PR head when reachable):
 - Are the reviewer's requirements in the brief implemented, correct, and complete on the branch?
 - Is CI green on the PR (or the PR's head equals the branch tip with a passed gate)?
+- When a prior hand-off exists: did the branch actually move since that
+  hand-off (new commits addressing its items, CI state change), or did the
+  same finding return unchanged?
 
-Decide:
-- When the state matches the brief — the work is complete even if a late
-  validator verdict disagreed on process round-trips (no new commits while
-  the reviewer approved the same diff) — call submit_outcome with outcome
-  "converge_on_state". In the reason field, write the state-based evidence
-  (commits, CI, review thread) that closes the brief.
-- When a requirement is genuinely still missing or CI is red on real changes,
-  call submit_outcome with outcome "blocked". In the reason field, write the
-  precise unreachable blocker; the run will fail loud with it for a human.
-- Never use other verdicts here; convergence or blocked are the only two
-  states this decision supports. Do not push code yourself; the decision is
-  state-verification only.
+Your verdict — call submit_outcome with exactly one of:
+
+- "converge_on_state": the state matches the brief — the work is complete
+  even if a late validator verdict disagreed on process round-trips (no new
+  commits while the reviewer approved the same diff). In the reason field,
+  write the state-based evidence (commits, CI, review thread) that closes
+  the brief.
+
+- "hand_off": the blocker is genuinely developer-actionable AND at most one
+  hand-off has been spent so far AND — when a prior hand-off exists — the
+  branch has actually moved since it (a second hand-off must be earned by
+  new remediation work; the same finding returning unchanged is not
+  progress). The developer you brief starts a NEW session with NO memory of
+  any prior round, so the reason field must be a self-contained remediation
+  brief, typed and numbered:
+  1. what is wrong (file/line/symptom you VERIFIED, not inherited claims),
+  2. what to change to fix it,
+  3. how to verify the fix (commands, expected state),
+  4. the branch/PR context (the branch is shared; do not reset or recreate it).
+  The brief travels as the fresh developer's first and only prompt — every
+  fact the developer needs must be in it.
+
+- "blocked": park the run for a human. This is the verdict when
+  - the blocker is NOT developer-actionable (an upstream or outside
+    dependency, a decision only a human can make, repo/billing state no
+    agent can change), or
+  - two hand-offs are already spent ({{ .hand_off_count }} of 2) and the
+    work still does not converge, or
+  - the same finding returned with no state change after a round was
+    already handed off for it.
+  In the reason field, write the precise unreachable blocker; the run will
+  fail loud with it for a human.
+
+- "failure": infra/adapter level breakage of this verification leg itself.
+
+- Any other verdict is invalid. The manager never pushes code and never
+  commits: the decision is state-verification only; remediation work is
+  always the developer's.

@@ -1,4 +1,4 @@
-.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint apply-routes
+.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint apply-routes ci vuln-scan
 
 # Workflow (linear_intake_v1) image. Unique tags are mandatory for the k3s
 # local registry: the kubelet never re-resolves a reused tag with
@@ -123,6 +123,9 @@ validate:
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
+	# KB-267: the handler tree is its own module now — validate it with the
+	# rest (its regression suite compiles it, but this is the canonical leg).
+	/usr/local/bin/criteria validate workstream_handler_v1
 	# KB-217: mechanical rule — every outcome arm that renders its adapter
 	# reason into a downstream prompt declares require_comment. Fails closed;
 	# trees are auto-discovered, no allowlists.
@@ -258,3 +261,93 @@ lint: lint-criteria-k8s
 
 lint-criteria-k8s:
 	cd criteria-k8s && go vet ./...
+
+# `vuln-scan` — the standalone security gate (the develop-run CI gate runs
+# `make ci && make vuln-scan`). Legs:
+#  1. Go dependency vulnerability scan: govulncheck (tool pinned for
+#     reproducibility, vulnerability database fetched live) on criteria-k8s;
+#     reachable findings gate the run, uncalled module-level findings are
+#     informational by govulncheck semantics. Loud-skip without go — same
+#     graceful-degrade convention as the ci target.
+#  2. CRI-250 secret-free shipped-configs gate (credential material scan).
+vuln-scan:
+	@echo "== vuln-scan: Go dependency vulnerability scan (govulncheck, criteria-k8s) =="
+	@if command -v go >/dev/null 2>&1; then \
+		(cd criteria-k8s && go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...); \
+	else \
+		echo "SKIP govulncheck: go not installed on this runner; install go to run the dependency vulnerability scan"; \
+	fi
+	@echo "== vuln-scan: secret-free shipped configs (CRI-250) =="
+	bash k8s/tests/test_secret_free_gate.sh
+	@echo "vuln-scan: all legs green"
+
+# `ci` — single full-gate entrypoint for gate runners that invoke `make ci`
+# (KB-267: the develop-run ci gate). Mirrors .github/workflows/ci.yml leg
+# for leg: tree validation, criteria-k8s go build/vet/test, the k8s manifest
+# shell loop, the engine-pin + standalone suites, the workstream_handler_v1
+# suite, the shared gh-retry integration tests, the CRI-250 secret gate,
+# and the structural YAML manifest validation. The go / python3 / perl /
+# pyyaml-gated legs and their tests loud-skip on minimal runners that lack
+# those interpreters and toolchains (same graceful-degrade convention as
+# the build targets above); CI's runner images carry every tool, so the
+# full set always runs there.
+ci: validate
+	@echo "== ci: go build + vet + test (criteria-k8s) =="
+	@if command -v go >/dev/null 2>&1; then \
+		(cd criteria-k8s && go build ./... && go vet ./... && go test ./... -count=1); \
+	else \
+		echo "SKIP go tests: go not installed on this runner (CI's go-tests job covers it)"; \
+	fi
+	@echo "== ci: k8s manifest shell tests =="
+	@for t in k8s/tests/test_*.sh; do \
+		case "$$t" in \
+			*test_create_ready_state.sh|*test_env_listen_ports.sh|*test_routes_config.sh) \
+				if ! command -v python3 >/dev/null 2>&1; then \
+					echo "SKIP $$t: needs python3 (not installed on this runner; CI covers it)"; \
+					continue; \
+				fi ;; \
+			*test_job_cri_27.sh|*test_launch_template.sh|*test_runner_events_file_default.sh) \
+				if ! command -v perl >/dev/null 2>&1; then \
+					echo "SKIP $$t: needs perl (not installed on this runner; CI covers it)"; \
+					continue; \
+				fi ;; \
+		esac; \
+		echo "RUN $$t"; \
+		bash "$$t" || exit 1; \
+	done
+	@echo "== ci: engine pin + standalone extraction suites =="
+	bash linear_intake_v1/tests/test_engine_pin.sh
+	bash linear_triage_v1/tests/test_triage_standalone.sh
+	bash linear_develop_v1/tests/test_develop_standalone.sh
+	bash kanboard_develop_v1/tests/test_develop_standalone.sh
+	bash kanboard_triage_v1/tests/test_triage_standalone.sh
+	bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
+	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
+	bash linear_intake_v1/tests/test_workflow_graphs_flat.sh
+	@echo "== ci: workstream_handler_v1 regression suite =="
+	@for t in workstream_handler_v1/tests/test_*.sh; do \
+		case "$$t" in \
+			*test_checkpoint_base_branch_render.sh|*test_subworkflow_var_plumbing.sh) \
+				if ! command -v python3 >/dev/null 2>&1; then \
+					echo "SKIP $$t: needs python3 (not installed on this runner; CI covers it)"; \
+					continue; \
+				fi ;; \
+		esac; \
+		echo "RUN $$t"; \
+		bash "$$t" || exit 1; \
+	done
+	@echo "== ci: shared gh retry wrapper integration tests (KB-219) =="
+	bash devops_triage_v1/tests/test_open_pr_retry.sh
+	bash linear_intake_v1/tests/test_container_entrypoint_gh_retry.sh
+	@echo "== ci: secret-free shipped configs gate (CRI-250) =="
+	bash k8s/tests/test_secret_free_gate.sh
+	@echo "== ci: validate-manifests (structural YAML parse; CI also kubectl-dry-runs, non-gating) =="
+	@if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then \
+		for f in k8s/*.yaml; do \
+			python3 -c "import yaml, sys; list(yaml.safe_load_all(open('$$f')))" || exit 1; \
+			echo "yaml ok: $$f"; \
+		done; \
+	else \
+		echo "SKIP validate-manifests: python3+pyyaml not installed on this runner (CI's validate-manifests job covers it)"; \
+	fi
+	@echo "ci: all legs green"

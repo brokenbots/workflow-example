@@ -1,0 +1,8 @@
+set -euo pipefail
+status=$(git status --porcelain)
+if [ -n "$status" ]; then
+    echo "uncommitted_changes:"
+    echo "$status"
+    exit 1
+fi
+echo "all_changes_committed=true"

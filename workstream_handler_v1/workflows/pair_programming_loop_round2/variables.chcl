@@ -1,0 +1,142 @@
+// Override for the developer's initial prompt. When set, takes priority over
+// var.developer.initial_prompt and the default workstream prompt. Used by the
+// parent workflow to inject coordinator feedback on re-run cycles.
+variable "developer_initial_prompt" {
+    type    = string
+    default = ""
+}
+
+// Base branch the checkpoint verifier compares the workstream branch against
+// (KB-211 benign-resume / fatal-unpushed split). Plumbed in by the parent's
+// pair_programming_loop subworkflow blocks; defaults to main.
+variable "base_branch" {
+    type        = string
+    description = "Base branch for push_checkpoint's committed-vs-base comparison (verify_checkpoint_pushed.sh)."
+    default     = "main"
+}
+
+// Shell snippet shared with the parent workflow that sets up a Git credential
+// helper reading GH_TOKEN / GITHUB_TOKEN / WORKFLOW_GITHUB_TOKEN at runtime.
+// Injected so push steps do not duplicate the helper or embed a token.
+variable "git_credential_helper" {
+    type    = string
+    default = ""
+}
+
+variable "ci_gate_cmd" {
+    type        = string
+    description = "command to run as ci gate, should exit 0 for clean and non-zero for failed. stderr and stdout are sent to the developer on failure. Empty (the default) skips the gate. Mirror what the remote CI runs — an aggregate target often omits gates CI runs separately (e.g. a vulnerability scan), and a gate missing here is one the developer only discovers after the PR is already red (e.g. 'make ci && make vuln-scan')."
+    default     = ""
+}
+
+variable "workstream_file" {
+    type        = string
+    description = "workstream file that agent will use to do work"
+}
+
+variable "worktree_dir" {
+    type        = string
+    description = "Absolute path of the isolated worktree the developer/reviewer agents operate in. Empty = process working directory."
+    default     = ""
+}
+
+variable "log_file" {
+    type        = string
+    description = "path to worklog file, if not set worklog will be kept in /tmp/uuid()/work.log"
+    default     = null
+}
+
+variable "allow_dirty" {
+    type        = bool
+    description = "skip the clean working tree check and proceed even if there are uncommitted changes"
+    default     = false
+}
+
+variable "branch_notes" {
+    type        = string
+    description = "note from the parent (e.g. branch_manager stash report) describing uncommitted work restored to the tree; surfaced to the developer when the tree is dirty"
+    default     = ""
+}
+
+variable "max_agent_visits" {
+    type        = number
+    description = "Maximum attempts for each developer and reviewer gate."
+    default     = 10
+}
+
+variable "max_checkpoint_push_visits" {
+    type        = number
+    description = "Maximum attempts for the checkpoint-push verification between developer turns (CRI-271)."
+    default     = 3
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the developer and reviewer agents."
+    type        = string
+    default     = ""
+}
+
+variable "developer" {
+    type = object({
+        model            = string
+        max_turns        = number
+        reasoning_effort = optional(string, "")
+        initial_prompt   = optional(string, "")
+        provider = optional(object({
+            base_url     = optional(string, "")
+            api          = optional(string, "")
+            wire_api     = optional(string, "")
+            api_key      = optional(string, "")
+            bearer_token = optional(string, "")
+        }))
+    })
+
+    // glm-5.3-flash:cloud is the coding model for the developer.
+    default = {
+        model     = "glm-5.3-flash:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Reviewer runs on the copilot adapter, resolving through the local Ollama
+// endpoint like the developer. deepseek-v4.1-flash:cloud is the review model.
+variable "reviewer" {
+    type = object({
+        model            = string
+        // KB-72/KB-65 diagnosis: the review leg died with 22 granted
+        // evidence-call turns streaming empty content and never a verdict
+        // (turn.finalize_exhausted). 30 turns is exploration money for a
+        // judge; the review budget is bounded (12-15 per KB-71) so the
+        // adapter's failure routing fires instead. agents/reviewer.md
+        // carries a turn-discipline rule stating this same number.
+        max_turns        = optional(number, 12)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model = "deepseek-v4.1-flash:cloud"
+        // Bounded per the comment on the type above; must stay in sync with
+        // the turn-discipline rule's stated number in agents/reviewer.md.
+        max_turns = 12
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

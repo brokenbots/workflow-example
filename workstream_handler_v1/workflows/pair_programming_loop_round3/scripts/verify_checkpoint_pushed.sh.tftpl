@@ -1,0 +1,48 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+set -euo pipefail; exec 2>&1
+branch="$criteria_value_1"
+base="$criteria_value_2"
+# The branch value travels through stdout writes on its way here and can carry
+# stray edge whitespace (observed: a trailing newline from an untrimmed
+# `basename` write made the refs/heads match below fail on a pushed branch,
+# CRI-295). Trim the edges; internal whitespace in a real branch name survives.
+branch="$(printf '%s' "$branch" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+# A whitespace-only value trims to empty, and `ls-remote origin refs/heads/`
+# lists every branch — an empty name must fail loudly instead of matching a
+# random head.
+if [ -z "$branch" ]; then
+    echo "checkpoint push verification: branch value is empty" >&2
+    exit 1
+fi
+
+# The checkpoint discipline requires the agent to push before ending a
+# checkpoint turn (CRI-271): the loop's crash window is a single turn's
+# session, so progress only survives across turns as pushed commits.
+# This step verifies the branch head is on the remote; a missing push
+# fails the run loudly instead of silently losing a checkpoint.
+head_sha=$(git rev-parse "refs/heads/$branch" 2>/dev/null || git rev-parse HEAD)
+remote_sha=$(git ls-remote origin "refs/heads/$branch" | awk '{print $1}')
+if [ -z "$remote_sha" ]; then
+    # KB-211: a checkpoint verdict with NOTHING pushed yet is a deterministic,
+    # benign recoverable shape, not data loss — the agent named an outcome whose
+    # precondition (a pushed commit) could not exist on its first turn. Fail the
+    # run only when work exists that a missing push would lose; resume the loop
+    # (deterministic correction prompt on the success path) when the tree carries
+    # zero committed work beyond the base branch. The FATAL case stays fatal:
+    # local commits exist but the push never landed — continuing would run on
+    # unpushed work the next session cannot see.
+    base_ref="origin/${base:-main}"
+    workstream_commits=$(git rev-list --count "${base_ref}..HEAD" 2>/dev/null || echo 0)
+    if [ "$workstream_commits" = "0" ]; then
+        echo "resumed_no_work=1"
+        exit 0
+    fi
+    echo "checkpoint push verification: remote branch $branch does not exist; $workstream_commits unpushed commit(s) — push lost would lose them" >&2
+    exit 1
+fi
+if [ "$head_sha" != "$remote_sha" ]; then
+    echo "checkpoint push verification: local $head_sha != remote $remote_sha" >&2
+    exit 1
+fi
+echo "checkpoint_pushed=$head_sha"
