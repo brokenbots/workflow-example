@@ -310,12 +310,12 @@ fi
 # main.chcl routes the run to state.failed. Scan both directions.
 bind_issues=0
 for tpl in "$TREE_ROOT"/scripts/*.sh.tftpl; do
-    for n in $(grep -oE '[$][{]?criteria_value_[0-9]+' "$tpl" | grep -oE '[0-9]+' | sort -u); do
+    while read -r n; do
         if ! grep -qE "^criteria_value_${n}=[{][{] [.]?criteria_value_${n}" "$tpl"; then
             fail "$(basename "$tpl") references \$criteria_value_$n but renders no {{ .criteria_value_$n }} binding"
             bind_issues=$((bind_issues + 1))
         fi
-    done
+    done < <(grep -oE '[$][{]?criteria_value_[0-9]+' "$tpl" | grep -oE '[0-9]+' | sort -u)
 done
 sed -n '/templatefile(/,/^[[:space:]]*\}[)][[:space:]]*$/p' "$TREE_ROOT/main.chcl" \
     | sed -n 's/.*templatefile("\([^"]*\)".*/PATH \1/p; s/^[[:space:]]*\(criteria_value_[0-9][0-9]*\)[[:space:]]*= .*/KEY \1/p' \
@@ -473,11 +473,10 @@ run_comment_case() {
     fi
     # Loud failure: the stub answers a JSON-RPC error body; the script must
     # exit non-zero.
-    KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+    ! KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
         GH_RETRY_BACKOFF_SECONDS="0 0 0" \
         E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" E2E_STUB_ERROR=1 \
         bash "$TMP/case_comment.sh" >/dev/null 2>&1
-    [ $? -ne 0 ]
 }
 
 check_payload() {
@@ -883,9 +882,11 @@ if [ "$rc_tags" -ne 0 ] && printf '%s' "$err_tags" | grep -q "kanboard rpc error
 else
     fail "an RPC error body must fail with 'kanboard rpc error: getTaskTags: Invalid params' (rc=$rc_tags out=$err_tags)"
 fi
-[ ! -s "$ticket" ] \
-    && ok "a failed fetch writes no ticket.json" \
-    || fail "a failed fetch must not write ticket.json"
+if [ -s "$ticket" ]; then
+    fail "a failed fetch must not write ticket.json"
+else
+    ok "a failed fetch writes no ticket.json"
+fi
 
 # ── 4a. KB-235: transport failures retry WITH BACKOFF, not single-shot ──────
 
@@ -962,9 +963,11 @@ for mode in empty html302; do
     else
         fail "an $mode body must fail with '$want', without any 'invalid JSON text' (rc=$rc_mode out=$err)"
     fi
-    [ ! -s "$ticket" ] \
-        && ok "an $mode body writes no ticket.json" \
-        || fail "an $mode body must not write ticket.json"
+    if [ -s "$ticket" ]; then
+        fail "an $mode body must not write ticket.json"
+    else
+        ok "an $mode body writes no ticket.json"
+    fi
 done
 
 # Case 3+4: the standalone comment path under the same outage bodies — a stub
@@ -975,10 +978,10 @@ run_guard_case() {
     render_comment_case comment_handler_done.sh.tftpl /tmp KB-24 approved \
         "workstreams/KB-24.md" "https://example.org/org/repo/pull/9" "kb-231-9f24c1a" main \
         >/dev/null
-    KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
+    { KANBOARD_APP_TOKEN=stub-token KANBOARD_URL=http://127.0.0.1:1 \
         GH_RETRY_BACKOFF_SECONDS="0 0 0" \
         E2E_CAPTURE="$TMP" PATH="$STUBBIN:$PATH" E2E_STUB_BODY="$1" \
-        bash "$TMP/case_comment.sh" 2>&1 >/dev/null
+        bash "$TMP/case_comment.sh" >/dev/null; } 2>&1
 }
 guard_err_empty="$(run_guard_case empty)" && rc_guard=0 || rc_guard=$?
 if [ "$rc_guard" -ne 0 ] \

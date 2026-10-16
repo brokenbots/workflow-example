@@ -223,12 +223,12 @@ fi
 # main.chcl routes the run to state.failed. Scan both directions.
 bind_issues=0
 for tpl in "$TREE_ROOT"/scripts/*.sh.tftpl; do
-    for n in $(grep -oE '[$][{]?criteria_value_[0-9]+' "$tpl" | grep -oE '[0-9]+' | sort -u); do
+    while read -r n; do
         if ! grep -qE "^criteria_value_${n}=[{][{] [.]?criteria_value_${n}" "$tpl"; then
             fail "$(basename "$tpl") references \$criteria_value_$n but renders no {{ .criteria_value_$n }} binding"
             bind_issues=$((bind_issues + 1))
         fi
-    done
+    done < <(grep -oE '[$][{]?criteria_value_[0-9]+' "$tpl" | grep -oE '[0-9]+' | sort -u)
 done
 sed -n '/templatefile(/,/^[[:space:]]*\}[)][[:space:]]*$/p' "$TREE_ROOT/main.chcl" \
     | sed -n 's/.*templatefile("\([^"]*\)".*/PATH \1/p; s/^[[:space:]]*\(criteria_value_[0-9][0-9]*\)[[:space:]]*= .*/KEY \1/p' \
@@ -324,8 +324,8 @@ fi
 # named, never surface a generic jq parse failure downstream.
 run_failed_comment_body() {
     render_failed_comment "some reason"
-    LINEAR_API_KEY=stub-key E2E_CAPTURE="$TMP" E2E_STUB_BODY="$1" PATH="$STUBBIN:$PATH" \
-        bash "$TMP/failed_comment_case.sh" 2>&1 >/dev/null
+    { LINEAR_API_KEY=stub-key E2E_CAPTURE="$TMP" E2E_STUB_BODY="$1" PATH="$STUBBIN:$PATH" \
+        bash "$TMP/failed_comment_case.sh" >/dev/null; } 2>&1
 }
 for mode in empty html302; do
     err="$(run_failed_comment_body "$mode")" && rc_body=0 || rc_body=$?

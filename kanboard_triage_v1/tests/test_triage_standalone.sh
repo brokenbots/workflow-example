@@ -642,7 +642,7 @@ check_posted_comment() {
 run_outage_comment() {
     render_comment_script comment_invalid.sh.tftpl \
         1 "$TMP/intake" 2 "$SLUG" 3 "reproduced" 4 "$TMP/qa" 5 "Review"
-    bash "$TMP/comment_case.sh" 2>&1 >/dev/null
+    { bash "$TMP/comment_case.sh" >/dev/null; } 2>&1
 }
 for mode in empty html302; do
     cfg_body "$mode"
@@ -748,7 +748,7 @@ if printf '%s' "$write_success" \
         | grep -q 'value  = "internal_reproduced"' \
     && printf '%s' "$write_success" \
         | grep -A1 'target = data.internal.workstream_file.value' \
-        | grep -q 'value  = "${var.intake_root}/${var.ticket_id}/workstreams/${var.ticket_id}.md"'; then
+        | grep -q "value  = \"\${var.intake_root}/\${var.ticket_id}/workstreams/\${var.ticket_id}.md\""; then
     ok "write_confirmed_workstream success writes the bypass verdict and workstream path"
 else
     fail "bypass verdict write missing — write_confirmed_workstream's success outcome must set data.internal.verdict.value = \"internal_reproduced\" (and the workstream path) or the KB-42 bypass posts empty verdict comments"
