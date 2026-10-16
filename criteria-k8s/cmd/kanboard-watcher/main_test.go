@@ -20,12 +20,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 )
 
 // logRecorder collects log entries so tests can assert watcher behavior.
@@ -73,6 +77,9 @@ type kbServer struct {
 	columns map[int][]map[string]interface{}
 	project map[string]interface{}
 	created []string // CriteriaRun ticket ids (asserted via k8s client instead)
+	// comments records the bodies posted per task (createComment); the
+	// KB-250 pin-degradation warning is asserted against this.
+	comments map[int][]string
 	// block, when non-nil, hangs the getAllTasks response until it is
 	// closed — the KB-22 reproduction hook for a poll-blocking upstream.
 	block chan struct{}
@@ -82,9 +89,10 @@ type kbServer struct {
 func newKbServer(t *testing.T) *kbServer {
 	t.Helper()
 	s := &kbServer{
-		tasks:   map[int]map[string]interface{}{},
-		tags:    map[int][]string{},
-		columns: map[int][]map[string]interface{}{},
+		tasks:    map[int]map[string]interface{}{},
+		tags:     map[int][]string{},
+		columns:  map[int][]map[string]interface{}{},
+		comments: map[int][]string{},
 	}
 	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -154,6 +162,10 @@ func newKbServer(t *testing.T) *kbServer {
 			}
 			resp["result"] = true
 		case "createComment":
+			if task, ok := s.tasks[intParam("task_id")]; ok {
+				content, _ := params["content"].(string)
+				s.comments[int(task["id"].(int))] = append(s.comments[int(task["id"].(int))], content)
+			}
 			resp["result"] = true
 		default:
 			t.Errorf("unexpected method: %s", req.Method)
@@ -177,6 +189,9 @@ func (s *kbServer) addTask(id int, columnID int, tags ...string) {
 
 // setTaskColumn changes a task's column (simulating watcher/workflow moves).
 func (s *kbServer) setTaskColumn(id, columnID int) { s.tasks[id]["column_id"] = columnID }
+
+// commentBodiesOn returns the comment bodies posted on a task (createComment).
+func (s *kbServer) commentBodiesOn(id int) []string { return s.comments[id] }
 
 // taskColumn returns the task's current column id.
 func (s *kbServer) taskColumn(id int) int { return s.tasks[id]["column_id"].(int) }
@@ -524,6 +539,79 @@ func TestPollStampsRepoConfig(t *testing.T) {
 		assert.Equal(t, "flag-gate", spec.CIGateCmd)
 		assert.Nil(t, spec.ConfigRef, "no config in the payload stamps no pin")
 	})
+}
+
+// KB-250: the watcher's k8s-client scheme is built in package main by
+// watcherScheme(), and PinConfigRef's typed corev1.ConfigMap read fails
+// before any API call when the scheme misses the kind — every stamp then
+// degrades to the bare routes CI gate value (the failed kb-246 refire ran
+// sh: make: not found instead of the per-repo ConfigMap gate line). The
+// poll tests register corev1 in their own test-local scheme, so they stay
+// green against a binary whose production scheme is missing the
+// registration; these tests exercise the production scheme itself:
+// removing the clientgoscheme registration in watcherScheme() fails both.
+func TestWatcherSchemeResolvesConfigPin(t *testing.T) {
+	scheme, err := watcherScheme()
+	require.NoError(t, err)
+
+	kinds, unversioned, err := scheme.ObjectKinds(&corev1.ConfigMap{})
+	require.NoError(t, err, "the production scheme must register the corev1 ConfigMap kind")
+	require.False(t, unversioned, "ConfigMap is a versioned core/v1 type, not an unversioned one")
+	require.Contains(t, kinds, corev1.SchemeGroupVersion.WithKind("ConfigMap"))
+
+	t.Run("PinConfigRef resolves the per-repo CM to an rv-pinned pin over the production scheme", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "workflow-example", Namespace: "criteria-jobs", ResourceVersion: "3317"},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+		ref, err := runstamp.PinConfigRef(context.Background(), c, "criteria-jobs",
+			&routes.Selection{ConfigName: "workflow-example"})
+		require.NoError(t, err, "PinConfigRef must resolve the per-repo ConfigMap through the production scheme")
+		require.NotNil(t, ref)
+		assert.Equal(t, "workflow-example", ref.Name)
+		assert.Equal(t, "3317", ref.ResourceVersion,
+			"a CM readable at stamp time is pinned by resourceVersion")
+	})
+}
+
+// KB-250 no-silent-degrade: a pin read that fails at stamp time (anything
+// but NotFound, which soft-fails to name-only on purpose) keeps the run
+// flowing on the name-only pin — the operator renders the CM at job-build
+// time — but the degradation is never silent: the watcher logs it AND
+// surfaces a warning comment on the ticket card, and the selected config
+// entry is never bare-stamped.
+func TestPollSurfacesPinDegradationOnCard(t *testing.T) {
+	want := apierrors.NewInternalError(errors.New("etcd down"))
+	tw := newTestWatcher(t, testRoutesJSONConfig)
+	surface := fake.NewClientBuilder().WithScheme(tw.w.client.Scheme()).
+		WithStatusSubresource(&criteriav1.CriteriaRun{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.ConfigMap); ok {
+					return want
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	tw.w.client = surface
+	tw.client = surface
+	tw.kbS.addTask(30, 5, "k8s-run")
+	tw.pollOnce(t)
+	runs := tw.runs(t)
+	require.Len(t, runs, 1, "the degradation must not fail the fire: the name-only pin keeps the run flowing")
+	spec := runs[0].Spec
+	require.NotNil(t, spec.ConfigRef, "never bare-stamp: a selected config always stamps a pin")
+	assert.Equal(t, "workflow-example", spec.ConfigRef.Name)
+	assert.Empty(t, spec.ConfigRef.ResourceVersion, "the pin is name-only")
+	assert.True(t, tw.logs.contains("per-repo config ConfigMap read failed at stamping"),
+		"the watcher logs the degradation")
+	comments := tw.kbS.commentBodiesOn(30)
+	require.Len(t, comments, 1, "the degradation is surfaced on the ticket card")
+	assert.Contains(t, comments[0], "criteria-kanboard-watcher:")
+	assert.Contains(t, comments[0], "workflow-example")
+	assert.Contains(t, comments[0], "could not be pinned at stamp time")
+	assert.Contains(t, comments[0], "etcd down", "the card warning carries the underlying read error")
 }
 
 // testRoutesJSONTagGroup (KB-154): the same fixture with a TAG-GROUP
