@@ -91,6 +91,27 @@ var (
 	routingTags       = flag.String("kanboard-routing-tags", getenv("KANBOARD_ROUTING_TAGS", ""), "Comma-separated task tags that are routing signals (e.g. component tags), never workflow-override candidates; they join the built-in exemption filter (empty disables the extra exemptions)")
 )
 
+// watcherScheme builds the scheme main() serves the watcher's k8s client
+// with. Every kind any read Gets by value must be registered here: a typed
+// Get of an unregistered kind fails before any API call with "no kind is
+// registered for the type ..." (CRI-264). This is CRI-264's wiring
+// regression shape — the tests that matter build their own scheme with
+// every kind registered, so only exercising the production scheme itself
+// catches a missing registration. KB-250 adds the client scheme (corev1):
+// PinConfigRef reads the per-repo config ConfigMap by value, and its
+// failure degrades CI gate stamping to the bare routes value — the
+// sh: make: not found class.
+func watcherScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	if err := criteriav1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering CriteriaRun scheme: %w", err)
+	}
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering k8s client scheme (corev1 ConfigMap): %w", err)
+	}
+	return scheme, nil
+}
+
 func main() {
 	flag.Parse()
 	logger := zap.New()
@@ -118,17 +139,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	scheme := runtime.NewScheme()
-	if err := criteriav1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering CriteriaRun scheme")
-		os.Exit(1)
-	}
-	// KB-250: PinConfigRef reads corev1.ConfigMaps (the per-repo config
-	// pin). A scheme without corev1 fails every read with "no kind is
-	// registered for the type v1.ConfigMap", which degrades CI gate
-	// stamping to the bare routes value — the sh: make: not found class.
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering k8s client scheme (corev1 ConfigMap)")
+	scheme, err := watcherScheme()
+	if err != nil {
+		logger.Error(err, "building watcher scheme")
 		os.Exit(1)
 	}
 
@@ -839,6 +852,14 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repo
 	// entry-by-entry; spec.configRef pins the ConfigMap the operator
 	// renders (fail-closed on drift). KB-154: the same stamp carries the
 	// entry's baseBranch onto the spec.
+	//
+	// KB-250 no-silent-degrade: a pin read failure (unreadable CM; NotFound
+	// already yields a name-only pin without an error) keeps the run
+	// flowing on the name-only pin — the operator renders it at job-build
+	// time — but the degradation is never silent: the watcher logs it AND
+	// surfaces a warning comment on the ticket (best-effort; a failed
+	// comment post is logged, not propagated — a warning must not gate the
+	// fire). It never stamps a run without the config entry's pin.
 	execNS := w.namespace
 	if sel.Workflow.Namespace != "" {
 		execNS = sel.Workflow.Namespace
@@ -847,6 +868,7 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repo
 	if pinErr != nil {
 		w.log.Error(pinErr, "per-repo config ConfigMap read failed at stamping; stamping a name-only pin",
 			"ticket", ticketID, "configMap", sel.ConfigName)
+		w.postPinWarning(ctx, task.ID, ticketID, sel.ConfigName, pinErr)
 	}
 	runstamp.StampRepoConfig(&spec, sel, cfgRef)
 	runstamp.StampWorkflowSource(&spec, sel.Workflow)
@@ -862,6 +884,24 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repo
 		},
 		Spec: spec,
 	}
+}
+
+// postPinWarning surfaces the pin-read degradation on the ticket card so it
+// is visible where the work is tracked ("per-repo config ConfigMap read
+// failed at stamping" must not live only in the watcher log, KB-250
+// no-silent-degrade). Best-effort: the run already carries the name-only
+// pin and the operator renders it at job-build time, so a failed comment
+// post is logged for the log scrape instead of failing the fire — a
+// warning must not gate the fire it warns about.
+func (w *watcher) postPinWarning(ctx context.Context, taskID int, ticketID, cmName string, pinErr error) {
+	body := fmt.Sprintf(
+		"criteria-kanboard-watcher: the per-repo config ConfigMap %s could not be pinned at stamp time (%v); the run is stamped with a name-only pin and the operator renders the ConfigMap at job-build time",
+		cmName, pinErr)
+	if err := w.kb.AddComment(ctx, taskID, body); err != nil {
+		w.log.Error(err, "posting pin degradation warning comment on ticket", "ticket", ticketID)
+		return
+	}
+	w.log.Info("posted pin degradation warning comment on ticket", "ticket", ticketID)
 }
 
 // columnNameFor resolves a column id to its title via the cached project map.

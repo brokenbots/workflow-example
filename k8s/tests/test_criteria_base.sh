@@ -48,7 +48,7 @@ grep -Eq 'test "\$\(git rev-parse HEAD\)" = "\$\{CRITERIA_COMMIT\}"' "$DOCKERFIL
 # statically here; smoke_test.sh exercises the failing build itself.
 have 'STAMP/PIN MISMATCH' "$DOCKERFILE" || \
     fail "Dockerfile must loudly fail the build when CRITERIA_VERSION tag commit != CRITERIA_COMMIT (stamp/pin pairing)"
-have 'git ls-remote origin "refs/tags/${CRITERIA_VERSION}"' "$DOCKERFILE" || \
+have "git ls-remote origin \"refs/tags/\${CRITERIA_VERSION}\"" "$DOCKERFILE" || \
     fail "Dockerfile stamp/pin assert must resolve the tag's commit via git ls-remote origin"
 
 # --- minimal runtime: git + ca-certs only ----------------------------------

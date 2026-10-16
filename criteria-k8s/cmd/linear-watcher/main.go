@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -45,6 +46,26 @@ var (
 	configsLabelGroup   = flag.String("linear-configs-label-group", getenv("LINEAR_CONFIGS_LABEL_GROUP", "configs"), "Linear label group whose labels name a per-repo config (KB-103 configLibrary entry) for tickets whose route carries no configRef")
 )
 
+// watcherScheme builds the scheme main() serves the watcher's k8s client
+// with. Every kind any read Gets by value must be registered here: a typed
+// Get of an unregistered kind fails before any API call with "no kind is
+// registered for the type ..." (CRI-264), while the tests build their own
+// scheme with every kind registered — only exercising the production
+// scheme itself catches a missing registration. KB-250 adds the client
+// scheme (corev1): PinConfigRef reads the per-repo config ConfigMap by
+// value, and its failure degrades CI gate stamping to the bare routes
+// value — the same defect the kanboard watcher shipped with.
+func watcherScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+	if err := criteriav1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering CriteriaRun scheme: %w", err)
+	}
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("registering k8s client scheme (corev1 ConfigMap): %w", err)
+	}
+	return scheme, nil
+}
+
 func main() {
 	flag.Parse()
 	logger := zap.New()
@@ -68,9 +89,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	scheme := runtime.NewScheme()
-	if err := criteriav1.AddToScheme(scheme); err != nil {
-		logger.Error(err, "registering CriteriaRun scheme")
+	scheme, err := watcherScheme()
+	if err != nil {
+		logger.Error(err, "building watcher scheme")
 		os.Exit(1)
 	}
 
@@ -918,6 +939,15 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, issue linear.Issue, repo
 	// KB-103: per-repo config outranks the watcher-level fallback
 	// flags entry-by-entry; spec.configRef pins the ConfigMap the
 	// operator renders (fail-closed on drift).
+	//
+	// KB-250 no-silent-degrade: a pin read failure (unreadable CM;
+	// NotFound already yields a name-only pin without an error) keeps
+	// the run flowing on the name-only pin — the operator renders it at
+	// job-build time — but the degradation is never silent: the watcher
+	// logs it AND surfaces a warning comment on the ticket (best-effort;
+	// a failed comment post is logged, not propagated — a warning must
+	// not gate the fire). It never stamps a run without the config
+	// entry's pin.
 	execNS := w.namespace
 	if sel.Workflow.Namespace != "" {
 		execNS = sel.Workflow.Namespace
@@ -926,6 +956,7 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, issue linear.Issue, repo
 	if pinErr != nil {
 		w.log.Error(pinErr, "per-repo config ConfigMap read failed at stamping; stamping a name-only pin",
 			"ticket", issue.Identifier, "configMap", sel.ConfigName)
+		w.postPinWarning(ctx, issue, sel.ConfigName, pinErr)
 	}
 	runstamp.StampRepoConfig(&spec, sel, cfgRef)
 	runstamp.StampWorkflowSource(&spec, sel.Workflow)
@@ -1051,29 +1082,49 @@ const (
 	dirtyLabelColor      = "#f43f5e" // failed-run marker: red
 )
 
-// postRoutingComment posts the routing failure on the ticket, deduping by
-// exact body so a stuck failure does not spam Linear across polls. When
-// reading existing comments fails, posting is skipped this poll and retried
-// next poll rather than risking duplicates. The comment read happens only
-// on actual routing failures (CRI-252 keeps this read on the failure path).
-func (w *watcher) postRoutingComment(ctx context.Context, issue linear.Issue, lookupErr error) error {
-	body := fmt.Sprintf("%s: %v", routingCommentPrefix, lookupErr)
+// postTicketComment posts a comment on the ticket, deduping by exact body
+// so a stuck failure does not spam Linear across polls. When reading
+// existing comments fails, posting is skipped this poll and retried next
+// poll rather than risking duplicates. The comment read happens only on
+// actual failures (CRI-252 keeps this read on the failure path).
+func (w *watcher) postTicketComment(ctx context.Context, issue linear.Issue, logName, body string) error {
 	comments, err := w.linear.IssueComments(ctx, issue.ID, commentDedupLimit)
 	if err != nil {
-		w.log.Error(err, "reading Linear comments for routing-failure dedup; retrying next poll",
+		w.log.Error(err, "reading Linear comments for "+logName+" dedup; retrying next poll",
 			"ticket", issue.Identifier)
 		return err
 	}
 	if slices.Contains(comments, body) {
-		w.log.V(1).Info("routing failure already reported on ticket", "ticket", issue.Identifier)
+		w.log.V(1).Info(logName+" already reported on ticket", "ticket", issue.Identifier)
 		return nil
 	}
 	if err := w.linear.PostComment(ctx, issue.ID, body); err != nil {
-		w.log.Error(err, "posting routing failure comment on ticket", "ticket", issue.Identifier)
+		w.log.Error(err, "posting "+logName+" comment on ticket", "ticket", issue.Identifier)
 		return err
 	}
-	w.log.Info("posted routing failure comment on ticket", "ticket", issue.Identifier)
+	w.log.Info("posted "+logName+" comment on ticket", "ticket", issue.Identifier)
 	return nil
+}
+
+// postRoutingComment posts the routing failure on the ticket.
+func (w *watcher) postRoutingComment(ctx context.Context, issue linear.Issue, lookupErr error) error {
+	return w.postTicketComment(ctx, issue, "routing failure",
+		fmt.Sprintf("%s: %v", routingCommentPrefix, lookupErr))
+}
+
+// postPinWarning surfaces the pin-read degradation on the ticket card so it
+// is visible where the work is tracked ("per-repo config ConfigMap read
+// failed at stamping" must not live only in the watcher log, KB-250
+// no-silent-degrade; the kanboard watcher posts the same warning on its
+// card). Best-effort: the run already carries the name-only pin and the
+// operator renders it at job-build time, so a failed comment post only
+// logs — a warning must not gate the fire it warns about.
+func (w *watcher) postPinWarning(ctx context.Context, issue linear.Issue, cmName string, pinErr error) {
+	// postTicketComment already logs a failed read or post; the caller's
+	// fire continues either way.
+	_ = w.postTicketComment(ctx, issue, "pin degradation",
+		fmt.Sprintf("criteria-linear-watcher: the per-repo config ConfigMap %s could not be pinned at stamp time (%v); the run is stamped with a name-only pin and the operator renders the ConfigMap at job-build time",
+			cmName, pinErr))
 }
 
 func mustSelector(m map[string]string) client.MatchingLabelsSelector {

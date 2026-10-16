@@ -1,4 +1,4 @@
-.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint apply-routes ci vuln-scan
+.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint lint-go apply-routes ci vuln-scan
 
 # Workflow (linear_intake_v1) image. Unique tags are mandatory for the k3s
 # local registry: the kubelet never re-resolves a reused tag with
@@ -222,7 +222,7 @@ test: validate test-criteria-k8s
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
 
-lint: lint-criteria-k8s
+lint: lint-go
 	shellcheck linear_intake_v1/container-entrypoint.sh \
 		k8s/launch-ticket-job.sh \
 		k8s/generate-pod-adapter-manifest.sh \
@@ -259,7 +259,9 @@ lint: lint-criteria-k8s
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh
 
-lint-criteria-k8s:
+# The Go lint leg. Full-CI gate lines invoke `make lint-go` explicitly
+# (see the develop-loop ci_gate step), so this must exist under this name.
+lint-go:
 	cd criteria-k8s && go vet ./...
 
 # `vuln-scan` — the standalone security gate (the develop-run CI gate runs
@@ -297,6 +299,12 @@ ci: validate
 		(cd criteria-k8s && go build ./... && go vet ./... && go test ./... -count=1); \
 	else \
 		echo "SKIP go tests: go not installed on this runner (CI's go-tests job covers it)"; \
+	fi
+	@echo "== ci: root-module gate-anchor tests (repogate; the ci_gate line's root go-test leg) =="
+	@if command -v go >/dev/null 2>&1; then \
+		(go test ./... -count=1); \
+	else \
+		echo "SKIP root go tests: go not installed on this runner"; \
 	fi
 	@echo "== ci: k8s manifest shell tests =="
 	@for t in k8s/tests/test_*.sh; do \
