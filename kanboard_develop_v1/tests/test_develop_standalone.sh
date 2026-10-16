@@ -141,7 +141,7 @@ terminals="$(jq -r '[.states[] | select(.terminal)] | length' "$GRAPH")"
 [ "$terminals" -eq 3 ] || fail "expected exactly 3 terminal states, got $terminals"
 
 terminal_names="$(jq -r '[.states[] | select(.terminal) | .name] | sort | join(" ")' "$GRAPH")"
-require_equal "$terminal_names" "need_assistance failed handler_complete" "terminal states are exactly need_assistance, failed and handler_complete"
+require_equal "$terminal_names" "failed handler_complete need_assistance" "terminal states are exactly need_assistance, failed and handler_complete"
 
 # 2026-10-02 dave ruling: waiting on a human is a FAILURE ending — humans
 # are for broken things. The delivery terminal (handler_complete: PR merged)
