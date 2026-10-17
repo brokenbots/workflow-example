@@ -107,6 +107,24 @@
 # criteria-adapter-<kind>:<tag> pins stay valid only for pre-CRI-233
 # (env-less) workflows, which provision one pod per adapter via
 # adapter.sh + criteria-adapter-remote-runner.
+#
+# KB-270 (2026-10-16): the 'castle' configLibrary entry + the per-repo
+# 'castle' ConfigMap went LIVE in criteria-jobs (brokenbots/castle: criteria
+# control-plane server + Parapet web UI). Castle needs CGO for go test -race,
+# so the chain prefixes the PVC toolchain PATH and exports CGO_ENABLED=1;
+# the entry below mirrors that live config.
+# KB-273: the run-side gate is SPLIT so the parapet npm suite never runs on
+# the ambient session image's node (the shell peer's Node 24 produced the
+# run f5c205c2 cross-realm AbortSignal failure wall; the same suite is green
+# only under Node 20 — the version castle's own GitHub CI pins). The gate
+# keeps the Go/proto legs and points the parapet leg at the Node 20 runtime
+# pinned onto the PVC toolchain (/data/tools/node20): npm ci + test:run under
+# that PATH prefix. The vite production build (build-parapet) stays
+# GitHub-CI-only, and proto-check-drift runs AFTER the parapet npm ci
+# because its generated-bindings plugins come from parapet/node_modules/.bin.
+# Tree mirrors live: the live 'castle' CM / routes configLibrary must carry
+# the same split ciGateCmd (a kubectl patch on card-270 precedent) or
+# admitted runs pin the stale Node-24-fatal chain (ConfigRenderDrift).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -502,6 +520,11 @@ data:
       "configLibrary": {
         "criteria-repo": {
           "ciGateCmd": "make ci"
+        },
+        "castle": {
+          "buildCmd": "make build-castle",
+          "testCmd": "make test",
+          "ciGateCmd": "export PATH=/data/tools/bin:/data/tools/go/bin:/data/tools/node20/bin:$PATH; export CGO_ENABLED=1; make build-castle test-conformance proto-lint && (cd castle && CGO_ENABLED=1 go test -race ./...) && (cd parapet && npm ci && npm run test:run) && make proto-check-drift"
         },
         "workflow-example": {
           "buildCmd": "make build",
