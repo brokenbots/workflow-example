@@ -1,9 +1,10 @@
-.PHONY: build build-push build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint lint-go apply-routes ci vuln-scan
+.PHONY: build build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint lint-go apply-routes ci vuln-scan
 
-# Workflow (linear_intake_v1) image. Unique tags are mandatory for the k3s
-# local registry: the kubelet never re-resolves a reused tag with
-# IfNotPresent, so every build gets a timestamped tag.
-WORKFLOW_IMAGE ?= localhost:5000/linear-intake-remote
+# Workflow image (KB-281): the linear intake image-mode example image is
+# retired — this repo no longer builds or ships an image-mode workflow image.
+# Source-mode runs (CRI-231) execute on the criteria-base image pinned by the
+# operator's CRITERIA_BASE_IMAGE default; the operator's baked
+# DefaultWorkflowImage stays for dormant image-mode compatibility.
 CRITERIA_K8S_IMAGE ?= localhost:5000/criteria-k8s
 # Minimal source-fetching base image (CRI-230): criteria binary + git +
 # ca-certs, fetched-and-applied at run time. Source-mode runs (CRI-231)
@@ -20,18 +21,9 @@ BUILD_TAG := $(shell date +%Y%m%d-%H%M%S)-$(GIT_SHA)
 CONTAINER_TOOL := $(shell command -v docker || command -v podman || command -v buildah || echo "")
 
 build:
-ifeq ($(CONTAINER_TOOL),)
-	@echo "No container tool found; running validation/lint instead of building the image."
-	$(MAKE) validate lint
-else
-	$(CONTAINER_TOOL) build --build-arg TARGETARCH=amd64 -f linear_intake_v1/Dockerfile -t $(WORKFLOW_IMAGE):$(BUILD_TAG) .
-	@echo "Built $(WORKFLOW_IMAGE):$(BUILD_TAG)"
-endif
-
-build-push: build
-ifneq ($(CONTAINER_TOOL),)
-	$(CONTAINER_TOOL) push $(WORKFLOW_IMAGE):$(BUILD_TAG)
-endif
+	@echo "Nothing to build: the image-mode workflow image is retired (KB-281)."
+	@echo "Source-mode runs use the operator's CRITERIA_BASE_IMAGE default (CRI-231);"
+	@echo "build the operator and base images with 'make build-criteria-k8s build-criteria-base'."
 
 build-criteria-k8s:
 ifeq ($(CONTAINER_TOOL),)
@@ -74,24 +66,23 @@ else
 	CONTAINER_TOOL=$(CONTAINER_TOOL) CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE) ./criteria-base/tests/smoke_test.sh
 endif
 
-# Build all three images with one unique tag.
-images: build build-criteria-k8s build-criteria-base
+# Build the operator and criteria-base images with one unique tag.
+images: build-criteria-k8s build-criteria-base
 
-images-push: build-push build-criteria-k8s-push build-criteria-base-push
+images-push: build-criteria-k8s-push build-criteria-base-push
 	@echo "Tag: $(BUILD_TAG)"
 	@echo "Deploy the operator with:"
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
-	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
 	@echo "Deploy pairing (CRI-234/CRI-237): the per-(scope,environment) co-location reads"
 	@echo "  the environment_type / environment_name keys only from criteria >= fc95449,"
 	@echo "  and the wire token delivery reads the accept_token key only from criteria"
 	@echo "  >= eae0181, so the operator image and the runner image must roll out together:"
 	@echo "  - source-mode runners (criteria-base) build the audited eae0181 commit;"
 	@echo "    k8s/tests/test_criteria_base_pin.sh fails the gate on any other pin."
-	@echo "  - image-mode runners keep the baked workflow image, built from a released"
-	@echo "    criteria tarball; no release contains eae0181 yet, so image-mode must"
-	@echo "    NOT roll until its CRITERIA_VERSION pin is re-audited (coordinator)."
+	@echo "  - image-mode runners are dormant-path compatibility (KB-281): the baked"
+	@echo "    default workflow image is retired in this repo and its CRITERIA_VERSION"
+	@echo "    pin must not roll unless the coordinator re-audits (unchanged default)."
 
 deploy-images: images-push
 ifneq ($(CONTAINER_TOOL),)
@@ -106,17 +97,12 @@ ifneq ($(CONTAINER_TOOL),)
 	# the watcher) must be pinned to the same freshly built tag and rolled
 	# together. Source-mode runs satisfy the pairing through the
 	# criteria-base pin enforced by k8s/tests/test_criteria_base_pin.sh;
-	# image-mode runs keep the baked workflow image, whose release-based
-	# CRITERIA_VERSION does not contain eae0181 and must not roll until
-	# re-audited (coordinator decision).
-	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
+	# image-mode runs stay on the baked default workflow image (dormant path,
+	# KB-281); no DEFAULT_CRITERIA_IMAGE roll happens anymore.
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif
 
 validate:
-	/usr/local/bin/criteria validate linear_intake_v1
-	/usr/local/bin/criteria validate linear_triage_v1
-	/usr/local/bin/criteria validate linear_develop_v1
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
@@ -146,8 +132,8 @@ validate:
 #      $(CRITERIA_BASE_IMAGE):$(BUILD_TAG) tag is set on the operator
 #      deployment by deploy-images.
 #   3. Apply this ConfigMap so the watcher resolves the split routes
-#      (criteria-triage: [Triage] -> linear_triage_v1;
-#      criteria-develop: [Ready for Development] -> linear_develop_v1):
+#      (criteria-triage: [Triage] -> kanboard_triage_v1;
+#      criteria-develop: [Ready] -> kanboard_develop_v1):
 #        make apply-routes
 # Steps 2 and 3 can be run in either order for older payloads, but step 2
 # MUST precede this apply for the CRI-243 payload: a pre-CRI-242 watcher
@@ -155,44 +141,31 @@ validate:
 # triage runs would fall back to the dev queue and serialize per repoURL
 # instead of admitting concurrently -- degraded concurrency, not a failure.
 # CAUTION: this applies k8s/examples/routes-configmap.yaml WHOLESALE; the
-# config source only carries criteria-triage and criteria-develop, so diff
-# the live criteria-routes ConfigMap first -- any live-only routes added
-# out of band (e.g. the pre-CRI-243 criteria-intake triage wiring) would
-# be dropped by this apply.
+# config source only carries the criteria-cleanup, kanboard-triage and
+# kanboard-develop routes, so diff the live criteria-routes ConfigMap first
+# -- any live-only routes added out of band would be dropped by this apply.
 apply-routes:
 	kubectl -n criteria-jobs apply -f k8s/examples/routes-configmap.yaml
 
 test: validate test-criteria-k8s
 	@echo "Rendering pod-adapter manifest..."
 	./k8s/generate-pod-adapter-manifest.sh
-	@echo "Running k8s pod-adapter regression test..."
-	./k8s/tests/test_job_cri_27.sh
+	@echo "Running operator prerequisites regression test (KB-281)..."
+	./k8s/tests/test_operator_prereqs.sh
 	@echo "Running runner server-mode TLS opt-out regression test..."
 	./k8s/tests/test_runner_server_tls.sh
-	@echo "Running k8s template regression test..."
-	./k8s/tests/test_launch_template.sh
 	@echo "Running per-scope digest discovery regression test (CRI-140)..."
 	./k8s/tests/test_per_scope_digest_files.sh
 	@echo "Running per-scope adapter wire token delivery regression test (CRI-237)..."
 	./k8s/tests/test_per_scope_wire_token.sh
-	@echo "Running engine pin regression test (CRI-140)..."
-	./linear_intake_v1/tests/test_engine_pin.sh
-	@echo "Running linear_triage_v1 standalone extraction regression test (CRI-238)..."
-	./linear_triage_v1/tests/test_triage_standalone.sh
-	@echo "Running linear_develop_v1 standalone extraction regression test (CRI-239)..."
-	./linear_develop_v1/tests/test_develop_standalone.sh
 	@echo "Running kanboard_develop_v1 standalone extraction regression test (KB-231)..."
 	./kanboard_develop_v1/tests/test_develop_standalone.sh
 	@echo "Running kanboard_triage_v1 standalone extraction regression test (KB-231)..."
 	./kanboard_triage_v1/tests/test_triage_standalone.sh
 	@echo "Running flat WorkflowGraphs shape smoke test (CRI-300)..."
-	./linear_intake_v1/tests/test_workflow_graphs_flat.sh
-	@echo "Running container-entrypoint token substitution regression test..."
-	./k8s/tests/test_container_entrypoint_substitution.sh
+	./k8s/tests/test_workflow_graphs_flat.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
 	./k8s/tests/test_secrets_store_csi.sh
-	@echo "Running example manifest regression test..."
-	./k8s/tests/test_example_manifest.sh
 	@echo "Running criteria-k8s Helm chart regression test..."
 	./k8s/tests/test_criteria_k8s_chart.sh
 	@echo "Running kanboard-watcher watchdog wiring regression test (KB-22)..."
@@ -220,28 +193,21 @@ test-criteria-k8s:
 	cd criteria-k8s && go test ./...
 
 lint: lint-go
-	shellcheck linear_intake_v1/container-entrypoint.sh \
-		k8s/launch-ticket-job.sh \
+	shellcheck k8s/launch-ticket-job.sh \
 		k8s/generate-pod-adapter-manifest.sh \
-		k8s/launch-pod-adapter-job.sh \
 		k8s/pod-adapter-runner.sh \
 		k8s/pod-adapter-adapter.sh \
 		k8s/install-secrets-store-csi.sh \
 		k8s/verify-secrets-store-csi.sh \
-		k8s/tests/test_launch_template.sh \
-		k8s/tests/test_job_cri_27.sh \
-		linear_intake_v1/tests/test_engine_pin.sh \
-		linear_triage_v1/tests/test_triage_standalone.sh \
-		linear_develop_v1/tests/test_develop_standalone.sh \
+		k8s/tests/test_operator_prereqs.sh \
+		k8s/tests/test_runner_events_file_default.sh \
 		kanboard_develop_v1/tests/test_develop_standalone.sh \
 		kanboard_triage_v1/tests/test_triage_standalone.sh \
-		linear_intake_v1/tests/test_workflow_graphs_flat.sh \
+		k8s/tests/test_workflow_graphs_flat.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
 		k8s/tests/test_per_scope_wire_token.sh \
 		k8s/tests/test_runner_server_tls.sh \
-		k8s/tests/test_container_entrypoint_substitution.sh \
 		k8s/tests/test_secrets_store_csi.sh \
-		k8s/tests/test_example_manifest.sh \
 		k8s/tests/test_criteria_k8s_chart.sh \
 		k8s/tests/test_kanboard_watcher_watchdog.sh \
 		k8s/tests/test_routes_config.sh \
@@ -311,24 +277,16 @@ ci: validate
 					echo "SKIP $$t: needs python3 (not installed on this runner; CI covers it)"; \
 					continue; \
 				fi ;; \
-			*test_job_cri_27.sh|*test_launch_template.sh|*test_runner_events_file_default.sh) \
-				if ! command -v perl >/dev/null 2>&1; then \
-					echo "SKIP $$t: needs perl (not installed on this runner; CI covers it)"; \
-					continue; \
-				fi ;; \
 		esac; \
-		echo "RUN $$t"; \
-		bash "$$t" || exit 1; \
-	done
-	@echo "== ci: engine pin + standalone extraction suites =="
-	bash linear_intake_v1/tests/test_engine_pin.sh
-	bash linear_triage_v1/tests/test_triage_standalone.sh
-	bash linear_develop_v1/tests/test_develop_standalone.sh
+			echo "RUN $$t"; \
+			bash "$$t" || exit 1; \
+		done
+	@echo "== ci: standalone extraction suites =="
 	bash kanboard_develop_v1/tests/test_develop_standalone.sh
 	bash kanboard_triage_v1/tests/test_triage_standalone.sh
 	bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
 	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
-	bash linear_intake_v1/tests/test_workflow_graphs_flat.sh
+	bash k8s/tests/test_workflow_graphs_flat.sh
 	@echo "== ci: workstream_handler_v1 regression suite =="
 	@for t in workstream_handler_v1/tests/test_*.sh; do \
 		case "$$t" in \
@@ -343,7 +301,6 @@ ci: validate
 	done
 	@echo "== ci: shared gh retry wrapper integration tests (KB-219) =="
 	bash devops_triage_v1/tests/test_open_pr_retry.sh
-	bash linear_intake_v1/tests/test_container_entrypoint_gh_retry.sh
 	@echo "== ci: secret-free shipped configs gate (CRI-250) =="
 	bash k8s/tests/test_secret_free_gate.sh
 	@echo "== ci: validate-manifests (structural YAML parse; CI also kubectl-dry-runs, non-gating) =="
