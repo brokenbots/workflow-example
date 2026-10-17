@@ -156,6 +156,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_runner_server_tls.sh
 	@echo "Running per-scope digest discovery regression test (CRI-140)..."
 	./k8s/tests/test_per_scope_digest_files.sh
+	@echo "Running runner tree discovery/lockfile binding regression test (KB-281 R1/R2)..."
+	./k8s/tests/test_runner_tree_discovery.sh
 	@echo "Running per-scope adapter wire token delivery regression test (CRI-237)..."
 	./k8s/tests/test_per_scope_wire_token.sh
 	@echo "Running kanboard_develop_v1 standalone extraction regression test (KB-231)..."
@@ -205,6 +207,7 @@ lint: lint-go
 		kanboard_triage_v1/tests/test_triage_standalone.sh \
 		k8s/tests/test_workflow_graphs_flat.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
+		k8s/tests/test_runner_tree_discovery.sh \
 		k8s/tests/test_per_scope_wire_token.sh \
 		k8s/tests/test_runner_server_tls.sh \
 		k8s/tests/test_secrets_store_csi.sh \
