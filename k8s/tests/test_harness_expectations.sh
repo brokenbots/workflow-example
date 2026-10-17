@@ -40,35 +40,73 @@ echo "PASS: committed harness-expectations matrix is complete and consistent (49
 
 # Negative checks run the guard against a doctored COPY of the doc in a temp
 # root, never the committed file.
-tampered_fail() { # <desc> <sed-expr> <expected output needle>
+#
+# Two tamper mechanisms:
+#   - tampered_fail_sed: literal sed edits (no anchors, no \| alternation
+#     traps — GNU and BusyBox both treat \| as alternation, which globally
+#     corrupts the doc and makes the fixture vacuous).
+#   - tampered_fail_line: surgical single-line edits done in node (node is
+#     already required by the guard), dialect-free by construction. The
+#     row-shape tampers use bold markers (**E30**, **A6**) that appear ONLY
+#     on their item rows — series-map slices use single-backtick cells.
+tampered_fail_sed() { # <desc> <sed-expr> <expected output needle>
     local desc="$1" sedexpr="$2" needle="$3"
-    local tmp out
+    local tmp
     tmp="$(mktemp -d)"
     mkdir -p "${tmp}/docs"
     cp "${REPO_ROOT}/${DOC_REL}" "${tmp}/docs/harness-expectations.md"
     sed -i "${sedexpr}" "${tmp}/docs/harness-expectations.md"
-    if ! out="$(node "${GUARD}" --root "${tmp}" --quiet 2>&1)"; then
-        echo "${out}" | grep -qF "${needle}" ||
-            fail "${desc}: guard failed but without the expected finding '${needle}'; got: ${out}"
-    else
-        fail "${desc}: guard accepted a doctored matrix (must fail closed); got: ${out}"
-    fi
-    rm -rf "${tmp}"
+    guard_must_fail "${desc}" "${tmp}" "${needle}"
     echo "PASS: ${desc} -> guard failed closed with the expected finding"
 }
 
-# 2. Missing item row.
-tampered_fail "missing item row" '/^\| \*\*E30\*\* /d' 'missing item row for **E30**'
+tampered_fail_line() { # <desc> <op> <marker> <replacement> <expected needle>
+    local desc="$1" op="$2" marker="$3" repl="$4" needle="$5"
+    local tmp
+    tmp="$(mktemp -d)"
+    mkdir -p "${tmp}/docs"
+    cp "${REPO_ROOT}/${DOC_REL}" "${tmp}/docs/harness-expectations.md"
+    node -e '
+        const fs = require("fs");
+        const [, file, op, marker, repl] = process.argv;
+        const lines = fs.readFileSync(file, "utf8").split("\n");
+        const at = lines.findIndex((l) => l.includes(marker));
+        if (at === -1) process.exit(3);
+        if (op === "delete-line") lines.splice(at, 1);
+        else if (op === "duplicate-line") lines.splice(at, 0, lines[at]);
+        else if (op === "replace-first-marker") lines[at] = lines[at].replace(marker, repl);
+        else process.exit(3);
+        fs.writeFileSync(file, lines.join("\n"));
+    ' "${tmp}/docs/harness-expectations.md" "${op}" "${marker}" "${repl}" ||
+        fail "${desc}: tamper marker '${marker}' not found (needle: ${needle})"
+    guard_must_fail "${desc}" "${tmp}" "${needle}"
+    echo "PASS: ${desc} -> guard failed closed with the expected finding"
+}
+
+guard_must_fail() { # <desc> <tmp-root> <expected output needle>
+    local desc="$1" tmp="$2" needle="$3"
+    local out
+    if out="$(node "${GUARD}" --root "${tmp}" --quiet 2>&1)"; then
+        rm -rf "${tmp}"
+        fail "${desc}: guard accepted a doctored matrix (must fail closed); got: ${out}"
+    fi
+    echo "${out}" | grep -qF "${needle}" ||
+        { rm -rf "${tmp}"; fail "${desc}: guard failed but without the expected finding '${needle}'; got: ${out}"; }
+    rm -rf "${tmp}"
+}
+
+# 2. Missing item row (single-row deletion).
+tampered_fail_line "missing item row" "delete-line" "**E30** " "" "missing item row for **E30**"
 
 # 3. Lost slice assignment.
-tampered_fail "lost slice assignment" 's/`E31`, //' 'harness/failures) does not assign'
+tampered_fail_sed "lost slice assignment" "s/\`E31\`, //" 'harness/failures) does not assign'
 
 # 4. Unpinning a KNOWN GAP (G11/G12 must stay pinned with their engine carrier).
-tampered_fail "unpinned KNOWN GAP marker" 's/KNOWN GAP/KNOWN LOSS/g' 'must be pinned as a KNOWN GAP'
-tampered_fail "lost engine-carrier filing rule" 's/files back to the engine carrier/files back elsewhere/g' 'must state its pinned engine carrier'
+tampered_fail_sed "unpinned KNOWN GAP marker" 's/KNOWN GAP/KNOWN LOSS/g' 'must be pinned as a KNOWN GAP'
+tampered_fail_sed "lost engine-carrier filing rule" 's/files back to the engine carrier/files back elsewhere/g' 'must state its pinned engine carrier'
 
 # 5. Out-of-band item id + row-count receipt: renaming A6 to H1 must be
 #    flagged as unknown (the id space is bounded); duplicating A6 must be
 #    flagged as a duplicate AND trip the exact row-count check (50 vs 49).
-tampered_fail "out-of-band item id" 's/^\| \*\*A6\*\* /| **H1** /' 'unexpected item id **H1**'
-tampered_fail "observed row count" 's/^\(| \*\*A6\*\* .*\)/\1\n\1/' 'observed item row count is 50'
+tampered_fail_line "out-of-band item id" "replace-first-marker" "**A6**" "**H1**" "unexpected item id **H1**"
+tampered_fail_line "observed row count" "duplicate-line" "**A6** " "" "observed item row count is 50"

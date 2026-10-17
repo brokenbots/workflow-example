@@ -229,8 +229,8 @@ lint: lint-go
 		k8s/tests/test_criteria_base_pin.sh \
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
-		k8s/tests/test_outcome_reason_flow.sh
-	k8s/tests/test_harness_expectations.sh
+		k8s/tests/test_outcome_reason_flow.sh \
+		k8s/tests/test_harness_expectations.sh
 
 # The Go lint leg. Full-CI gate lines invoke `make lint-go` explicitly
 # (see the develop-loop ci_gate step), so this must exist under this name.
