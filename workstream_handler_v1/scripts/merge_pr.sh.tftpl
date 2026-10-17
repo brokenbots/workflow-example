@@ -19,7 +19,12 @@ merge_rc=0
 merge_err=$(gh_retry_merged gh pr merge "$pr" --squash --delete-branch) || merge_rc=$?
 
 if [ "$merge_rc" -eq 0 ]; then
+    # KB-272: carry the squash merge commit's sha in the step output so the
+    # post-merge CI wait does not re-derive it. May be empty in the seconds
+    # right after the merge; the wait step refreshes it bounded, fail-closed.
+    merge_sha=$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null || true)
     echo "merged=true pr=$pr"
+    echo "merge_sha=${merge_sha:-}"
     exit 0
 fi
 
@@ -27,7 +32,11 @@ fi
 # Treat as success if GitHub says the PR is already merged.
 state=$(gh pr view "$pr" --json state --jq '.state' || echo "")
 if [ "$state" = "MERGED" ]; then
+    # KB-272: same sha emission as the fresh-merge arm — the wait step gates
+    # the already-merged race identically.
+    merge_sha=$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null || true)
     echo "already_merged=true pr=$pr"
+    echo "merge_sha=${merge_sha:-}"
     exit 0
 fi
 
