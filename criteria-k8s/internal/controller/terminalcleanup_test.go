@@ -124,10 +124,12 @@ func TestReconcileTerminalRunDeletesChildJobs(t *testing.T) {
 
 			// Second pass on the same terminal run: no jobs left, and the
 			// reconciler must not re-create or delete anything.
+			deletesAfterFirstPass := len(cl.deletes)
 			res, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 			require.NoError(t, err)
 			assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
-			assert.Empty(t, cl.deletes, "the second terminal pass must be a no-op delete-wise")
+			assert.Len(t, cl.deletes, deletesAfterFirstPass,
+				"the second terminal pass must be a no-op delete-wise")
 			assert.Empty(t, jobNamesForRun(t, cl, run.Name), "no child Job may be re-created for a terminal run")
 
 			var updated criteriav1.CriteriaRun
@@ -189,7 +191,10 @@ func TestReconcileNonTerminalRunKeepsChildJobs(t *testing.T) {
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{RequeueAfter: 10 * time.Second}, res)
+	// With the stall watchdog disabled (StallWindow unset) an active
+	// non-terminal run does not self-poll; the Job's own watch drives the
+	// next pass. No new polling is introduced here either way.
+	assert.Equal(t, ctrl.Result{}, res)
 
 	assert.Empty(t, cl.deletes, "a running run's child Jobs must not be deleted")
 	assert.Len(t, jobNamesForRun(t, cl, "cri-277"), 3, "all child Jobs must survive the running pass")
