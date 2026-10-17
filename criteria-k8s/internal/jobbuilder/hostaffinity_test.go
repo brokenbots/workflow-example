@@ -135,7 +135,7 @@ func TestHostAffinityCoherentAcrossAllRunPods(t *testing.T) {
 	sourceRun := *run
 	sourceRun.Spec.WorkflowSource = &criteriav1.RunWorkflowSource{
 		Type: "url",
-		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}
 
 	runner := jobbuilder.BuildRunnerJob(run, defaults)

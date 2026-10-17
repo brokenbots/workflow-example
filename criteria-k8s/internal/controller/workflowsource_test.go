@@ -82,7 +82,7 @@ func TestReconcileRefusesURLWorkflowRunWithoutWorkflowSource(t *testing.T) {
 		Name:      "criteria-intake",
 		Type:      "url",
 		Namespace: "default",
-		URL:       "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, nil)
 
 	recorder := record.NewFakeRecorder(10)
@@ -139,7 +139,7 @@ func TestReconcileRefusalCleansUpActuatedRunChildJobs(t *testing.T) {
 		Name:      "criteria-intake",
 		Type:      "url",
 		Namespace: "default",
-		URL:       "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, nil)
 
 	recorder := record.NewFakeRecorder(10)
@@ -188,10 +188,10 @@ func TestReconcileAdmitsURLWorkflowRunWithWorkflowSource(t *testing.T) {
 		Name:      "criteria-intake",
 		Type:      "url",
 		Namespace: "default",
-		URL:       "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, &criteriav1.RunWorkflowSource{
 		Type: "url",
-		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	})
 
 	cl := fake.NewClientBuilder().
@@ -277,7 +277,7 @@ func TestReconcileRefusalEmitsEventOnceThenStaysTerminal(t *testing.T) {
 		Name:      "criteria-intake",
 		Type:      "url",
 		Namespace: "default",
-		URL:       "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, nil)
 
 	recorder := record.NewFakeRecorder(10)
@@ -324,7 +324,7 @@ func TestReconcileRefusesPerScopeURLRunWithoutWorkflowSource(t *testing.T) {
 		Name:      "criteria-intake",
 		Type:      "url",
 		Namespace: "default",
-		URL:       "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, nil)
 	run.Spec.PerScopeSessions = true
 

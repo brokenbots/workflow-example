@@ -66,7 +66,7 @@ func newProbeRun(name string) *criteriav1.CriteriaRun {
 			MaxAgentVisits: 2,
 			WorkflowSource: &criteriav1.RunWorkflowSource{
 				Type: "url",
-				URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+				URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 			},
 		},
 	}
