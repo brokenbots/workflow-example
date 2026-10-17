@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
@@ -201,6 +202,41 @@ func TestPodStateFeedEmitsTransitionsOnly(t *testing.T) {
 	assert.Equal(t, 1, stub.received("run-2"))
 
 	// The pre-shared token rode the request header.
+	assert.Equal(t, "shared-castle-token", stub.tokenAt(0))
+}
+
+// TestPodStateFeedNilClientDefaultsToH2C is the live-path regression for
+// KB-239: the production operator builds the feed with a NIL client, and
+// castle serves the SubmitEvents bidi stream on a cleartext port that only
+// speaks prior-knowledge HTTP/2. A nil default must therefore speak h2c —
+// the previous http.DefaultClient default sent every emit as HTTP/1.1 and
+// castle answered 505 HTTP Version Not Supported, leaving the KB-70
+// session-wait fast-fail blind on every production emit.
+//
+// The TLS-negotiating server in newPodStateTestServer does NOT reproduce
+// this: StartTLS + EnableHTTP2 upgrades even an HTTP/1-only client, which
+// is why this suite stayed green while production 505ed. This test uses a
+// plain non-TLS server wrapped in h2c.NewHandler instead.
+func TestPodStateFeedNilClientDefaultsToH2C(t *testing.T) {
+	stub := &podStateCriteriaStub{envelopes: map[string][]*v1.Envelope{}}
+	path, handler := criteriav1connect.NewCriteriaServiceHandler(stub)
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	srv := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
+	t.Cleanup(srv.Close)
+
+	// The exact production call site: nil client, pre-shared token set.
+	feed := NewPodStateFeed(PodStateFeedConfig{Addr: srv.URL, Token: "shared-castle-token"}, nil)
+	feed.attemptTimeout = 500 * time.Millisecond
+	feed.maxAttempts = 2
+	feed.backoffBase = time.Millisecond
+
+	feed.Emit(context.Background(), "run-h2c",
+		[]events.PodStateReport{podStateTestReport(events.PodPhasePending, "Unschedulable")}, testLogger())
+
+	// Exactly one SubmitEvents envelope accepted over the bidi stream...
+	require.Equal(t, 1, stub.received("run-h2c"))
+	// ...and the pre-shared token must ride the request header.
 	assert.Equal(t, "shared-castle-token", stub.tokenAt(0))
 }
 

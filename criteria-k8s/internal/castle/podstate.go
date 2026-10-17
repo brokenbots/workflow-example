@@ -2,9 +2,11 @@ package castle
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"google.golang.org/protobuf/types/known/structpb"
+	"golang.org/x/net/http2"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
@@ -79,10 +82,16 @@ type podStateSignalState struct {
 	at     time.Time
 }
 
-// NewPodStateFeed builds a feed. A nil httpClient uses http.DefaultClient.
+// NewPodStateFeed builds a feed. A nil httpClient defaults to a cleartext
+// HTTP/2 (h2c prior-knowledge) client: castle serves the SubmitEvents bidi
+// stream from a cleartext port that requires HTTP/2 — connect-go answers
+// bidi requests over HTTP/1.1 with 505, which is how a plain http.DefaultClient
+// left every production emit failing (KB-239). Callers passing a custom
+// client keep working unchanged; it is then their responsibility to speak
+// HTTP/2.
 func NewPodStateFeed(cfg PodStateFeedConfig, httpClient *http.Client) *PodStateFeed {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = newClearTextH2CClient()
 	}
 	if cfg.Token != "" {
 		httpClient = &http.Client{Transport: &tokenTransport{base: httpClient.Transport, token: cfg.Token}}
@@ -96,6 +105,23 @@ func NewPodStateFeed(cfg PodStateFeedConfig, httpClient *http.Client) *PodStateF
 		backoffBase:    podStateBackoffBase,
 		last:           map[string]podStateSignalState{},
 		signalTTL:      podStateSignalTTL,
+	}
+}
+
+// newClearTextH2CClient builds the cleartext HTTP/2 prior-knowledge client
+// used for the nil-client default, mirroring castle's own h2cClient
+// (castle/cmd/criteria-test-agent/main.go): AllowHTTP lets the http2
+// Transport dial a bare http:// address, and DialTLSContext hands back a
+// plain TCP connection so the transport speaks HTTP/2 with prior knowledge
+// over it.
+func newClearTextH2CClient() *http.Client {
+	return &http.Client{
+		Transport: &http2.Transport{
+			AllowHTTP: true,
+			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		},
 	}
 }
 
