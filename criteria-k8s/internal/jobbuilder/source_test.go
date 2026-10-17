@@ -43,7 +43,7 @@ func TestSourceModeRunnerEnvBaseBranch(t *testing.T) {
 	t.Run("spec baseBranch reaches the runner env", func(t *testing.T) {
 		run := urlRun("kb154-source-base", &criteriav1.RunWorkflowSource{
 			Type: "url",
-			URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+			URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 		}, "")
 		run.Spec.BaseBranch = "v0.6.0-release"
 
@@ -60,7 +60,7 @@ func TestSourceModeRunnerEnvBaseBranch(t *testing.T) {
 	t.Run("empty spec stays main", func(t *testing.T) {
 		run := urlRun("kb154-source-main", &criteriav1.RunWorkflowSource{
 			Type: "url",
-			URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+			URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 		}, "")
 
 		job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
@@ -78,7 +78,7 @@ func TestSourceModeRunnerEnvBaseBranch(t *testing.T) {
 func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 	run := urlRun("cri-231-url", &criteriav1.RunWorkflowSource{
 		Type: "url",
-		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, "")
 
 	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
@@ -99,7 +99,7 @@ func TestSourceModeURLOnlyRunsOnBaseImage(t *testing.T) {
 
 	// The run context and source env reach the runner; the runner script
 	// bridges repo_dir into the workflow vars itself.
-	assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1", envValue(runner.Env, "WORKFLOW_URL"))
+	assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1", envValue(runner.Env, "WORKFLOW_URL"))
 	assert.Equal(t, "", envValue(runner.Env, "WORKFLOW_REF"), "no ref declared: WORKFLOW_REF must be absent")
 	assert.Equal(t, "", envValue(runner.Env, "REPO_DIR"))
 	assert.Equal(t, "CRI-231", envValue(runner.Env, "TICKET_ID"))
@@ -173,14 +173,14 @@ func TestSourceModeWithoutRepoUrlSkipsRepoClone(t *testing.T) {
 }
 
 // KB-7: a source-mode run WITH a repo-under-test keeps the per-ticket
-// repo-clone init container — the linear_develop_v1 git steps consume the
+// repo-clone init container — the kanboard_develop_v1 git steps consume the
 // /data/intake/<TICKET>/repo the clone populates (the runner script bridges
 // it into --var repo_dir). The clone script's fail-closed error signatures
 // from the original reproduction are preserved verbatim.
 func TestSourceModeWithRepoUrlKeepsRepoClone(t *testing.T) {
 	run := urlRun("kb-7-repo-bearing", &criteriav1.RunWorkflowSource{
 		Type: "url",
-		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1",
 	}, "")
 
 	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
@@ -281,7 +281,7 @@ func TestSourceModeAdapterPodsNeverReadMovedCriteriaHome(t *testing.T) {
 // CRI-231 requirement 3: in url+image source mode the URL is injected
 // exactly as in url-only mode and the process runs in the provided image.
 func TestSourceModeURLImageRunsProcessInProvidedImage(t *testing.T) {
-	wfURL := "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1"
+	wfURL := "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1"
 
 	urlOnly := urlRun("cri-231-url-only", &criteriav1.RunWorkflowSource{Type: "url", URL: wfURL}, "")
 	urlImage := urlRun("cri-231-url-image", &criteriav1.RunWorkflowSource{Type: "url", URL: wfURL}, "localhost:5000/linear-intake-remote:dev")
@@ -358,7 +358,7 @@ func TestImageModeUnchangedBySourceMode(t *testing.T) {
 func TestSourceModeRendersWorkflowPlan(t *testing.T) {
 	run := urlRun("cri-231-plan", &criteriav1.RunWorkflowSource{Type: "url", URL: "git::https://example.com/wf.git"}, "")
 	run.Spec.Workflow = &criteriav1.RunWorkflow{
-		Name:      "linear-intake-url",
+		Name:      "workflow-lib-url",
 		Type:      "url",
 		Namespace: "wf-ns",
 		Env:       map[string]string{"CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"},
@@ -662,7 +662,7 @@ func TestRedactWorkflowSourceMatchesCriteriaPublisher(t *testing.T) {
 // process image. The record is the exact JSON the runner writes into
 // run-metadata.json at admission.
 func TestSourceModePublishesOriginMetadataEnv(t *testing.T) {
-	const wfURL = "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1"
+	const wfURL = "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1"
 
 	t.Run("url-only records redacted source and job, no image", func(t *testing.T) {
 		run := urlRun("cri-232-url-only", &criteriav1.RunWorkflowSource{Type: "url", URL: wfURL}, "")
@@ -732,7 +732,7 @@ func TestImageModeUnchangedByOriginMetadata(t *testing.T) {
 func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
 	job := jobbuilder.BuildRunnerJob(urlRun("cri-232-script", &criteriav1.RunWorkflowSource{
 		Type: "url",
-		URL:  "git::https://ci-bot:s3cret@example.com/org/workflows.git//linear_intake_v1",
+		URL:  "git::https://ci-bot:s3cret@example.com/org/workflows.git//kanboard_triage_v1",
 		Ref:  "28777aacc3cfbe85005ddb27f548116e692c0eb4",
 	}, "registry.example.com/team/process:1.2.3"), jobbuilder.Defaults{DataPVC: "criteria-data"})
 	runner := job.Spec.Template.Spec.Containers[0]
@@ -743,7 +743,7 @@ func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
 
 	baseEnv := func() map[string]string {
 		return map[string]string{
-			"WORKFLOW_URL":             "git::https://ci-bot:s3cret@example.com/org/workflows.git//linear_intake_v1",
+			"WORKFLOW_URL":             "git::https://ci-bot:s3cret@example.com/org/workflows.git//kanboard_triage_v1",
 			"WORKFLOW_REF":             "28777aacc3cfbe85005ddb27f548116e692c0eb4",
 			"WORKFLOW_ORIGIN_METADATA": record,
 			"JOB_NAME":                 "cri-232-script",
@@ -784,7 +784,7 @@ func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal([]byte(record), &parsed))
 		assert.Equal(t, "cri-232-script", parsed.Job)
-		assert.Equal(t, "git::https://redacted@example.com/org/workflows.git//linear_intake_v1", parsed.Source)
+		assert.Equal(t, "git::https://redacted@example.com/org/workflows.git//kanboard_triage_v1", parsed.Source)
 		assert.Equal(t, "28777aacc3cfbe85005ddb27f548116e692c0eb4", parsed.ResolvedRef)
 		assert.Equal(t, "registry.example.com/team/process:1.2.3", parsed.Image)
 	})

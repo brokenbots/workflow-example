@@ -100,7 +100,7 @@ func TestObserveCopilotActivityKindsCountAsProgress(t *testing.T) {
 			enteredAt := now.Add(-40 * time.Minute)
 			server := &stubServer{
 				agents: []*v1.Agent{{CriteriaId: "crit-24", Name: "cri-24-abc12", Status: "online"}},
-				runs:   []*v1.Run{&v1.Run{RunId: "run-24", CriteriaId: "crit-24", WorkflowName: "linear_develop_v1", Status: "running"}},
+				runs:   []*v1.Run{&v1.Run{RunId: "run-24", CriteriaId: "crit-24", WorkflowName: "kanboard_develop_v1", Status: "running"}},
 				events: map[string][]*v1.Envelope{
 					"run-24": {
 						withTs(&v1.Envelope{RunId: "run-24", Seq: 1, Payload: &v1.Envelope_StepEntered{StepEntered: &v1.StepEntered{Step: "develop", Adapter: "copilot"}}}, enteredAt),
@@ -152,7 +152,7 @@ func TestObserveHealthyCopilotStreamLongerThanWindowKeepsFreshProgress(t *testin
 	}
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-24", Name: "cri-24-abc12", Status: "online"}},
-		runs:   []*v1.Run{&v1.Run{RunId: "run-24", CriteriaId: "crit-24", WorkflowName: "linear_develop_v1", Status: "running"}},
+		runs:   []*v1.Run{&v1.Run{RunId: "run-24", CriteriaId: "crit-24", WorkflowName: "kanboard_develop_v1", Status: "running"}},
 		events: map[string][]*v1.Envelope{"run-24": events},
 	}
 
@@ -191,7 +191,7 @@ func TestObserveWedgeChatterKeepsProgressStale(t *testing.T) {
 	}
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-24", Name: "cri-24-abc12", Status: "online"}},
-		runs:   []*v1.Run{&v1.Run{RunId: "run-24", CriteriaId: "crit-24", WorkflowName: "linear_develop_v1", Status: "running"}},
+		runs:   []*v1.Run{&v1.Run{RunId: "run-24", CriteriaId: "crit-24", WorkflowName: "kanboard_develop_v1", Status: "running"}},
 		events: map[string][]*v1.Envelope{"run-24": events},
 	}
 

@@ -1,8 +1,8 @@
 # Kubernetes workflow runner deployment
 
 This directory contains the Kubernetes manifests and launchers for running a
-Criteria workflow (currently `linear_intake_v1`) against a Linear ticket inside
-a cluster. The recommended deployment is operator-based and autonomous:
+Criteria workflow against a ticket inside a cluster. The recommended deployment
+is operator-based and autonomous:
 
 * The `criteria-k8s-operator` reconciles a `CriteriaRun` custom resource into
   a runner `Job` plus one adapter `Job` per adapter type.
@@ -307,8 +307,6 @@ After creating it, the operator creates the runner and adapter Jobs.
 The launcher scripts are still available for local testing but they bypass
 the operator and the `CriteriaRun` CRD:
 
-* `./k8s/launch-pod-adapter-job.sh` renders and applies a runner Job plus one
-  adapter Job per adapter type directly.
 * `./k8s/launch-ticket-job.sh` renders and applies the legacy single-container
   Job template (`05-job-template.yaml`).
 
@@ -442,9 +440,9 @@ You should see a single file with mode `0600` owned by the `fsGroup` user
 
 ### Regenerate the prerequisite manifest
 
-`k8s/operator-prereqs.yaml` and `k8s/job-cri-27.yaml` are generated from
-`k8s/job-cri-27.yaml.tmpl` by embedding the runner and adapter wrapper scripts.
-After editing either wrapper script, regenerate both files:
+`k8s/operator-prereqs.yaml` is generated from `k8s/operator-prereqs.yaml.tmpl`
+by embedding the runner and adapter wrapper scripts. After editing either
+wrapper script, regenerate it:
 
 ```sh
 ./k8s/generate-pod-adapter-manifest.sh
@@ -541,12 +539,10 @@ configure cross-pod mTLS.
 | `04-castle.yaml` | Optional Castle control-plane Deployment and Service. |
 | `05-job-template.yaml` | Legacy single-container Job template. |
 | `operator-prereqs.yaml` | `SecretProviderClass` and `ConfigMap` objects required by the operator. |
-| `job-cri-27.yaml.tmpl` | Pod-adapter Job group template with embedded script placeholders. |
-| `job-cri-27.yaml` | Generated pod-adapter manifest used by the local launcher. |
+| `operator-prereqs.yaml.tmpl` | Template the operator-prereqs manifest is rendered from. |
 | `pod-adapter-runner.sh` | Runner wrapper script; becomes the `runner.sh` entry in the `pod-adapter-scripts` ConfigMap. |
 | `pod-adapter-adapter.sh` | Adapter wrapper script; becomes the `adapter.sh` entry in the `pod-adapter-scripts` ConfigMap. |
-| `generate-pod-adapter-manifest.sh` | Embeds the wrapper scripts into `job-cri-27.yaml` and `operator-prereqs.yaml`. |
-| `launch-pod-adapter-job.sh` | Renders and applies the pod-adapter Job group directly. |
+| `generate-pod-adapter-manifest.sh` | Embeds the wrapper scripts into `operator-prereqs.yaml`. |
 | `launch-ticket-job.sh` | Renders and applies the legacy `05-job-template.yaml`. |
 | `install-secrets-store-csi.sh` | Helm installer for the CSI driver and OpenBao provider. |
 | `verify-secrets-store-csi.sh` | Waits for the CSI driver/provider DaemonSets and SPCs. |
@@ -555,7 +551,6 @@ configure cross-pod mTLS.
 | `registries.yaml` | k3s containerd mirror for insecure local registries. |
 | `values-secrets-store-csi-driver.yaml` | Helm values for the upstream CSI driver chart. |
 | `values-openbao-csi-provider.yaml` | Helm values for the OpenBao CSI provider chart. |
-| `examples/ticket-job.yaml` | Apply-ready example Job for the local launcher path. |
 | `tests/` | Regression tests for the manifests and launchers. |
 | `criteria-k8s/config/install.yaml` | Operator install manifest (CRD, RBAC, operator and watcher deployments). |
 | `criteria-k8s/config/examples/criteriarun.yaml` | Example `CriteriaRun` for the manual path. |

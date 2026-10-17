@@ -36,7 +36,7 @@ variable "workstream_out_dir" {
 }
 
 // Durable path where the supervisor-approved reproduction plan is persisted
-// before execution begins. When a parent workflow (e.g. linear_intake_v1)
+// before execution begins. When a parent workflow (e.g. kanboard_triage_v1)
 // provides this path, qa_triage_v1 will copy the approved plan there on plan
 // approval and will detect/restore it on a subsequent same-ticket run, skipping
 // plan generation. Empty disables persistence (standalone usage)."

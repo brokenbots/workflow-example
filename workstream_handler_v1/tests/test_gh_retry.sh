@@ -253,15 +253,15 @@ assert_grep_count "devops_triage root steps wrapped" 2 \
     "${REPO_ROOT}/devops_triage_v1/main.chcl"
 assert_grep_count "devops_triage open_pr script wrapped" 2 \
     "${REPO_ROOT}/devops_triage_v1/scripts/open_pr.sh.tftpl"
-assert_grep_count "linear intake entrypoint sites wrapped" 3 \
-    "${REPO_ROOT}/linear_intake_v1/container-entrypoint.sh"
-for f in criteria-k8s/internal/jobbuilder/jobbuilder.go k8s/job-cri-27.yaml \
-         k8s/job-cri-27.yaml.tmpl k8s/examples/ticket-job.yaml; do
+# KB-281: the linear_intake_v1 entrypoint assertion and its CI registration
+# leg retired with the tree.
+# KB-281: the job-cri-27 example Job group (job-cri-27.yaml[.tmpl] +
+# examples/ticket-job.yaml) retired with the linear estate; jobbuilder.go is
+# the only surviving repo-clone probe fixture.
+for f in criteria-k8s/internal/jobbuilder/jobbuilder.go; do
     assert_grep_count "jobbuilder fixture wrapped: ${f}" 1 "${REPO_ROOT}/${f}" \
         "gh_retry gh repo clone"
 done
-assert_grep_count "CI registers the linear intake retry test" 1 \
-    "${REPO_ROOT}/.github/workflows/ci.yml" "test_container_entrypoint_gh_retry"
 for probe in k8s/pod-adapter-runner.sh k8s/pod-adapter-adapter.sh; do
     if grep -q 'api\.github\.com\|gh pr\|gh api\|gh repo' "${REPO_ROOT}/${probe}" 2>/dev/null; then
         assert_grep_count "probe-only script unexpectedly calls gh: ${probe}" 0 \
@@ -285,8 +285,7 @@ done
 # wrapper's shell step gates.
 for copy in workstream_handler_v1/scripts/gh_retry.sh.tftpl \
             workstream_handler_v1/workflows/pr_reviewer_loop/scripts/gh_retry.sh.tftpl \
-            devops_triage_v1/scripts/gh_retry.sh.tftpl \
-            linear_intake_v1/scripts/gh_retry.sh; do
+            devops_triage_v1/scripts/gh_retry.sh.tftpl; do
     if cmp -s "${REPO_ROOT}/workstream_handler_v1/scripts/gh_retry.sh.tftpl" "${REPO_ROOT}/${copy}"; then
         ok "vendored copy byte-identical: ${copy}"
     else
@@ -303,7 +302,7 @@ while IFS= read -r script; do
     fi
 done <<EOF
 $(find "${REPO_ROOT}/workstream_handler_v1" "${REPO_ROOT}/devops_triage_v1" \
-       "${REPO_ROOT}/linear_intake_v1" "${REPO_ROOT}/criteria-k8s" \
+       "${REPO_ROOT}/criteria-k8s" \
        \( -name '*.sh' -o -name '*.tftpl' \) ! -path '*/agents/*' \
     -exec grep -lE 'gh (api|pr|repo)|api\.github\.com' {} + 2>/dev/null \
     | sed "s|^${REPO_ROOT}/||" | grep -v 'gh_retry\|_test\|/tests/')

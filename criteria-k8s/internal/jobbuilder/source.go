@@ -134,7 +134,7 @@ fi
 # Workflow variables: source-mode runs get the operator-side runtime values
 # as workflow vars via --var (raw strings; the engine applies each declared
 # variable type later). Without this bridge a fetched workflow's required
-# string variables (e.g. var.ticket_id in linear_develop_v1) are null at
+# string variables (e.g. var.ticket_id in kanboard_develop_v1) are null at
 # compile time and the first templatefile(... shellquote(var.ticket_id))
 # step fails with "shellquote: invalid value; expected string" — every
 # earlier URL-mode run died at the per-scope digest handshake before any
@@ -228,7 +228,8 @@ exit "$engine_exit"
 // gh and the workflow source is content, so a fetched workflow that needs
 // the ticket repository clones it itself; the init container exists to
 // pre-populate the /data/intake/<TICKET>/repo path the runner script bridges
-// into var.repo_dir for repo-bearing workflows (linear_develop_v1). The
+// into var.repo_dir for repo-bearing workflows (e.g. kanboard_develop_v1).
+// The
 // workflow object's declared volumes, secrets, and env still render through
 // the plan, so url+image runs of a workflow-library object carry the same
 // storage surface as their image-mode counterparts.
@@ -248,8 +249,9 @@ func buildSourceRunnerJob(run *criteriav1.CriteriaRun, defaults Defaults) *batch
 
 	job := buildJobBase(run, defaults, TargetNamespace(run), jobName, labels)
 	job.Spec.Template.Spec.ServiceAccountName = "criteria-runner"
-	// Source-mode runs that need the ticket repository (e.g. linear_develop_v1
-	// drives git fetch/worktree/pr steps against var.repo_dir) get the same
+	// Source-mode runs that need the ticket repository (e.g. the kanboard
+	// develop tree drives git fetch/worktree/pr steps against var.repo_dir)
+	// get the same
 	// per-ticket clone the image-mode runner has always had: the per-ticket
 	// /data/intake/<TICKET>/repo path, cloned by an init container before the
 	// runner starts. Image-mode clones use the baked image (gh + git); source

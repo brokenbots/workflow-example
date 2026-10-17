@@ -231,7 +231,7 @@ func TestLegacyRunnerWithoutWorkflowHasNoCSISecretVolumes(t *testing.T) {
 			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
 			WorkflowSource: &criteriav1.RunWorkflowSource{
 				Type: "url",
-				URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+				URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 			},
 		},
 	}
@@ -321,7 +321,7 @@ func TestJobArchNodeSelectorFollowsOperatorConfig(t *testing.T) {
 	}
 	sourceRun := urlRun("cri-arch-source", &criteriav1.RunWorkflowSource{
 		Type: "url",
-		URL:  "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
+		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
 	}, "")
 	arm64Defaults := jobbuilder.Defaults{JobArch: "arm64"}
 

@@ -55,9 +55,7 @@ jobs:
       # require_comment outcome attribute (KB-45) landed in v0.5.42, and the
       # KB-217 tree contracts (outcome arms whose adapter reason renders into
       # a downstream step's input) need an engine that parses and enforces it.
-      # The trees remain compile-compatible with v0.5.32+ engines; this does
-      # NOT change the image-mode pin in linear_intake_v1/Dockerfile (still
-      # v0.5.22, coordinator-owned).
+      # The trees remain compile-compatible with v0.5.32+ engines.
       # Installed before the k8s/tests loop: KB-240's
       # test_env_listen_ports.sh drives the real engine (port-0 shim binds),
       # and the loop runs every k8s/tests/test_*.sh it finds.
@@ -74,9 +72,8 @@ jobs:
           sudo install -m 0755 /tmp/criteria-install/criteria /usr/local/bin/criteria
           rm -rf "/tmp/${archive}" /tmp/criteria-checksums.txt /tmp/criteria-install
 
-      # Mirrors linear_intake_v1/Dockerfile: pre-pull the two adapter binaries
-      # that linear_triage_v1/.criteria.lock.hcl and
-      # linear_develop_v1/.criteria.lock.hcl pin, so `criteria validate`
+      # Pre-pull the adapter binaries that kanboard_triage_v1/.criteria.lock.hcl
+      # and kanboard_develop_v1/.criteria.lock.hcl pin, so `criteria validate`
       # can resolve and verify their schemas from the runner's local cache.
       - name: Pre-pull triage adapter binaries into the criteria cache
         env:
@@ -93,18 +90,6 @@ jobs:
             bash "$t"
             echo "::endgroup::"
           done
-
-      - name: Run engine pin regression test (CRI-140)
-        run: |
-          bash linear_intake_v1/tests/test_engine_pin.sh
-
-      - name: Run linear_triage_v1 standalone extraction regression test (CRI-238)
-        run: |
-          bash linear_triage_v1/tests/test_triage_standalone.sh
-
-      - name: Run linear_develop_v1 standalone extraction regression test (CRI-239)
-        run: |
-          bash linear_develop_v1/tests/test_develop_standalone.sh
 
       # KB-231: the kanboard trees must fail deterministically on dead-board
       # outages (empty / HTML-302 RPC bodies) with the failing stage named,
@@ -139,7 +124,7 @@ jobs:
       # engine (skips cleanly on engines that predate the event).
       - name: Run flat WorkflowGraphs shape smoke test (CRI-300)
         run: |
-          bash linear_intake_v1/tests/test_workflow_graphs_flat.sh
+          bash k8s/tests/test_workflow_graphs_flat.sh
 
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
@@ -152,14 +137,11 @@ jobs:
           done
 
       # KB-219: the shared gh retry wrapper is consumed by every GH call site
-      # (workstream_handler_v1 loop above, plus devops_triage_v1's open_pr and
-      # the linear intake entrypoint) — keep their integration tests gated.
+      # (workstream_handler_v1 loop above, plus devops_triage_v1's open_pr) —
+      # keep their integration tests gated.
       - name: Run devops_triage_v1 open_pr retry test (KB-219)
         run: |
           bash devops_triage_v1/tests/test_open_pr_retry.sh
-      - name: Run linear_intake entrypoint retry test (KB-219)
-        run: |
-          bash linear_intake_v1/tests/test_container_entrypoint_gh_retry.sh
 
   secret-free-gate:
     name: Secret-free shipped configs (CRI-250)

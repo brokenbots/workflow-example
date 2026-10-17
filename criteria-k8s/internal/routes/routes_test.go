@@ -91,18 +91,39 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 8 {
-		t.Errorf("workflowLibrary size = %d, want 8", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 5 {
+		t.Errorf("workflowLibrary size = %d, want 5", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 5 {
-		t.Errorf("routes size = %d, want 5", len(p.Routes))
+	if len(p.Routes) != 3 {
+		t.Errorf("routes size = %d, want 3", len(p.Routes))
 	}
-	if p.Routes[0].Project != "Criteria K8s Workflow Runner" || p.Routes[1].Project != "Criteria K8s Workflow Runner" ||
-		p.Routes[2].Project != "Criteria K8s Workflow Runner" {
-		t.Errorf("routes = %+v, want all routed for project %q", p.Routes, "Criteria K8s Workflow Runner")
+	// KB-281: the retired criteria-triage / criteria-develop routes are gone.
+	// Surviving route order: the criteria project's cleanup-only route, then
+	// the two kanboard routes.
+	if n := p.Routes[0].Name; n != "criteria-cleanup" {
+		t.Errorf("routes[0] = %q, want %q (criteria project: cleanup only)", n, "criteria-cleanup")
 	}
-	// The kanboard objects are present alongside the linear ones (dual-source
-	// coexistence): the kanboard routes target the Kanboard Tickets project.
+	if p.Routes[0].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("cleanup route project = %q, want %q", p.Routes[0].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[1].Project != "Kanboard Tickets" || p.Routes[2].Project != "Kanboard Tickets" {
+		t.Errorf("routes[1:3] projects = %q/%q, want the kanboard pair on %q", p.Routes[1].Project, p.Routes[2].Project, "Kanboard Tickets")
+	}
+	// Absence regressions (KB-281): the retired linear url objects must not
+	// return in the shipped example.
+	for _, gone := range []string{"linear-intake-url", "linear-triage-url", "linear-develop-url"} {
+		if _, still := p.WorkflowLibrary[gone]; still {
+			t.Errorf("workflowLibrary still has the retired object %q (KB-281)", gone)
+		}
+	}
+	for _, r := range p.Routes {
+		if r.Workflow == "linear-intake-url" || r.Workflow == "linear-triage-url" || r.Workflow == "linear-develop-url" {
+			t.Errorf("route %q still fires the retired linear workflow %q (KB-281)", r.Name, r.Workflow)
+		}
+	}
+	// The retained linear-intake-v1 image object coexists with the live
+	// kanboard objects: no route assigns it by default; the override
+	// resolution is exercised in TestShippedExampleResolvesKanboardRoutes.
 	kb, ok := p.WorkflowLibrary["kanboard-triage-url"]
 	if !ok {
 		t.Fatalf("workflowLibrary missing kanboard-triage-url")
@@ -139,15 +160,14 @@ func TestParseAndValidate(t *testing.T) {
 	}
 }
 
-// CRI-241 + CRI-243: the shipped example carries the split pattern as the
-// criteria project's actual workflow (plan CRI-214 exit condition 3). A
-// ticket in the "Ready for Development" workflow state resolves to the
-// linear-develop-url library object (linear_develop_v1, url-only with the
-// ADR-0005 D7 commit pin), a ticket in "Triage" resolves to the new
-// linear-triage-url object (linear_triage_v1, pinned likewise, triage
-// class), and the watcher-facing TicketStates union stays
-// [Ready for Development, Triage].
-func TestShippedExampleResolvesDevRoute(t *testing.T) {
+// KB-281: the shipped example's live routing is the kanboard pair. A ticket
+// in "Backlog" on the Kanboard Tickets project resolves to the
+// kanboard-triage-url object (kanboard_triage_v1, url-only with the ADR-0005
+// D7 commit pin, triage class), a ticket in "Ready" resolves to the
+// kanboard-develop-url object (kanboard_develop_v1, pinned likewise), the
+// retired criteria-project routes resolve errNoRoute, and the
+// watcher-facing TicketStates union shrinks to kanboard + cleanup states.
+func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
 		t.Fatalf("reading shipped example: %v", err)
@@ -157,78 +177,89 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
 
-	sel, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run"}, nil))
+	sel, err := p.Resolve(selectorFor("Kanboard Tickets", "Backlog", []string{"k8s-run"}, nil))
 	if err != nil {
-		t.Fatalf("Resolve(Ready for Development): %v", err)
+		t.Fatalf("Resolve(Kanboard Tickets, Backlog): %v", err)
 	}
-	if sel.Route.Name != "criteria-develop" {
-		t.Errorf("matched route = %q, want %q", sel.Route.Name, "criteria-develop")
+	if sel.Route.Name != "kanboard-triage" {
+		t.Errorf("matched route = %q, want %q", sel.Route.Name, "kanboard-triage")
 	}
-	if sel.Name != "linear-develop-url" {
-		t.Errorf("resolved workflow = %q, want %q", sel.Name, "linear-develop-url")
+	if sel.Name != "kanboard-triage-url" {
+		t.Errorf("resolved workflow = %q, want %q", sel.Name, "kanboard-triage-url")
 	}
 	wf := sel.Workflow
 	if wf.Type != TypeURL {
 		t.Errorf("workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
 	}
-	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494" {
-		t.Errorf("workflow url = %q, want the linear_develop_v1 subtree pinned to current main (CRI-311 loop recovery)", wf.URL)
+	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=63535719e37750301a8b7cc9be2c74b2d18c847e" {
+		t.Errorf("workflow url = %q, want the kanboard_triage_v1 subtree pinned to the main-landed commit", wf.URL)
 	}
-	// Ref pins track current main since the CRI-311 loop recovery
-	// (2026-09-23): the 09-18 pins (7645feb / 9db68c3) predate CRI-269's
-	// per_scope_sessions contract, so the shipped objects were re-pinned to
-	// 91153bc — advancing both the subtree content (develop: main.chcl +
-	// adapters.chcl; triage: adapters.chcl + script templates) and the
-	// environment contract.
-	if wf.Ref != "9e04399fd8dc0955bc7b77f199fea2e97f176494" {
-		t.Errorf("workflow ref = %q, want the re-pinned current-main develop commit (CRI-311 loop recovery)", wf.Ref)
+	// Ref pins track main-landed squash commits (CRI-241/CRI-243 convention).
+	if wf.Ref != "63535719e37750301a8b7cc9be2c74b2d18c847e" {
+		t.Errorf("workflow ref = %q, want the main-landed kanboard_triage_v1 commit", wf.Ref)
 	}
 	if wf.Image != "" {
 		t.Errorf("workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
 	}
+	if wf.Class != ClassTriage {
+		t.Errorf("kanboard-triage-url class = %q, want %q (CRI-242 read-only admission)", wf.Class, ClassTriage)
+	}
 	if len(wf.Volumes) != 3 || len(wf.Secrets) != 2 {
-		t.Errorf("linear-develop-url = %+v, want 3 volumes (data, repo, scratch — wf-cache dropped by the CRI-311 loop-recovery re-pin) and 2 secrets", wf)
+		t.Errorf("kanboard-triage-url = %+v, want 3 volumes and 2 secrets", wf)
 	}
 
-	// The union of declared states is what the watcher queries Linear for;
-	// the dev route must grow it beyond [Triage].
-	// The kanboard routes join the union (dual-source coexistence): the
-	// linear watcher now also queries the kanboard columns... no — the
-	// kanboard watcher queries those. The union here is shared payload
-	// state, so it grows to include them; the linear watcher filters by
-	// its own project's routes at Resolve time.
-	want := []string{"Backlog", "Ready", "Ready for Development", "Triage"}
+	// The develop side of the split: Ready resolves to the
+	// kanboard-develop-url object — no default class (dev admission), same
+	// main-landed pin convention.
+	develop, err := p.Resolve(selectorFor("Kanboard Tickets", "Ready", []string{"k8s-run"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve(Kanboard Tickets, Ready): %v", err)
+	}
+	if develop.Route.Name != "kanboard-develop" || develop.Name != "kanboard-develop-url" {
+		t.Errorf("Ready resolves to %q/%q, want kanboard-develop/kanboard-develop-url", develop.Route.Name, develop.Name)
+	}
+	developWf := develop.Workflow
+	if developWf.Type != TypeURL || developWf.Image != "" {
+		t.Errorf("kanboard-develop-url = %+v, want url-only (no process image)", developWf)
+	}
+	if developWf.URL != "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=63535719e37750301a8b7cc9be2c74b2d18c847e" {
+		t.Errorf("develop workflow url = %q, want the kanboard_develop_v1 subtree pinned to the main-landed commit", developWf.URL)
+	}
+	if len(developWf.Volumes) != 3 || len(developWf.Secrets) != 2 {
+		t.Errorf("kanboard-develop-url = %+v, want 3 volumes and 2 secrets", developWf)
+	}
+
+	// KB-281 absence regressions: the retireed criteria-project routes must
+	// fail closed (the watcher's routes fail closed on unmapped shapes).
+	for _, tc := range []struct{ name, state string }{
+		{"Triage state (criteria-triage retired)", "Triage"},
+		{"Backlog state (criteria routes never covered it)", "Backlog"},
+		{"Ready without the dirty label (develop route retired)", "Ready"},
+	} {
+		if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", tc.state, []string{"k8s-run"}, nil)); !errors.Is(err, ErrNoRoute) {
+			t.Errorf("Resolve(Criteria project, %s) err = %v, want ErrNoRoute (%s)", tc.state, err, tc.name)
+		}
+	}
+
+	// The retained linear-intake-v1 image object is override-reachable (via
+	// the workflows label group) but no route assigns it by default: the same
+	// Ready-for-Development resolution with the object override selects the
+	// image workflow, the plain one above fails closed.
+	overridden, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run", "criteria-dirty", "linear-intake-v1"},
+		map[string]string{"linear-intake-v1": "workflows"}))
+	if err != nil {
+		t.Fatalf("Resolve(Ready for Development, linear-intake-v1 override): %v", err)
+	}
+	if overridden.Name != "linear-intake-v1" || overridden.Workflow.Type != TypeImage {
+		t.Errorf("override resolution = %q/%s, want the linear-intake-v1 image object", overridden.Name, overridden.Workflow.Type)
+	}
+
+	// The union of declared states is what the kanboard watcher queries for
+	// (the criteria-cleanup route carries Ready for Development; the linear
+	// watcher filters per-project at Resolve time).
+	want := []string{"Backlog", "Ready", "Ready for Development"}
 	if got := p.TicketStates(); !slices.Equal(got, want) {
 		t.Errorf("TicketStates() = %v, want %v", got, want)
-	}
-
-	// The split pattern is the criteria project's actual workflow (CRI-243,
-	// plan CRI-214 exit condition 3): Triage resolves to the split triage
-	// tree — linear_triage_v1 fetched url-only with the current-main pin
-	// (CRI-311 loop recovery), admitted on the concurrent read-only triage
-	// queue class.
-	triage, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", nil, nil))
-	if err != nil {
-		t.Fatalf("Resolve(Triage): %v", err)
-	}
-	if triage.Route.Name != "criteria-triage" || triage.Name != "linear-triage-url" {
-		t.Errorf("Triage resolves to %q/%q, want criteria-triage/linear-triage-url", triage.Route.Name, triage.Name)
-	}
-	triageWf := triage.Workflow
-	if triageWf.Type != TypeURL {
-		t.Errorf("triage workflow type = %q, want %q (url-only, minimal criteria base runtime)", triageWf.Type, TypeURL)
-	}
-	if triageWf.URL != "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494" {
-		t.Errorf("triage workflow url = %q, want the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery)", triageWf.URL)
-	}
-	if triageWf.Ref != "9e04399fd8dc0955bc7b77f199fea2e97f176494" {
-		t.Errorf("triage workflow ref = %q, want the re-pinned current-main triage commit (CRI-311 loop recovery)", triageWf.Ref)
-	}
-	if triageWf.Image != "" {
-		t.Errorf("triage workflow image = %q, want empty (url-only must not declare a process image)", triageWf.Image)
-	}
-	if len(triageWf.Volumes) != 3 || len(triageWf.Secrets) != 2 {
-		t.Errorf("linear-triage-url = %+v, want 3 volumes (data, repo, scratch — wf-cache dropped by the CRI-311 loop-recovery re-pin) and 2 secrets", triageWf)
 	}
 }
 
@@ -299,17 +330,15 @@ func TestShippedExampleCastleGatePinsNode20ParapetSuite(t *testing.T) {
 // CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
 // dirty label is a ROUTING SURFACE. A ticket carrying the watcher's sticky
 // "criteria-dirty" label in "Ready for Development" resolves to the
-// criteria-cleanup route and the ticket-cleanup-url object — the
-// tag-based specific route beats the tag-less general develop route by the
-// specific-over-general priority (matchRoute). A ticket without the dirty
-// label keeps the general develop route, a dirty ticket in "Triage" keeps
-// the triage route (the state gate still applies), and the object ships
-// url-only, on the triage (read-only) admission class, pinned to no commit
-// (this repository squash merges — every shipped pin names a main-landed
-// squash commit set in a follow-up change, CRI-241/CRI-243 convention — so
-// the pin for the freshly added tree is a documented follow-up) and
-// credential-free beyond the Linear API key (the cleanup pass does zero git
-// operations).
+// criteria-cleanup route and the ticket-cleanup-url object — (KB-281: the
+// tag-less general develop route the cleanup route used to out-prioritize is
+// retired, so without the dirty label nothing matches and the watcher fails
+// closed; specific-over-general priority still governs multi-candidate
+// shapes). The object ships url-only, on the triage (read-only) admission
+// class, pinned (this repository squash merges — every shipped pin names a
+// main-landed squash commit set in a follow-up change, CRI-241/CRI-243
+// convention) and credential-free beyond the Linear API key (the cleanup
+// pass does zero git operations).
 func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
@@ -365,34 +394,32 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 		}
 	}
 
-	// The priority holds both ways: a ticket WITHOUT the dirty label keeps
-	// the general develop route.
-	dev, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run"}, nil))
-	if err != nil {
-		t.Fatalf("Resolve(Ready for Development, no dirty label): %v", err)
-	}
-	if dev.Route.Name != "criteria-develop" || dev.Name != "linear-develop-url" {
-		t.Errorf("non-dirty ticket resolves to %q/%q, want criteria-develop/linear-develop-url", dev.Route.Name, dev.Name)
+	// KB-281: the tag-less general develop route is retired, so a ticket
+	// WITHOUT the dirty label fails closed (nothing matches).
+	if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run"}, nil)); !errors.Is(err, ErrNoRoute) {
+		t.Errorf("non-dirty ticket err = %v, want ErrNoRoute (the general develop route is retired)", err)
 	}
 
-	// And the state gate still applies: a dirty ticket in Triage keeps the
-	// triage route (the cleanup route is declared for
-	// "Ready for Development" only).
-	triage, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Triage", []string{"criteria-dirty"}, nil))
-	if err != nil {
-		t.Fatalf("Resolve(Triage, criteria-dirty): %v", err)
+	// The state gate still applies: a dirty ticket in "Backlog" (never a
+	// cleanup-route state) fails closed.
+	if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Backlog", []string{"criteria-dirty"}, nil)); !errors.Is(err, ErrNoRoute) {
+		t.Errorf("dirty Backlog ticket err = %v, want ErrNoRoute (the cleanup route is declared for Ready for Development only)", err)
 	}
-	if triage.Route.Name != "criteria-triage" || triage.Name != "linear-triage-url" {
-		t.Errorf("dirty Triage ticket resolves to %q/%q, want criteria-triage/linear-triage-url", triage.Route.Name, triage.Name)
+
+	// KB-103's configRef lived on the retired criteria-develop route; no
+	// surviving route binds a config entry by default.
+	for _, r := range p.Routes {
+		if r.Name == "criteria-develop" {
+			t.Fatalf("the criteria-develop route returned after KB-281")
+		}
 	}
 
 	// The cleanup route declares no new linear states, so CRI-310 held the
-	// linear union. The kanboard routes (dual-source coexistence) add their
-	// own columns to the shared payload's union — the linear watcher filters
-	// them out per-project at Resolve time.
-	want := []string{"Backlog", "Ready", "Ready for Development", "Triage"}
+	// union at the linear estate's states; KB-281 retired those routes and
+	// the union shrank to kanboard + cleanup states.
+	want := []string{"Backlog", "Ready", "Ready for Development"}
 	if got := p.TicketStates(); !slices.Equal(got, want) {
-		t.Errorf("TicketStates() = %v, want %v (the kanboard routes grow the union; CRI-310 held for the linear routes alone)", got, want)
+		t.Errorf("TicketStates() = %v, want %v (the union holds only the surviving routes' states)", got, want)
 	}
 }
 

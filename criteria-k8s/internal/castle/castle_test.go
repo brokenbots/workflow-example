@@ -139,7 +139,7 @@ func TestObserveDiscoversRunByRunnerAgentAndDrains(t *testing.T) {
 	server := &stubServer{
 		agents: []*v1.Agent{{CriteriaId: "crit-42", Name: "cri-42-abc12", Status: "online"}},
 		runs: []*v1.Run{{
-			RunId: "run-1", CriteriaId: "crit-42", WorkflowName: "linear_intake_v1", Status: "running",
+			RunId: "run-1", CriteriaId: "crit-42", WorkflowName: "kanboard_triage_v1", Status: "running",
 		}},
 		events: map[string][]*v1.Envelope{
 			"run-1": {

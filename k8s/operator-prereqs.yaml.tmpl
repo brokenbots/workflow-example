@@ -1,0 +1,46 @@
+# Operator prerequisites template (KB-281): renders to k8s/operator-prereqs.yaml
+# via ./k8s/generate-pod-adapter-manifest.sh, which embeds the wrapper scripts
+# from k8s/pod-adapter-runner.sh / k8s/pod-adapter-adapter.sh and rewrites the
+# namespace placeholders to criteria-jobs.
+#
+# The former first document, the linear-spc SecretProviderClass, was retired
+# with the linear_* workflow trees (KB-281): image-mode runner Jobs can no
+# longer be provisioned as examples, and the Secrets Store CSI mount that
+# consumed it only survives in the Helm-managed estate (the chart keeps
+# linear-spc under its retirement-header note because runner Jobs mount it).
+# The copilot-spc document stays: workflow adapters read their GitHub tokens
+# through it, and the secrets still live under the live OpenBao path
+# criteria/data/linear.
+# The original job-cri-27 Job-group example documents were retired with the
+# linear intake flow: the manifest trio was the local linear-flow example
+# (pod-adapter-cri-27), its launcher k8s/launch-pod-adapter-job.sh and the
+# rendered k8s/job-cri-27.yaml / k8s/examples/ticket-job.yaml went with it.
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: copilot-spc
+  namespace: __NAMESPACE__
+spec:
+  provider: openbao
+  parameters:
+    roleName: criteria-jobs
+    objects: |
+      - objectName: workflow_github_token
+        secretPath: criteria/data/linear
+        secretKey: workflow_github_token
+        filePermission: 0444
+      - objectName: reviewer_github_token
+        secretPath: criteria/data/linear
+        secretKey: reviewer_github_token
+        filePermission: 0444
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-adapter-scripts
+  namespace: __NAMESPACE__
+data:
+  runner.sh: |
+__RUNNER_SCRIPT__
+  adapter.sh: |
+__ADAPTER_SCRIPT__

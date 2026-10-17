@@ -484,8 +484,7 @@ git config --global credential.https://github.helper '!gh auth git-credential'
 # images predating KB-219 keep the plain clone — honest fallback, nothing
 # masked, and a TLS blip no longer kills the job pod at bootstrap.
 _gh_retry_script=""
-for _gh_retry_rel in linear_intake_v1/scripts/gh_retry.sh \
-                     workstream_handler_v1/scripts/gh_retry.sh.tftpl \
+for _gh_retry_rel in workstream_handler_v1/scripts/gh_retry.sh.tftpl \
                      devops_triage_v1/scripts/gh_retry.sh.tftpl; do
     if [ -r "/workflows/${_gh_retry_rel}" ]; then
         _gh_retry_script="/workflows/${_gh_retry_rel}"

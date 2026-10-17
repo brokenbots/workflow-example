@@ -17,9 +17,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER_CANONICAL="$REPO_ROOT/k8s/pod-adapter-runner.sh"
 RUNNER_CHART="$REPO_ROOT/charts/criteria-k8s/scripts/runner.sh"
 PREREQS="$REPO_ROOT/k8s/operator-prereqs.yaml"
-TMPL="$REPO_ROOT/k8s/job-cri-27.yaml.tmpl"
-EXAMPLE="$REPO_ROOT/k8s/examples/ticket-job.yaml"
-LAUNCHER="$REPO_ROOT/k8s/launch-pod-adapter-job.sh"
+TMPL="$REPO_ROOT/k8s/operator-prereqs.yaml.tmpl"
 
 fail() {
     echo "FAIL: $1" >&2
@@ -62,36 +60,11 @@ for f in "$RUNNER_CANONICAL" "$RUNNER_CHART"; do
 done
 
 # Static manifests: no events.ndjson outside comments.
-for f in "$PREREQS" "$TMPL" "$EXAMPLE"; do
+for f in "$PREREQS" "$TMPL"; do
     [ -f "$f" ] || fail "missing manifest: $f"
     if strip_comments < "$f" | grep -qF 'events.ndjson'; then
         fail "$f references events.ndjson outside comments"
     fi
 done
-
-# The example manifest must ship an empty default EVENTS_FILE.
-example_value=$(grep -A1 'name: EVENTS_FILE' "$EXAMPLE" | sed -n 's/^[[:space:]]*value: //p' || true)
-[ "$example_value" = '""' ] || fail "examples/ticket-job.yaml EVENTS_FILE default is not empty: '$example_value'"
-
-# The rendered job manifest (launcher DRY_RUN, default env) must carry an
-# empty default EVENTS_FILE and no events.ndjson in code lines. EVENTS_FILE is
-# explicitly cleared so the assertion covers the default, not any ambient
-# debug value exported by the calling shell.
-manifest="$(mktemp)"
-manifest_code="$(mktemp)"
-trap 'rm -f "$manifest" "$manifest_code"' EXIT
-env -u EVENTS_FILE TICKET_ID=CRI-136 REPO_URL=brokenbots/workflow-example DRY_RUN=1 \
-    "$LAUNCHER" > "$manifest"
-
-if ! grep -qF 'name: EVENTS_FILE' "$manifest"; then
-    fail "rendered job manifest lost the EVENTS_FILE env wiring"
-fi
-manifest_value=$(grep -A1 'name: EVENTS_FILE' "$manifest" | sed -n 's/^[[:space:]]*value: //p' || true)
-[ "$manifest_value" = '""' ] || fail "rendered job manifest EVENTS_FILE default is not empty: '$manifest_value'"
-
-strip_comments < "$manifest" > "$manifest_code"
-if grep -qF 'events.ndjson' "$manifest_code"; then
-    fail "rendered job manifest writes events.ndjson by default"
-fi
 
 echo "PASS: runner events-file is debug-only (no default events.ndjson anywhere in script or manifests)"

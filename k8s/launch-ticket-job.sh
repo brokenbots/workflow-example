@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Launch a Kubernetes Job for linear_intake_v1 using the remote-mode image.
+# Launch a Kubernetes Job using the remote-mode workflow image. The retained
+# baked image is localhost:5000/linear-intake-remote:dev (KB-281 retired the
+# Linear intake source tree; the image remains for manual runs).
 #
 # Environment variables:
 #   IMAGE                     Container image to run (default: localhost:5000/linear-intake-remote:dev)

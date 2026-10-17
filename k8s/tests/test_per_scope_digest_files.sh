@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # Regression test for CRI-140: the runner must publish per-run adapter digest
-# files keyed by adapter INSTANCE name (digest-intake) in addition to adapter
+# files keyed by adapter INSTANCE name (digest-triage) in addition to adapter
 # kind (digest-shell/digest-copilot), and a per-scope adapter pod must resolve
 # its pinned digest from the instance-keyed file. Before the fix a per-scope
-# pod for instance "intake" polled digest-intake forever (or resolved the
+# pod for instance "triage" polled digest-triage forever (or resolved the
 # wrong image) and the shim handshake never completed.
 #
 # Part 1 exercises the runner's lockfile parsing against the real workflow
@@ -17,7 +17,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER="$REPO_ROOT/k8s/pod-adapter-runner.sh"
 ADAPTER="$REPO_ROOT/k8s/pod-adapter-adapter.sh"
-LOCKFILE="$REPO_ROOT/linear_intake_v1/.criteria.lock.hcl"
+LOCKFILE="$REPO_ROOT/kanboard_triage_v1/.criteria.lock.hcl"
 
 fail() {
     echo "FAIL: $1" >&2
@@ -84,15 +84,15 @@ entry_digest() {
     ' "$lockfile"
 }
 
-expect_intake="sha256:$(entry_digest shell intake)"
-expect_copilot="sha256:$(entry_digest copilot intake_classifier)"
-[ -n "$expect_intake" ] || fail "oracle could not read the shell/intake entry from the lockfile"
-[ -n "$expect_copilot" ] || fail "oracle could not read the copilot/intake_classifier entry from the lockfile"
+expect_shell="sha256:$(entry_digest shell triage)"
+expect_copilot="sha256:$(entry_digest copilot triage_reviewer)"
+[ -n "$expect_shell" ] || fail "oracle could not read the shell/triage entry from the lockfile"
+[ -n "$expect_copilot" ] || fail "oracle could not read the copilot/triage_reviewer entry from the lockfile"
 
-[ "$(digest_of intake)" = "$expect_intake" ] || fail "digest-intake must be published keyed by adapter instance (CRI-140)"
-[ "$(digest_of shell)" = "$expect_intake" ] || fail "digest-shell must keep the kind-keyed shell digest"
+[ "$(digest_of triage)" = "$expect_shell" ] || fail "digest-triage must be published keyed by adapter instance (CRI-140)"
+[ "$(digest_of shell)" = "$expect_shell" ] || fail "digest-shell must keep the kind-keyed shell digest"
 [ "$(digest_of copilot)" = "$expect_copilot" ] || fail "digest-copilot must keep the kind-keyed copilot digest"
-[ -f "$run_dir/digest-intake_classifier" ] || fail "missing instance-keyed digest for intake_classifier"
+[ -f "$run_dir/digest-triage_reviewer" ] || fail "missing instance-keyed digest for triage_reviewer"
 [ -f "$run_dir/digest-triage_reviewer" ] || fail "missing instance-keyed digest for triage_reviewer"
 
 [ -z "$(adapter_digest nonexistentkind 2> /dev/null)" ] || \
@@ -138,9 +138,9 @@ chmod +x "$stubbin/criteria-adapter-remote-runner"
 printf '10.0.0.9:7778' > "$run_dir/host"
 printf 'per-run-token' > "$run_dir/token"
 # Distinct from the kind digest so the assertion proves the instance-keyed
-# file was used (the real lockfile currently pins intake and shell to the
+# file was used (the real lockfile currently pins the triage instance and its shell kind to the
 # same digest, which would make the resolution indistinguishable).
-printf 'sha256:intake-instance-pin' > "$run_dir/digest-intake"
+printf 'sha256:triage-instance-pin' > "$run_dir/digest-triage"
 
 run_adapter() {
     local out="$1"
@@ -152,12 +152,12 @@ run_adapter() {
     [ -s "$out" ] || fail "pod-adapter-adapter.sh never exec'd the adapter binary"
 }
 
-# The CRI-140 per-scope intake pod: kind shell, instance intake, no direct
+# The CRI-140 per-scope triage pod: kind shell, instance triage, no direct
 # env for host/token/digest — everything resolves from the discovery files,
 # and the digest comes from the instance-keyed file.
 run_adapter "$tmp/adapter-env" \
     ADAPTER_KIND=shell \
-    CRITERIA_ADAPTER_NAME=intake \
+    CRITERIA_ADAPTER_NAME=triage \
     CRITERIA_RUN_JOB_NAME=cri-140 \
     CRITERIA_RUN_DIR_ROOT="$tmp/runs"
 resolved="$(cat "$tmp/adapter-env")"
@@ -165,8 +165,8 @@ printf '%s' "$resolved" | grep -qx 'CRITERIA_REMOTE_HOST=10.0.0.9:7778' || \
     fail "adapter.sh must dial the discovery host file (POD_IP:7778), never the shim bind address"
 printf '%s' "$resolved" | grep -qx 'CRITERIA_REMOTE_TOKEN=per-run-token' || \
     fail "adapter.sh must resolve the per-run bearer token from discovery"
-printf '%s' "$resolved" | grep -qx 'CRITERIA_REMOTE_DIGEST=sha256:intake-instance-pin' || \
-    fail "adapter.sh must resolve the instance-keyed digest-intake over the kind-keyed file"
+printf '%s' "$resolved" | grep -qx 'CRITERIA_REMOTE_DIGEST=sha256:triage-instance-pin' || \
+    fail "adapter.sh must resolve the instance-keyed digest-triage over the kind-keyed file"
 
 # An instance with no instance-keyed file falls back to the kind digest, so
 # the poll loop always terminates.

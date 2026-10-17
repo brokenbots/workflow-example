@@ -64,9 +64,6 @@ repo_root = sys.argv[1]
 # must exist per file. workflow dirs contribute their subworkflow bodies, so
 # the counts ARE the deployed tree shape this suite pins.
 deployed = {
-    "linear_intake_v1/adapters.chcl": ["intake"],
-    "linear_triage_v1/adapters.chcl": ["triage"],
-    "linear_develop_v1/adapters.chcl": ["develop"],
     "kanboard_develop_v1/adapters.chcl": ["develop"],
     "kanboard_triage_v1/adapters.chcl": ["triage"],
     "qa_triage_v1/adapters.chcl": ["primary", "scratch"],
@@ -75,7 +72,6 @@ deployed = {
     "workstream_handler_v1/workflows/pair_programming_loop/adapters.chcl": ["worktree"],
     "workstream_handler_v1/workflows/branch_manager/adapters.chcl": ["worktree", "primary"],
     "workstream_handler_v1/workflows/pr_reviewer_loop/adapters.chcl": ["worktree"],
-    "linear_intake_v1/tests/credential_isolation/adapters.chcl": ["probe"],
 }
 
 # The multi-body deployed trees: root and subworkflow bodies must keep

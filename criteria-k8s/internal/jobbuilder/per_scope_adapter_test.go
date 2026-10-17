@@ -181,7 +181,8 @@ func TestBuildPerScopeAdapterPodFallsBackToAdapterNameWithoutType(t *testing.T) 
 
 func TestEngineProvisionWantedPayloadResolvesExistingImage(t *testing.T) {
 	// CRI-140 contract check for the pinned engine: the workflow image builds
-	// criteria >= v0.5.22 (linear_intake_v1/Dockerfile), which publishes the
+	// criteria >= v0.5.22 (the retired linear_intake_v1/Dockerfile pin that
+	// stayed the image-mode default until KB-281), which publishes the
 	// provision-wanted envelope with adapter_type (the implementation kind)
 	// in payload.data. The adapter node name ("intake") travels in "adapter".
 	// Running the nested envelope through the parser and the pod builder must

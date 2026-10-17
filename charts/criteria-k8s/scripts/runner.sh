@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+# KB-281: pod-adapter image-mode running is dormant-path compatibility for
+# prebuilt workflow images; the linear_* example trees are retired and the
+# runner ships only with the operator prerequisites ConfigMap (and the Helm
+# chart's copy). It stays functional for any prebuilt image that mounts one
+# workflow tree under /workflows and the linear-spc-backed secrets; the
+# chart's linear-spc retirement-header note covers why the mount survives.
+
 # Read the Linear API key from the CSI mount. The workflow-runner container is
 # intentionally not given any GitHub token mounts.
 LINEAR_API_KEY=""
@@ -56,9 +63,29 @@ mkdir -p "$run_dir"
 token=$(head -c 48 /dev/urandom | base64 | tr -cd 'a-zA-Z0-9' | head -c 32)
 printf '%s' "$token" > "$run_dir/token"
 
-# Resolve the pinned adapter digests from the workflow lockfile using the same
-# awk the local container entrypoint uses.
-lockfile=/workflows/linear_intake_v1/.criteria.lock.hcl
+# Resolve the workflow tree and bind $lockfile BEFORE any digest is read
+# (KB-281: the tree is no longer hardcoded to the retired linear intake tree).
+# Under `set -eu` the digest functions below dereference $lockfile as soon as
+# they are called, and a resolution block placed after this point would hit an
+# unbound variable: the digest files get written as a bare "sha256:" while the
+# publication pipeline masks the failure (review finding R1 on KB-281).
+# Image-mode Jobs mount exactly one workflow tree directory under $workflow_src,
+# located by its lockfile; mounting several trees, or none, is a loud error.
+# The mounted copy in $workflow_tmp is only consumed further down by the token
+# substitution and the apply step, so the early copy is safe.
+workflow_src=/workflows
+workflow_tmp=/tmp/workflows
+rm -rf "$workflow_tmp"
+cp -a "$workflow_src" "$workflow_tmp"
+workflow_tree="$(find "$workflow_src" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'test -f "$1/.criteria.lock.hcl" && basename "$1"' _ {} \;)"
+tree_count=$(printf '%s' "$workflow_tree" | grep -c . || true)
+if [ "$tree_count" -ne 1 ]; then
+    echo "expected exactly one workflow tree (with a .criteria.lock.hcl) under $workflow_src, found $tree_count" >&2
+    exit 1
+fi
+workflow_tree=$(printf '%s' "$workflow_tree" | head -1)
+lockfile="$workflow_src/$workflow_tree/.criteria.lock.hcl"
+
 
 adapter_digest() {
     kind="$1"
@@ -117,11 +144,6 @@ done
 # 0.0.0.0:7778 so separate adapter pods can reach it; local Docker runs keep
 # 127.0.0.1:7778 unchanged.
 printf '%s' "${POD_IP}:7778" > "$run_dir/host"
-
-workflow_src=/workflows
-workflow_tmp=/tmp/workflows
-rm -rf "$workflow_tmp"
-cp -a "$workflow_src" "$workflow_tmp"
 
 # Substitute the placeholders in every subworkflow's remote environment block
 # so each shim and the adapter pods share the generated bearer token. The
@@ -232,7 +254,7 @@ fi
 # Secret variables are passed as file: OriginRefs: the engine resolves them
 # through the FileProvider at run start (resolveSecretVarOrigins). Raw token
 # values never appear in argv - only the mount paths.
-/usr/local/bin/criteria apply "$workflow_tmp/linear_intake_v1" \
+/usr/local/bin/criteria apply "$workflow_tmp/$workflow_tree" \
     --var-file "$runtime_vars" \
     --var "linear_api_key=$LINEAR_API_KEY" \
     --var "workflow_github_token=file:/home/criteria/secrets/workflow_github_token" \

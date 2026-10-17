@@ -2,14 +2,15 @@
 # CRI-241: create the "Ready for Development" workflow state on the CRI team
 # via the Linear API.
 #
-# The criteria-develop route (k8s/examples/routes-configmap.yaml) routes any
-# ticket in the "Ready for Development" state to the linear_develop_v1
-# workflow, and the triage workflow's re-arm step (CRI-240, 9db68c3) moves
-# re-armed tickets to that state via set_ready_state — but none of that can
+# The criteria-develop route (k8s/examples/routes-configmap.yaml) used to
+# route any ticket in the "Ready for Development" state to the develop
+# workflow, and the triage workflow's re-arm step (CRI-240, 9db68c3) moved
+# re-armed tickets to that state via set_ready_state — but none of that could
 # fire until the state EXISTS on the Linear team. This script is the
 # deploy-time half of that pairing: run it BEFORE applying the routes
 # ConfigMap and rolling the operator/watcher (make apply-routes), so the
-# re-arm step's state name exists when it fires.
+# re-arm step's state name exists when it fires. (KB-281: the develop route
+# itself is retired, but the state still exists on the live team.)
 #
 # Every GraphQL shape below was introspected from the LIVE Linear schema
 # (not assumed):
@@ -22,8 +23,8 @@
 #   - The Team type has NO workflowStates field; the state lookup uses the
 #     ROOT `workflowStates(filter: {team: {id: {eq: $team}}, name:
 #     {eq: $name}})` query — the same idiom the CRI-240 re-arm step
-#     (linear_triage_v1/scripts/set_review_state.sh.tftpl) uses in
-#     production.
+#     (the CRI-240 re-arm step's set_review_state.sh.tftpl, formerly in the
+#     retired triage tree) uses in production.
 #   - workflowStateCreate returns WorkflowStatePayload {success,
 #     workflowState {id name type color ...}}.
 #

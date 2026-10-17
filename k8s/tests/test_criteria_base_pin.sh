@@ -88,11 +88,10 @@ set -euo pipefail
 # k8s/tests/test_criteria_base.sh and criteria-base/tests/smoke_test.sh in
 # the same change.
 #
-# Image-mode runs keep the baked workflow image (linear_intake_v1) built
-# from a released criteria tarball; no criteria release contains eae0181,
+# Image-mode runs keep the retained baked workflow image built from a
+# released criteria tarball; no criteria release contains eae0181,
 # so image-mode pairing is a coordinator decision and is NOT guarded here.
-# It is documented in linear_intake_v1/Dockerfile and the Makefile deploy
-# targets.
+# It is documented in the deploy targets.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"

@@ -12,42 +12,48 @@
 #   type=url (no image)   -> url-only: fetched at admission, minimal runtime.
 #   type=url + image      -> url+image: URL is content, image is process.
 #
-# The 'linear-intake-v1' library object and the 'linear-intake-url' object
-# keep the legacy intake behavior reachable: runs execute the baked
-# linear_intake_v1 image, or its url-only fetch, via a ticket's
-# workflows-label-group override — no route assigns them by default anymore.
+# KB-281 (2026-10-17): the linear_intake_v1 / linear_triage_v1 /
+# linear_develop_v1 trees and their url objects ('linear-intake-url',
+# 'linear-develop-url', 'linear-triage-url') plus the 'criteria-triage' /
+# 'criteria-develop' routes are RETIRED — removed from this example. The
+# 'linear-intake-v1' image object stays: it pins the frozen
+# localhost:5000/linear-intake-remote:dev registry image (nothing in this
+# repo builds that image anymore) and keeps the legacy intake behavior
+# reachable via a ticket's workflows-label-group override — no route
+# assigns it by default anymore.
 #
 # KB-103: 'configLibrary' holds per-repo runner config (build/test/ci-gate
 # commands). Each entry name doubles as the ConfigMap name the operator
 # renders at admission; routes bind to an entry with an optional 'configRef'
-# (the 'criteria-develop' route carries it so dev runs gate BEFORE PR open).
+# (the retired 'criteria-develop' route carried it so its dev runs gated
+# BEFORE PR open — no live route binds the 'workflow-example' entry today;
+# the entry stays as the repo's documented runner config).
 # A repo's own ConfigMap (named after its configLibrary entry, in the
 # execution namespace) can declare the same camelCase data keys; patching it
 # is a routing change for future refires only — admitted runs stamped the
 # pin fail-closed (ConfigRenderDrift).
 #
 # CRI-243 (plan CRI-214 M10.1, exit condition 3): the criteria project's
-# routes are the split pattern — its actual workflow. The 'criteria-triage'
-# route fires linear_triage_v1 on [Triage] and the 'criteria-develop' route
-# fires linear_develop_v1 on [Ready for Development], both url-only via git
-# URL with ADR-0005 D7 commit pins:
-#   - linear-triage-url is pinned to current main (c1708d9, 2026-10-07
-#     wave carrier: KB-153 shim teardown sync, KB-95/96 session fixes, KB-156
-#     lease-based shared sessions, KB-96 checkpoint crash fix).
-#     Its class is 'triage' (CRI-242/M9.5): triage work is read-only against the
-#     repo, so triage runs admit concurrently with any run on the same
-#     repoURL while dev runs serialize per repoURL.
-#   - linear-develop-url is pinned to current main (c1708d9); class stays
-#     omitted (defaults to dev).
+# routes followed the split pattern — the 'criteria-triage' route fired
+# linear_triage_v1 on [Triage] and the 'criteria-develop' route fired
+# linear_develop_v1 on [Ready for Development], url-only with ADR-0005 D7
+# commit pins ('triage' class on triage runs: read-only against the repo,
+# so triage runs admitted concurrently with any run on the same repoURL
+# while dev runs serialized per repoURL). KB-281 retired that estate with
+# the linear_* trees: those routes and objects are gone. CRI-242's class
+# semantics live on in the kanboard and cleanup routes.
 # CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
 # dirty label is a ROUTING SURFACE. The 'ticket-cleanup-url' object fetches
 # the ticket_cleanup_v1 tree (url-only, no image, on criteria-base — the
 # CRI-244 validation-run-a child shape: single shell adapter, no git
 # operations, so its only secret is the Linear API key) and the
 # 'criteria-cleanup' route fires it on tickets carrying the watcher's sticky
-# "criteria-dirty" label in [Ready for Development]. The tag-based route
-# beats the tag-less general develop route by the specific-over-general
-# priority (internal/routes/routes.go matchRoute). Its class is 'triage'
+# "criteria-dirty" label in [Ready for Development]. (KB-281: the tag-less
+# general develop route this route used to out-prioritize is retired, so
+# for tickets without the dirty label nothing matches — the watcher fails
+# closed; the tag-based route needs no priority tie-break anymore. The
+# internal/routes/routes.go specific-over-general resolution still governs
+# the remaining multi-candidate shapes.) Its class is 'triage'
 # (CRI-242): the cleanup pass is read-only against the repo.
 # The object ships WITHOUT a 'ref' pin deliberately: this repository squash
 # merges (the shipped pins all name main-landed commits — set in FOLLOW-UP
@@ -56,7 +62,7 @@
 # follow-up change must pin 'ref' to the merge commit that lands
 # ticket_cleanup_v1, per the same "any change to a subtree must re-pin its
 # object's 'ref'" rule below; until then the fetch resolves the tree at the
-# default branch head exactly like the pinless linear-intake-url object.
+# default branch head exactly like every other pinless url-only object.
 # Any change to either subtree must re-pin its object's 'ref' to the new
 # resolved commit SHA — ADR-0005 D7 enforces the pin fail-closed at
 # admission.
@@ -86,8 +92,8 @@
 # shape (classification -> switch/match routing -> confidence-gated human
 # approval). The 'decision-demo-url' object is ROUTE PREP ONLY for KB-207:
 # no routes[] entry fires it yet (the shipped example must keep exactly the
-# five live routes), it is url-only and pinless like the
-# linear-intake-url object, and KB-207 completes the wiring in one place —
+# three live routes), it is url-only and pinless, and KB-207 completes the
+# wiring in one place —
 # re-pinning 'ref' to the merge commit that lands decision_demo_v1 (the
 # CRI-241/CRI-243 follow-up convention), declaring the decision adapter
 # image in adapterImages, binding the System One credential surfaced by a
@@ -159,165 +165,6 @@ data:
               "kind": "pvc",
               "claim": "criteria-repo",
               "mountPath": "/repo"
-            }
-          ],
-          "secrets": [
-            {
-              "name": "linear-api-key",
-              "secretProviderClass": "linear-spc",
-              "mountPath": "/home/criteria/linear-secrets",
-              "env": {
-                "LINEAR_API_KEY": "linear_api_key"
-              }
-            },
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
-              }
-            }
-          ],
-          "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
-          }
-        },
-        "linear-intake-url": {
-          "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_intake_v1",
-          "namespace": "criteria-jobs",
-          "volumes": [
-            {
-              "name": "data",
-              "kind": "pvc",
-              "claim": "criteria-data",
-              "mountPath": "/data",
-              "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              }
-            },
-            {
-              "name": "repo",
-              "kind": "pvc",
-              "claim": "criteria-repo",
-              "mountPath": "/repo"
-            },
-            {
-              "name": "scratch",
-              "kind": "tmp",
-              "mountPath": "/tmp/scratch",
-              "sizeLimit": "8Gi"
-            }
-          ],
-          "secrets": [
-            {
-              "name": "linear-api-key",
-              "secretProviderClass": "linear-spc",
-              "mountPath": "/home/criteria/linear-secrets",
-              "env": {
-                "LINEAR_API_KEY": "linear_api_key"
-              }
-            },
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
-              }
-            }
-          ],
-          "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
-          }
-        },
-        "linear-develop-url": {
-          "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494",
-          "ref": "9e04399fd8dc0955bc7b77f199fea2e97f176494",
-          "namespace": "criteria-jobs",
-          "volumes": [
-            {
-              "name": "data",
-              "kind": "pvc",
-              "claim": "criteria-data",
-              "mountPath": "/data",
-              "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              }
-            },
-            {
-              "name": "repo",
-              "kind": "pvc",
-              "claim": "criteria-repo",
-              "mountPath": "/repo"
-            },
-            {
-              "name": "scratch",
-              "kind": "tmp",
-              "mountPath": "/tmp/scratch",
-              "sizeLimit": "8Gi"
-            }
-          ],
-          "secrets": [
-            {
-              "name": "linear-api-key",
-              "secretProviderClass": "linear-spc",
-              "mountPath": "/home/criteria/linear-secrets",
-              "env": {
-                "LINEAR_API_KEY": "linear_api_key"
-              }
-            },
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
-              }
-            }
-          ],
-          "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
-          }
-        },
-        "linear-triage-url": {
-          "type": "url",
-          "url": "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494",
-          "ref": "9e04399fd8dc0955bc7b77f199fea2e97f176494",
-          "class": "triage",
-          "namespace": "criteria-jobs",
-          "volumes": [
-            {
-              "name": "data",
-              "kind": "pvc",
-              "claim": "criteria-data",
-              "mountPath": "/data",
-              "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              }
-            },
-            {
-              "name": "repo",
-              "kind": "pvc",
-              "claim": "criteria-repo",
-              "mountPath": "/repo"
-            },
-            {
-              "name": "scratch",
-              "kind": "tmp",
-              "mountPath": "/tmp/scratch",
-              "sizeLimit": "8Gi"
             }
           ],
           "secrets": [
@@ -533,23 +380,6 @@ data:
         }
       },
       "routes": [
-        {
-          "name": "criteria-triage",
-          "workflow": "linear-triage-url",
-          "project": "Criteria K8s Workflow Runner",
-          "states": [
-            "Triage"
-          ]
-        },
-        {
-          "name": "criteria-develop",
-          "workflow": "linear-develop-url",
-          "project": "Criteria K8s Workflow Runner",
-          "configRef": "workflow-example",
-          "states": [
-            "Ready for Development"
-          ]
-        },
         {
           "name": "criteria-cleanup",
           "workflow": "ticket-cleanup-url",
