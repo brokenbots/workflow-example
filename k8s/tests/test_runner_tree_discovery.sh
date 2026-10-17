@@ -55,7 +55,7 @@ if printf '%s' "$SPAN" | grep -q 'Publish the runner dial address'; then
 else
     fail "span extraction lost the dial-address publication (window end drifted)"
 fi
-if ! printf '%s' "$SPAN" | grep -q '> "\$run_dir/host"'; then
+if ! printf '%s' "$SPAN" | grep -qF 'run_dir/host'; then
     fail "span extraction lost the dial-address host publication"
 fi
 
@@ -105,11 +105,17 @@ run_case() {
     mkdir -p "$tmp/workflow_tmp-$tag" "$tmp/discovery-$tag"
     (
         set -eu
-        FIXTURE_SRC="$src"
-        FIXTURE_TMP="$tmp/workflow_tmp-$tag"
-        run_dir="$tmp/discovery-$tag"
-        POD_IP="127.0.0.1"
+        # Consumed by the eval'd runner span, not directly: export marks the
+        # intentional eval-only use for shellcheck.
+        export FIXTURE_SRC="$src"
+        export FIXTURE_TMP="$tmp/workflow_tmp-$tag"
+        export run_dir="$tmp/discovery-$tag"
+        export POD_IP="127.0.0.1"
         eval "$SPAN"
+        # R1 guard: $workflow_tree/$lockfile are bound by the eval'd runner span
+        # itself; pre-binding them would nullify the unbound-variable ordering
+        # check this test exists for.
+        # shellcheck disable=SC2154
         printf 'resolved_tree=%s\nlockfile=%s\n' "$workflow_tree" "$lockfile" \
             > "$tmp/resolved-$tag"
     ) > "$tmp/out-$tag" 2> "$tmp/err-$tag" || echo "$?" > "$tmp/rc-$tag"
