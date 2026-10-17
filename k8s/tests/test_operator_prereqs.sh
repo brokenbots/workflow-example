@@ -79,7 +79,7 @@ lacks 'envFrom'
 has 'name: pod-adapter-scripts'
 cmp_embedded() {
     local key="$1" canonical="$2" block
-    block="$(awk -v key="$key: |" 'index($0, key) {flag=1; next} flag && /^    [^ ]/ {flag=0} flag {gsub(/^    /,""); print}' "$MANIFEST")"
+    block="$(awk -v key="$key: |" 'index($0, key) {flag=1; next} flag && /^  [^ ]/ {flag=0} flag {gsub(/^    /,""); print}' "$MANIFEST")"
     [ -n "$block" ] || fail "no embedded $key document in pod-adapter-scripts ConfigMap"
     diff <(printf '%s\n' "$block") "$canonical" >/dev/null || \
         fail "embedded $key drifted from $canonical (run k8s/generate-pod-adapter-manifest.sh)"
