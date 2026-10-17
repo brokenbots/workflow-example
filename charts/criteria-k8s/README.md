@@ -140,9 +140,11 @@ kubectl apply -f charts/criteria-k8s/crds/criteria.brokenbots.dev_criteriaruns.y
 
 ## Superseded legacy files
 
-The chart supersedes the manual launch paths. `k8s/05-job-template.yaml`,
-`k8s/job-cri-27.yaml*` and `k8s/launch-*.sh` are legacy/manual launch paths
-that should be deleted (the operator reconciles `CriteriaRun`s into Jobs).
+The chart supersedes the manual launch paths. `k8s/05-job-template.yaml` and
+`k8s/launch-ticket-job.sh` are legacy/manual launch paths that should be
+deleted eventually; the KB-281 retirement removed the pod-adapter Job-group
+example stanzas (`k8s/job-cri-27.yaml*`, `k8s/launch-pod-adapter-job.sh`) —
+the operator reconciles `CriteriaRun`s into Jobs.
 
 ## Keeping the scripts ConfigMap in sync
 

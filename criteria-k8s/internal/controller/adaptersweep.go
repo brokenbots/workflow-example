@@ -37,8 +37,8 @@ import (
 //
 // Objects without a CriteriaRun ownerReference are never deleted, even when
 // they carry a run label: the label is attribution, not ownership. Adapter
-// Jobs and Pods of manually launched runs (k8s/launch-pod-adapter-job.sh)
-// are labeled but have no CriteriaRun, so an empty lookup by run name proves
+// Jobs and Pods of manually launched runs are labeled but have no CriteriaRun,
+// so an empty lookup by run name proves
 // nothing about the object being orphaned. They are left untouched and
 // logged: the sweep only ever deletes what it can prove is orphaned via a
 // CriteriaRun ownerReference.

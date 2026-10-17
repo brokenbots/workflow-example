@@ -109,7 +109,7 @@ func getSweptPod(t *testing.T, cl client.Client, namespace, name string) (*corev
 }
 
 // A run label alone is attribution, not ownership: manually launched runs
-// (k8s/launch-pod-adapter-job.sh) label their adapter Jobs and Pods
+// label their adapter Jobs and Pods
 // criteria.brokenbots.dev/run=<job name> without any CriteriaRun existing
 // for them. A label-only lookup that comes up empty must never trigger a
 // delete — the sweep would otherwise kill live manually launched work.
@@ -234,7 +234,7 @@ func TestAdapterSweeperIsNamespaceScoped(t *testing.T) {
 }
 
 // A labeled legacy adapter Job with no ownerReference is never swept — same
-// ownership-evidence rule as pods. Manually launched runs (k8s/launch-pod-adapter-job.sh)
+// ownership-evidence rule as pods. Manually launched runs
 // label their adapter Jobs without any CriteriaRun existing for them.
 func TestAdapterSweeperKeepsLabelOnlyLegacyAdapterJobOfMissingRun(t *testing.T) {
 	job := adapterJob("pod-adapter-cri-27-adapter", "default", "pod-adapter-cri-27")
