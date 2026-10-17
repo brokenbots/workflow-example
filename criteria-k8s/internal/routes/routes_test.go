@@ -232,6 +232,70 @@ func TestShippedExampleResolvesDevRoute(t *testing.T) {
 	}
 }
 
+// KB-273: the shipped 'castle' configLibrary entry mirrors the live
+// criteria-jobs entry (created 2026-10-16 on KB-270) with the KB-273 gate
+// split. The live pre-split gate ran the parapet npm suite on whatever
+// node the session pod ships; castle's shell peer (Node 24) produced the
+// cross-realm AbortSignal false-failure wall of KB-270 run f5c205c2, and
+// the suite is only green under Node 20 — the version castle's own GitHub
+// CI pins (README-documented trap: verify parapet the CI way). The
+// run-side gate therefore keeps the Go/proto legs in-session and pins the
+// parapet leg (npm ci + test:run) to the Node 20 runtime on the PVC
+// toolchain at /data/tools/node20; the vite production build (make build's
+// build-parapet leg) stays GitHub-CI-only, and proto-check-drift runs
+// after the parapet npm ci because its generated-bindings plugins come
+// from parapet/node_modules/.bin. If this test fails, the shipped example
+// drifted back toward the ambient-node npm gate and live/tree diverged
+// (ConfigRenderDrift): re-sync both, don't ship the drift.
+func TestShippedExampleCastleGatePinsNode20ParapetSuite(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("reading shipped example: %v", err)
+	}
+	p, err := Parse([]byte(extractRoutesJSON(t, string(data))))
+	if err != nil {
+		t.Fatalf("Parse(shipped example) failed: %v", err)
+	}
+	castle, ok := p.ConfigLibrary["castle"]
+	if !ok {
+		t.Fatalf("configLibrary missing the castle entry (mirrors the live criteria-jobs CM)")
+	}
+	if castle.BuildCmd != "make build-castle" {
+		t.Errorf("castle buildCmd = %q, want make build-castle (%q: the build-parapet npm leg stays GitHub-CI-only)", castle.BuildCmd, castle.BuildCmd)
+	}
+	if castle.TestCmd != "make test" {
+		t.Errorf("castle testCmd = %q, want make test", castle.TestCmd)
+	}
+	gate := castle.CIGateCmd
+	// The in-session legs: Go/proto gates under the PVC toolchain path,
+	// castle's CGO race suite, and the parapet suite under the pinned
+	// Node 20 runtime — never the ambient session pod's node.
+	for _, leg := range []string{
+		"/data/tools/node20/bin",
+		"export CGO_ENABLED=1",
+		"make build-castle test-conformance proto-lint",
+		"(cd castle && CGO_ENABLED=1 go test -race ./...)",
+		"(cd parapet && npm ci && npm run test:run)",
+		"make proto-check-drift",
+	} {
+		if !strings.Contains(gate, leg) {
+			t.Errorf("castle ciGateCmd missing %q: %q", leg, gate)
+		}
+	}
+	// The gate is exactly the split: no monolithic make test/build goals
+	// (the KB-270-era chain carried them and ran npm on the ambient node)
+	// and every npm invocation belongs to the pinned parapet leg.
+	if strings.Contains(gate, "make build test") {
+		t.Errorf("castle ciGateCmd reintroduced the monolithic KB-270-era goals: %q", gate)
+	}
+	if strings.Contains(gate, " make test;") || strings.Contains(gate, " make test &&") {
+		t.Errorf("castle ciGateCmd runs make test directly: %q (parapet leg must stay npm-pinned)", gate)
+	}
+	if n := strings.Count(gate, "npm"); n != 2 {
+		t.Errorf("castle ciGateCmd carries %d npm invocations, want exactly 2 (ci + test:run, only inside the pinned parapet leg): %q", n, gate)
+	}
+}
+
 // CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
 // dirty label is a ROUTING SURFACE. A ticket carrying the watcher's sticky
 // "criteria-dirty" label in "Ready for Development" resolves to the
