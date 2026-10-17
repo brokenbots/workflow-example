@@ -1254,8 +1254,8 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 
 	var jobsAfterRelease batchv1.JobList
 	require.NoError(t, cl.List(context.Background(), &jobsAfterRelease, client.InNamespace("default")))
-	assert.Len(t, jobsAfterRelease.Items, 3,
-		"A's terminal pass admits B in queue state without actuating it")
+	assert.Empty(t, jobsAfterRelease.Items,
+		"A's terminal pass deletes A's child Jobs (KB-275) and admits B in queue state without actuating it")
 
 	var releasedB criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &releasedB))
@@ -1269,7 +1269,7 @@ func TestQueueSerializesSameRepoRuns(t *testing.T) {
 
 	var allJobs batchv1.JobList
 	require.NoError(t, cl.List(context.Background(), &allJobs, client.InNamespace("default")))
-	assert.Len(t, allJobs.Items, 6, "B's own reconcile pass creates its jobs")
+	assert.Len(t, allJobs.Items, 3, "B's own reconcile pass creates its jobs (A's are already deleted)")
 
 	var admittedB criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(runB), &admittedB))

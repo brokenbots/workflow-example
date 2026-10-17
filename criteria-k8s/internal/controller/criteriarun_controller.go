@@ -111,6 +111,16 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Release any stale admission slot so the next queued run is admitted.
 	if isTerminalPhase(run.Status.Phase) {
 		r.Queue.Release(&run)
+
+		// Terminal-cleanup guarantee (KB-275): a run with a terminal resolved
+		// view never keeps child Jobs, on EVERY reconcile pass — the resolved
+		// view is the only source, so a freshly restarted operator (no
+		// in-memory state) enforces it here too. Already-gone Jobs make this
+		// a no-op, idempotent across resyncs. The adapter-pod sweep and the
+		// castle re-derivation below are independent of this cleanup.
+		if err := r.deleteTerminalChildJobs(ctx, &run, logger); err != nil {
+			return ctrl.Result{}, err
+		}
 		// Stale per-scope adapters of a terminal run: the engine releases
 		// every scope when the run ends, so any surviving adapter pod dials a
 		// deregistered shim forever ("scope ... is not registered" every 2s)
@@ -284,6 +294,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	desiredJobs := jobbuilder.BuildAll(&run, resolvedDefaults)
 
 	var runnerJob *batchv1.Job
+	provisioned := false
 	for _, desired := range desiredJobs {
 		var found batchv1.Job
 		err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &found)
@@ -295,6 +306,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if err := r.Create(ctx, desired); err != nil {
 				return ctrl.Result{}, fmt.Errorf("creating job %s: %w", desired.Name, err)
 			}
+			provisioned = true
 			found = *desired
 		} else if err != nil {
 			return ctrl.Result{}, fmt.Errorf("getting job %s: %w", desired.Name, err)
@@ -362,6 +374,19 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	phase := update.Status.Phase
+
+	// Terminal-cleanup guarantee (KB-275): this pass just resolved the run's
+	// view. When it is terminal and the pass is not mid-provisioning (no
+	// child Job was just created for this run), delete the child Jobs now —
+	// a run whose runner Job completed on its watch must not keep them until
+	// some later status write reaches the persisted-terminal branch. A pass
+	// that provisioned a Job defers the reap to its next reconcile, where
+	// the terminal phase is persisted and the terminal branch deletes it.
+	if isTerminalPhase(phase) && !provisioned {
+		if err := r.deleteTerminalChildJobs(ctx, &run, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	// CRI-208 operator signal table — actuation only, never the state path.
 	// The signals ride the castle run record's status (obs.RunStatus, the

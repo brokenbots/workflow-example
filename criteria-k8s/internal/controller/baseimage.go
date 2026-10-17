@@ -177,16 +177,39 @@ func markBaseImageMismatch(update *criteriav1.CriteriaRun, generation int64, pin
 // job names derive from the run identity only, so the desired set's
 // namespaces and names are stable regardless of defaults.
 func (r *CriteriaRunReconciler) deleteChildJobs(ctx context.Context, run *criteriav1.CriteriaRun) error {
+	_, err := r.deleteJobs(ctx, run, metav1.DeletePropagationForeground)
+	return err
+}
+
+// deleteTerminalChildJobs enforces the terminal-cleanup guarantee (KB-275):
+// a run whose resolved phase is terminal never keeps child Jobs, on every
+// reconcile pass. Background propagation takes the Job off the API
+// immediately and drops its pods with it; already-gone Jobs are tolerated,
+// so a terminal run without child Jobs is a no-op reconcile.
+func (r *CriteriaRunReconciler) deleteTerminalChildJobs(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) error {
+	deleted, err := r.deleteJobs(ctx, run, metav1.DeletePropagationBackground)
+	for _, name := range deleted {
+		logger.Info("deleting child Job of terminal CriteriaRun", "CriteriaRun", run.Name, "job", name)
+	}
+	return err
+}
+
+// deleteJobs deletes the child Jobs the job builders would reconcile for run
+// with the given propagation policy, tolerating already-gone Jobs and
+// returning the names of the Jobs actually deleted.
+func (r *CriteriaRunReconciler) deleteJobs(ctx context.Context, run *criteriav1.CriteriaRun, propagation metav1.DeletionPropagation) ([]string, error) {
+	var deleted []string
 	for _, desired := range jobbuilder.BuildAll(run, r.Defaults) {
 		var job batchv1.Job
 		err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &job)
 		if err == nil {
-			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("deleting child job %s: %w", desired.Name, err)
+			if err := r.Delete(ctx, &job, client.PropagationPolicy(propagation)); err != nil && !apierrors.IsNotFound(err) {
+				return deleted, fmt.Errorf("deleting child job %s: %w", desired.Name, err)
 			}
+			deleted = append(deleted, desired.Name)
 		} else if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("getting child job %s for deletion: %w", desired.Name, err)
+			return deleted, fmt.Errorf("getting child job %s for deletion: %w", desired.Name, err)
 		}
 	}
-	return nil
+	return deleted, nil
 }

@@ -478,11 +478,14 @@ func TestReconcileTerminalRunIgnoresBaseImageEnv(t *testing.T) {
 
 	reconcileOnce(t, r, run)
 
+	// The env change is ignored for a terminal run (no mismatch condition,
+	// no replay), but the terminal-cleanup guarantee (KB-275) deletes the
+	// completed Job on that same pass.
 	var updated criteriav1.CriteriaRun
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
 	assert.Equal(t, criteriav1.PhaseSucceeded, updated.Status.Phase)
 	_, found := runnerJobImageFor(t, cl, run)
-	assert.True(t, found, "a completed run's Job must not be deleted")
+	assert.False(t, found, "a terminal run's child Job must be deleted (KB-275)")
 	_, ok := conditionFor(updated.Status, controller.ConditionBaseImageMismatch)
 	assert.False(t, ok)
 }
