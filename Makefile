@@ -113,6 +113,10 @@ validate:
 	# reason into a downstream prompt declares require_comment. Fails closed;
 	# trees are auto-discovered, no allowlists.
 	@node scripts/tree-outcome-flow.mjs
+	# KB-254: the harness-expectations matrix of record (the harness series
+	# anchor) — its guard fails closed on a missing/duplicate item id, a
+	# broken series-slice assignment, or a conventions regression.
+	@node scripts/harness_matrix.mjs
 
 # CRI-241 + CRI-243: apply the criteria-routes ConfigMap live. Deploy
 # ordering for the CRI-243 cutover (the criteria project's routes become
@@ -188,6 +192,8 @@ test: validate test-criteria-k8s
 	./decision_demo_local_v1/tests/test_decision_demo_runtime.sh
 	@echo "Running outcome-reason flow rule regression test (KB-217)..."
 	./k8s/tests/test_outcome_reason_flow.sh
+	@echo "Running harness-expectations matrix guard regression test (KB-254)..."
+	./k8s/tests/test_harness_expectations.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
 	./k8s/tests/test_env_listen_ports.sh
 
@@ -223,7 +229,8 @@ lint: lint-go
 		k8s/tests/test_criteria_base_pin.sh \
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
-		k8s/tests/test_outcome_reason_flow.sh
+		k8s/tests/test_outcome_reason_flow.sh \
+		k8s/tests/test_harness_expectations.sh
 
 # The Go lint leg. Full-CI gate lines invoke `make lint-go` explicitly
 # (see the develop-loop ci_gate step), so this must exist under this name.
