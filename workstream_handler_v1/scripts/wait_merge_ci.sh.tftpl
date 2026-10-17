@@ -85,7 +85,7 @@ while :; do
             continue
         fi
     fi
-    echo "sha=$sha"
+    echo "merge_ci_poll=squash sha ${sha}" >&2
 
     runs_rc=0
     runs=$(gh api "repos/$owner/$repo/commits/$sha/check-runs") || runs_rc=$?
@@ -103,7 +103,9 @@ while :; do
     if [ "$total" -le 0 ]; then
         # No check runs registered for the squash commit yet. Distinguish
         # "CI hasn't arrived" from "repo has no Actions at all" (CRI-90).
-        wf_count=$(gh api "repos/$owner/$repo/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+        # gh_retry captures gh's raw stdout, so the reduce happens here, not
+        # though gh's --jq (which the wrapper path can silently bypass).
+        wf_count=$(gh api "repos/$owner/$repo/actions/workflows" 2>/dev/null | jq -r '.total_count // -1' 2>/dev/null || echo -1)
         case "$wf_count" in ''|*[!0-9]*) wf_count=-1 ;; esac
         if [ "$wf_count" = "0" ]; then
             emit_verdict "merge_ci=green" "sha=$sha" \
