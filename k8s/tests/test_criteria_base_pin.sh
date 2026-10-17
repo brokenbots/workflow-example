@@ -96,7 +96,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-AUDITED_COMMIT="6e77270ad57f347980cd1749afd78ba70129c27b"
+# Re-audited to d9fe5881 (v0.5.55, 2026-10-17): pin moves one release past the last recorded
+# AUDITED_COMMIT 6e77270 (v0.5.53). Delta 6e77270..d9fe5881 spans TWO releases:
+#   v0.5.54 (0969b641): KB-246 binary-path type-half completion (#535), KB-259 eval-functions
+#     extension (#537), KB-264 templatefile numeric-arg format() pre-string-pipe (#538),
+#     KB-266 compile-time templatefile-var typing gate (#539) — engine-internal only;
+#     proto/ diff EMPTY (verified by range audit); no event contract change.
+#   v0.5.55 (d9fe5881): TEST-ONLY — KB-245 legacy shim wiring test removal (net -81 lines
+#     in internal/engine tests); zero runtime code.
+# proto/ delta over the whole span: EMPTY; adapter wire v2 untouched (criteria-base builds
+# the engine, not the SDK). Castle ingest is envelope-verbatim, consumer-safe.
+AUDITED_COMMIT="d9fe5881a29f7aa7009a052398eea59c6743913c"
 
 fail() {
     echo "FAIL: $1" >&2
