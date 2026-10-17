@@ -2,9 +2,11 @@
 # Regression test for k8s/create-ready-for-development-state.sh (CRI-241).
 #
 # The state creation is the deploy-time pairing half required before the
-# criteria-develop route and the watcher rollout can go live: the triage
-# workflow's re-arm step (CRI-240) moves tickets to "Ready for Development",
-# which only works once the state exists on the Linear team.
+# criteria-cleanup route and the watcher rollout can go live: tickets move to
+# "Ready for Development" when a workstream hands a card back for rework
+# (CRI-240-era wiring), which only works once the state exists on the Linear
+# team. KB-281: the linear triage tree is retired; the state name stays
+# identical to what the kept cleanup route and constant expect.
 #
 # shellcheck disable=SC2016
 
@@ -377,29 +379,25 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "LINEAR_API_KEY is not set" || \
 ok "missing LINEAR_API_KEY: loud failure, zero requests"
 
 # ── 10. cross-file consistency of the state name (CRI-241) ────────────────
-# The state name is written in three places that must never drift apart:
-# the triage workflow's linear_ready_state default (set_ready_state moves
-# tickets there), the script's STATE_NAME constant (creates it), and the
-# criteria-develop route's states list (fires on it).
+# The state name is written in two places that must never drift apart: the
+# script's STATE_NAME constant (creates it) and the criteria-cleanup route's
+# states list (fires on it). KB-281: the linear triage tree that held the
+# third copy of the name is retired.
 STATE_NAME_EXPECTED="Ready for Development"
 
 routes_json="$(awk '/^  routes.json: \|$/ {flag=1; next} flag && !/^    / {exit} flag {print substr($0, 5)}' \
     "$REPO_ROOT/k8s/examples/routes-configmap.yaml")"
 [ -n "$routes_json" ] || fail "consistency: could not extract routes.json from the shipped example"
 if ! jq -e --arg s "$STATE_NAME_EXPECTED" \
-    '.routes[] | select(.name == "criteria-develop") | .states == [$s]' \
+    '.routes[] | select(.name == "criteria-cleanup") | .states == [$s]' \
     >/dev/null <<<"$routes_json"; then
-    fail "consistency: criteria-develop route states do not match '$STATE_NAME_EXPECTED'"
+    fail "consistency: criteria-cleanup route states do not match '$STATE_NAME_EXPECTED'"
 fi
 
 if ! grep -Fq 'readonly STATE_NAME="Ready for Development"' "$SCRIPT"; then
     fail "consistency: script STATE_NAME constant drifted from '$STATE_NAME_EXPECTED'"
 fi
 
-if ! grep -A5 'variable "linear_ready_state"' "$REPO_ROOT/linear_triage_v1/variables.chcl" \
-    | grep -Fq "default     = \"$STATE_NAME_EXPECTED\""; then
-    fail "consistency: linear_triage_v1 linear_ready_state default drifted from '$STATE_NAME_EXPECTED'"
-fi
-ok "consistency: state name identical across triage variable, script constant, and route states"
+ok "consistency: state name identical across script constant and route states"
 
 echo "PASS: create-ready-for-development-state regression tests"

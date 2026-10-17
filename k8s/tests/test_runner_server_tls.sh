@@ -69,12 +69,12 @@ run_runner() { # out_env out_args castle_addr
     SANDBOXES+=("$sb")
 
     mkdir -p "$sb/bin" "$sb/secrets" "$sb/home" "$sb/data" \
-        "$sb/workflows/linear_intake_v1" "$sb/intake" "$sb/triage"
+        "$sb/workflows/kanboard_triage_v1" "$sb/intake" "$sb/triage"
     printf 'test-linear-api-key' > "$sb/secrets/linear_api_key"
 
     # Minimal per-repo fixtures: the lockfile entries the runner resolves for
     # adapter digest discovery, and an adapters.chcl for the token/listen sed.
-    cat > "$sb/workflows/linear_intake_v1/.criteria.lock.hcl" <<'EOF'
+    cat > "$sb/workflows/kanboard_triage_v1/.criteria.lock.hcl" <<'EOF'
 adapter "shell" "intake" {
   reference       = "ghcr.io/brokenbots/criteria-adapter-shell:0.0.0-test"
   resolved_digest = "sha256:000000000000000000000000000000000000000000000000000000000000shell"
@@ -84,7 +84,7 @@ adapter "copilot" "intake_classifier" {
   resolved_digest = "sha256:000000000000000000000000000000000000000000000000000000000copilot"
 }
 EOF
-    printf 'listen_address = "127.0.0.1:7778"\n' > "$sb/workflows/linear_intake_v1/adapters.chcl"
+    printf 'listen_address = "127.0.0.1:7778"\n' > "$sb/workflows/kanboard_triage_v1/adapters.chcl"
 
     cat > "$sb/bin/criteria" <<'EOF'
 #!/bin/sh
