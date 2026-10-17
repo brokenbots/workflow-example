@@ -117,7 +117,7 @@ transport observation, not development.
 | **A2** | Digest-pin resolve/miss: a lockfile-pinned digest resolves and the session opens with that OCI digest; a mismatching digest is refused BEFORE any session opens (D7 fail-closed) and no pod spawns. | `provision_wanted` `digest` vs lockfile pin in the runner stream; refusal record in runner events, zero pod-create events for the miss. |
 | **A3** | Definition-identity grammar end-to-end: the workflow definition identity (name + version + criteria bound) resolves from compile through admission to the peer-composition identity `<type>.<name>` per environment. | WorkflowGraphs member list + peer composition grouping (definition identity + environment identity) in peer logs. |
 | **A4** | Scope-set dialing: ONE environment pod serves MANY scopes of one run (distinct (scope, adapter) pairs), and the env-wide kind check resolves the adapter image from `adapter_type` (never the node name). | Number of `provision_wanted` emissions vs pod creates; `adapter_type` carried verbatim; per-scope peer-builder manifest shapes. |
-| **A5** | Child lifecycle: a clean-exit child never respawns (verbatim spawn spec observed); a crashed child spawns/respawns only per its declared `on_crash`; `kill_child` is never emitted on the harness's healthy path; at most one live pod per definition name (per-definition mutex). | Peer logs + operator pod create/delete counts for the run. |
+| **A5** | Child lifecycle (the task's four expectations, verbatim): a clean-exit child respawns per the verbatim spawn spec ("clean-exit respawn verbatim spec" clause observed); a crashed child NEVER respawns (crash-never-respawn; the harness trees leave the language-default `on_crash` = `fail` in force, so no crash respawn is declared or observed); `kill_child` is never emitted on the harness's healthy path; at most one live pod per definition name (per-definition mutex). | Peer logs (clean-exit respawn record matching the spawn spec verbatim; zero respawned pod creates after the crash stimulus) + operator pod create/delete counts for the run. |
 | **A6** | Rotation/release tombstones: `release` per (scope, environment) tears the corresponding pod down promptly; a rotated `accept_token` on an already-released pair never resurrects it (tombstone). | `release` events + operator pod deletion events; absence of a second `provision_wanted` after tombstone. |
 
 ## B. Operator composition, graph-carrier shape (tree `harness_wire_v1`, card 276)
@@ -207,8 +207,9 @@ environment; asserts pod/manifest shapes from operator + peer logs.
 ## Guard
 
 `scripts/harness_matrix.mjs` (wired into `make validate`) fails closed when
-this matrix is incomplete or self-inconsistent: missing/duplicate item ids,
-wrong count (must be 37 + 12), a slice assignment missing from the series map,
-a KNOWN GAP without its pinned marker, or a conventions block missing one of
-the of-record facts above. `k8s/tests/test_harness_expectations.sh` runs the
-same guard for the CI shell-test loop.
+this matrix is incomplete or self-inconsistent: missing/duplicate/unknown item
+ids with an exact row-count check (must be 37 + 12), a slice assignment missing
+from the series map, a KNOWN GAP without its pinned marker, or a conventions
+block missing one of the of-record facts above.
+`k8s/tests/test_harness_expectations.sh` runs the same guard for the CI
+shell-test loop.
