@@ -98,6 +98,23 @@ data "internal" "branch_scope_retries" {
     value = 0
 }
 
+// KB-272: merge_pr's post-merge wait verdict (wait_merge_ci stdout, first
+// line "merge_ci=green|failed|timeout" plus sha/evidence lines). On a
+// non-green verdict the fail_merge_ci bookkeeping step composes the typed
+// failure_reason from it; the parent trees park the ticket in Review.
+data "internal" "merge_ci_verdict" {
+    type  = string
+    value = ""
+}
+
+// KB-272: merge_pr's protocol stdout, captured for wait_merge_ci — the PR
+// number and the squash sha travel from the merge step to the wait step so
+// the wait never re-derives them.
+data "internal" "merge_pr_result" {
+    type  = string
+    value = ""
+}
+
 subworkflow "branch_manager" {
     source = "./workflows/branch_manager"
     input = {
@@ -770,7 +787,13 @@ step "merge_pr" {
     // blips (KB-235 doubled the schedule to 30/60/120s); the step timeout
     // covers the worst-case wall clock.
     timeout = "600s"
-    outcome "success" { next = step.teardown_worktree }
+    outcome "success" {
+        next = step.wait_merge_ci
+        write {
+            target = data.internal.merge_pr_result.value
+            value  = output.stdout
+        }
+    }
     // A refused merge is usually actionable, not terminal: an unresolved review
     // thread (GitHub's required_conversation_resolution), a bot review that
     // landed after the approving pass, or an approval dismissed by a new commit.
@@ -784,6 +807,84 @@ step "merge_pr" {
             value = templatefile("./agents/merge_refused.md.tftpl", {
                 stdout = output.stdout
             })
+        }
+    }
+}
+
+// KB-272: close the standing merge gate inside the workflow. The gate binds
+// mergers: after ANY merge, wait for the squash commit's OWN CI to complete
+// green BEFORE reconciling the kanboard ticket to Done. The parent trees'
+// post-merge bookkeeping (comment_handler_done -> set_done_state) trusts this
+// handler's success, so the gate must close here: green -> the existing done
+// arm; red/timeout -> the assistance lane (typed failure_reason, parent parks
+// the ticket in Review, NO Done move). The script is bounded (10 min, 30s
+// cadence, gh_retry transport wrapper); the sha comes straight from
+// merge_pr's output, so the wait never re-derives it.
+step "wait_merge_ci" {
+    target = adapter.shell.sh
+    // KB-219: gh_retry can add up to ~210s of backoff inside the wait script
+    // on top of its own deadline; the step timeout covers the worst case.
+    timeout = "900s"
+    input {
+        command = templatefile("./scripts/wait_merge_ci.sh.tftpl", {
+            criteria_value_1 = data.internal.merge_pr_result.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
+        })
+    }
+    outcome "success" {
+        next = switch.route_merge_ci
+        write {
+            target = data.internal.merge_ci_verdict.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "merge_ci_failed: " + data.internal.pr_url.value + " — wait_merge_ci failed before reaching a verdict: " + trimspace(output.stderr)
+        }
+    }
+}
+
+// KB-272: only a completed-green merge-commit CI rollup proceeds to the done
+// arm. failed/timeout/anything-else falls to the assistance lane — fail
+// closed, never a provisional Done.
+switch "route_merge_ci" {
+    match {
+        condition = startswith(steps.wait_merge_ci.stdout, "merge_ci=green")
+        next      = step.teardown_worktree
+    }
+    default { next = step.fail_merge_ci }
+}
+
+// KB-272: red or timeout on the squash commit's own CI is exactly the
+// "not discoverable state" the failed terminal exists for: the run fails
+// loudly with a typed reason and the parent's bookkeeping (comment +
+// review-column parking) runs instead of the Done reconcile — the card is
+// never stamped Done over a merge whose CI never went green. A red merge
+// commit is developer-actionable, but the assistance lane is the right
+// terminal here: the tree already converged (reviewer-approved, merged),
+// and re-running the develop loop over the same commit cannot help — a human
+// or a new push needs to decide.
+step "fail_merge_ci" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'merge-commit CI did not complete green after the squash merge — failing the run loudly instead of reconciling Done (KB-272)'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "merge_ci_failed: " + data.internal.pr_url.value + " — the squash commit's own CI did not complete green after the merge; Done reconcile withheld (KB-272 standing merge gate): " + data.internal.merge_ci_verdict.value
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "merge_ci_failed: " + data.internal.pr_url.value + " — the squash commit's own CI did not complete green after the merge; Done reconcile withheld (KB-272 standing merge gate): " + data.internal.merge_ci_verdict.value
         }
     }
 }

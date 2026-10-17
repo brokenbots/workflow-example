@@ -1,0 +1,132 @@
+# wait_merge_ci.sh.tftpl — KB-272: close the standing merge gate INSIDE the
+# workflow, between the squash merge and the parent's Done reconcile.
+#
+# The standing merge gate binds mergers: after ANY merge, wait for the squash
+# commit's OWN CI to complete green BEFORE reconciling the ticket to Done.
+# The Done bookkeeping downstream (comment_handler_done -> set_done_state)
+# trusts this workflow's success, so the gate must close here: green -> the
+# run proceeds to the done arm; red/timeout -> the run fails loudly with a
+# typed failure_reason and the parent parks the ticket in Review instead of
+# stamping Done.
+#
+# Input (template vars):
+#   criteria_value_1 — merge_pr's protocol stdout. The PR number and the
+#                      squash sha come from there (merge_pr.sh knows both;
+#                      KB-272 mandates the sha source stays single: merge_pr).
+#   gh_retry         — the shared bounded-backoff transport wrapper.
+#
+# Env knobs (test/ops only; production runs on the defaults):
+#   MERGE_CI_POLL_SECONDS — poll cadence (default 30).
+#   MERGE_CI_MAX_SECONDS  — wait deadline (default 600). Never extended.
+#
+# Protocol stdout (first line is the typed verdict; the shell adapter only
+# emits success/failure over exit_code/stdout/stderr, so the verdict rides
+# stdout like check_pr's status lines):
+#   merge_ci=green|failed|timeout
+#   sha=<squash sha>
+#   failed_check=<name>=<conclusion>   (at most 3, failed verdict only)
+#   merge_error=<why>                  (timeout verdict only, when known)
+#
+# Gate semantics (fail closed):
+#   * all check runs completed, none with a failing conclusion   -> green
+#   * any completed run failed/timed_out/cancelled/startup...    -> failed
+#   * runs still queued/in_progress, or CI not yet registered... -> keep polling
+#   * deadline reached before a completed-green rollup           -> timeout
+#   * commit has no check runs and the repo has no workflows     -> green
+#     (nothing to wait for — CRI-90 semantics, mirroring check_pr.sh: a repo
+#     that never registers Actions would otherwise hang every merge)
+#   * the merge sha never materializes within the deadline       -> timeout
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -uo pipefail
+{{ .gh_retry }}
+pr=$(printf '%s' "$criteria_value_1" | grep -oE 'pr=[0-9]+' | head -1 | cut -d= -f2 | tr -d '\n')
+sha=$(printf '%s' "$criteria_value_1" | grep -oE 'merge_sha=[0-9a-fA-F]+' | head -1 | cut -d= -f2 | tr -d '\n')
+
+poll_seconds=${MERGE_CI_POLL_SECONDS:-30}
+max_seconds=${MERGE_CI_MAX_SECONDS:-600}
+case "$poll_seconds" in ''|*[!0-9]*) poll_seconds=30 ;; esac
+case "$max_seconds" in ''|*[!0-9]*) max_seconds=600 ;; esac
+deadline=$(( $(date +%s) + max_seconds ))
+
+owner=$(gh repo view --json owner --jq '.owner.login' || echo "")
+repo=$(gh repo view --json name --jq '.name' || echo "")
+
+if [ -z "$pr" ]; then
+    # merge_pr always knows its PR number; losing it here is a wiring
+    # regression, not a gate verdict. Exit non-zero so the step's failure
+    # arm types the reason and the run still avoids the Done reconcile.
+    echo "wait_merge_ci: could not parse the pull request number from merge_pr output — cannot identify the squash commit; failing the step (fail closed)" >&2
+    exit 1
+fi
+
+emit_verdict() {
+    echo "$1"
+    shift
+    for line in "$@"; do echo "$line"; done
+    exit 0
+}
+
+while :; do
+    now=$(date +%s)
+    if [ "$now" -ge "$deadline" ]; then
+        emit_verdict "merge_ci=timeout" "sha=${sha:-}" \
+            "merge_error=the squash commit's CI did not complete within ${max_seconds}s (poll cadence ${poll_seconds}s)"
+    fi
+
+    if [ -z "$sha" ]; then
+        # merge_pr emitted no sha (mergeCommit briefly unresolvable right
+        # after the merge). Refresh bounded by the same deadline — the gate
+        # stays closed until the squash commit can even be identified.
+        sha=$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null || true)
+        sha=$(printf '%s' "$sha" | tr -d '\n')
+        if [ -z "$sha" ]; then
+            echo "merge_ci_poll=sha unresolvable — retrying" >&2
+            if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
+            continue
+        fi
+    fi
+    echo "sha=$sha"
+
+    runs_rc=0
+    runs=$(gh api "repos/$owner/$repo/commits/$sha/check-runs") || runs_rc=$?
+    if [ "$runs_rc" -ne 0 ]; then
+        # Transport or hard API failure on this poll: do not verdict on a
+        # dead poll — keep polling until the deadline (gh_retry already
+        # burned its bounded backoff inside the call).
+        echo "merge_ci_poll=check-runs poll failed (rc=$runs_rc) — retrying" >&2
+        if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
+        continue
+    fi
+
+    total=$(printf '%s' "$runs" | jq -r '.total_count // 0' 2>/dev/null || echo 0)
+    case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    if [ "$total" -le 0 ]; then
+        # No check runs registered for the squash commit yet. Distinguish
+        # "CI hasn't arrived" from "repo has no Actions at all" (CRI-90).
+        wf_count=$(gh api "repos/$owner/$repo/actions/workflows" --jq '.total_count' 2>/dev/null || echo "-1")
+        case "$wf_count" in ''|*[!0-9]*) wf_count=-1 ;; esac
+        if [ "$wf_count" = "0" ]; then
+            emit_verdict "merge_ci=green" "sha=$sha" \
+                "merge_error=repo registers no GitHub Actions workflows — no CI to wait for (CRI-90 semantics)"
+        fi
+        echo "merge_ci_poll=no check runs for ${sha:-} yet — retrying" >&2
+        if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
+        continue
+    fi
+
+    pending=$(printf '%s' "$runs" | jq '[.check_runs[]? | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+    case "$pending" in ''|*[!0-9]*) pending=0 ;; esac
+    if [ "$pending" -gt 0 ]; then
+        echo "merge_ci_poll=${pending} check run(s) still running — retrying" >&2
+        if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
+        continue
+    fi
+
+    failing=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status == "completed")] | map(select((.conclusion // "") != "success" and (.conclusion // "") != "skipped" and (.conclusion // "") != "neutral")) | .[0:3] | .[] | "failed_check=\(.name)=\(.conclusion // "unknown")"' 2>/dev/null || true)
+
+    if [ -n "$failing" ]; then
+        emit_verdict "merge_ci=failed" "sha=$sha" "$failing"
+    fi
+
+    emit_verdict "merge_ci=green" "sha=$sha"
+done
