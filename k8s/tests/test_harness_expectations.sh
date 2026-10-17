@@ -14,6 +14,8 @@
 #   3. negative: losing a series-map slice assignment must fail closed with
 #      the card named;
 #   4. negative: unpinning a KNOWN GAP must fail closed.
+#   5. negative: an out-of-band item row id must be flagged (the id space is
+#      bounded) and the observed row count must be checked.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
@@ -64,3 +66,9 @@ tampered_fail "lost slice assignment" 's/`E31`, //' 'harness/failures) does not 
 # 4. Unpinning a KNOWN GAP (G11/G12 must stay pinned with their engine carrier).
 tampered_fail "unpinned KNOWN GAP marker" 's/KNOWN GAP/KNOWN LOSS/g' 'must be pinned as a KNOWN GAP'
 tampered_fail "lost engine-carrier filing rule" 's/files back to the engine carrier/files back elsewhere/g' 'must state its pinned engine carrier'
+
+# 5. Out-of-band item id + row-count receipt: renaming A6 to H1 must be
+#    flagged as unknown (the id space is bounded); duplicating A6 must be
+#    flagged as a duplicate AND trip the exact row-count check (50 vs 49).
+tampered_fail "out-of-band item id" 's/^\| \*\*A6\*\* /| **H1** /' 'unexpected item id **H1**'
+tampered_fail "observed row count" 's/^\(| \*\*A6\*\* .*\)/\1\n\1/' 'observed item row count is 50'

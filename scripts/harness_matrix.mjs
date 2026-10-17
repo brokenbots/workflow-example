@@ -75,16 +75,20 @@ if (EXPECTED_IDS.length !== 49) setupFail(`internal: expected id space is ${EXPE
 
 // --- item rows: `| **A1** | assertion | carrier |` ------------------------
 
-const rowRe = /^\| \*\*([A-G]\d+)\*\*/;
+const rowRe = /^\| \*\*([A-Z]\d+)\*\*/;
 const itemRows = new Map(); // id -> line (first occurrence)
+const observedIds = new Set(); // every distinct id the row shape matched, expected or not
 const duplicateIds = new Set();
 const unknownIds = new Set();
 const malformedRows = new Set();
+let parsedRowCount = 0;
 
 for (const line of lines) {
   const m = line.match(rowRe);
   if (!m) continue;
+  parsedRowCount++;
   const id = m[1];
+  observedIds.add(id);
   if (!EXPECTED_IDS.includes(id)) unknownIds.add(id);
   if (itemRows.has(id)) duplicateIds.add(id);
   else itemRows.set(id, line);
@@ -93,6 +97,13 @@ for (const line of lines) {
   const assertion = cells[2]?.trim() ?? "";
   const carrier = cells[3]?.trim() ?? "";
   if (assertion.length < 20 || carrier.length < 20) malformedRows.add(id);
+}
+
+if (parsedRowCount !== EXPECTED_IDS.length) {
+  problems.push(
+    `observed item row count is ${parsedRowCount}, expected exactly ${EXPECTED_IDS.length} ` +
+    `(id space is bounded: ${DOC_REL} declares 37 base + 12 G items)`,
+  );
 }
 
 for (const id of EXPECTED_IDS) {
