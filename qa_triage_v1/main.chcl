@@ -70,7 +70,7 @@ data "internal" "verdict" {
 
 // Absolute path of the published workstream file, set by publish_workstream.
 // Empty when the run produced no workstream. Exposed as an output so a parent
-// workflow (linear_intake_v1) can hand it to workstream_handler_v1 without
+// workflow (kanboard_triage_v1) can hand it to workstream_handler_v1 without
 // re-deriving the slug.
 data "internal" "workstream_file" {
     type  = string
@@ -859,7 +859,7 @@ state "failed" {
 }
 
 // ── Outputs ──────────────────────────────────────────────────────────────────
-// Declared for parent workflows (linear_intake_v1). verdict is empty when the
+// Declared for parent workflows (kanboard_triage_v1). verdict is empty when the
 // run died before the intake or verdict gate recorded one; workstream_file is
 // empty whenever no workstream was published. Parents must read both with
 // try() on success AND failure outcomes — see

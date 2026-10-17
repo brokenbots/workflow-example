@@ -1,8 +1,8 @@
 # Kubernetes workflow runner deployment
 
 This directory contains the Kubernetes manifests and launchers for running a
-Criteria workflow (currently `linear_intake_v1`) against a Linear ticket inside
-a cluster. The recommended deployment is operator-based and autonomous:
+Criteria workflow against a ticket inside a cluster. The recommended deployment
+is operator-based and autonomous:
 
 * The `criteria-k8s-operator` reconciles a `CriteriaRun` custom resource into
   a runner `Job` plus one adapter `Job` per adapter type.

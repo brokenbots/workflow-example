@@ -5,9 +5,9 @@ BrokenBots.
 
 ## Workflow trees
 
-- `linear_intake_v1`, `linear_triage_v1`, `linear_develop_v1`, `ticket_cleanup_v1`:
-  the Linear ticket pipelines routed via the `criteria-routes` ConfigMap
-  (`k8s/examples/routes-configmap.yaml`).
+- `ticket_cleanup_v1` (CRI-310): the dirty-label cleanup pipeline routed via
+  the `criteria-routes` ConfigMap (`k8s/examples/routes-configmap.yaml`);
+  the retired Linear pipelines were removed 2026-10-17 (KB-281).
 - `decision_demo_v1` (KB-205, ADR-0013): the runnable proof of the decision
   adapter's composition shape. One decision step asks a System One model for
   a noul answer (urgency), a choice (department), and a score (severity)
@@ -38,7 +38,9 @@ BrokenBots.
 ## Kubernetes deployment
 
 The `k8s/` directory contains a Kubernetes Job template and launcher for running
-`linear_intake_v1` against a ticket. The Job uses the remote-mode image:
+the retained remote-mode workflow image (KB-281: the Linear intake tree is
+retired; the baked `localhost:5000/linear-intake-remote:dev` image remains
+available for manual runs). The Job uses the remote-mode image:
 
 ```text
 localhost:5000/linear-intake-remote:dev

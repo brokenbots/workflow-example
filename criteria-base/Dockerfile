@@ -8,8 +8,8 @@
 # fetcher (git/archive) and applies it from the CRITERIA_HOME cache with
 # fail-closed pin enforcement (CRI-226 --workflow-ref).
 #
-# The baked workflow image (linear_intake_v1) is unchanged and stays in use for
-# image-only mode; wiring this image into the operator is CRI-231.
+# The retained baked workflow image (linear-intake-remote:dev) is unchanged
+# for image-only mode; wiring this image into the operator is CRI-231.
 #
 # Do NOT bump the pinned commit blindly: it must be criteria main at
 # eae01816c4a2da88449833a233d1b3f6a099bef1 (the merged CRI-215..236 chain:
