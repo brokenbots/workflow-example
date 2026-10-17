@@ -38,16 +38,18 @@ Two rules are structural:
 
 | Card | Harness title | Tree | Items (this matrix) |
 |---|---|---|---|
-| 276 | `harness/wire` | `harness_wire_v1` | `A1`–`A6`, `B7`–`B12` |
-| 277 | `harness/contracts` | `harness_contracts_v1` | `C13`–`C18`, `D19`, `D21`, `D22` |
-| 278 | `harness/composition` | `harness_composition_v1` | `G1`–`G12` (+ the live-operator composition asserts, `G10`) |
-| 279 | `harness/failures` | `harness_failures_v1` | `E24`–`E32`, `G12` |
-| 280 | `harness/fleet-smoke` | `harness_fleet_smoke_v1` | canary slice: `A1`, `A2`, `F33`, `F34`, `F36` |
+| 276 | `harness/wire` | `harness_wire_v1` | `A1`, `A2`, `A3`, `A4`, `A5`, `A6`, `B7`, `B8`, `B9`, `B10`, `B11`, `B12` |
+| 277 | `harness/contracts` | `harness_contracts_v1` | `C13`, `C14`, `C15`, `C16`, `C17`, `C18`, `D19`, `D21`, `D22` |
+| 278 | `harness/composition` | `harness_composition_v1` | `G1`, `G2`, `G3`, `G4`, `G5`, `G6`, `G7`, `G8`, `G9`, `G10`, `G11`, `G12` |
+| 279 | `harness/failures` | `harness_failures_v1` | `E24`, `E25`, `E26`, `E27`, `E28`, `E29`, `E30`, `E31`, `E32`, `G12` |
+| 280 | `harness/fleet-smoke` | `harness_fleet_smoke_v1` | canary slice: `A1`, `A2`, `F33`, `F34`, `F35`, `F36`, `F37` |
 
 - **harness/fleet-smoke (280) is the FAST-FEEDBACK CANARY**: a ~1-minute,
   deterministic, no-agent tree that must run BEFORE any develop leg on every
   roll/pin change; it is the first candidate for cron-smoke treatment once its
-  tree lands. It gates a branch cheaply; the full KB-246-class develop leg
+  tree lands. Its slice is the full fleet-invariants band (`F33`–`F37`) plus
+  the two cheapest wire probes (`A1`, `A2`) as the boot-path smoke. It gates a
+  branch cheaply; the full KB-246-class develop leg
   REMAINS the acceptance gate — harnesses narrow what that leg burns, they do
   not replace it.
 - **Deliberately unassigned harness items:** `D20` (checkpoint discipline) and
@@ -200,7 +202,7 @@ environment; asserts pod/manifest shapes from operator + peer logs.
 | **G9** | Callee-default env without override: a callee environment the parent does NOT override provisions from the callee's own declaration — identical identity to the callee's standalone shape (no parent leakage either direction). | No-override stimulus; identity comparison callee-standalone vs composed-run. |
 | **G10** | Live-operator composition asserts: on a live operator, the composition tree re-asserts the graph-carrier shape with an embedded callee — boot manifests contain every member (`B7`) and drift-recreate is absent both directions (`B9`) even though the callee's members arrive only from the composed graph. | Peer logs + operator pod census on a live operator. |
 | **G11** | KNOWN GAP (pinned, engine carrier): `subworkflow environment=` is NOT validated to exist in the parent — a dangling environment traversal on a subworkflow compiles and fails only at runtime. The composition harness pins the gap's shape deliberately; a fix files back to the engine carrier, never to a harness card. | Dangling-environment stimulus on the composition tree; documented runtime (not compile) failure shape. |
-| **G12** | KNOWN GAP (pinned, engine carrier): `SubworkflowNode.Environment` is compiled-but-unread — the attribute travels through compilation and is inert at runtime (subworkflow-level environment declarations are silently ignored). The composition card pins its compiled-but-unread shape and the failures card (279) pins the failure shape: a runtime composition change that silently does nothing. | Compiled node carrying the attribute + runtime inertness observed; documented as a known gap in run notes. |
+| **G12** | KNOWN GAP (pinned, engine carrier): `SubworkflowNode.Environment` is compiled-but-unread — the attribute travels through compilation and is inert at runtime (subworkflow-level environment declarations are silently ignored). The composition card pins its compiled-but-unread shape and the failures card (279) pins the failure shape: a runtime composition change that silently does nothing. A fix files back to the engine carrier, never to a harness card. | Compiled node carrying the attribute + runtime inertness observed; documented as a known gap in run notes. |
 
 ## Guard
 
