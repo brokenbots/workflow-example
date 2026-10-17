@@ -2,15 +2,18 @@ package castle
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
@@ -79,10 +82,25 @@ type podStateSignalState struct {
 	at     time.Time
 }
 
-// NewPodStateFeed builds a feed. A nil httpClient uses http.DefaultClient.
+// NewPodStateFeed builds a feed. A nil httpClient gets the feed's default:
+// an h2c transport (cleartext HTTP/2 with prior knowledge). Castle's
+// CriteriaService/SubmitEvents is a Connect BIDI stream, which requires
+// HTTP/2; http.DefaultClient speaks HTTP/1.1 to a cleartext http:// address
+// and every emit fails with "HTTP status 505 HTTP Version Not Supported"
+// (KB-239, live-verified 2026-10-10: continuous "castle podstate: unknown:
+// HTTP status 505" during kb-228-1791665927). Mirror castle's own
+// system-test-harness h2cClient(). Callers may still pass a custom client;
+// it is then their responsibility to speak HTTP/2 (TLS negotiation or h2c).
 func NewPodStateFeed(cfg PodStateFeedConfig, httpClient *http.Client) *PodStateFeed {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{
+			Transport: &http2.Transport{
+				AllowHTTP: true,
+				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, addr)
+				},
+			},
+		}
 	}
 	if cfg.Token != "" {
 		httpClient = &http.Client{Transport: &tokenTransport{base: httpClient.Transport, token: cfg.Token}}

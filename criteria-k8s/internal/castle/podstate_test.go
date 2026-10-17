@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
@@ -288,4 +289,40 @@ func (s *podStateCriteriaStub) tokenAt(i int) string {
 // testLogger returns the discard logger.
 func testLogger() logr.Logger {
 	return logr.Discard()
+}
+
+// TestPodStateFeedNilClientSpeaksH2COverCleartext is the KB-239 regression:
+// the production feed passes nil (HTTP/2 prior-knowledge h2c default) and
+// dials a CLEARTEXT http:// castle (no TLS in-cluster). Before the fix the
+// nil default was http.DefaultClient -> HTTP/1.1 -> connect 505 on every
+// SubmitEvents emit (1,840 logged failures in 40h, live 2026-10-15/17).
+// httptest.StartTLS cannot reproduce that shape (it negotiates HTTP/2 over
+// TLS), so this server is a plain (non-TLS) listener wrapped in h2c.
+func TestPodStateFeedNilClientSpeaksH2COverCleartext(t *testing.T) {
+	stub := &podStateCriteriaStub{envelopes: map[string][]*v1.Envelope{}}
+	path, handler := criteriav1connect.NewCriteriaServiceHandler(stub)
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+	srv := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{})) // plain http://, no TLS
+	t.Cleanup(srv.Close)
+
+	// nil client = the exact production call site (operator main.go).
+	feed := NewPodStateFeed(PodStateFeedConfig{Addr: srv.URL, Token: "shared-castle-token"}, nil)
+	feed.attemptTimeout = 2 * time.Second
+	feed.maxAttempts = 2
+	feed.backoffBase = time.Millisecond
+
+	ctx := context.Background()
+	feed.Emit(ctx, "run-h2c", []events.PodStateReport{podStateTestReport(events.PodPhasePending, "Unschedulable")}, testLogger())
+
+	require.Equal(t, 1, stub.received("run-h2c"),
+		"the nil-client feed must reach a cleartext h2c castle: got 0 accepts (HTTP/1.1 would 505)")
+	envs := stub.envelopesFor("run-h2c")
+	require.Len(t, envs, 1)
+	first := envs[0].GetAdapterEvent()
+	require.NotNil(t, first)
+	fields := first.GetData().AsMap()
+	assert.Equal(t, "Pending", fields["phase"])
+	assert.Equal(t, "Unschedulable", fields["reason"])
+	assert.Equal(t, "shared-castle-token", stub.tokenAt(0))
 }
