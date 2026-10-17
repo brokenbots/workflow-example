@@ -79,8 +79,7 @@ images: build build-criteria-k8s build-criteria-base
 
 images-push: build-push build-criteria-k8s-push build-criteria-base-push
 	@echo "Tag: $(BUILD_TAG)"
-	@echo "Deploy the watcher with:"
-	@echo "  kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
+	@echo "Deploy the operator with:"
 	@echo "  kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)"
 	@echo "  kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)"
@@ -96,7 +95,6 @@ images-push: build-push build-criteria-k8s-push build-criteria-base-push
 
 deploy-images: images-push
 ifneq ($(CONTAINER_TOOL),)
-	kubectl -n criteria-jobs set env deploy/criteria-linear-watcher CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set image deploy/criteria-k8s-operator operator=$(CRITERIA_K8S_IMAGE):$(BUILD_TAG)
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator CRITERIA_BASE_IMAGE=$(CRITERIA_BASE_IMAGE):$(BUILD_TAG)
 	# Deploy pairing (CRI-234/CRI-237): the per-(scope,environment)
@@ -112,7 +110,6 @@ ifneq ($(CONTAINER_TOOL),)
 	# CRITERIA_VERSION does not contain eae0181 and must not roll until
 	# re-audited (coordinator decision).
 	kubectl -n criteria-jobs set env deploy/criteria-k8s-operator DEFAULT_CRITERIA_IMAGE=$(WORKFLOW_IMAGE):$(BUILD_TAG)
-	kubectl -n criteria-jobs rollout status deploy/criteria-linear-watcher --timeout=120s
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif
 

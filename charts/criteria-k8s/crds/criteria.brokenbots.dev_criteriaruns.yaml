@@ -89,7 +89,8 @@ spec:
                   type: object
                   description: >-
                     Resolved workflow-library object stamped by the
-                    linear-watcher (CRI-217) from the criteria-routes
+                    kanboard-watcher (CRI-217: the retired linear-watcher
+                    introduced the field) from the criteria-routes
                     ConfigMap. Consumed by the jobbuilder (CRI-222). Empty
                     means the operator defaults apply.
                   required:

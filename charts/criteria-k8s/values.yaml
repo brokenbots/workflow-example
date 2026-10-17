@@ -24,15 +24,19 @@ podSecurity:
   enforce: baseline
 
 images:
-  # criteria-k8s binary image: operator and linear watcher deployments both
-  # run this image with different entrypoints.
+  # criteria-k8s binary image: the operator (/manager) and the kanboard
+  # watcher deployment — a raw overlay applied from k8s/kanboard-watcher.yaml,
+  # not templated here — (/kanboard-watcher) both run this image with different
+  # entrypoints. The criteria-linear-watcher (/linear-watcher) was retired
+  # 2026-10-09 (KB-228; Linear cutover complete).
   operator:
     repository: localhost:5000/criteria-k8s
     tag: dev
     pullPolicy: IfNotPresent
   # Criteria workflow image the operator passes to runner Jobs (via
-  # DEFAULT_CRITERIA_IMAGE / CRITERIA_IMAGE) and the watcher records in
-  # CriteriaRuns.
+  # DEFAULT_CRITERIA_IMAGE / CRITERIA_IMAGE) and the kanboard-watcher
+  # records in CriteriaRuns (the linear-watcher did until its 2026-10-09
+  # retirement).
   workflow:
     repository: localhost:5000/linear-intake-remote
     tag: dev
@@ -100,28 +104,10 @@ operator:
       memory: 512Mi
       cpu: 500m
 
-# Linear watcher: polls Linear and creates a CriteriaRun for each ticket in
-# the watched project that is in a workflow state declared by the routes
-# payload (omitted states default to Triage; CRI-218).
-watcher:
-  enabled: true
-  replicaCount: 1
-  linearProjectName: Criteria K8s Workflow Runner
-  pollInterval: 5m
-  maxAgentVisits: 2
-  providerBaseUrl: http://192.168.17.116:11434/v1
-  # ConfigMap carrying the routes payload (key routes.json), mounted into the
-  # watcher at /etc/criteria/routes. It is operator config applied separately
-  # (k8s/examples/routes-configmap.yaml), not templated by this chart, and is
-  # re-read by the watcher every poll. Set to "" to drop the mount.
-  routesConfigMap: criteria-routes
-  resources:
-    requests:
-      memory: 64Mi
-      cpu: 50m
-    limits:
-      memory: 256Mi
-      cpu: 200m
+# The criteria-linear-watcher Deployment (and its `watcher.*` values) was
+# removed from this chart on 2026-10-09 — Linear→Kanboard cutover complete
+# (KB-228). Ticket polling now ships as the raw kanboard-watcher overlay
+# (k8s/kanboard-watcher.yaml), not as a chart deployment.
 
 # Castle control plane: single replica with persistent SQLite storage.
 # Castle tolerates the k3s control-plane taint so it can run on a
@@ -164,8 +150,8 @@ openbao:
   roleName: criteria-jobs
   secretPath: criteria/data/linear
 
-# Pod security context shared by the operator, watcher and castle pods
-# (restricted compliance: non-root, no escalation, RuntimeDefault seccomp).
+# Pod security context shared by the operator and castle pods (restricted
+# compliance: non-root, no escalation, RuntimeDefault seccomp).
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 10001

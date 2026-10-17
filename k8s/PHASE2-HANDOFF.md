@@ -84,7 +84,11 @@ this topology autonomously: classify -> develop -> PR #21 -> merge -> Done.
   adapter images have NONE of these and die on step execution).
 - Deployments live: criteria-k8s-operator (v4), criteria-linear-watcher
   (CRITERIA_IMAGE=linear-intake-remote:v0.5.18-4, polls Linear Triage
-  tickets in project "Criteria K8s Workflow Runner" every 60s),
+  tickets in project "Criteria K8s Workflow Runner" every 60s)
+  [retirement note 2026-10-09 (KB-228): the criteria-linear-watcher was
+  scaled to zero and removed from the codebase after the Linear → Kanboard
+  ticket cutover completed 2026-10-08; ticket intake now runs on the
+  criteria-kanboard-watcher (raw k8s/kanboard-watcher.yaml overlay)],
   castle (restricted-compliant), secrets-store CSI driver + OpenBao
   CSI provider in ns csi. OpenBao root token: ~/k3s-dynamo/openbao.keys
   (KV criteria/linear holds linear_api_key + both GitHub tokens).

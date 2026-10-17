@@ -21,8 +21,9 @@ const (
 // triage-class runs are read-only against the repo and may run
 // concurrently with any run on the same repoURL (per-ticket PVC clones
 // isolate state). The class is declared on the routes workflow-library
-// object and stamped onto the run by the linear-watcher; runs without a
-// stamped workflow behave as dev.
+// object and stamped onto the run by the kanboard-watcher (the retired
+// linear-watcher stamped it until the 2026-10-09 Linear retirement);
+// runs without a stamped workflow behave as dev.
 const (
 	RunClassDev    = "dev"
 	RunClassTriage = "triage"
@@ -68,8 +69,9 @@ type CriteriaRunSpec struct {
 	// engine's provision-wanted / release lifecycle events.
 	PerScopeSessions bool `json:"perScopeSessions,omitempty"`
 
-	// Workflow is the resolved workflow-library object stamped onto the run
-	// by the linear-watcher (CRI-217) from the criteria-routes ConfigMap.
+	// Workflow is the resolved workflow-library object stamped onto the
+	// run by the kanboard-watcher (CRI-217: the retired linear-watcher
+	// introduced the field) from the criteria-routes ConfigMap.
 	// Nil means no workflow was assigned and the operator defaults apply.
 	// Consumed by the jobbuilder (CRI-222).
 	Workflow *RunWorkflow `json:"workflow,omitempty"`
