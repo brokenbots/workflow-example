@@ -358,7 +358,7 @@ func TestImageModeUnchangedBySourceMode(t *testing.T) {
 func TestSourceModeRendersWorkflowPlan(t *testing.T) {
 	run := urlRun("cri-231-plan", &criteriav1.RunWorkflowSource{Type: "url", URL: "git::https://example.com/wf.git"}, "")
 	run.Spec.Workflow = &criteriav1.RunWorkflow{
-		Name:      "linear-intake-url",
+		Name:      "workflow-lib-url",
 		Type:      "url",
 		Namespace: "wf-ns",
 		Env:       map[string]string{"CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"},
