@@ -7,9 +7,11 @@ set -euo pipefail
 # proves the ADR-0005 D1/D2 modes (image-only, url-only, url+image + expected
 # pin) and the pvc/nfs/tmp volumes with env mapping and OpenBao/CSI secret
 # name references are representable. Also asserts the example is secret-free
-# and carries the CRI-243 split-pattern cutover: the criteria project's
-# routes fire the pinned linear_triage_v1 / linear_develop_v1 trees (plan
-# CRI-214 exit condition 3), the git-ref pin duality (url '?ref=' vs the
+# and carries the KB-281 post-retirement shape: the retired linear estate
+# (linear-intake-url / linear-triage-url / linear-develop-url objects and the
+# criteria-triage / criteria-develop routes) is gone, the criteria project is
+# cleanup-only, the kanboard routes fire the pinned kanboard_triage_v1 /
+# kanboard_develop_v1 trees, the git-ref pin duality (url '?ref=' vs the
 # separate "ref" key) agrees per entry, and the adapterImages pins agree
 # three ways: shipped example == RECORDED_PIN_SET == live criteria-routes CM
 # (the live leg skips when no kubectl/cluster is reachable, e.g. CI).
@@ -401,7 +403,7 @@ def validate(doc):
 base = load_example(example_path)
 LIB = "workflowLibrary"
 BAKED = "linear-intake-v1"
-URLWF = "linear-intake-url"
+URLWF = "kanboard-develop-url"
 
 
 def mutate(fn):
@@ -646,11 +648,12 @@ walk_strings(base, "payload", cred_hits)
 if cred_hits:
     failures.append(f"example payload is not secret-free: {'; '.join(cred_hits)}")
 
-# -------------------------------------------------- CRI-243: shipped example
-# shape — the criteria project's routes are the split pattern (plan CRI-214
-# exit condition 3): Triage fires the pinned linear_triage_v1 tree, Ready
-# for Development fires the pinned linear_develop_v1 tree, both url-only via
-# the git URL with full ADR-0005 D7 commit pins.
+# -------------------------------------------------- KB-281: shipped example
+# shape — the linear estate (the criteria project's split triage/develop
+# routes firing the linear_* trees) is RETIRED: the criteria project is
+# cleanup-only, the kanboard routes cover their own watcher's project and
+# states with full ADR-0005 D7 commit pins, and the retired linear-* url
+# objects must not return.
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -659,16 +662,18 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 5,
-            f"shipped example routes = {len(base['routes'])}, want the two criteria project split routes, "
-            "the CRI-310 cleanup route, and the two kanboard routes (dual-source coexistence)")
-triage_route = next((r for r in base["routes"] if r.get("name") == "criteria-triage"), None)
-develop_route = next((r for r in base["routes"] if r.get("name") == "criteria-develop"), None)
+shipped_err(len(base["routes"]) == 3,
+            f"shipped example routes = {len(base['routes'])}, want the CRI-310 cleanup route "
+            "plus the two kanboard routes (the criteria split routes are retired, KB-281)")
+route_names = {r.get("name") for r in base["routes"] if isinstance(r, dict)}
+shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-develop"},
+            f"shipped example route names = {sorted(route_names)}, want exactly cleanup + kanboard pair")
+for retired_route in ("criteria-triage", "criteria-develop"):
+    shipped_err(retired_route not in route_names,
+                f"shipped example: the retired {retired_route} route returned (KB-281)")
 cleanup_route = next((r for r in base["routes"] if r.get("name") == "criteria-cleanup"), None)
 kanboard_triage_route = next((r for r in base["routes"] if r.get("name") == "kanboard-triage"), None)
 kanboard_develop_route = next((r for r in base["routes"] if r.get("name") == "kanboard-develop"), None)
-shipped_err(triage_route is not None, "shipped example: routes missing the criteria-triage route")
-shipped_err(develop_route is not None, "shipped example: routes missing the criteria-develop route")
 shipped_err(cleanup_route is not None, "shipped example: routes missing the criteria-cleanup route (CRI-310)")
 shipped_err(kanboard_triage_route is not None,
             "shipped example: routes missing the kanboard-triage route (dual-source coexistence)")
@@ -678,40 +683,33 @@ shipped_err(all(r.get("project") == "Criteria K8s Workflow Runner"
                 for r in base["routes"] if r.get("name", "").startswith("criteria-")),
             "shipped example: every criteria-* route must target the criteria project")
 
-if triage_route is not None:
-    if triage_route.get("workflow") != "linear-triage-url":
-        failures.append("shipped example: criteria-triage must fire linear-triage-url")
-    if triage_route.get("states") != ["Triage"]:
-        failures.append(f"shipped example: criteria-triage states = {triage_route.get('states')}, want [Triage]")
-if develop_route is not None:
-    if develop_route.get("workflow") != "linear-develop-url":
-        failures.append("shipped example: criteria-develop must fire linear-develop-url")
-    if develop_route.get("states") != ["Ready for Development"]:
-        failures.append(
-            f"shipped example: criteria-develop states = {develop_route.get('states')}, want [Ready for Development]"
-        )
+# KB-281 absence regressions: the retired linear url objects and any route
+# firing them must not return.
+for retired_wf in ("linear-intake-url", "linear-triage-url", "linear-develop-url"):
+    shipped_err(retired_wf not in base[LIB],
+                f"shipped example: workflowLibrary still carries the retired {retired_wf} object (KB-281)")
+for r in base["routes"]:
+    wf_name = r.get("workflow")
+    shipped_err(not str(wf_name).startswith("linear-"),
+                f"shipped example: route {r.get('name')} still fires the retired linear workflow {wf_name!r} (KB-281)")
 
-# KB-103: the shipped example carries a per-repo configLibrary and the
-# criteria-develop route binds to it — dev-run gate-before-PR-open wiring.
+# KB-103: the shipped example carries a per-repo configLibrary — but the
+# configRef binding lived on the retired criteria-develop route, so no
+# surviving route binds a config entry today.
 config_library = base.get("configLibrary")
 shipped_err(isinstance(config_library, dict) and bool(config_library),
             "shipped example: configLibrary must be a non-empty object")
 if isinstance(config_library, dict):
     for name, entry in config_library.items():
         validate_config(name, entry, f"shipped example: configLibrary.{name}", failures)
-if develop_route is not None:
-    if develop_route.get("configRef") != "workflow-example":
-        failures.append(
-            f"shipped example: criteria-develop configRef = {develop_route.get('configRef')!r}, "
-            "want 'workflow-example' (the repo's own gate runs BEFORE PR open)"
-        )
+shipped_err(all("configRef" not in r for r in base["routes"]),
+            "shipped example: a surviving route still binds configRef (KB-103's binding rode the retired criteria-develop route)")
 
 # CRI-310 (validation run C): the dirty label is a routing surface. The
-# cleanup route selects on the watcher's sticky criteria-dirty tag over the
-# same project and state as the general develop route — the
-# specific-over-general tag priority (internal/routes/routes.go matchRoute)
-# is what makes a dirty-labeled ticket fire ticket-cleanup-url instead of
-# linear-develop-url.
+# cleanup route selects on the watcher's sticky criteria-dirty tag for the
+# criteria project's Ready for Development state. (KB-281: the tag-less
+# general develop route it used to out-prioritize is retired, so a
+# dirty-label-free ticket matches nothing and the watcher fails closed.)
 if cleanup_route is not None:
     if cleanup_route.get("workflow") != "ticket-cleanup-url":
         failures.append("shipped example: criteria-cleanup must fire ticket-cleanup-url")
@@ -740,37 +738,9 @@ for route, wf_name, states in (
     if route.get("states") != states:
         failures.append(f"shipped example: {route.get('name')} states = {route.get('states')}, want {states}")
 
-triage_wf = base[LIB].get("linear-triage-url")
-if not isinstance(triage_wf, dict):
-    failures.append("shipped example: workflowLibrary missing the linear-triage-url object")
-else:
-    if triage_wf.get("type") != "url" or "url" not in triage_wf:
-        failures.append("shipped example: linear-triage-url must be a url workflow")
-    if not str(triage_wf.get("url", "")).startswith(
-            "git::https://github.com/brokenbots/workflow-example.git//linear_triage_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494"):
-        failures.append("shipped example: linear-triage-url must point at the linear_triage_v1 subtree pinned to current main (CRI-311 loop recovery: tree content identical to the 9db68c3 pin)")
-    if not FULL_SHA.match(triage_wf.get("ref") or ""):
-        failures.append("shipped example: linear-triage-url ref must be a pinned 40-hex commit SHA (D7)")
-    if triage_wf.get("ref") != "9e04399fd8dc0955bc7b77f199fea2e97f176494":
-        failures.append("shipped example: linear-triage-url ref must pin the re-lock commit 9e04399")
-    if triage_wf.get("class") != "triage":
-        failures.append("shipped example: linear-triage-url must declare class=triage (CRI-242 read-only admission)")
-    if "image" in triage_wf:
-        failures.append("shipped example: linear-triage-url must be url-only (no process image)")
-
-develop_wf = base[LIB].get("linear-develop-url")
-if not isinstance(develop_wf, dict):
-    failures.append("shipped example: workflowLibrary missing the linear-develop-url object")
-else:
-    if not str(develop_wf.get("url", "")).startswith(
-            "git::https://github.com/brokenbots/workflow-example.git//linear_develop_v1?ref=9e04399fd8dc0955bc7b77f199fea2e97f176494"):
-        failures.append("shipped example: linear-develop-url must point at the linear_develop_v1 subtree pinned to current main (CRI-311 loop recovery: tree content identical to the 7645feb pin)")
-    if not FULL_SHA.match(develop_wf.get("ref") or ""):
-        failures.append("shipped example: linear-develop-url ref must be a pinned 40-hex commit SHA (D7)")
-    if develop_wf.get("ref") != "9e04399fd8dc0955bc7b77f199fea2e97f176494":
-        failures.append("shipped example: linear-develop-url ref must pin the re-lock commit 9e04399")
-    if "image" in develop_wf:
-        failures.append("shipped example: linear-develop-url must be url-only (no process image)")
+# (KB-281: the linear-triage-url / linear-develop-url object assertions are
+# gone with the objects themselves — the absence regressions above fail fast
+# if the retired linear estate ever resurfaces in the example payload.)
 
 # CRI-310: ticket-cleanup-url — the dirty-label cleanup workflow object
 # (url-only, on criteria-base). Validation run C corrected two assumptions
@@ -818,7 +788,9 @@ else:
 # fetching the pre-fix tree and the run captured the -32602 "Too many
 # arguments" error body as ticket.json's tags. Both objects now pin the
 # current main tree carrying the #106 fix; the assertions below mirror the
-# linear-triage/linear-develop pin assertions so the next subtree change
+# ticket-cleanup-url pin assertions (KB-281: the retired linear-triage-url /
+# linear-develop-url blocks are gone — these are the subtree pin guards for
+# all shipped kanboard objects) so the next subtree change
 # fails here until its re-pin lands in the same change.
 for kb_name, kb_subtree, kb_class, kb_pin in (
         ("kanboard-triage-url", "kanboard_triage_v1", "triage", "63535719e37750301a8b7cc9be2c74b2d18c847e"),
@@ -849,9 +821,9 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
 # (below) == live CM. The KB-216 fleet leg repinned live copilot-peer
 # everywhere to k8s-0.5.16 (verified 2026-10-09) while this file lagged at
 # 0.5.15 — exactly the drift class both legs below fail on. Version drift of
-# one pin family is caught per kind present; the two deliberately-unpinned
-# url-only objects (linear-intake-url, decision-demo-url) carry no
-# adapterImages and skip the check.
+# one pin family is caught per kind present; the objects that declare no
+# adapterImages (the retained linear-intake-v1 image object and the
+# decision-demo-url placeholder, KB-205/KB-281) skip the check.
 RECORDED_PIN_SET = {
     "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
     "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1",
