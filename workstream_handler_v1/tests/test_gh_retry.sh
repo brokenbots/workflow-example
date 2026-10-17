@@ -243,7 +243,9 @@ assert_grep_count() {
         fail "${desc}: expected ${want}, got ${got} in ${file}"
     fi
 }
-assert_grep_count "workstream_handler_v1 root steps wrapped" 8 \
+# KB-272: 11 - the wait_merge_ci step's render arg plus its two KB-219
+# timeout-context comment lines join the pre-existing 8 matches.
+assert_grep_count "workstream_handler_v1 root steps wrapped" 11 \
     "${REPO_ROOT}/workstream_handler_v1/main.chcl"
 assert_grep_count "pr_reviewer_loop steps wrapped" 6 \
     "${REPO_ROOT}/workstream_handler_v1/workflows/pr_reviewer_loop/main.chcl"
