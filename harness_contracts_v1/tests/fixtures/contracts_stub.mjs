@@ -132,20 +132,106 @@ const MODES = {
     }),
   ],
 
-  // D21: the trailing-* allow band lets the shell tool call execute while
-  // the read tool call is denied with a permission event; the recovered
-  // denial keeps the turn's success.
+  // D21: the trailing-* band grants the shell tool call first-match-wins
+  // (the first matching band wins per the permission event's pattern echo)
+  // while the read tool call is denied with a permission event naming the
+  // tool; the recovered denial keeps the turn's success. The bash command
+  // writes the same side-effect record the fixed prompt engineers — into
+  // the probe root the suite passes via PROBEROOT — so the suite can prove
+  // the granted call actually executed.
   f6_permissions: () => [
-    tool("bash", { command: "printf d21-shell-band-ok", description: "D21 band-matched shell call" }),
+    tool("bash", {
+      command:
+        "printf d21-shell-band-ok > " +
+        process.env.PROBEROOT +
+        "/d21_shell_band_record",
+      description: "D21 band-matched shell call",
+    }),
     tool("view", { path: "main.chcl" }),
     submit({
       outcome: "approved",
       payload: {
         reason:
-          "D21 recovered denial keeps success: the trailing-* band allowed the shell tool call, the read tool call was denied with a permission event, and the step still finalized approved after recovering",
+          "D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering",
       },
+      comment: "D21 permission band probe",
     }),
   ],
+
+  // F9 full-chain mode: the shipped main.chcl runs ALL eight steps in one
+  // session against ONE stub process. The array is the concatenation of
+  // every step's engineered sequence in chain order (the stub's call
+  // counter is per-process, so position = step progress):
+  //   contract_valid(1) contract_reject(3) contract_comment(2)
+  //   contract_uncontracted(1) contract_permissions(3) then the two
+  //   never-finalize stimuli (budget + unmapped) — every call past the
+  //   engineered prefix serves the same plain never-finalize reply, so the
+  //   turn-budget steps cannot drift the index. echo_verdict dials the
+  //   shell adapter and never hits this stub.
+  full_chain: (() => {
+    const tail = [];
+    for (let i = 0; i < 16; i++)
+      tail.push(
+        plain(
+          "KB-277 never-finalize probe: this step never finalizes on purpose (turn budget must exhaust)",
+        ),
+      );
+    return () =>
+      [
+        submit({
+          outcome: "approved",
+          payload: {
+            reason: "C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact",
+          },
+        }),
+        submit({ outcome: "rejected", payload: { verdict: "wrong field set on purpose" } }),
+        submit({
+          outcome: "rejected",
+          reason: "wrong lane on purpose: reason string outside the typed payload lane",
+        }),
+        submit({
+          outcome: "rejected",
+          payload: {
+            reason: "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
+          },
+        }),
+        submit({
+          outcome: "approved",
+          payload: {
+            reason: "C17 comment contract payload (this submission carries an empty adapter comment and must be rejected)",
+          },
+          comment: "",
+        }),
+        submit({
+          outcome: "observed",
+          payload: {
+            reason: "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
+          },
+        }),
+        submit({
+          outcome: "approved",
+          reason:
+            "C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps",
+        }),
+        tool("bash", {
+          command:
+            "printf d21-shell-band-ok > " +
+            (process.env.PROBEROOT || "/tmp") +
+            "/d21_shell_band_record",
+          description: "D21 band-matched shell call",
+        }),
+        tool("view", { path: "main.chcl" }),
+        submit({
+          outcome: "approved",
+          payload: {
+            reason:
+              "D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering",
+          },
+          comment: "D21 permission band probe",
+        }),
+        ...tail,
+      ];
+  })(),
 
   // C18a/D22 + C18b: never-finalize stimuli — the turn budget exhausts and
   // the missing-finalize class (or, with no lanes mapped, the loud routing
