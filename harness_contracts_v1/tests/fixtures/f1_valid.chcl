@@ -1,0 +1,81 @@
+// Fixture F1 (C14): a schema-valid payload is accepted and routes the
+// declared outcome, and the PROJECTED outputs land in run state. The probe
+// submission carries BOTH lanes with distinct texts: the payload lane text
+// must never surface (the engine drops payload body fields — the pinned
+// projection gap), while the top-level reason lane text flows verbatim
+// through output.reason into the c14_reason run-state write and its echo
+// record. The undeclared rejected arm is declared here (the C13 carrier)
+// but never fired in this fixture — F4 fires it.
+workflow {
+    name             = "harness_contracts_v1_f1_valid"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_valid"
+    target_state     = "done"
+    policy { max_total_steps = 4 }
+}
+
+data "internal" "c14_reason" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d19_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c17_comment" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
+step "contract_valid" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_valid.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.c14_reason.value
+            value  = output.reason
+        }
+        next   = step.echo_verdict
+    }
+    outcome "rejected" {
+        next = state.failed
+    }
+}
+
+step "echo_verdict" {
+    target      = adapter.shell.recorder
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/echo_verdict.sh.tftpl", {
+            probe_root   = var.probe_root
+            c14_reason   = data.internal.c14_reason.value
+            d19_verdict  = data.internal.d19_verdict.value
+            c17_comment  = data.internal.c17_comment.value
+            d21_reason   = data.internal.d21_reason.value
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

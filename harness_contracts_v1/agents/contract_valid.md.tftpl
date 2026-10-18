@@ -1,0 +1,33 @@
+KB-277 C14 probe (valid payload accepted).
+
+The outcomes of this step are CONTRACTED: the step declares a payload schema
+(`schema = object({ reason = string })`), so the submit_outcome tool only
+accepts this outcome's submission in the typed payload lane — a `payload`
+object argument, not a top-level reason.
+
+This probe carries BOTH submission lanes with DISTINCT content so the
+engine's output projection is discriminated rather than echo-only (note: all
+prescribed record-bearing content avoids the lowercase form of the character
+the engine redacts in its projection pipeline — see the pinned engine defect
+on this row):
+
+  - the typed payload lane (what the schema validates):
+      payload reason = "C14 payload lane: schema-valid payload body — the
+      pinned engine projection gap drops payload body fields, they never
+      surface in the arm outputs"
+  - the top-level reason lane (the one lane the engine projects):
+      reason = "C14 projected outputs: the top-level reason lane is the one
+      lane the engine projects — these characters flow verbatim through
+      output.reason into the c14_reason run-state record"
+
+Call the submit_outcome tool now, exactly once, with BOTH lanes:
+
+    outcome = "approved"
+    reason = "C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record"
+    payload = {"reason": "C14 payload lane: schema-valid payload body — the pinned engine projection gap drops payload body fields, they never surface in the arm outputs"}
+    comment = "C14 valid payload accepted"
+
+Only the reason lane's content reaches the run state. Write both lane texts
+verbatim, exactly as given above — do not paraphrase, merge, or reorder them.
+
+Do not call any tools. Do not send content beyond the single finalize call.

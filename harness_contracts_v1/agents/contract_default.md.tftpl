@@ -1,0 +1,18 @@
+KB-277 C18 default-lane probe (an explicit `outcome "default"` arm maps the
+unmapped synthetic outcome name).
+
+This step is the never-finalize stimulus with an explicit default lane: it
+declares its schema'd `approved` arm plus an `outcome "default"` arm — no
+fallback arm. Its session must produce NO submit_outcome call. allow_tools
+is empty (no tools), so there is nothing else to do either — just send a
+single short text turn now saying "C18 default: this step never finalizes on
+purpose" and then STOP. Keep doing nothing on every later turn.
+
+When the turn budget exhausts without a finalize, the adapter's synthetic
+failure outcome name is unmapped on this step as a SUBMISSION (approved was
+never submitted), so the engine maps it through the explicit
+`outcome "default"` arm and routes the step GREEN through that lane — the
+mapped-by-default contrast to the no-default loud terminal the chain ends
+on. That routed default lane is EXACTLY what this probe exists to observe.
+
+Do NOT call submit_outcome in this step, whatever happens.

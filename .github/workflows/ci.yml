@@ -83,6 +83,17 @@ jobs:
           criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.4
           criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15
 
+      # The copilot adapter's CLI server execs the `copilot` CLI from PATH
+      # (run 39098317753: bind adapter "copilot.main" ... "failed to start
+      # CLI server: exec: "copilot": executable file not found in $PATH").
+      # Install the npm CLI — version-pinned to 1.0.82, the build the KB-277
+      # contracts suite was proven against. Its model traffic is aimed at the
+      # suite's scripted stub via adapters_shim.mjs (provider wire pinned in
+      # the fixture tree), so no live GitHub model access is needed; the local
+      # suite passes with a dummy token under exactly this CLI.
+      - name: Install Copilot CLI for copilot.main binding
+        run: sudo npm install -g @github/copilot@1.0.82
+
       - name: Run k8s manifest shell tests
         run: |
           for t in k8s/tests/test_*.sh; do
@@ -125,6 +136,25 @@ jobs:
       - name: Run flat WorkflowGraphs shape smoke test (CRI-300)
         run: |
           bash k8s/tests/test_workflow_graphs_flat.sh
+
+      # KB-277: the contracts harness (matrix C13-C18 + D19/D21/D22) —
+      # per-shape fixture runs over a scripted local model stub; each matrix
+      # shape asserted in run events. Skips cleanly without the pinned
+      # adapter binaries (pre-pulled above). Gate integrity: a green suite
+      # that skipped would prove nothing, so the run must show the
+      # all-shapes-observed banner from actual observations.
+      - name: Run harness_contracts_v1 standalone regression test (KB-277)
+        env:
+          SUITE_DEBUG: "1"
+        run: |
+          set -o pipefail
+          bash harness_contracts_v1/tests/test_contracts_standalone.sh \
+            2>&1 | tee /tmp/kb277_suite.log
+          banner='harness_contracts_v1 standalone suite: all fixture shapes observed in run events'
+          if ! grep -qF "$banner" /tmp/kb277_suite.log; then
+            echo "::error::harness_contracts_v1 suite skipped (pinned adapters absent at run time) — gate coverage silently lost; restore the pre-pull"
+            exit 1
+          fi
 
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.

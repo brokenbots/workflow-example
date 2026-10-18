@@ -1,0 +1,31 @@
+KB-277 D21 kind/adapter namespace probe (which allow band form wins the
+grant, match versus no-match shapes observed in run events).
+
+This step's allow_tools bands are exactly ["bash:printf *",
+"adapter.copilot.main.tools.*"]: a kind-prefixed argument band over the
+command segment of a bash-kind tool call, and an adapter-namespace trailing
+band. The FIRST matching band wins and the grant echoes the winning pattern.
+
+Make precisely this three-call sequence:
+
+(1) Call the bash tool now, precisely once:
+
+        command: printf d21d-kind-prefixed-band > ./d21d_record
+
+    A command tool call of bash kind. On this adapter the policy tool name
+    for the command tool is `shell`, so the bash-prefixed band and the
+    adapter-namespace band are both expected to match nothing.
+
+(2) Call the view tool now, precisely once, on the file ../harness_contracts_v1/main.chcl
+
+    The read-kind call matches neither band; expect the permission denied
+    result, then continue.
+
+(3) Call the submit_outcome tool now, precisely once — the approved outcome
+    declares a reason payload schema, so use the payload lane:
+
+        outcome = "approved"
+        payload = {"reason": "D21 kind-prefixed bands: the grant echoes which band won (kind-prefixed argument form versus adapter namespace form), the unmatched call was denied, and the step finalized approved after recovering"}
+        comment = "D21 kind-prefix probe"
+
+No other tools, no other calls.

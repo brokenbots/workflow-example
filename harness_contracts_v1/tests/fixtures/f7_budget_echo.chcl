@@ -1,0 +1,70 @@
+// Fixture F7 (C18a/D22): the never-finalize stimulus exhausts the low turn
+// budget (turn.finalize_exhausted, finalize_kind=missing); the adapter's
+// no-finalized-result synthetic failure routes the DECLARED fallback lane to
+// the verdict-echo step (a shell step — no model calls), which lands green
+// with empty verdict records (the upstream contracted arms never ran).
+workflow {
+    name             = "harness_contracts_v1_f7_budget_echo"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_budget"
+    target_state     = "echo_done"
+    policy { max_total_steps = 6 }
+}
+
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d19_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c17_comment" {
+    type  = string
+    value = ""
+}
+
+step "contract_budget" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_budget.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = step.echo_verdict
+    }
+    outcome "failure" {
+        fallback = true
+        next     = step.echo_verdict
+    }
+}
+
+step "echo_verdict" {
+    target      = adapter.shell.recorder
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/echo_verdict.sh.tftpl", {
+            probe_root  = var.probe_root
+            d21_reason  = ""
+            c14_reason  = ""
+            d19_verdict = data.internal.d19_verdict.value
+            c17_comment = data.internal.c17_comment.value
+        })
+    }
+    outcome "success" { next = state.echo_done }
+    outcome "failure" { next = state.failed }
+}
+
+state "echo_done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

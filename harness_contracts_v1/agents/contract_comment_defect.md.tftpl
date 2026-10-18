@@ -1,0 +1,25 @@
+KB-277 C17 defect probe (corrected comment on the require_comment arm — engine never receives it).
+
+This fixture run is DEFECT EVIDENCE for adapter 0.5.15, not a designed green
+route: the `approved` arm declares `schema = object({ reason = string })` AND
+`require_comment = true`. The adapter-side require_comment check accepts a
+non-empty comment, but the adapter forwards only {outcome, reason} to the
+engine in the FinalizeOutcome RPC — the engine-side require_comment
+validation always sees an empty comment and fails the step loud.
+
+Make the submit_outcome calls below IN ORDER. Do not invent your own repair.
+
+(1) EMPTY-COMMENT VIOLATION (rejected loudly by the adapter-side check):
+
+        outcome = "approved"
+        payload = {"reason": "C17 comment contract payload (this submission carries an empty adapter comment and must be rejected)"}
+        comment = ""
+
+(2) CORRECTED-COMMENT RESUBMISSION (the defect probe: accepted by the
+    adapter-side check, dropped before the engine-side check):
+
+        outcome = "approved"
+        payload = {"reason": "C17 corrected-comment defect probe: this non-empty adapter comment is accepted by the adapter-side check but dropped before the engine-side require_comment validation"}
+        comment = "C17 corrected non-empty adapter comment (defect probe)"
+
+Do not call any tools.

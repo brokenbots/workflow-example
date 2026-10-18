@@ -1,0 +1,21 @@
+probe_root={{ .probe_root | shellquote }}
+set -eu
+command -v mkdir >/dev/null
+
+# Fixed-content verdict records (KB-277): the verdict values are the run-state
+# strings the contracted arms wrote (D19/C17 carry their texts across from
+# data.internal into the record — the shellquote rendering treats the
+# adapter text as opaque single arguments, never part of the command
+# grammar), plus the probe_root from the variable. Every value
+# here arrives via the ONE lane the engine projects into arm outputs — the
+# submission's top-level reason (the C13 reason lane, or the reason lane each
+# dual-lane submission writes); payload body fields are dropped by the engine
+# projection (the pinned gap on the C14 row), which is exactly what the c14
+# record's lane-discriminated content proves.
+records_dir="$probe_root/contracts_probe_records"
+mkdir -p "$records_dir"
+printf 'd21_reason=%s\n' {{ .d21_reason | shellquote }} > "$records_dir/d21_reason_record"
+printf 'c14_reason=%s\n' {{ .c14_reason | shellquote }} > "$records_dir/c14_reason_record"
+printf 'd19_verdict=%s\n' {{ .d19_verdict | shellquote }} > "$records_dir/d19_verdict_record"
+printf 'c17_comment=%s\n' {{ .c17_comment | shellquote }} > "$records_dir/c17_comment_record"
+echo "contracts verdict records written: $records_dir/d21_reason_record $records_dir/c14_reason_record $records_dir/d19_verdict_record $records_dir/c17_comment_record"

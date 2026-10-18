@@ -1,0 +1,12 @@
+KB-277 C18a/D22 probe (turn budget exhaustion routes the declared fallback lane).
+
+This step is the never-finalize stimulus: its session must produce NO
+submit_outcome call at all. allow_tools is empty (no tools), so there is
+nothing else to do either — just send a single short text turn now saying
+"C18a/D22: this step never finalizes on purpose" and then STOP. Keep doing
+nothing on every later turn. The turn budget must exhaust WITHOUT a finalize,
+the turn.finalize_exhausted event marks the missing-finalize class, and the
+step's declared fallback lane catches the no-finalized-result case and routes
+it loud-class-marked instead of leaving an ambiguous FSM error.
+
+Do NOT call submit_outcome in this step, whatever happens.

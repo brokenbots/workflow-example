@@ -1,0 +1,60 @@
+// Fixture F6 (D21): permission policy — verbatim carrier of the shipped
+// contract_permissions step (harness_contracts_v1/main.chcl): the same
+// step body, data declaration, prompt template, allow band, payload-schema
+// arm, and write block, trimmed to this single step + the done terminal.
+// The trailing-* band s* grants the bash call first-match-wins (pattern
+// echoed in permission.granted) while the view call maps to policy tool
+// read, matches no band, and is DENIED (permission.denied names the tool);
+// the recovered denial keeps the turn's success. Band-set design note,
+// empirically pinned while building these probes: a matching NAME band
+// short-circuits per-segment compound evaluation (["s*", "shell:printf *"]
+// grants a printf && ls compound with pattern=s*), so a compound stimulus
+// is only observable on band sets that carry no matching name band. The
+// compound-segmentation and kind/adapter-namespace halves of the D21 row
+// are pinned by their own single-stimulus probes — f6c_compound.chcl
+// (every-segment refusal on a mismatching second segment) and
+// f6d_kindprefix.chcl (kind-prefixed and adapter-namespace bands match
+// nothing on this adapter's policy naming).
+workflow {
+    name             = "harness_contracts_v1_f6_permissions"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_permissions"
+    target_state     = "done"
+    policy { max_total_steps = 8 }
+}
+
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
+step "contract_permissions" {
+    target      = adapter.copilot.main
+    allow_tools = ["s*", "shell"]
+    input {
+        prompt = templatefile("./agents/contract_permissions.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.d21_reason.value
+            value  = output.reason
+        }
+        next = state.done
+    }
+    outcome "failure" {
+        fallback = true
+        next     = state.failed
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

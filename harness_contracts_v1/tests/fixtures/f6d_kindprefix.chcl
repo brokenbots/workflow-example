@@ -1,0 +1,47 @@
+// Fixture F6d (D21): kind/adapter-namespace band no-match probe — a
+// single-stimulus copy of the shipped contract_permissions step body
+// trimmed to the no-match band set: ["bash:printf *",
+// "adapter.copilot.main.tools.*"]. On this adapter's policy naming the
+// command tool is `shell` and the view tool is `read`, so both the
+// bash-prefixed argument band and the adapter-namespace trailing band
+// match NOTHING: the bash call is denied ("no matching allow_tools entry"),
+// no record lands, and the read call is denied with the suggestion string
+// naming the tool. The step still finalizes approved after recovering —
+// the no-match half of the kind and adapter-namespace band grammar, pinned
+// in run events; the matching-kind half (shell prefix) is pinned by F6c's
+// grant. Contrast with F6/F6c: an UNQUALIFIED name band and a SHELL-prefixed
+// argument band both match this policy's tool naming.
+workflow {
+    name             = "harness_contracts_v1_f6d_kindprefix"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_permissions"
+    target_state     = "done"
+    policy { max_total_steps = 8 }
+}
+
+step "contract_permissions" {
+    target      = adapter.copilot.main
+    allow_tools = ["bash:printf *", "adapter.copilot.main.tools.*"]
+    input {
+        prompt = templatefile("./agents/contract_f6d.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+    outcome "failure" {
+        fallback = true
+        next     = state.failed
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

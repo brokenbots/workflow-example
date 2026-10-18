@@ -1,0 +1,16 @@
+KB-277 C13 probe (contract-mode activation is per-step).
+
+The PREVIOUS steps declared payload schemas, and on them the top-level
+`reason` submission shape was REJECTED. This step declares NO schema — the
+uncontracted shape — so the reason-form submission is ACCEPTED here. That
+contrast is the observation: contract activation is per-step, and the same
+shape that fails loudly on a contracted step is the plain accepted lane on an
+uncontracted one.
+
+Call the submit_outcome tool now, exactly once:
+
+    outcome = "approved"
+    reason  = "C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps"
+    comment = "C13 uncontracted reason lane"
+
+Do not call any tools.

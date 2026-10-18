@@ -1,0 +1,78 @@
+// Fixture F3 (C17): the empty adapter comment on the require_comment arm is
+// rejected loudly (payload_invalid comment_missing — the matrix slice), then
+// the probe observation routes the green exit through the contracted
+// `observed` arm, whose reason renders into the c17_comment record sink.
+workflow {
+    name             = "harness_contracts_v1_f3_comment_echo"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_comment"
+    target_state     = "echo_done"
+    policy { max_total_steps = 4 }
+}
+
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d19_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c17_comment" {
+    type  = string
+    value = ""
+}
+
+step "contract_comment" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_comment.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema          = object({ reason = string })
+        require_comment = true
+        write {
+            target = data.internal.c17_comment.value
+            value  = output.reason
+        }
+        next = step.echo_verdict
+    }
+    outcome "observed" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.c17_comment.value
+            value  = output.reason
+        }
+        next = step.echo_verdict
+    }
+}
+
+step "echo_verdict" {
+    target      = adapter.shell.recorder
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/echo_verdict.sh.tftpl", {
+            probe_root  = var.probe_root
+            d21_reason  = ""
+            c14_reason  = ""
+            d19_verdict = data.internal.d19_verdict.value
+            c17_comment = data.internal.c17_comment.value
+        })
+    }
+    outcome "success" { next = state.echo_done }
+    outcome "failure" { next = state.failed }
+}
+
+state "echo_done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

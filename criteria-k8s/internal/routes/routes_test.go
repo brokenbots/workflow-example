@@ -91,11 +91,11 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 5 {
-		t.Errorf("workflowLibrary size = %d, want 5", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 6 {
+		t.Errorf("workflowLibrary size = %d, want 6", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 3 {
-		t.Errorf("routes size = %d, want 3", len(p.Routes))
+	if len(p.Routes) != 4 {
+		t.Errorf("routes size = %d, want 4", len(p.Routes))
 	}
 	// KB-281: the retired criteria-triage / criteria-develop routes are gone.
 	// Surviving route order: the criteria project's cleanup-only route, then
@@ -108,6 +108,20 @@ func TestParseAndValidate(t *testing.T) {
 	}
 	if p.Routes[1].Project != "Kanboard Tickets" || p.Routes[2].Project != "Kanboard Tickets" {
 		t.Errorf("routes[1:3] projects = %q/%q, want the kanboard pair on %q", p.Routes[1].Project, p.Routes[2].Project, "Kanboard Tickets")
+	}
+	// KB-277: the harness-contracts route rides last — the criteria project's
+	// dave-go tag-gated harness series leg (fires harness-contracts-url).
+	if n := p.Routes[3].Name; n != "harness-contracts" {
+		t.Errorf("routes[3] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
+	}
+	if p.Routes[3].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-contracts route project = %q, want %q", p.Routes[3].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[3].Workflow != "harness-contracts-url" {
+		t.Errorf("harness-contracts route workflow = %q, want %q", p.Routes[3].Workflow, "harness-contracts-url")
+	}
+	if _, ok := p.WorkflowLibrary["harness-contracts-url"]; !ok {
+		t.Errorf("workflowLibrary missing the harness-contracts-url object (KB-277)")
 	}
 	// Absence regressions (KB-281): the retired linear url objects must not
 	// return in the shipped example.

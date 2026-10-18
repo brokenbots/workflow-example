@@ -1,0 +1,33 @@
+// Fixture F3b (C17 defect evidence): the corrected non-empty comment
+// resubmission on the require_comment arm, with NO exit arm. Proven on
+// adapter 0.5.15: the adapter-side check accepts the comment but the
+// FinalizeOutcome RPC carries only {outcome, reason:""}, so the engine-side
+// require_comment validation fails LOUD with StepOutcomeInvalid
+// missing_comment and the step/run fails after 1 attempts. Asserted as the
+// documented defect shape; KB-249 (v0.6.0) retires require_comment.
+workflow {
+    name             = "harness_contracts_v1_f3b_comment_defect"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_comment"
+    target_state     = "done"
+    policy { max_total_steps = 4 }
+}
+
+step "contract_comment" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_comment_defect.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema          = object({ reason = string })
+        require_comment = true
+        next            = state.done
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}

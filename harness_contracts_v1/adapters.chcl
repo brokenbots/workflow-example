@@ -1,0 +1,51 @@
+// Deterministic adapter + environment set (KB-277). One remote environment —
+// the KB-241 per-scope peer-pod shape — and two adapter definitions:
+// the copilot probe identity every contract/agent-mechanics step dials
+// (ONE session identity across the whole run: fixed prompt, fixed model,
+// low max-turns — the matrix D slice's single fixed session), and one shell
+// identity the verdict-echo step dials to carry the contracted comment text
+// into run-state records.
+//
+// No adapter engine overrides anywhere: the tree changes nothing about engine
+// behavior — it only aims the probes. NO crash override is declared (the
+// language default stays in force).
+
+environment "remote" "probe_members" {
+    // Per-scope sessions: each scope's dials of this environment dispatch
+    // as per-scope operator-spawned peer pods (CRI-269 deferred-remote).
+    per_scope_sessions = true
+    working_directory  = var.probe_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+// Definition identity copilot.main — every copilot step in main.chcl targets
+// it, so the whole matrix slice runs in ONE fixed session (fixed prompt per
+// step, fixed model, low max-turns). max_turns stays deliberately low (4):
+// the finalize normally lands on the first turn, and the never-finalize
+// probes (C18b/D22) need the budget to exhaust deterministically.
+adapter "copilot" "main" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.15"
+    environment = remote.probe_members
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+    }
+    config {
+        model         = "claude-sonnet-4.5"
+        max_turns     = 4
+        system_prompt = "KB-277 contracts harness probe session. You execute exactly the fixed per-step probes the user prompt asks for and never invent additional work. The submit_outcome tool is the only finalize path: call it with exactly the parameter shapes the step prompt prescribes."
+    }
+}
+
+// Definition identity shell.recorder — the verdict-echo step dials it to write
+// the C17/D19 verdict texts into fixed-content records under the probe root.
+adapter "shell" "recorder" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.4"
+    environment = remote.probe_members
+}

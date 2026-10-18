@@ -1,0 +1,376 @@
+// harness_contracts_v1 — the flow (KB-277). Nine deterministic steps in the
+// exact order the contracts matrix slice needs — matrix C13-C18 (typed
+// outcome contracts) plus the contract-shaped light-agent items D19, D21, D22
+// (matrix of record docs/harness-expectations.md, series card 277). Acceptance
+// for every item is its shape observed in run events (half-implementations
+// cannot pass silently).
+//
+//   contract_valid       C14: a schema-valid payload is accepted and routes
+//                        the declared outcome with projected outputs intact.
+//   contract_reject      C15+C16+D19: wrong-field-set and wrong-lane
+//                        submissions are rejected by the payload contract and
+//                        re-prompted (the bounded repair loop, visible as
+//                        payload_invalid events); a rejected attempt commits
+//                        NOTHING; then the schema-valid ENGINEERED rejection
+//                        routes the DECLARED rejected lane green, its reason
+//                        carried verbatim into run-state.
+//   contract_comment     C17: an empty adapter comment on a require_comment
+//                        arm is rejected loudly (payload_invalid
+//                        comment_missing); the probe observation then routes
+//                        the step's green exit via the second contracted arm
+//                        (no require_comment — its reason renders into the
+//                        downstream verdict record). (The corrected-comment
+//                        resubmission on the require_comment arm is
+//                        UNOBSERVABLE on adapter 0.5.15 — the adapter
+//                        forwards only {outcome, reason} to the engine, so
+//                        the engine-side require_comment check always sees
+//                        an empty comment and the arm cannot finalize;
+//                        documented as a defect, KB-249 makes require_comment
+//                        a compile error in v0.6.0. The standalone suite
+//                        fires that resubmission against a fixture copy and
+//                        asserts the engine-side missing_comment loud
+//                        failure as defect evidence.)
+//   contract_uncontracted C13: the SAME top-level reason shape rejected on
+//                        every contracted step above is ACCEPTED here, on a
+//                        step declaring no schema — contract activation is
+//                        per-step. (The mixed contracted/undeclared-arm shape
+//                        itself fails loud at compile; the standalone suite
+//                        exercises that diagnostic.)
+//   contract_permissions D21: a trailing-* allow band lets the shell tool
+//                        call execute while the read tool call is DENIED
+//                        (permission.denied event), and the recovered denial
+//                        keeps the turn's success.
+//   contract_budget      C18a+D22: the never-finalize stimulus exhausts the
+//                        low turn budget (turn.finalize_exhausted,
+//                        finalize_kind=missing) and the step's declared
+//                        fallback lane catches the adapter's no-finalized-
+//                        result case, routing it loud-class-marked green.
+//   echo_verdict         shell record write: carries the C17/D19 verdict
+//                        texts verbatim from run-state into fixed-content
+//                        records (the KB-217 sink the require_comment arms
+//                        feed).
+//   contract_default     C18 default mapping: never-finalize again, but on a
+//                        step declaring an explicit `outcome "default"` arm
+//                        (no fallback): the adapter's synthetic failure
+//                        outcome name is unmapped as a submission, so the
+//                        engine maps it through the default arm and routes
+//                        GREEN — the mapped-by-default contrast to the loud
+//                        terminal that follows.
+//   contract_unmapped    C18b: never-finalize again, but with EVERY lane
+//                        absent (no default, no fallback): the synthetic
+//                        failure outcome name is unmapped, so the engine
+//                        fails LOUD with an explicit routing error instead of
+//                        swallowing it — the designed loud terminal.
+//
+// One copilot session: every copilot step targets the same copilot.main
+// identity (fixed prompt per step, fixed model, low max-turns). No real
+// development happens — these probes exercise agent-mechanics shapes only.
+
+workflow {
+    name             = "harness_contracts_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_valid"
+    target_state     = "done"
+
+    policy {
+        max_total_steps = 16
+    }
+}
+
+// ── Run-state: the contracted arms' verbatim texts, carried downstream ──────
+
+data "internal" "c14_reason" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d19_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c17_comment" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c13_reason" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
+// ── Steps ────────────────────────────────────────────────────────────────────
+
+// C14: valid payload accepted.
+// C13 carrier: this step declares one schema'd arm (approved) and one
+// deliberately UNDECLARED arm (rejected, no schema, documented no-op route).
+// Declaring any schema contracts ALL arms of the step: the undeclared arm
+// compiles but carries no outcome_contracts entry, so a submission on it
+// fails LOUD at run time — StepOutcomeInvalid issued with the
+// "outcome_uncontracted: ... has no outcome_contracts entry" schema
+// contract diagnostic within seconds of the step (the KB-246 no_work
+// class). The fixed prompt never submits it; the standalone suite fires it
+// against the real tree with a scripted stub and asserts the loud shape.
+step "contract_valid" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_valid.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.c14_reason.value
+            value  = output.reason
+        }
+        next = step.contract_reject
+    }
+    outcome "rejected" {
+        next = state.failed
+    }
+}
+
+// C15 repair loop + C16 no-commit-on-rejection + D19 engineered rejection lane.
+//
+// The `rejected` arm renders its payload reason into the downstream verdict
+// record but deliberately does NOT declare require_comment: on adapter
+// 0.5.15 the adapter drops the comment before the FinalizeOutcome RPC (the
+// engine-side require_comment check always sees an empty comment), so a
+// require_comment arm cannot finalize green and would break the observable
+// D19 route. The require_comment probe lives on `contract_comment` alone;
+// KB-249 (v0.6.0) makes require_comment a compile error and retires it.
+step "contract_reject" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_reject.md.tftpl", {})
+    }
+    outcome "rejected" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.d19_verdict.value
+            value  = output.reason
+        }
+        next = step.contract_comment
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = step.contract_comment
+    }
+}
+
+// C17: empty adapter comment rejected on a require_comment arm — the loud
+// rejection IS the designed observation (the matrix slice). The step carries
+// TWO contracted outcomes: `approved` declares schema + require_comment
+// (the KB-217 mechanical-rule arm: its reason WOULD render into the
+// downstream verdict record) and is submitted once with an empty adapter
+// comment — the adapter answers LOUD with payload_invalid comment_missing
+// within seconds (asserted in run events). The green exit runs through
+// `observed`, whose reason DOES render into the verdict record sink.
+//
+// DEFECT DOCUMENTED (adapter 0.5.15, KB-249-adjacent): the corrected
+// comment resubmission on the require_comment arm can NEVER finalize — the
+// adapter forwards only {outcome, reason: ""} to the engine (the top-level
+// comment and payload.comment are accepted by the adapter-side check but
+// silently dropped before the FinalizeOutcome RPC), so the engine-side
+// require_comment check sees an empty comment and issues StepOutcomeInvalid
+// missing_comment, failing the step loud. Per the series constraint no
+// adapter/engine fix lands from a harness card; the standalone suite
+// captures that loud failure on a fixture copy as the defect evidence, and
+// KB-249 (v0.6.0) turns require_comment into a compile error, retiring the
+// probe entirely.
+step "contract_comment" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_comment.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema          = object({ reason = string })
+        require_comment = true
+        write {
+            target = data.internal.c17_comment.value
+            value  = output.reason
+        }
+        next = step.contract_uncontracted
+    }
+    outcome "observed" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.c17_comment.value
+            value  = output.reason
+        }
+        next = step.contract_uncontracted
+    }
+}
+
+// C13: the uncontracted reason lane is accepted on a step with no schema.
+// The approved arm carries a write (not a schema — writes do not activate
+// contract mode) so the reason-lane text lands in run state as the captured
+// output (StepOutputCaptured carries the written value — the assertion
+// surface for this arm): output is projected only from the top-level reason
+// field, and the reason lane is exactly what the uncontracted step accepts
+// (the payload lanes project reason "" — see the suite notes). The arm stays
+// schema-less on purpose: declaring ANY schema here would contract ALL of
+// this step's outcomes and destroy the uncontracted stimulus, so the
+// KB-247 flow rule is answered by NOT rendering this reason into a
+// downstream input (no echo-template param reads it).
+step "contract_uncontracted" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_uncontracted.md.tftpl", {})
+    }
+    outcome "approved" {
+        write {
+            target = data.internal.c13_reason.value
+            value  = output.reason
+        }
+        next = step.contract_permissions
+    }
+}
+
+// D21 step "contract_permissions" — proven shape, verbatim fixture carrier
+// f6_permissions.chcl. allow_tools bands match POLICY TOOL NAMES, first
+// match wins: ["s*", "shell"] grants the bash call (whose policy tool name
+// is shell) with pattern=s* echoed in permission.granted — the trailing-*
+// band winning over the later exact "shell" entry is the first-match-wins
+// glob-contract observation. The view call maps to policy tool read,
+// matches neither band, and is DENIED with a permission.denied event that
+// names the tool; the recovered denial keeps the turn's success. A
+// matching name band SHORT-CIRCUITS per-segment evaluation: granted
+// compounds are granted via the name band regardless of segment content
+// (empirically pinned: ["s*", "shell:printf *"] grants a printf && ls
+// compound with pattern=s*), so the compound-segmentation and kind-prefix
+// halves of the D21 row need band sets with no matching name band — the
+// standalone suite fires them as F6c (["shell:printf *"]: a compound whose
+// second segment matches no band is refused with the exact every-segment
+// refusal "no matching allow_tools entry for every segment of the compound
+// command", the denied call executes nothing, the all-matching compound is
+// granted with the winning kind-prefixed pattern echoed, and the turn
+// recovers to success) and F6d (kind-prefixed ["bash:printf *"] and
+// adapter-namespace ["adapter.copilot.main.tools.*"] bands match NOTHING on
+// this adapter's policy naming — both the bash and the read call are
+// denied with "no matching allow_tools entry": the no-match half of the
+// kind and adapter-namespace band grammar, pinned in run events; a shell
+// kind prefix DOES match, as F6c's grant shows). The approved arm carries a
+// reason payload schema: a turn that carried tool activity is
+// contract-validated even when the arm would otherwise be schema-less (a
+// tool-bearing turn on a schema-less arm fails loud with
+// outcome_uncontracted — proven by the standalone suite).
+
+step "contract_permissions" {
+    target      = adapter.copilot.main
+    allow_tools = ["s*", "shell"]
+    input {
+        prompt = templatefile("./agents/contract_permissions.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.d21_reason.value
+            value  = output.reason
+        }
+        next = step.contract_budget
+    }
+}
+
+// C18a + D22: turn budget exhausted without a finalize; the declared fallback
+// lane catches the adapter's no-finalized-result case (max one fallback per
+// step) and routes it loud-class-marked green.
+step "contract_budget" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_budget.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = step.echo_verdict
+    }
+    outcome "failure" {
+        fallback = true
+        next     = step.echo_verdict
+    }
+}
+
+// The verdict records: the contracted arms' reason/comment texts render here
+// (the KB-217 sink) and land as fixed-content records under the probe root.
+step "echo_verdict" {
+    target      = adapter.shell.recorder
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/echo_verdict.sh.tftpl", {
+            probe_root   = var.probe_root
+            c14_reason   = data.internal.c14_reason.value
+            d19_verdict  = data.internal.d19_verdict.value
+            c17_comment  = data.internal.c17_comment.value
+            d21_reason   = data.internal.d21_reason.value
+        })
+    }
+    outcome "success" { next = step.contract_default }
+    outcome "failure" { next = state.failed }
+}
+
+// C18 default mapping: the never-finalize stimulus on a step declaring an
+// explicit `outcome "default"` arm (no fallback arm). The adapter's
+// synthetic failure outcome name is unmapped on the step as a submission
+// (approved is never submitted), and the engine maps it through the default
+// arm — routing the step GREEN through the declared default lane. This is
+// the mapped-by-default half of the C18 row; the chain's next step is its
+// no-default loud contrast (same synthetic name, no mapping →
+// outcome_not_allowed), so the mapped-vs-unmapped pair is one observation.
+step "contract_default" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_default.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = step.contract_unmapped
+    }
+    outcome "default" {
+        next = step.contract_unmapped
+    }
+}
+
+// C18b: budget exhaustion with EVERY lane absent — the synthetic failure
+// outcome name is unmapped (no default arm, no fallback arm), so the engine
+// must fail the run LOUD with an explicit routing error. The designed loud
+// terminal of this run: the shepherd reads StepOutcomeInvalid (not allowed)
+// + the run failure as the C18b observation, never a silent swallow. If the
+// session disobeys the never-finalize prompt and finalizes approved, the run
+// lands green (the stimulus miss is visible in the run events either way).
+step "contract_unmapped" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_unmapped.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+// The green terminal: every contract-shaped observation above landed except
+// the designed-loud C18b terminal (which ends the run FAILED on purpose —
+// the run must not lie about its evidence, CRI-275 doctrine).
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

@@ -1,0 +1,41 @@
+// Fixture F8b (C18 default mapping): the never-finalize stimulus on a step
+// that declares an explicit `outcome "default"` arm. The adapter's synthetic
+// failure outcome name is unmapped on the step as a SUBMISSION (approved was
+// never submitted), and the default arm maps it — the step routes GREEN
+// through the default lane. The contrast pair with F8 (no default arm →
+// outcome_not_allowed loud) is the C18 observation: mapped-by-default routes
+// green, unmapped-with-no-default fails loud. The burn is bounded: exactly
+// one turn budget exhausts before the default lane routes.
+workflow {
+    name             = "harness_contracts_v1_f8b_default"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_default"
+    target_state     = "done"
+    policy { max_total_steps = 6 }
+}
+
+step "contract_default" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_default.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+    outcome "default" {
+        next = state.done
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

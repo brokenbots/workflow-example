@@ -1,0 +1,36 @@
+KB-277 D21 probe (permission policy: trailing-* band first-match-wins,
+recovered denial keeps success).
+
+This step's allow_tools is exactly ["s*", "shell"]: allow bands match the
+POLICY TOOL NAME, and the first matching band wins. Your bash calls map to
+the policy tool `shell`, which the trailing-* band `s*` matches first.
+
+Make exactly this three-call sequence. Call (2) is ENGINEERED to be denied;
+the denial is NOT a step failure — you recover and the step still finalizes
+success (a recovered denial keeps the turn's success). The step's approved
+outcome carries a payload schema, so the finalize MUST use the typed payload
+lane.
+
+(1) Call the bash tool now, exactly once:
+
+        command: printf d21-shell-band-ok > ./d21_shell_band_record
+
+    This runs: its policy tool name `shell` matches the `s*` band, which is
+    the FIRST matching band even though the later exact `shell` entry would
+    also match (the grant echoes the winning pattern in run events). The
+    record lands in this step's working directory (the probe root the
+    harness points the shell environment at).
+
+(2) Call the view tool now, exactly once, on the file ../harness_contracts_v1/main.chcl
+
+    This is DENIED (its policy tool name `read` matches neither allow band);
+    expect a permission denied result telling you the tool was not allowed.
+
+(3) Call the submit_outcome tool now, exactly once — this step's approved
+    outcome declares a reason payload schema, so use the payload lane:
+
+        outcome = "approved"
+        payload = {"reason": "D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering"}
+        comment = "D21 permission band probe"
+
+No other tools, no other calls.

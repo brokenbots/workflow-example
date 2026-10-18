@@ -131,6 +131,23 @@
 # Tree mirrors live: the live 'castle' CM / routes configLibrary must carry
 # the same split ciGateCmd (a kubectl patch on card-270 precedent) or
 # admitted runs pin the stale Node-24-fatal chain (ConfigRenderDrift).
+#
+# KB-277 (2026-10-17, series ARMED on dave's parallel directive): the
+# 'harness-contracts-url' object + 'harness-contracts' route ship the KB-254
+# harness series' contracts leg (harness_contracts_v1, matrix C13-C18 +
+# D19/D21/D22 — typed outcomes/contract fixtures + light-agent behavior).
+# The object is url-ONLY for now and carries no 'ref': shipping pinless is
+# the ADR-0005 D7 follow-up convention (decision-demo-url precedent) — at
+# the card's close a follow-up re-pins 'ref'/?ref= to the squash-merge
+# commit that lands the tree, because the subtree can't pin its own landing
+# commit. The route fires ON DAVE'S GO within the green-run plan only:
+# tag-gated (tagMatch=all on harness-validation + harness-contracts) over
+# the criteria project's Ready for Development state, so a plain
+# development card never matches it (criteria-cleanup selects the same
+# state but the different criteria-dirty tag; the kanboard routes select
+# the kanboard project). Secrets stay name references (CRI-214 plan
+# section 3.8), and adapterImages pin the recorded fleet pin set verbatim
+# (three-way pin agreement).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -362,6 +379,50 @@ data:
           "type": "url",
           "url": "git::https://github.com/brokenbots/workflow-example.git//decision_demo_v1",
           "namespace": "criteria-jobs"
+        },
+        "harness-contracts-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//harness_contracts_v1",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
+              }
+            }
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+          }
         }
       },
       "configLibrary": {
@@ -405,6 +466,18 @@ data:
           "project": "Kanboard Tickets",
           "states": [
             "Ready"
+          ]
+        },
+        {
+          "name": "harness-contracts",
+          "workflow": "harness-contracts-url",
+          "project": "Criteria K8s Workflow Runner",
+          "tags": [
+            "harness-validation",
+            "harness-contracts"
+          ],
+          "states": [
+            "Ready for Development"
           ]
         }
       ]
