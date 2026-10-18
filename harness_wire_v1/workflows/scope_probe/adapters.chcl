@@ -1,0 +1,30 @@
+// The KB-276 subworkflow callee: one shell adapter dial per scope against
+// the SAME environment identity (remote.probe_shell) the parent declares
+// (A4 scope-set dialing). Its adapter definition identity
+// shell.probe_dialer is distinct from the parent's probe_a/probe_b, so the
+// boot manifest carries a third member for the environment while the
+// operator's env grouping keeps ONE pod for all of it.
+//
+// Deterministic and secret-free: no agent steps, no secret bindings, no
+// no crash overrides.
+
+environment "remote" "probe_shell" {
+    // Per-scope sessions: this callee's scope is exactly one per-scope
+    // participant in the parent run's environment group (A4/A6: its end
+    // releases the pair; the parent's later dials re-respawn the child
+    // cleanly (A5).
+    per_scope_sessions = true
+    working_directory  = var.probe_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+adapter "shell" "probe_dialer" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.4"
+    environment = remote.probe_shell
+}

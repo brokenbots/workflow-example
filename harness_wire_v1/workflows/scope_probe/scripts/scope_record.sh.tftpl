@@ -1,0 +1,13 @@
+probe_root={{ .probe_root | shellquote }}
+scope_label={{ .scope_label | shellquote }}
+set -euo pipefail
+command -v mkdir >/dev/null
+
+# Fixed-content scope record (KB-276): the scope label is the ONLY
+# per-arm interpolation and it comes from the parent's compile-time input —
+# never from the runtime environment. The record content is byte-identical
+# across runs for the same arm.
+records_dir="$probe_root/wire_probe_records"
+mkdir -p "$records_dir"
+printf '%b\n' {{ .record_lines | shellquote }} > "$records_dir/scope_record_$scope_label"
+echo "wire-probe scope record written for scope $scope_label"

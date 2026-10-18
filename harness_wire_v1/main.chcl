@@ -1,0 +1,132 @@
+// harness_wire_v1 — the flow (KB-276). Five deterministic steps in the exact
+// order the wire probes need; every dial is a shell record write under the
+// probe root, never an agent call:
+//
+//   boot_probe        FIRST dial of shell.probe_a (early provision: identity
+//                     handshake A1, digest pin A2).
+//   scope_probe_one   subworkflow scope #1: the callee's own
+//                     shell.probe_dialer identity dials the SAME
+//                     environment identity (A4 scope set), ends, and
+//                     releases (A6 release stimulus).
+//   scope_probe_two   subworkflow scope #2: fresh scope instance into the
+//                     same environment — clean-exit respawn for the callee
+//                     (A5) and a second release for the tombstone carrier.
+//   late_join_probe   FIRST dial of shell.probe_b, after the graph's boot
+//                     manifest already hosts it as a synthetic member:
+//                     the late join must never recreate the pod (B7/B9).
+//   redial_probe_a    shell.probe_a again across scopes: clean-exit
+//                     respawn verbatim (A5) with the pod still up (B9).
+//
+// Both subworkflow declarations share ONE callee source with per-arm inputs
+// (the repro_main/repro_stable pattern in qa_triage_v1) — two graph layers
+// carrying the SAME definition identity, which is exactly the graph-member
+// dedup stimulus (B8: a member is listed once regardless of the layers
+// referencing it).
+
+workflow {
+    name             = "harness_wire_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "boot_probe"
+    target_state     = "done"
+
+    policy {
+        max_total_steps = 16
+    }
+}
+
+// ── Subworkflows ─────────────────────────────────────────────────────────────
+
+subworkflow "scope_probe_one" {
+    source = "./workflows/scope_probe"
+    input = {
+        probe_root  = var.probe_root
+        scope_label = "one"
+    }
+}
+
+subworkflow "scope_probe_two" {
+    source = "./workflows/scope_probe"
+    input = {
+        probe_root  = var.probe_root
+        scope_label = "two"
+    }
+}
+
+// ── Steps ────────────────────────────────────────────────────────────────────
+
+// Every record write is a fixed-content echo of wire-probe identity lines —
+// no run ids, no timestamps, no environment reads: the record content is
+// identical across runs, so the shepherd's run-event mapping diffs cleanly.
+step "boot_probe" {
+    target      = adapter.shell.probe_a
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "boot_record"
+            record_lines = "definition-identity=shell.probe_a\nscope-set-role=early-dial\nwire-probe=harness_wire_v1/boot_probe"
+        })
+    }
+    outcome "success" { next = step.scope_probe_one }
+    outcome "failure" { next = state.failed }
+}
+
+step "scope_probe_one" {
+    target      = subworkflow.scope_probe_one
+    allow_tools = []
+
+    outcome "success" { next = step.scope_probe_two }
+    outcome "failure" { next = state.failed }
+}
+
+step "scope_probe_two" {
+    target      = subworkflow.scope_probe_two
+    allow_tools = []
+
+    outcome "success" { next = step.late_join_probe }
+    outcome "failure" { next = state.failed }
+}
+
+step "late_join_probe" {
+    target      = adapter.shell.probe_b
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "late_join_record"
+            record_lines = "definition-identity=shell.probe_b\nscope-set-role=late-join\nwire-probe=harness_wire_v1/late_join_probe"
+        })
+    }
+    outcome "success" { next = step.redial_probe_a }
+    outcome "failure" { next = state.failed }
+}
+
+step "redial_probe_a" {
+    target      = adapter.shell.probe_a
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "redial_record"
+            record_lines = "definition-identity=shell.probe_a\nscope-set-role=clean-exit-respawn\nwire-probe=harness_wire_v1/redial_probe_a"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+// A failed probe ends the run FAILED (the run must not lie about its
+// evidence — CRI-275 doctrine): the shepherd reading the run events must see
+// the failed terminal, never a green pass with a swallowed record.
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

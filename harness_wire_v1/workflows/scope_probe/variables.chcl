@@ -1,0 +1,14 @@
+// The subworkflow's scope inputs: only the probe root (compile-time
+// supplied by the parent) and the per-arm scope label. Nothing secret, and
+// nothing from the runtime environment.
+
+variable "probe_root" {
+    description = "Absolute root under which the probe records are written. Must match the parent's probe_root: the subworkflow scopes write beside the parent's probe records."
+    type        = string
+    default     = "/tmp/criteria-harness-wire"
+}
+
+variable "scope_label" {
+    description = "Per-arm label distinguishing the two scope invocations (\"one\" / \"two\"). Names the record file; drives neither routing nor any other control flow (the shape is identical both arms)."
+    type        = string
+}

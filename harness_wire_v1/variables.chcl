@@ -1,0 +1,16 @@
+// Variables for the KB-276 wire harness tree. Deliberately minimal: the
+// probes are deterministic — the only variable inputs are the probe root
+// (outside the repository, stable) and the copilot boot member's token
+// (secret channel, bound at apply time from the github-tokens surface).
+
+variable "probe_root" {
+    description = "Absolute root under which the probe records are written. Must be OUTSIDE the repository and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS (the remote environments' working_directory)."
+    type        = string
+    default     = "/tmp/criteria-harness-wire"
+}
+
+variable "workflow_github_token" {
+    description = "GitHub token for the copilot boot member over the secret channel. The member is never dialed, but the adapter still verifies at run start; the token resolves exactly like the production trees' (workstream_handler_v1 pattern)."
+    type        = string
+    secret      = true
+}

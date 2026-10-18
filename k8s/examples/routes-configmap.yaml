@@ -91,9 +91,9 @@
 # this repository as runnable proof of the decision adapter's composition
 # shape (classification -> switch/match routing -> confidence-gated human
 # approval). The 'decision-demo-url' object is ROUTE PREP ONLY for KB-207:
-# no routes[] entry fires it yet (the shipped example must keep exactly the
-# three live routes), it is url-only and pinless, and KB-207 completes the
-# wiring in one place —
+# no routes[] entry fires it yet (decision-demo-url stays route-less at prep
+# time and KB-207 adds its route as part of that wiring), it is url-only and
+# pinless, and KB-207 completes the wiring in one place —
 # re-pinning 'ref' to the merge commit that lands decision_demo_v1 (the
 # CRI-241/CRI-243 follow-up convention), declaring the decision adapter
 # image in adapterImages, binding the System One credential surfaced by a
@@ -185,6 +185,20 @@
 # the private-repo URL fetch, not the canary's own use — the tree declares
 # no copilot member and no secret channel of its own), and a shell-only
 # adapterImages pin (the fleet-smoke fleet is shell identity only).
+# KB-276 (2026-10-17, series ARMED on dave's parallel directive): the
+# 'harness-wire-url' object + 'harness-wire' route ship the KB-254 harness
+# series' wire/transport leg (harness_wire_v1, matrix A1-A6 + B7-B12). The
+# object is url-ONLY for now and carries no 'ref': shipping pinless is the
+# ADR-0005 D7 follow-up convention (decision-demo-url precedent) — at the
+# card's close a follow-up re-pins 'ref'/?ref= to the squash-merge commit
+# that lands the tree, because the subtree can't pin its own landing commit.
+# The route fires ON DAVE'S GO within the green-run plan only: tag-gated
+# (tagMatch=all on harness-validation + harness-wire) over the criteria
+# project's Ready for Development state, so a plain development card never
+# matches it (criteria-cleanup selects the same state but the different
+# criteria-dirty tag; the kanboard routes select the kanboard project).
+# Secrets stay name references (CRI-214 plan section 3.8), and adapterImages
+# pin the recorded fleet pin set verbatim (three-way pin agreement).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -241,8 +255,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "ticket-cleanup-url": {
@@ -295,8 +309,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "kanboard-triage-url": {
@@ -313,8 +327,7 @@ data:
               "mountPath": "/data",
               "env": {
                 "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              ,
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
                 "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
               }
             },
@@ -352,8 +365,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "kanboard-develop-url": {
@@ -369,8 +382,7 @@ data:
               "mountPath": "/data",
               "env": {
                 "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              ,
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
                 "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
               }
             },
@@ -408,8 +420,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "decision-demo-url": {
@@ -457,8 +469,52 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          }
+        },
+        "harness-wire-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//harness_wire_v1",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
+              }
+            }
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "harness-composition-url": {
@@ -501,8 +557,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "harness-failures-url": {
@@ -545,8 +601,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "harness-fleet-smoke-url": {
@@ -589,7 +645,7 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1"
           }
         }
       },
@@ -679,6 +735,18 @@ data:
           "tags": [
             "harness-validation",
             "harness-fleet-smoke"
+          ],
+          "states": [
+            "Ready for Development"
+          ]
+        },
+        {
+          "name": "harness-wire",
+          "workflow": "harness-wire-url",
+          "project": "Criteria K8s Workflow Runner",
+          "tags": [
+            "harness-validation",
+            "harness-wire"
           ],
           "states": [
             "Ready for Development"

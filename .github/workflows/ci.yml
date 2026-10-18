@@ -120,6 +120,14 @@ jobs:
         run: |
           bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
 
+      # KB-276: the harness wire/transport tree (matrix A1-A6 + B7-B12) —
+      # compile-level gate over the deterministic 2-env 2-kind probe tree
+      # (handshake, digest pins, identity grammar, scope sets, graph-carrier
+      # composition); route-prep wiring rides the routes-configmap test.
+      - name: Run harness_wire_v1 standalone regression test (KB-276)
+        run: |
+          bash harness_wire_v1/tests/test_wire_standalone.sh
+
       # KB-205 / ADR-0013: decision-demo worktrees — the System One
       # classification+routing demo and its backend-agnostic localhost
       # variant. Compile-level gate over both trees (arm order, every

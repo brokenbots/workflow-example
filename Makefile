@@ -136,6 +136,9 @@ validate:
 	# reason into a downstream prompt declares require_comment. Fails closed;
 	# trees are auto-discovered, no allowlists.
 	@node scripts/tree-outcome-flow.mjs
+	# KB-276: the wire/composition harness tree — same validate leg as the
+	# production trees; its standalone suite carries the compile-level checks.
+	/usr/local/bin/criteria validate harness_wire_v1
 	# KB-254: the harness-expectations matrix of record (the harness series
 	# anchor) — its guard fails closed on a missing/duplicate item id, a
 	# broken series-slice assignment, or a conventions regression.
@@ -225,6 +228,8 @@ test: validate test-criteria-k8s
 	./harness_fleet_smoke_v1/tests/test_fleet_smoke_standalone.sh
 	@echo "Running harness-expectations matrix guard regression test (KB-254)..."
 	./k8s/tests/test_harness_expectations.sh
+	@echo "Running harness wire standalone regression test (KB-276)..."
+	./harness_wire_v1/tests/test_wire_standalone.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
 	./k8s/tests/test_env_listen_ports.sh
 
@@ -265,7 +270,8 @@ lint: lint-go
 		harness_fleet_smoke_v1/tests/test_fleet_smoke_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh \
-		k8s/tests/test_harness_expectations.sh
+		k8s/tests/test_harness_expectations.sh \
+		harness_wire_v1/tests/test_wire_standalone.sh
 
 # The Go lint leg. Full-CI gate lines invoke `make lint-go` explicitly
 # (see the develop-loop ci_gate step), so this must exist under this name.
@@ -330,6 +336,7 @@ ci: validate
 	bash kanboard_develop_v1/tests/test_develop_standalone.sh
 	bash kanboard_triage_v1/tests/test_triage_standalone.sh
 	bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
+	bash harness_wire_v1/tests/test_wire_standalone.sh
 	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
 	bash harness_contracts_v1/tests/test_contracts_standalone.sh
 	bash harness_composition_v1/tests/test_composition_standalone.sh

@@ -1,0 +1,80 @@
+// Deterministic adapter + environment set (KB-276). Two remote environments —
+// the KB-241 per-scope peer-pod shape — and four adapter definitions:
+// three shell identities dialed by steps in exactly the order the wire
+// probes need, plus the graph-only copilot boot member no step ever dials.
+//
+// NO crash override is declared anywhere in this tree (A5's stimulus: the language
+// default stays in force, so a crashed child is never respawned by the
+// harness, and a healthy one respawns verbatim on redial). No adapter engine
+// overrides: the tree changes nothing about engine behavior — it only aims
+// the probes.
+
+// One environment identity hosts ALL of the shell probes: root scopes and
+// subworkflow scopes dial it alike (A4 scope-set dialing — the peer serves
+// the run's scopes of this environment from one pod). The name must stay
+// in step with the subworkflow callee's own declaration below, and with the
+// routes object's adapterImages (the env-wide kind check resolves the image
+// by adapter TYPE: A3).
+environment "remote" "probe_shell" {
+    // Per-scope sessions: each scope's dials of this environment dispatch
+    // as per-scope operator-spawned peer pods (CRI-269 deferred-remote).
+    per_scope_sessions = true
+    working_directory  = var.probe_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+// The second environment identity, hosting a different adapter KIND: the
+// copilot boot member (B7/B8). Dialed by nobody — the pod comes up at boot
+// from the graph-complete manifest and serves as the 2-kind census stimulus.
+environment "remote" "probe_copilot" {
+    per_scope_sessions = true
+    working_directory  = var.probe_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+// Definition identity shell.probe_a — the early dial (identity handshake
+// A1, digest pin A2) and the redial at run end (clean-exit respawn A5).
+adapter "shell" "probe_a" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.4"
+    environment = remote.probe_shell
+}
+
+// Definition identity shell.probe_b — the LATE join (B7/B8/B9): first dialed
+// after both subworkflow scopes have already come and gone. Its manifest
+// member rides the graph (boot manifest), so joining must never recreate
+// the environment pod.
+adapter "shell" "probe_b" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.4"
+    environment = remote.probe_shell
+}
+
+// Definition identity copilot.boot_member — the graph-carrier boot member
+// (B7/B8). Pinned digest (yes), dial identity (no): no step targets this
+// adapter, so it exists only in the boot manifests and never spawns a
+// session. The token rides the secret channel only (never interpolated
+// into step input — there is no step input here at all).
+adapter "copilot" "boot_member" {
+    environment = remote.probe_copilot
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.15"
+    secrets {
+        GITHUB_TOKEN = var.workflow_github_token
+    }
+    config {
+        model         = "claude-sonnet-4.5"
+        max_turns     = 1
+        system_prompt = "harness boot member: never dialed by any step"
+    }
+}
