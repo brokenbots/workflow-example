@@ -200,6 +200,10 @@ const MODES = {
   // the missing-finalize class (or, with no lanes mapped, the loud routing
   // error) is the designed shape.
   f7_budget: () => [plain("KB-277 C18a/D22 probe: this step never finalizes on purpose (turn budget must exhaust)")],
+  // C18 default mapping: never-finalize on a step with an explicit
+  // `outcome "default"` arm — the synthetic unmapped failure name routes the
+  // default lane green (the mapped-by-default contrast to f8_unmapped).
+  f8b_default: () => [plain("KB-277 C18 default-lane probe: this step never finalizes on purpose (the synthetic failure outcome must route the default arm)")],
   f8_unmapped: () => [plain("KB-277 C18b probe: this step never finalizes on purpose (the synthetic failure outcome must hit the loud routing error)")],
 };
 
@@ -215,6 +219,7 @@ const MARKER_STEPS = [
   ["KB-277 C13 probe", "f5_uncontracted"],
   ["KB-277 D21 probe", "f6_permissions"],
   ["KB-277 C18a/D22 probe", "f7_budget"],
+  ["KB-277 C18 default-lane probe", "f8b_default"],
   ["KB-277 C18b probe", "f8_unmapped"],
 ];
 const PLAIN_NEVER_FINALIZE = () =>

@@ -15,7 +15,7 @@ set -uo pipefail
 # carries conversation state ACROSS steps, and a scripted stub cannot steer
 # multi-step sessions deterministically, so per-shape fixtures keep the
 # engineered call chains short and exact. F9 then runs the SHIPPED
-# main.chcl verbatim end-to-end (all eight steps, loud-terminal by design)
+# main.chcl verbatim end-to-end (all nine steps, loud-terminal by design)
 # so the routed tree itself is under test, not only its fixture copies.
 #
 # Skips cleanly when the engine, node, jq, or the pinned adapter versions are
@@ -25,9 +25,9 @@ TREE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURES="$(cd "$(dirname "${BASH_SOURCE[0]}")/fixtures" && pwd)"
 CRITERIA="${CRITERIA_BIN:-criteria}"
 TIMEOUT_SECS="${SUITE_TIMEOUT:-150}"
-# The shipped-chain run (F9) drives all eight steps plus turn-budget and
+# The shipped-chain run (F9) drives all nine steps plus turn-budget and
 # loud-terminal stimuli in one session; give it its own generous ceiling.
-TIMEOUT_FULL="${SUITE_TIMEOUT_FULL:-600}"
+TIMEOUT_FULL="${SUITE_TIMEOUT_FULL:-750}"
 
 FAILED=0
 declare -a STUB_PIDS=()
@@ -444,10 +444,42 @@ else
 fi
 expect_event F8 RunFailed
 
+# ── F8b: C18 default mapping — the synthetic unmapped name routes the default
+#    lane ──────────────────────────────────────────────────────────────────────
+# The mapped-by-default contrast to F8: identical never-finalize stimulus, but
+# the fixture declares an explicit `outcome "default"` arm. The adapter's
+# synthetic failure outcome name is unmapped on the step as a submission, and
+# the engine maps it through the default arm — the run itself stays green.
+
+run_fixture f8b_default f8b_default
+expect_rc_zero F8b
+if has_ev '"step":"contract_default","outcome":"failure"' \
+   && has_ev 'outcome_not_allowed'; then
+    ok "F8b synthetic failure name loudly unmapped even with the default arm (outcome_not_allowed)"
+else
+    fail F8b: the unmapped loud notice before the default routing was not observed
+fi
+if has_ev '"to":"done","viaOutcome":"default"'; then
+    ok "F8b unmapped synthetic failure name routed the explicit default arm (viaOutcome=default)"
+else
+    fail F8b: the default arm did not route the unmapped synthetic failure name
+fi
+if [ "$(kind_count "$EV" turn.finalize_exhausted)" = "1" ]; then
+    ok "F8b burn bounded: exactly 1 finalize_exhausted turn before the default lane"
+else
+    fail "F8b: expected exactly 1 finalize_exhausted (bounded turn budget), saw $(kind_count "$EV" turn.finalize_exhausted)"
+fi
+if has_ev '"finalize_kind":"missing"'; then
+    ok "F8b missing-finalize class marked before the default lane routing"
+else
+    fail F8b: finalize_kind=missing not observed on the default-lane step
+fi
+expect_run_green F8b
+
 # ── F9: shipped full chain — the SHIPPED main.chcl under test at runtime ────
 #
 # One run of the shipped tree, verbatim (run_shipped never replaces
-# main.chcl): all eight steps execute against one stub process in chain
+# main.chcl): all nine steps execute against one stub process in chain
 # order, so the card's expectation slice is observed in the events the
 # routed tree actually emits — not only in fixture copies. The chain ends
 # in state.failed BY DESIGN (the C18b unmapped step is loud-terminal), so
@@ -463,7 +495,19 @@ expect_step F9 contract_uncontracted approved
 expect_step F9 contract_permissions approved
 expect_step F9 contract_budget failure
 expect_step F9 echo_verdict success
+# The default-routed step emits no StepOutcome: the synthetic name is loudly
+# un-mapped (StepOutcomeInvalid outcome_not_allowed) and the engine resolves
+# the routing through the explicit default arm — visible only in the
+# StepTransition viaOutcome. The mapped-by-default vs unmapped-loud contrast
+# with the terminal contract_unmapped step is exactly: same loud notice, but
+# a viaOutcome=default transition (green) instead of a dead end (RunFailed).
+expect_step F9 contract_default failure
 expect_step F9 contract_unmapped failure
+if has_ev '"from":"contract_default","to":"contract_unmapped","viaOutcome":"default"'; then
+    ok "F9 default-lane routing observed (viaOutcome=default after the loud notice)"
+else
+    fail F9: the explicit default arm did not route the synthetic failure outcome
+fi
 expect_event F9 RunFailed
 # The unmapped routing error surfaces as a StepOutcomeInvalid issue string
 # ("outcome_not_allowed: outcome ... not in allowed_outcomes") and an
@@ -493,10 +537,10 @@ if [ "$(kind_count "$EV" comment_missing)" = "1" ]; then
 else
     fail "F9: expected exactly 1 comment_missing, saw $(kind_count "$EV" comment_missing)"
 fi
-if [ "$(kind_count "$EV" turn.finalize_exhausted)" = "2" ]; then
-    ok "F9 both never-finalize steps exhausted their turn budget"
+if [ "$(kind_count "$EV" turn.finalize_exhausted)" = "3" ]; then
+    ok "F9 all three never-finalize steps exhausted their turn budget"
 else
-    fail "F9: expected exactly 2 finalize_exhausted turns, saw $(kind_count "$EV" turn.finalize_exhausted)"
+    fail "F9: expected exactly 3 finalize_exhausted turns, saw $(kind_count "$EV" turn.finalize_exhausted)"
 fi
 if has_ev '"finalize_kind":"missing"'; then
     ok "F9 missing-finalize class marked on the exhausted turns"
@@ -538,7 +582,7 @@ C13_REC="$PROOT/contracts_probe_records/c13_reason_record"
 # contract_budget failure + the echo_verdict success; the unmapped loud
 # terminal emits StepOutcomeInvalid (never a committed StepOutcome).
 if [ "$(count_type "$EV" StepOutcome)" = "7" ]; then
-    ok "F9 exactly one outcome event per non-unmapped step (5 commits + 1 failure + 1 echo)"
+    ok "F9 exactly one outcome event per finalized step (5 commits + 1 failure + 1 echo; the default-routed step emits none)"
 else
     fail "F9: expected exactly 7 StepOutcome events across the chain, saw $(count_type "$EV" StepOutcome)"
 fi

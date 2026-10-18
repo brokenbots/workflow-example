@@ -1,4 +1,4 @@
-// harness_contracts_v1 — the flow (KB-277). Eight deterministic steps in the
+// harness_contracts_v1 — the flow (KB-277). Nine deterministic steps in the
 // exact order the contracts matrix slice needs — matrix C13-C18 (typed
 // outcome contracts) plus the contract-shaped light-agent items D19, D21, D22
 // (matrix of record docs/harness-expectations.md, series card 277). Acceptance
@@ -49,6 +49,13 @@
 //                        texts verbatim from run-state into fixed-content
 //                        records (the KB-217 sink the require_comment arms
 //                        feed).
+//   contract_default     C18 default mapping: never-finalize again, but on a
+//                        step declaring an explicit `outcome "default"` arm
+//                        (no fallback): the adapter's synthetic failure
+//                        outcome name is unmapped as a submission, so the
+//                        engine maps it through the default arm and routes
+//                        GREEN — the mapped-by-default contrast to the loud
+//                        terminal that follows.
 //   contract_unmapped    C18b: never-finalize again, but with EVERY lane
 //                        absent (no default, no fallback): the synthetic
 //                        failure outcome name is unmapped, so the engine
@@ -293,8 +300,31 @@ step "echo_verdict" {
             c13_reason   = data.internal.c13_reason.value
         })
     }
-    outcome "success" { next = step.contract_unmapped }
+    outcome "success" { next = step.contract_default }
     outcome "failure" { next = state.failed }
+}
+
+// C18 default mapping: the never-finalize stimulus on a step declaring an
+// explicit `outcome "default"` arm (no fallback arm). The adapter's
+// synthetic failure outcome name is unmapped on the step as a submission
+// (approved is never submitted), and the engine maps it through the default
+// arm — routing the step GREEN through the declared default lane. This is
+// the mapped-by-default half of the C18 row; the chain's next step is its
+// no-default loud contrast (same synthetic name, no mapping →
+// outcome_not_allowed), so the mapped-vs-unmapped pair is one observation.
+step "contract_default" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_default.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = step.contract_unmapped
+    }
+    outcome "default" {
+        next = step.contract_unmapped
+    }
 }
 
 // C18b: budget exhaustion with EVERY lane absent — the synthetic failure
