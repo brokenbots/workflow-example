@@ -75,8 +75,8 @@ pin_installed() {
 if [ -z "$SKIP" ] && ! pin_installed 0.5.15; then
     SKIP="pinned copilot adapter 0.5.15 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15')"
 fi
-if [ -z "$SKIP" ] && ! pin_installed 0.5.4; then
-    SKIP="pinned shell adapter 0.5.4 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.4')"
+if [ -z "$SKIP" ] && ! pin_installed 0.5.5; then
+    SKIP="pinned shell adapter 0.5.5 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.5')"
 fi
 if [ -n "$SKIP" ]; then
     echo "SKIP: harness_contracts_v1 standalone suite: $SKIP" >&2
