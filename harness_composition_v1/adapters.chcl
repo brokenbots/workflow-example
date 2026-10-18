@@ -1,0 +1,83 @@
+// KB-278 (composition card): parent-side adapter + environment set. The
+// shared identity pair is deliberate:
+//
+//   environment remote.comp_main — declared by BOTH the parent (here) and the
+//     embedded callee (with a contrast value in its own declaration). The
+//     composed graph groups members of the same environment identity across
+//     ALL layers (G1), and at runtime the parent declaration substitutes the
+//     callee's same-key declaration (ADR-0009, G7) — the callee's contrast
+//     value must never leak into a pod on this identity.
+//
+//   environment remote.iter_body — the iteration-body environment (G2/G3):
+//     per_scope_sessions pins each iteration's dial onto its own
+//     (scope-instance, environment) pod, released at iteration exit.
+//
+// Adapter members:
+//   shell.pass_in    — the pass-in identity (G6/G8): established first by the
+//                      root scope (owner_dial), re-spelled by the callee, and
+//                      re-dialed by the root AFTER the borrower scopes exited
+//                      (survivor_redial).
+//   shell.iter_dialer — the iteration member, bound to the iteration-body
+//                      environment (loop_iterations + parallel_probe targets).
+//   shell.late_join  — declared from the start, dialed last (G10/B7 stimulus:
+//                      boot manifests already carried it).
+//
+// No adapter engine overrides anywhere: the tree changes nothing about engine
+// behavior — it only aims the probes. NO crash override is declared (the
+// language default stays in force).
+
+environment "remote" "comp_main" {
+    // Per-scope sessions: each scope's dials of this environment dispatch
+    // as per-scope operator-spawned peer pods (CRI-269 deferred-remote).
+    per_scope_sessions = true
+    working_directory  = var.probe_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The substitution marker (G7): the parent's value is the only one pods on
+    // this identity may observe — the callee layer's same-key declaration
+    // ("callee-shadow") is substituted away.
+    variables = {
+        COMPOSITION_ENV_SHADING = "parent"
+    }
+}
+
+environment "remote" "iter_body" {
+    // Per-scope sessions AND per-iteration scopes: every for_each/parallel
+    // iteration is its own scope-instance, so each iteration gets a fresh pod
+    // keyed per iteration and its scope releases it at exit (G2/G3).
+    per_scope_sessions = true
+    working_directory  = var.probe_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The iteration marker (G2 evidence): records written from inside an
+    // iteration body carry this — comp_main pods must print it empty.
+    variables = {
+        ITERATION_ENV_MARKER = "iter_body"
+    }
+}
+
+adapter "shell" "pass_in" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.comp_main
+}
+
+adapter "shell" "iter_dialer" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.iter_body
+}
+
+adapter "shell" "late_join" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.comp_main
+}

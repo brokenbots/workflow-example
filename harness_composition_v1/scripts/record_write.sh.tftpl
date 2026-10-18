@@ -1,0 +1,25 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# Fixed-content composition probe records (KB-278): every record carries the
+# static identity value AND the two runtime environment markers:
+#   composition_env_shadow — readable only on pods whose environment identity
+#     carried the parent's substituted declaration ("parent"); a borrower
+#     shadow value ("callee-shadow") would be G7 leakage; empty means the pod
+#     runs an identity that never declared it (e.g. the iteration body env).
+#   iteration_env_marker — readable only on per-iteration pods (G2 evidence).
+# Both markers expand empty when absent, so one script discriminates all the
+# environment identities the composition exercise touches.
+records_dir="$probe_root/composition_probe_records"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'composition_env_shadow=%s\n' "$COMPOSITION_ENV_SHADING"
+    printf 'iteration_env_marker=%s\n' "$ITERATION_ENV_MARKER"
+} > "$record"
+echo "composition record written: $record"

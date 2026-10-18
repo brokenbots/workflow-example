@@ -1,0 +1,22 @@
+// Variables for the KB-278 composition harness tree. The iteration/parallel
+// label lists are the three-item stimuli the SHAPE prescribes; the probes are
+// otherwise deterministic and need no secret channel (the tree carries no
+// copilot member — only shell identities, so no token surface is declared).
+
+variable "probe_root" {
+    description = "Absolute root under which the composition probe records are written. Must be OUTSIDE the repository and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS (the remote environments' working_directory)."
+    type        = string
+    default     = "/tmp/criteria-harness-composition"
+}
+
+variable "iter_labels" {
+    description = "For-each iteration labels (G2/G3 stimuli): one iteration per label."
+    type        = list(string)
+    default     = ["one", "two", "three"]
+}
+
+variable "parallel_labels" {
+    description = "Parallel iteration labels (G5 stimuli), bounded by parallel_max = 2."
+    type        = list(string)
+    default     = ["p1", "p2", "p3"]
+}
