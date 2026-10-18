@@ -11,10 +11,9 @@ set -euo pipefail
 # Part 1 exercises the runner's lockfile parsing against the real workflow
 # lockfiles (the both-kinds qa_triage_v1 exemplar and the shell-only
 # kanboard_triage_v1 triage tree) plus a synthetic multi-entry lockfile.
-# Part 2 runs pod-adapter-
-# adapter.sh end-to-end with a stubbed criteria-adapter-remote-runner binary
-# and a seeded discovery directory, asserting the resolved connection env and
-# that the poll loop terminates.
+# Part 2 runs pod-adapter-adapter.sh end-to-end with a stubbed
+# criteria-adapter-remote-runner binary and a seeded discovery directory,
+# asserting the resolved connection env and that the poll loop terminates.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER="$REPO_ROOT/k8s/pod-adapter-runner.sh"
@@ -88,6 +87,11 @@ entry_digest() {
 # kind leg still fires against this shell-only lockfile, emitting its
 # expected "criteria adapter copilot not found" stderr and an empty
 # digest-copilot that the both-kinds pass below repins.
+# Both published passes share one run dir because the triage and exemplar
+# trees pin the identical shell adapter digest - assert that pairing instead
+# of just claiming it.
+[ "sha256:$(lockfile="$TRIAGE_LOCKFILE" entry_digest shell triage)" = "sha256:$(lockfile="$EXEMPLAR_LOCKFILE" entry_digest shell repo)" ] || \
+    fail "triage and exemplar lockfiles must pin the identical shell digest for the shared run dir to stay unambiguous"
 lockfile="$TRIAGE_LOCKFILE"
 run_dir="$tmp/runs/cri-140"
 mkdir -p "$run_dir"
