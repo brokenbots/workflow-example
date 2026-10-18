@@ -30,12 +30,12 @@ declare -a STUB_PIDS=()
 WORK=""
 
 fail() {
-    echo "FAIL: $1" >&2
+    echo "FAIL: $*" >&2
     FAILED=$((FAILED + 1))
 }
 
 ok() {
-    echo "ok: $1"
+    echo "ok: $*"
 }
 
 # ── Preconditions (skip, not fail — run-event depth is opt-in) ───────────────
@@ -121,7 +121,7 @@ run_fixture() {
         --output json --ui=false >"$EV" 2>&1 || RC=$?
     kill "$stub_pid" 2>/dev/null
 
-    if [ "$SUITE_DEBUG" = "1" ]; then
+    if [ "${SUITE_DEBUG:-}" = "1" ]; then
         echo "--- events $name (rc=$RC) ---" >&2
         tail -c 4000 "$EV" >&2
         echo "--- stub $name ---" >&2
@@ -165,7 +165,7 @@ expect_rc_zero F1
 expect_event F1 StepOutcome
 expect_run_green F1
 if has_ev 'C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact'; then
-    ok F1 engineered payload reason carried verbatim in run events
+    ok "F1 engineered payload reason carried verbatim in run events"
 else
     fail F1: engineered payload reason not found verbatim in run events
 fi
@@ -175,19 +175,19 @@ fi
 run_fixture f2_reject_echo f2_reject
 expect_rc_zero F2
 if [ "$(count_type "$EV" payload_invalid 2>/dev/null || true)" -ge 1 ] || has_ev 'payload_invalid'; then
-    ok F2 payload_invalid rejections observed
+    ok "F2 payload_invalid rejections observed"
 else
     fail F2: no payload_invalid repair-loop rejections observed
 fi
 if ! has_ev 'wrong field set on purpose' ; then :; fi
 expect_run_green F2
 if [ -f "$PROOT/contracts_probe_records/d19_verdict_record" ]; then
-    ok F2 d19 verdict record written to run-state files
+    ok "F2 d19 verdict record written to run-state files"
 else
     fail F2: d19_verdict_record missing from probe root
 fi
 if has_ev 'D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason'; then
-    ok F2 D19 engineered reason carried verbatim in run events
+    ok "F2 D19 engineered reason carried verbatim in run events"
 else
     fail F2: D19 engineered reason not found verbatim in run events
 fi
@@ -202,13 +202,13 @@ else
     fail F3: comment_missing loud rejection not observed
 fi
 if has_ev 'payload_invalid'; then
-    ok F3 rejection surfaced as payload_invalid
+    ok "F3 rejection surfaced as payload_invalid"
 else
     fail F3: loud rejection missing the payload_invalid shape
 fi
 expect_run_green F3
 if [ -f "$PROOT/contracts_probe_records/c17_comment_record" ]; then
-    ok F3 c17 verdict record written to run-state files
+    ok "F3 c17 verdict record written to run-state files"
 else
     fail F3: c17_comment_record missing from probe root
 fi
@@ -224,7 +224,7 @@ else
 fi
 expect_event F3b RunFailed
 if has_ev 'failed after 1 attempts'; then
-    ok F3b step failed loud after 1 attempts
+    ok "F3b step failed loud after 1 attempts"
 else
     fail F3b: loud step-failure-after-1-attempts shape not observed
 fi
@@ -248,7 +248,7 @@ expect_run_green F5
 if has_ev 'payload_invalid'; then
     fail F5: uncontracted step must accept the reason lane without payload rejections
 else
-    ok F5 reason-lane accepted with no payload rejections
+    ok "F5 reason-lane accepted with no payload rejections"
 fi
 
 # ── F6: D21 — trailing-* band, recovered denial keeps success ───────────────
@@ -267,12 +267,12 @@ expect_run_green F6
 run_fixture f7_budget_echo f7_budget
 expect_rc_zero F7
 if has_ev 'finalize_exhausted'; then
-    ok F7 turn budget exhaustion observed
+    ok "F7 turn budget exhaustion observed"
 else
     fail F7: turn.finalize_exhausted not observed
 fi
 if has_ev 'finalize_kind":"missing"\|"missing"'; then
-    ok F7 missing-finalize class marked
+    ok "F7 missing-finalize class marked"
 else
     fail F7: finalize_kind=missing class not observed
 fi
