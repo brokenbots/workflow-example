@@ -177,6 +177,26 @@ jobs:
             exit 1
           fi
 
+      # KB-279 (failures leg, series leg armed on dave's go): the engineered
+      # failure-path fixtures execute in-run — every failure must land in its
+      # DESIGNED CLASS marker (stall watchdog, bounded-retry park, iteration
+      # failure, class registry, E24 wedge shape, G12 silent traversal flip,
+      # E30 admission pin refusals observed against a throwaway TLS archive
+      # server built at suite time). Gate integrity: a skipped run must fail
+      # the all-shapes banner check.
+      - name: Run harness_failures_v1 standalone regression test (KB-279)
+        env:
+          SUITE_DEBUG: "1"
+        run: |
+          set -o pipefail
+          bash harness_failures_v1/tests/test_failures_standalone.sh \
+            2>&1 | tee /tmp/kb279_suite.log
+          banner='harness_failures_v1 standalone suite: all failure shapes asserted (compile + probes + fixtures + admission pins green)'
+          if ! grep -qF "$banner" /tmp/kb279_suite.log; then
+            echo "::error::harness_failures_v1 suite skipped (criteria/jq/go absent at run time) — gate coverage silently lost; restore the toolchain"
+            exit 1
+          fi
+
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
       - name: Run workstream_handler_v1 regression tests

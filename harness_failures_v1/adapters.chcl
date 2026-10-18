@@ -1,0 +1,111 @@
+// KB-279 (failures card): parent-side adapter + environment set. The shared
+// identity pair is deliberate:
+//
+//   environment remote.fail_main — declared by BOTH the parent (here) and the
+//     embedded borrower callee (with a contrast value in its own
+//     declaration). The composed graph groups members of the same environment
+//     identity across ALL layers (composition card G1), and at runtime the
+//     parent declaration substitutes the callee's same-key declaration
+//     (ADR-0009) — the callee's contrast value must never leak into a pod on
+//     this identity (E27's borrower pod, specifically).
+//
+//   environment remote.iter_body — the iteration-body environment: every
+//     for_each iteration is its own scope-instance; per_scope_sessions pins
+//     each iteration's dial onto its own pod, released at iteration exit.
+//
+//   environment remote.g12_side — the G12 carrier identity: declared by the
+//     parent (so the subworkflow block's `environment` traversal is VALID —
+//     the compiled-but-unread attribute must stay harmless) and shadowed by
+//     the g12 callee's same-key declaration (contrast value "callee-shadow").
+//
+// Adapter members:
+//   shell.pass_in      — the pass-in identity (E27): established first by the
+//                        root (owner_dial), re-spelled by the borrower callee,
+//                        and re-dialed by the root AFTER the borrower scope
+//                        exited (survivor_redial).
+//   shell.fail_dialer  — the iteration member (engineered failing iteration),
+//                        also used for exactly-once aggregate-marking.
+//   shell.g12_declared — the G12 member: declared in the composed graph from
+//                        the start (carried in every boot manifest), dialed
+//                        only via the g12 callee's re-spelling.
+//
+// cwd note (all three remote environments): every environment binds
+// working_directory = "/home/criteria" — the operator pod's pre-existing
+// user home; the adapter sandbox unconditionally allows it, and probe
+// RECORDS land in var.probe_root beneath it (created at run time). No
+// adapter engine overrides anywhere: the tree changes nothing about engine
+// behavior. NO crash override is declared (the language default stays).
+
+environment "remote" "fail_main" {
+    // Per-scope sessions: each scope's dials of this environment dispatch as
+    // per-scope operator-spawned peer pods (CRI-269 deferred-remote).
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The owner-side marker (E27 evidence): the borrower record must read
+    // THIS value (the substituted side), never the callee's contrast value.
+    variables = {
+        FAILURE_MAIN_ENV_MARKER = "owner"
+    }
+}
+
+environment "remote" "iter_body" {
+    // Per-scope sessions AND per-iteration scopes: each for_each iteration
+    // gets a fresh pod keyed per iteration, released at iteration exit.
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The iteration marker: records written from inside the loop carry it;
+    // fail_main pods must print it empty.
+    variables = {
+        FAILURE_ITER_ENV_MARKER = "iter_body"
+    }
+}
+
+environment "remote" "g12_side" {
+    // Per-scope sessions: the g12 callee's dial is its own
+    // (callee-scope, environment) pod — the identity's single provision.
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The G12 marker: the callee's record must read THIS value (substituted
+    // side). The subworkflow block's traversal is inert — if the block
+    // attribute ever changed runtime behavior, the defect files to the
+    // engine carrier.
+    variables = {
+        FAILURE_G12_ENV_MARKER = "parent"
+    }
+}
+
+adapter "shell" "pass_in" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.fail_main
+}
+
+adapter "shell" "fail_dialer" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.iter_body
+}
+
+adapter "shell" "g12_declared" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.g12_side
+}

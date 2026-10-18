@@ -1,0 +1,32 @@
+// KB-279 (failures card): borrower-side environment + adapter.
+//
+// remote.fail_main — the SHADOWED same-key declaration (ADR-0009): the
+//   borrower's own value ("callee-shadow") must never surface on a pod; the
+//   parent's declaration substitutes this one at composition.
+
+environment "remote" "fail_main" {
+    // Per-scope sessions: the borrower dial is its own (borrower-scope,
+    // environment) session — joined, never provisioned (zero provision_wanted).
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The contrast value (substitution test): if THIS value is ever observed
+    // on a pod, the parent's shadow did not substitute — a defect files to
+    // the engine carrier, never fixed from a harness card.
+    variables = {
+        FAILURE_MAIN_ENV_MARKER = "callee-shadow"
+    }
+}
+
+// The SAME definition identity the parent declares (cross-layer grouping;
+// E27 borrower dial) — deliberately identical to the parent's pass_in.
+adapter "shell" "pass_in" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.fail_main
+}

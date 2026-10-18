@@ -1,0 +1,20 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# G12-side failure record (KB-279): the g12 callee pod's evidence.
+# failure_g12_env_marker must read "parent" (the substituted side) — proof
+# the pod evidence comes from same-key identity substitution, never from the
+# subworkflow block's inert `environment` traversal attribute.
+records_dir="$probe_root/failure_probe_records"
+g12_env="${FAILURE_G12_ENV_MARKER:-}"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'failure_g12_env_marker=%s\n' "$g12_env"
+} > "$record"
+echo "failure record written: $record"

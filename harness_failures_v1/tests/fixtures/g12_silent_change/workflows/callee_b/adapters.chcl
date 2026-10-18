@@ -1,0 +1,23 @@
+// KB-279 G12 fixture callee adapters: the callee's own declared identity,
+// carrying the CONTRAST shadow marker (never the parent's side_a/side_b
+// marker values — those are parent-only identities).
+
+environment "remote" "callee_side" {
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    variables = {
+        FAILURE_G12_SILENT_CALLEE_MARKER = "callee-shadow"
+    }
+}
+
+adapter "shell" "callee_declared" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.callee_side
+}

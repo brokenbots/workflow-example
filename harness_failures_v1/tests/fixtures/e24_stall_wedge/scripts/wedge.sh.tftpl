@@ -1,0 +1,45 @@
+// KB-279 E24 wedge stimulus: heartbeat-only, zero step progress.
+//
+// ${wedge_seconds}: total wedge window (seconds, validated numeric).
+// ${probe_root}:    evidence root for the heartbeats file (under the sandbox-
+//                   allowed surface).
+//
+// Every loop iteration writes ONE heartbeat line and sleeps; no record is
+// ever completed, no step progress is ever emitted — the designed shape the
+// StallWatchdog condition classifies. The script exits only when the wedge
+// window is exhausted (success arm declared loud in main.chcl).
+set -eu
+
+# Rendered knobs (primary): the parent's templatefile declaration — the
+# render contract the standalone suite asserts. The env/positional/default
+# chain below is a safety net for a direct (out-of-graph) invocation only.
+wedge_seconds={{ .wedge_seconds | shellquote }}
+: "${wedge_seconds:=${WEDGE_SECONDS:-${1:-900}}}"
+probe_root={{ .probe_root | shellquote }}
+: "${probe_root:=${PROBE_ROOT:-${2:-/home/criteria/criteria-harness-failures}}}"
+
+# Anti-injection: both knobs must be numeric before they reach sleep/printf.
+case "$wedge_seconds" in
+    ''|*[!0-9]*) echo "e24-wedge: wedge_seconds must be numeric, got: $wedge_seconds" >&2; exit 9 ;;
+esac
+case "$probe_root" in
+    ''|*..*|*[;&|`$<>]*) echo "e24-wedge: probe_root refused (unsafe shape)" >&2; exit 9 ;;
+esac
+
+heartbeats_dir="$probe_root/failure_probe_records"
+mkdir -p "$heartbeats_dir"
+heartbeats_file="$heartbeats_dir/e24_heartbeats.log"
+
+echo "e24-wedge: starting heartbeat-only wedge for ${wedge_seconds}s (stall class designed, never step progress)" >&2
+
+elapsed=0
+while [ "$elapsed" -lt "$wedge_seconds" ]; do
+    printf 'heartbeat elapsed=%ss session=alive step_progress=0\n' "$elapsed" >>"$heartbeats_file"
+    printf 'e24-wedge: heartbeat elapsed=%ss step_progress=0\n' "$elapsed" >&2
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+
+echo "e24-wedge: wedge window exhausted without step progress (designed heartbeat-only shape)" >&2
+echo "e24-wedge: DESIGNED STALL SHAPE — a live run must trip the StallWatchdog condition, not idle through" >&2
+exit 0

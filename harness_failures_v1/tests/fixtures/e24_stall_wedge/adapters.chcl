@@ -1,0 +1,24 @@
+// KB-279 E24 fixture adapters: one shell member on the pass-in identity. The
+// environment declares the stall-wedge marker the wedge template's evidence
+// loop pins (shape-only: the suite never runs this tree).
+
+environment "remote" "stall_env" {
+    // The wedge step's single dial is its own session (per-scope).
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    variables = {
+        FAILURE_STALL_ENV_MARKER = "stall-wedge"
+    }
+}
+
+adapter "shell" "pass_in" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.stall_env
+}

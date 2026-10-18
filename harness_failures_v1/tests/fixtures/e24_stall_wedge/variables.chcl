@@ -1,0 +1,12 @@
+// KB-279 E24 fixture variables.
+variable "probe_root" {
+    type    = string
+    default = "/home/criteria/criteria-harness-failures"
+}
+
+// Wedge duration, seconds. Long enough to sit past any stall window at
+// admission time; the suite never runs it, so this only pins the shape.
+variable "wedge_seconds" {
+    type    = string
+    default = "900"
+}

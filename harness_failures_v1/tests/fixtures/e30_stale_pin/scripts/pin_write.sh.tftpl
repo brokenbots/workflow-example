@@ -1,0 +1,27 @@
+// KB-279 E30 pin_probe stimulus: shape-only record writer (never run by the
+// suite — the suite exercises the ADMISSION pin gate at archive level).
+//
+// ${probe_root}:  evidence root for the pin probe record.
+// ${record_name}: fixed marker name.
+// ${record_value}: fixed marker content.
+set -eu
+
+probe_root={{ .probe_root | shellquote }}
+: "${probe_root:=${PROBE_ROOT:-${1:-/home/criteria/criteria-harness-failures}}}"
+record_name={{ .record_name | shellquote }}
+: "${record_name:=${RECORD_NAME:-${2:-pin_probe}}}"
+record_value={{ .record_value | shellquote }}
+: "${record_value:=${RECORD_VALUE:-${3:-pin-probe}}}"
+
+case "$probe_root" in
+    ''|*..*|*[;&|`$<>]*) echo "e30-pin: probe_root refused (unsafe shape)" >&2; exit 9 ;;
+esac
+
+records_dir="$probe_root/failure_probe_records"
+mkdir -p "$records_dir"
+
+printf 'e30-pin: record %s = %s\n' "$record_name" "$record_value" >&2
+printf '%s: %s\n' "$record_name" "$record_value" >"$records_dir/$record_name.record"
+
+echo "e30-pin: wrote pin probe record (shape evidence only)" >&2
+exit 0

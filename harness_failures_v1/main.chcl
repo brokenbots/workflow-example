@@ -1,0 +1,312 @@
+// KB-279 (KB-254 series, failures card): harness_failures_v1 — the E-matrix
+// (failure-path) harness tree. NEW tree; production trees are never modified
+// from a harness card. No adapter/engine code changes are declared anywhere:
+// the tree only aims the probes at the shapes the matrix pins.
+//
+// SHAPE (card 279): engineered-to-fail steps; a GREEN run means every failure
+// landed in its DESIGNED CLASS marker. Nothing here fails silently — every
+// engineered stimulus routes through a declared lane that names its class
+// (run-evidence stderr markers + class-marker records), and the design
+// arms that would prove a stimulus DIDN'T fail route loud (state.failed).
+//
+// Matrix rows in scope (docs/harness-expectations.md, matrix E + G12):
+//   E24 provider stall → watchdog/timeout class. ENGINE-OWNED: the StallWatchdog
+//       condition trips on LastStepProgress staleness, which a green run's own
+//       steps can never exercise. The engineered stimulus is the fixture
+//       tests/fixtures/e24_stall_wedge (heartbeat-only wedge past the window);
+//       its live fault fires as its own run within the green-run plan.
+//   E25 provider 5xx → bounded retry then awaiting_human. IN-RUN: the
+//       retry_bounded_probe step exercises the bounded-retry contract
+//       (KB-219 vocabulary: transient classes retried, 4xx passed through,
+//       bounded schedule, stderr attempt evidence); recovery lands back on
+//       the success lane. Exhaustion routes to state.need_assistance — the
+//       awaiting-human PARK spelling, never a silent or failed route.
+//   E26 never-scheduled pod (capacity) distinguishable from handshake budget.
+//       OPERATOR-OWNED: the two designed class markers (unscheduled_capacity
+//       vs handshake_budget_exhausted) are pinned in the class registry this
+//       tree writes; a live observation must read the DISTINCT spellings
+//       (pod-scheduling events vs session handshake budget), never a merged
+//       "failed" class.
+//   E27 zero provision_wanted scope emission. IN-RUN: the borrower_scope
+//       subworkflow dials ONLY the owner-established pass-in identity — a
+//       scope with nothing new to wire must emit ZERO provision_wanted
+//       events (no spurious pods for the borrower; live pod census).
+//   E28 heartbeat reaper discrimination (parked not failed). TERMINAL SHAPE:
+//       the reaper's parks land on state.need_assistance (the park spelling
+//       this tree declares), never on state.failed; registry class
+//       heartbeat_park pins the discrimination.
+//   E29 container restart resume-vs-replay. OPERATOR-OWNED: registry class
+//       restart_resume pins the designed marker; the tree's records are
+//       fixed-content (byte-stable across re-writes) so a replay can never
+//       fake a resume — drift would be observable in the record census.
+//   E30 stale pin refusal (expected-pin mismatch). ADMISSION-OWNED and
+//       SUITE-OBSERVED: tests/fixtures/e30_stale_pin carries a tampered
+//       lockfile digest which `criteria validate` must refuse fail-closed,
+//       naming the expected-pin mismatch (asserted by the standalone suite).
+//   E31 BaseImageMismatch refusal. ENGINE-OWNED CR condition (CRI-264);
+//       registry class base_image_mismatch pins the designed marker and the
+//       fail-closed refusal semantics.
+//   E32 broken image mirror identification. OPERATOR-OWNED: a broken mirror
+//       must surface as its own identified class (mirror_unreachable, naming
+//       the mirror) — not as a generic failure; registry class pins it, and
+//       the routes object pins the exact mirror identities (adapterImages).
+//   G12 KNOWN-GAP closeout (pinned from the composition card, defect files
+//       to the engine carrier): the failure shape of the compiled-but-unread
+//       subworkflow `environment` traversal — a runtime change of the
+//       attribute silently does nothing. Pinned here: the g12_compose block
+//       carries a VALID parent-declared traversal (remote.g12_side) that must
+//       stay inert at runtime; the g12 callee's pod evidence comes from
+//       same-key identity substitution, never from this attribute. The
+//       silent-change half is pinned by tests/fixtures/g12_silent_change
+//       (a different-but-valid traversal, validate-green identically).
+//
+// The acceptance lane for this card is the live green-run plus the
+// engineered-fault runs (each landing in its DESIGNED CLASS marker); this
+// tree's standalone suite pins the compiled/source shapes and re-plays the
+// probe lanes the live observations read.
+
+workflow {
+    name             = "harness_failures_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "owner_dial"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 32
+    }
+}
+
+// ── Owner session on the pass-in identity (the E27 borrow target) ────────────
+// The root scope dials adapter.shell.pass_in FIRST, before the borrower scope
+// exists: the borrower (E27) must have NOTHING new to wire.
+step "owner_dial" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "owner_dial"
+            record_value = "owner-dial scope=root identity=shell.pass_in@remote.fail_main"
+        })
+    }
+    outcome "success" { next = step.class_registry }
+    outcome "failure" { next = state.failed }
+}
+
+// ── The designed failure-class registry (the map live observations read) ─────
+// One fixed-content record enumerating every designed class marker for the
+// matrix slice (E24-E32 + G12): each line names the class, its carrier and
+// its lane. Live operator/engine events map onto THIS vocabulary; a class
+// that lacks a registry line is not a designed class of this card.
+step "class_registry" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/registry_class.sh.tftpl", {
+            probe_root = var.probe_root
+        })
+    }
+    outcome "success" { next = step.fail_class_lane }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Engineered step-failure stimulus: designed class lane, IN-RUN ────────────
+// The step is ENGINEERED to exit 3 (deterministic, no retry class): its
+// stderr carries the designed class marker into the run evidence stream, and
+// its failure outcome routes to the marker step below. The success arm is the
+// design-bug loud lane: if the stimulus ever succeeds, the run fails loudly
+// (the tree must never lie about its evidence).
+step "fail_class_lane" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/fail_class.sh.tftpl", {
+            stimulus_class = "engineered_step_failure"
+            stimulus_rc    = "3"
+            stimulus_step  = "fail_class_lane"
+        })
+    }
+    outcome "failure" { next = step.mark_step_failure }
+    outcome "success" { next = state.failed }
+}
+
+// ── The step-failure class marker (the GREEN continuation) ───────────────────
+// Every engineered failure lands in its designed class marker: this record
+// names the class and the stimulus it came from. The run stays green.
+step "mark_step_failure" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "step_failure_class"
+            record_value = "engineered rc=3 stimulus (fail_class_lane class=engineered_step_failure) landed in its designed failure lane"
+        })
+    }
+    outcome "success" { next = step.retry_bounded_probe }
+    outcome "failure" { next = state.failed }
+}
+
+// ── E25 carrier: bounded retry then awaiting_human ───────────────────────────
+// KB-219 vocabulary as a designed in-run stimulus: two transient (http_5xx)
+// failures, recovery on attempt 3 — the bounded schedule, the per-attempt
+// stderr evidence line and the class table are all pinned by the standalone
+// suite. EXHAUSTION routes to the park spelling (state.need_assistance), the
+// awaiting-human designed arm: never a silent swallow, never a failed route.
+step "retry_bounded_probe" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/retry_probe.sh.tftpl", {
+            probe_root      = var.probe_root
+            record_name     = "retry_bounded"
+            record_value    = "bounded-retry stimulus (transient http_5xx x2) recovered on the success lane"
+            max_attempts    = "4"
+            backoff_seconds = "1 2 4"
+            sleep_budget    = "30"
+            fail_all        = "0"
+        })
+    }
+    outcome "success" { next = step.borrower_callee }
+    outcome "failure" { next = state.need_assistance }
+}
+
+// ── E27 carrier: borrower scope with NOTHING new to wire ─────────────────────
+// The embedded callee declares the same-key environment identity (with a
+// contrast shadow value, substituted away by the parent — ADR-0009) and
+// re-spells adapter.shell.pass_in, dialing ONLY the owner-established
+// session. A scope with nothing new to wire must emit ZERO provision_wanted
+// events — the live pod census is the acceptance observation; the borrower
+// record's substituted marker ("owner", never "callee-shadow") is the
+// pod-side evidence.
+subworkflow "borrower_scope" {
+    source = "./workflows/borrower_scope"
+    input = {
+        probe_root = var.probe_root
+    }
+}
+
+step "borrower_callee" {
+    target      = subworkflow.borrower_scope
+    allow_tools = []
+    input {
+        probe_root = var.probe_root
+    }
+    outcome "success" { next = step.loop_fail_probe }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Engineered iteration-failure stimulus + aggregate lane (exactly once) ────
+// A for_each over three labels where label "two" is ENGINEERED to exit 7 (its
+// record carries the engineered_iteration_failure marker, its stderr names
+// the class). The any_failed aggregate arm is the DESIGNED lane: the failure
+// routes through it exactly once, post-loop, into a class-marker record. The
+// all_succeeded arm is the design-bug loud lane.
+step "loop_fail_probe" {
+    target      = adapter.shell.fail_dialer
+    allow_tools = []
+    environment = remote.iter_body
+    for_each    = var.iter_labels
+    input {
+        command = templatefile("./scripts/iter_fail_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "iter_${each.value}"
+            record_value = "iteration label=${each.value} idx=${each._idx} of ${each._total}"
+            iter_label   = each.value
+            fail_label   = "two"
+            designed_rc  = "7"
+        })
+    }
+    outcome "any_failed"    { next = step.mark_aggregate }
+    outcome "all_succeeded" { next = state.failed }
+}
+
+// ── The aggregate failure class marker (exactly once, post-loop) ─────────────
+step "mark_aggregate" {
+    target      = adapter.shell.fail_dialer
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "aggregate_failure_class"
+            record_value = "one engineered failing iteration (label=two rc=7 class=engineered_iteration_failure) routed through the any_failed aggregate exactly once"
+        })
+    }
+    outcome "success" { next = step.g12_probe }
+    outcome "failure" { next = state.failed }
+}
+
+// ── G12 carrier: the subworkflow block's (inert) environment traversal ───────
+// The block's `environment` traversal is the compiled-but-unread attribute
+// (SubworkflowNode.Environment, KB-278 finding). It is declared here as a
+// VALID parent-declared identity (remote.g12_side) so the tree pins the exact
+// shape that must stay harmless: the g12 callee's pod evidence comes from
+// same-key identity substitution (ADR-0009), never from this attribute. The
+// silent-change half of the failure shape — flipping the traversal value
+// changes nothing at runtime — is pinned by tests/fixtures/g12_silent_change.
+subworkflow "g12_compose" {
+    source      = "./workflows/g12_compose"
+    environment = remote.g12_side
+    input = {
+        probe_root = var.probe_root
+    }
+}
+
+step "g12_probe" {
+    target      = subworkflow.g12_compose
+    allow_tools = []
+    input {
+        probe_root = var.probe_root
+    }
+    outcome "success" { next = step.redial_pass_in }
+    outcome "failure" { next = state.failed }
+}
+
+// ── Survivor redial: borrowed sessions outlive borrower scoping ──────────────
+// A root re-dial of the pass-in identity AFTER the borrower scope
+// (borrower_callee), the iteration scope (loop_fail_probe) and the g12 callee
+// scope (g12_probe) exited: the E27 borrower must never have torn down or
+// re-provisioned the owner session — the record pairs with owner_dial's.
+step "redial_pass_in" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "survivor_redial"
+            record_value = "survivor-redial scope=root after=borrower_scope+iteration_scope+g12_callee_scope"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+// done: the GREEN terminal — every engineered failure landed in its designed
+// class marker on the way here.
+state "done" {
+    terminal = true
+    success  = true
+}
+
+// failed: the loud design-bug/undesignated-failure terminal. A run landing
+// here means a stimulus did NOT land in its designed class (or something
+// genuinely went wrong) — never parked silently.
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// need_assistance: the awaiting-human PARK spelling (E25 exhaustion route,
+// E28 reaper-park class). Bounded-retry schedules park here; they never
+// fail over from here.
+state "need_assistance" {
+    terminal = true
+    success  = false
+}
+
+// ── Variables ────────────────────────────────────────────────────────────────
+// Declared in variables.chcl: probe_root (the records' root, outside the
+// repo) and iter_labels (the three-item stimulus; label "two" is the
+// engineered failing iteration per the loop_fail_probe design).

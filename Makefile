@@ -108,6 +108,16 @@ validate:
 	/usr/local/bin/criteria validate decision_demo_local_v1
 	/usr/local/bin/criteria validate harness_contracts_v1
 	/usr/local/bin/criteria validate harness_composition_v1
+	# KB-279: the failures leg validates green — its fixtures are validated
+	# by the tree's standalone suite (the G12 flip copy is engineered to stay
+	# green; the E30 admission refusal is observed against a live throwaway
+	# server at suite time, never here).
+	/usr/local/bin/criteria validate harness_failures_v1
+	# KB-279: the failure-path fixtures validate green as shipped (engineered
+	# to fail in their DESIGNED class at run time, not at validation).
+	/usr/local/bin/criteria validate harness_failures_v1/tests/fixtures/e24_stall_wedge
+	/usr/local/bin/criteria validate harness_failures_v1/tests/fixtures/e30_stale_pin
+	/usr/local/bin/criteria validate harness_failures_v1/tests/fixtures/g12_silent_change
 	# KB-278: the G11 gap fixture validates green by design (the KNOWN GAP
 	# is pinned); the G5 guard-violation fixture is owned by the tree's
 	# standalone suite — validating it here would flip red/green with the
@@ -203,6 +213,8 @@ test: validate test-criteria-k8s
 	./harness_contracts_v1/tests/test_contracts_standalone.sh
 	@echo "Running harness_composition_v1 standalone regression test (KB-278)..."
 	./harness_composition_v1/tests/test_composition_standalone.sh
+	@echo "Running harness_failures_v1 standalone regression test (KB-279)..."
+	./harness_failures_v1/tests/test_failures_standalone.sh
 	@echo "Running harness-expectations matrix guard regression test (KB-254)..."
 	./k8s/tests/test_harness_expectations.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
@@ -241,6 +253,7 @@ lint: lint-go
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
 		harness_contracts_v1/tests/test_contracts_standalone.sh \
 		harness_composition_v1/tests/test_composition_standalone.sh \
+		harness_failures_v1/tests/test_failures_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh \
 		k8s/tests/test_harness_expectations.sh
@@ -311,6 +324,7 @@ ci: validate
 	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
 	bash harness_contracts_v1/tests/test_contracts_standalone.sh
 	bash harness_composition_v1/tests/test_composition_standalone.sh
+	bash harness_failures_v1/tests/test_failures_standalone.sh
 	bash k8s/tests/test_workflow_graphs_flat.sh
 	@echo "== ci: workstream_handler_v1 regression suite =="
 	@for t in workstream_handler_v1/tests/test_*.sh; do \

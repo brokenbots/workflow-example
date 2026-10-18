@@ -1,0 +1,62 @@
+// KB-279 (failures card) fixture — matrix E30: stale pin refusal (expected-pin
+// mismatch at admission).
+//
+// SHAPE: a minimal VALID tree the standalone suite tars and serves as a remote
+// archive source, then exercises the admission pin gate:
+//
+//   1. `criteria validate <archive> --workflow-ref sha256:<matching-digest>`
+//      → the source resolves and validates GREEN.
+//   2. `--workflow-ref sha256:<wrong-digest>` → fail-closed refusal naming the
+//      expected-pin mismatch (pinned-vs-resolved values verbatim), rc != 0.
+//   3. A byte-tampered archive → the RESOLVED digest changes → the same
+//      refusal fires even though the content would parse (pin checked before
+//      content).
+//
+// OBSERVED mechanics (captured by hand before the suite pinned them):
+// expected pins apply only to remote git/archive sources (a local tree path
+// ignores --workflow-ref), the archive must carry .chcl/.hcl at extraction
+// root, and the refusal text spells
+//   expected-pin mismatch: expected "<pinned>", resolved "<resolved>";
+//   refusing to run
+// with rc=1 (fail closed). The suite's TLS archive server (tlsServe.go) is
+// throwaway observation scaffolding: a self-signed throwaway cert is minted
+// at suite time and trusted only via SSL_CERT_FILE for that invocation —
+// nothing ships, nothing persists, no real credentials are involved.
+
+workflow {
+    name             = "e30_stale_pin"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "pin_probe"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+// Shape-only step: the suite exercises the ADMISSION pin gate, never the run.
+step "pin_probe" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/pin_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "pin_probe"
+            record_value = "pin-probe identity=shell.pass_in@remote.pin_env (admission pin gate exercised at archive level)"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

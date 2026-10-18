@@ -1,0 +1,57 @@
+// KB-279 (failures card): E27 borrower callee of harness_failures_v1 — the
+// borrower scope with NOTHING new to wire. The callee re-states the SAME
+// identity the parent uses, deliberately:
+//
+//   environment remote.fail_main — the same-key declaration the parent
+//     shadows (ADR-0009 substitution): this layer declares the contrast value
+//     "callee-shadow" that must NEVER be observed on a pod.
+//
+//   adapter shell.pass_in — the SAME definition identity the parent declares:
+//     the borrower dial joins the pass-in session the parent's scope
+//     established, without provisioning its own. A scope with nothing new to
+//     wire must emit ZERO provision_wanted events — the live pod census is
+//     the acceptance observation.
+//
+// The callee writes its own failure record: the substituted marker must read
+// "owner" and the borrower marker line names the zero-provision expectation.
+
+workflow {
+    name             = "harness_failures_borrower"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "dial_shared"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+// ── E27 carrier: borrower dial of the pass-in identity ───────────────────────
+// The dial lands in a (borrower-scope, remote.fail_main) session joined over
+// the shared identity — the record's failure_main_env_marker must read
+// "owner" (the substituted-side value), never "callee-shadow".
+step "dial_shared" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "borrower_shared"
+            record_value = "borrower-dial scope=borrower identity=shell.pass_in@remote.fail_main (nothing new to wire: zero provision_wanted)"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

@@ -1,0 +1,80 @@
+// KB-279 (failures card) fixture — matrix G12 closeout: the silent env-change
+// failure shape (SubworkflowNode.Environment is compiled-but-unread).
+//
+// SHAPE: the parent declares TWO valid identities (remote.side_a and
+// remote.side_b) and the subworkflow block traverses environment =
+// remote.side_b. The engineered experiment the suite performs:
+//
+//   1. The parent validates and compiles GREEN as shipped (side_b traversal).
+//   2. A copy with the traversal FLIPPED to remote.side_a (different identity,
+//      same key path) also validates and compiles GREEN — the change is
+//      SILENT at admission/compile: no diagnostic, no refusal, no green-run
+//      difference at this layer. Only run events (pod env markers) could ever
+//      distinguish the two.
+//
+// That is the pinned failure shape: a runtime change of the block attribute
+// does nothing, and nothing in the static layers tells you. The LIVE G12
+// carrier in the parent tree (g12_compose) carries the run-side half; defect
+// files to the engine carrier (never fixed here).
+
+workflow {
+    name             = "g12_silent_change"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "parent_dial"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+// The parent's own dial over the LIVE identity (side_a) — the marker a pod
+// would actually observe on this scope.
+step "parent_dial" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/parent_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "g12_silent_parent"
+            record_value = "g12-silent scope=root identity=shell.pass_in@remote.side_a (block traversal below is the inert attribute)"
+        })
+    }
+    outcome "success" { next = step.silent_env }
+    outcome "failure" { next = state.failed }
+}
+
+// ── The G12 silent-change carrier ────────────────────────────────────────────
+// environment = remote.side_b is the compiled-but-unread attribute under
+// experiment. It is VALID (parent-declared) — flipping it to remote.side_a
+// (another parent-declared identity) must not flip any static-layer verdict:
+// both spellings validate and compile green (pinned by the standalone suite).
+subworkflow "silent_env" {
+    source      = "./workflows/callee_b"
+    environment = remote.side_b
+    input = {
+        probe_root = var.probe_root
+    }
+}
+
+step "silent_env" {
+    target      = subworkflow.silent_env
+    allow_tools = []
+    input {
+        probe_root = var.probe_root
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
