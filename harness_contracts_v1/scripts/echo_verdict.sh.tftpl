@@ -1,5 +1,5 @@
 probe_root={{ .probe_root | shellquote }}
-set -euo pipefail
+set -eu
 command -v mkdir >/dev/null
 
 # Fixed-content verdict records (KB-277): the verdict values are the run-state
