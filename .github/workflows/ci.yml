@@ -133,10 +133,12 @@ jobs:
       # that skipped would prove nothing, so the run must show the
       # all-shapes-observed banner from actual observations.
       - name: Run harness_contracts_v1 standalone regression test (KB-277)
+        env:
+          SUITE_DEBUG: "1"
         run: |
           set -o pipefail
           bash harness_contracts_v1/tests/test_contracts_standalone.sh \
-            | tee /tmp/kb277_suite.log
+            2>&1 | tee /tmp/kb277_suite.log
           banner='harness_contracts_v1 standalone suite: all fixture shapes observed in run events'
           if ! grep -qF "$banner" /tmp/kb277_suite.log; then
             echo "::error::harness_contracts_v1 suite skipped (pinned adapters absent at run time) — gate coverage silently lost; restore the pre-pull"
