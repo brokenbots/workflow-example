@@ -11,15 +11,20 @@ command -v printf >/dev/null
 #     shadow value ("callee-shadow") would be G7 leakage; empty means the pod
 #     runs an identity that never declared it (e.g. the iteration body env).
 #   iteration_env_marker — readable only on per-iteration pods (G2 evidence).
-# Both markers expand empty when absent, so one script discriminates all the
-# environment identities the composition exercise touches.
+# The markers are expanded with `${VAR:-}` guards (captured into plain
+# variables before the record file is created): identities that never declared
+# a marker expand it empty under `set -u` instead of aborting, and a failed
+# expansion can never leave a truncated record behind. One script discriminates
+# all the environment identities the composition exercise touches.
 records_dir="$probe_root/composition_probe_records"
+shadow="${COMPOSITION_ENV_SHADING:-}"
+marker="${ITERATION_ENV_MARKER:-}"
 mkdir -p "$records_dir"
 record="$records_dir/$record_name"
 {
     printf 'record_name=%s\n' "$record_name"
     printf 'record_value=%s\n' "$record_value"
-    printf 'composition_env_shadow=%s\n' "$COMPOSITION_ENV_SHADING"
-    printf 'iteration_env_marker=%s\n' "$ITERATION_ENV_MARKER"
+    printf 'composition_env_shadow=%s\n' "$shadow"
+    printf 'iteration_env_marker=%s\n' "$marker"
 } > "$record"
 echo "composition record written: $record"

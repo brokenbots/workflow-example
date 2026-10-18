@@ -4,9 +4,9 @@
 // copilot member — only shell identities, so no token surface is declared).
 
 variable "probe_root" {
-    description = "Absolute root under which the composition probe records are written. Must be OUTSIDE the repository and under $HOME or CRITERIA_SHELL_ALLOWED_PATHS (the remote environments' working_directory)."
+    description = "Absolute root under which the composition probe records are written (created by the probe scripts at run time). Must live under $HOME or CRITERIA_SHELL_ALLOWED_PATHS: the shell adapter's sandbox refuses a resolved working_directory outside that surface, so the default sits beneath the pod home the remote environments bind as their working_directory."
     type        = string
-    default     = "/tmp/criteria-harness-composition"
+    default     = "/home/criteria/criteria-harness-composition"
 }
 
 variable "iter_labels" {

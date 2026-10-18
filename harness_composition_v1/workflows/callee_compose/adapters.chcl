@@ -10,7 +10,7 @@ environment "remote" "comp_main" {
     // Per-scope sessions: each scope's dials of this environment dispatch
     // as per-scope operator-spawned peer pods (CRI-269 deferred-remote).
     per_scope_sessions = true
-    working_directory  = var.probe_root
+    working_directory  = "/home/criteria"
     process = {
         exec = ["*"]
     }
@@ -29,7 +29,7 @@ environment "remote" "callee_default" {
     // Per-scope sessions: the callee dial is its own (callee-scope,
     // environment) pod — the callee-only identity's single provision.
     per_scope_sessions = true
-    working_directory  = var.probe_root
+    working_directory  = "/home/criteria"
     process = {
         exec = ["*"]
     }

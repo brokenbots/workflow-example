@@ -22,6 +22,16 @@
 //   shell.late_join  — declared from the start, dialed last (G10/B7 stimulus:
 //                      boot manifests already carried it).
 //
+// cwd note (all four remote environments): every environment binds
+// working_directory = "/home/criteria" — the operator pod's pre-existing
+// user home. The engine delivers a remote environment's resolved
+// working_directory to the shell adapter as the per-step input key
+// (criteria CRI-270), and the adapter's sandbox refuses any path outside
+// $HOME or CRITERIA_SHELL_ALLOWED_PATHS; the pod home exists before the
+// first session opens and is unconditionally allowed, so no provisioning
+// step needs to create it. Probe RECORDS land in var.probe_root beneath it,
+// created by the probe scripts' mkdir at run time.
+//
 // No adapter engine overrides anywhere: the tree changes nothing about engine
 // behavior — it only aims the probes. NO crash override is declared (the
 // language default stays in force).
@@ -30,7 +40,7 @@ environment "remote" "comp_main" {
     // Per-scope sessions: each scope's dials of this environment dispatch
     // as per-scope operator-spawned peer pods (CRI-269 deferred-remote).
     per_scope_sessions = true
-    working_directory  = var.probe_root
+    working_directory  = "/home/criteria"
     process = {
         exec = ["*"]
     }
@@ -50,7 +60,7 @@ environment "remote" "iter_body" {
     // iteration is its own scope-instance, so each iteration gets a fresh pod
     // keyed per iteration and its scope releases it at exit (G2/G3).
     per_scope_sessions = true
-    working_directory  = var.probe_root
+    working_directory  = "/home/criteria"
     process = {
         exec = ["*"]
     }
