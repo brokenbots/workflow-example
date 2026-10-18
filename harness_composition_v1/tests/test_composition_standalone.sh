@@ -189,7 +189,6 @@ fi
 
 MAIN="$TREE_ROOT/main.chcl"
 ROOT_ADAPTERS="$TREE_ROOT/adapters.chcl"
-CALLEE_MAIN="$TREE_ROOT/workflows/callee_compose/main.chcl"
 CALLEE_ADAPTERS="$TREE_ROOT/workflows/callee_compose/adapters.chcl"
 
 if grep -q 'for_each    = var.iter_labels' "$MAIN" && \
