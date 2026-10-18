@@ -255,8 +255,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "ticket-cleanup-url": {
@@ -309,8 +309,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "kanboard-triage-url": {
@@ -327,8 +327,7 @@ data:
               "mountPath": "/data",
               "env": {
                 "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              ,
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
                 "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
               }
             },
@@ -366,8 +365,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "kanboard-develop-url": {
@@ -383,8 +382,7 @@ data:
               "mountPath": "/data",
               "env": {
                 "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              ,
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
                 "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
               }
             },
@@ -422,8 +420,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "decision-demo-url": {
@@ -434,6 +432,47 @@ data:
         "harness-contracts-url": {
           "type": "url",
           "url": "git::https://github.com/brokenbots/workflow-example.git//harness_contracts_v1",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
+              }
+            }
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          }
+        },
         "harness-wire-url": {
           "type": "url",
           "url": "git::https://github.com/brokenbots/workflow-example.git//harness_wire_v1",
@@ -474,8 +513,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "harness-composition-url": {
@@ -518,8 +557,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "harness-failures-url": {
@@ -562,8 +601,8 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
           }
         },
         "harness-fleet-smoke-url": {
@@ -606,7 +645,7 @@ data:
             }
           ],
           "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1"
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1"
           }
 
         }
@@ -697,6 +736,12 @@ data:
           "tags": [
             "harness-validation",
             "harness-fleet-smoke"
+          ],
+          "states": [
+            "Ready for Development"
+          ]
+        },
+        {
           "name": "harness-wire",
           "workflow": "harness-wire-url",
           "project": "Criteria K8s Workflow Runner",
