@@ -672,6 +672,12 @@ shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-dev
                             "harness-fleet-smoke"},
             f"shipped example route names = {sorted(route_names)}, want cleanup + kanboard pair"
             " + harness-contracts + harness-composition + harness-failures + harness-fleet-smoke")
+shipped_err(len(base["routes"]) == 4,
+            f"shipped example routes = {len(base['routes'])}, want the CRI-310 cleanup route, the two kanboard routes, "
+            "and the KB-276 harness-wire route (the criteria split routes are retired, KB-281)")
+route_names = {r.get("name") for r in base["routes"] if isinstance(r, dict)}
+shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-develop", "harness-wire"},
+            f"shipped example route names = {sorted(route_names)}, want cleanup + kanboard pair + harness-wire")
 for retired_route in ("criteria-triage", "criteria-develop"):
     shipped_err(retired_route not in route_names,
                 f"shipped example: the retired {retired_route} route returned (KB-281)")
@@ -682,6 +688,7 @@ harness_contracts_route = next((r for r in base["routes"] if r.get("name") == "h
 harness_composition_route = next((r for r in base["routes"] if r.get("name") == "harness-composition"), None)
 harness_failures_route = next((r for r in base["routes"] if r.get("name") == "harness-failures"), None)
 harness_fleet_smoke_route = next((r for r in base["routes"] if r.get("name") == "harness-fleet-smoke"), None)
+harness_wire_route = next((r for r in base["routes"] if r.get("name") == "harness-wire"), None)
 shipped_err(cleanup_route is not None, "shipped example: routes missing the criteria-cleanup route (CRI-310)")
 shipped_err(kanboard_triage_route is not None,
             "shipped example: routes missing the kanboard-triage route (dual-source coexistence)")
@@ -767,6 +774,27 @@ else:
                         "want [Ready for Development]")
     if "tagMatch" in harness_contracts_route:
         failures.append("shipped example: harness-contracts must keep the tagMatch=all default")
+# KB-276 (series ARMED): the harness-wire route fires the KB-254 harness
+# series' wire leg ON DAVE'S GO within the green-run plan. Its selector must
+# never overlap the plain development lanes: tagMatch=all on
+# harness-validation + harness-wire (criteria-cleanup selects the same state
+# but the different criteria-dirty tag; the kanboard routes select the
+# kanboard project), so an untagged development card matches nothing here.
+if harness_wire_route is None:
+    failures.append("shipped example: routes missing the harness-wire route (KB-276)")
+else:
+    if harness_wire_route.get("workflow") != "harness-wire-url":
+        failures.append("shipped example: harness-wire must fire harness-wire-url")
+    if harness_wire_route.get("project") != "Criteria K8s Workflow Runner":
+        failures.append("shipped example: harness-wire must target the criteria project")
+    if harness_wire_route.get("tags") != ["harness-validation", "harness-wire"]:
+        failures.append(f"shipped example: harness-wire tags = {harness_wire_route.get('tags')}, "
+                        "want [harness-validation, harness-wire] (the dave-go tag gate)")
+    if harness_wire_route.get("states") != ["Ready for Development"]:
+        failures.append(f"shipped example: harness-wire states = {harness_wire_route.get('states')}, "
+                        "want [Ready for Development]")
+    if "tagMatch" in harness_wire_route:
+        failures.append("shipped example: harness-wire must keep the tagMatch=all default")
 
 # (KB-281: the linear-triage-url / linear-develop-url object assertions are
 # gone with the objects themselves — the absence regressions above fail fast
@@ -912,6 +940,10 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
 # shipped PINLESS pre-close (the ADR-0005 D7 follow-up convention per
 # decision-demo-url precedent: a subtree cannot pin its own landing commit,
 # so KB-277 re-pins ref/?ref= to the squash-merge commit at the card's
+# KB-276: the harness_wire_v1 tree object — url-only, class=triage, shipped
+# PINLESS pre-close (the ADR-0005 D7 follow-up convention per
+# decision-demo-url precedent: a subtree cannot pin its own landing commit,
+# so KB-276 re-pins ref/?ref= to the squash-merge commit at the card's
 # close). The github-tokens binding is a name reference (CRI-214 section
 # 3.8); the tree's only secret var is workflow_github_token, bound on the
 # copilot member, and every other member stays secret-free. adapterImages
@@ -1057,6 +1089,36 @@ else:
     if hfsm_volume_names != ["data", "repo", "scratch"]:
         failures.append(f"shipped example: harness-fleet-smoke-url volumes = {hfsm_volume_names},"
                         " want [data, repo, scratch] (the KB-241 peer-pod surface)")
+harness_wf = base[LIB].get("harness-wire-url")
+if not isinstance(harness_wf, dict):
+    failures.append("shipped example: workflowLibrary missing the harness-wire-url object (KB-276)")
+else:
+    if harness_wf.get("type") != "url" or "url" not in harness_wf:
+        failures.append("shipped example: harness-wire-url must be a url workflow")
+    if not str(harness_wf.get("url", "")).startswith(
+            "git::https://github.com/brokenbots/workflow-example.git//harness_wire_v1"):
+        failures.append("shipped example: harness-wire-url must point at the harness_wire_v1 subtree")
+    if str(harness_wf.get("url", "")).endswith("?ref=") or not str(harness_wf.get("url", "")).endswith("//harness_wire_v1"):
+        failures.append("shipped example: harness-wire-url ships pinless pre-close (ADR-0005 D7 follow-up: "
+                        "KB-276 re-pins ref/?ref= to the landing squash-merge commit at the card's close)")
+    if harness_wf.get("ref"):
+        failures.append("shipped example: harness-wire-url must be pinless before the KB-276 close re-pin "
+                        "(the follow-up change flips this assertion together with the pin)")
+    if harness_wf.get("class") != "triage":
+        failures.append(f"shipped example: harness-wire-url class = {harness_wf.get('class')!r}, want 'triage'")
+    if "image" in harness_wf:
+        failures.append("shipped example: harness-wire-url must be url-only (no process image)")
+    harness_secrets = harness_wf.get("secrets") if isinstance(harness_wf.get("secrets"), list) else []
+    if {s.get("name") for s in harness_secrets} != {"github-tokens"}:
+        failures.append("shipped example: harness-wire-url must bind exactly github-tokens "
+                        "(WORKFLOW_GITHUB_TOKEN by name reference; the tree is otherwise secret-free)")
+    harness_vols = harness_wf.get("volumes") if isinstance(harness_wf.get("volumes"), list) else []
+    if [v.get("name") for v in harness_vols] != ["data", "repo", "scratch"]:
+        failures.append("shipped example: harness-wire-url volumes must be data + repo + scratch "
+                        "(the criteria runner shape the other url objects declare)")
+    if harness_wf.get("adapterImages") != RECORDED_PIN_SET:
+        failures.append(f"shipped example: harness-wire-url adapterImages = {harness_wf.get('adapterImages')!r}, "
+                        "want the recorded pin set verbatim (three-way pin agreement)")
 
 # KB-230: adapter-image pin state. The shipped example is the deploy source
 # for the live criteria-routes CM (make apply-routes applies it wholesale),
