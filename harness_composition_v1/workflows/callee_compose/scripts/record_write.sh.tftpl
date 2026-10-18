@@ -1,0 +1,29 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# Fixed-content composition probe records (KB-278): every record carries the
+# static identity value AND the two runtime environment markers:
+#   composition_env_shadow — reads "parent" on substituted pods (G7); this
+#     callee's own contrast value ("callee-shadow") must NEVER be observed —
+#     substituting this declaration away IS the ADR-0009 stimulus.
+#   iteration_env_marker — reads empty inside the callee (the iteration body
+#     environment exists only in the parent's iteration scopes, G2 evidence).
+# The markers are expanded with `${VAR:-}` guards (captured into plain
+# variables before the record file is created): identities that never declared
+# a marker expand it empty under `set -u` instead of aborting, and a failed
+# expansion can never leave a truncated record behind.
+records_dir="$probe_root/composition_probe_records"
+shadow="${COMPOSITION_ENV_SHADING:-}"
+marker="${ITERATION_ENV_MARKER:-}"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'composition_env_shadow=%s\n' "$shadow"
+    printf 'iteration_env_marker=%s\n' "$marker"
+} > "$record"
+echo "composition record written: $record"

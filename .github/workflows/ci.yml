@@ -156,6 +156,27 @@ jobs:
             exit 1
           fi
 
+      # KB-278: the composition harness (matrix G1-G12 + G10's re-assert of
+      # B7/B9) — the compiled WorkflowGraphs shape and source pins over the
+      # embedded callee env grouping, iteration-body env, parallel guard,
+      # ADR-0009 substitution pair, alias-ledger dial pair, and the two
+      # composition KNOWN-GAP fixtures. The pinned copilot binary
+      # (pre-pulled above) arms the G5-fixture compile-time parallel_safe
+      # refusal the suite asserts. Skips cleanly without the engine; gate
+      # integrity: a skipped run must fail the all-shapes banner check.
+      - name: Run harness_composition_v1 standalone regression test (KB-278)
+        env:
+          SUITE_DEBUG: "1"
+        run: |
+          set -o pipefail
+          bash harness_composition_v1/tests/test_composition_standalone.sh \
+            2>&1 | tee /tmp/kb278_suite.log
+          banner='harness_composition_v1 standalone suite: all matrix shapes asserted (compile + source pins green)'
+          if ! grep -qF "$banner" /tmp/kb278_suite.log; then
+            echo "::error::harness_composition_v1 suite skipped (criteria/jq absent at run time) — gate coverage silently lost; restore the toolchain"
+            exit 1
+          fi
+
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
       - name: Run workstream_handler_v1 regression tests

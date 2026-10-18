@@ -1,0 +1,213 @@
+// KB-278 (KB-254 series, composition card): harness_composition_v1 — the
+// G-matrix (composition) harness tree. NEW tree; production trees are never
+// modified from a harness card. No adapter/engine code changes are declared
+// anywhere: the tree only aims the probes at the shapes the matrix pins.
+//
+// Matrix rows in scope (docs/harness-expectations.md, matrix G):
+//   G1  embedded callee env members grouped across ALL layers
+//       (grouping key = definition identity + environment identity)
+//   G2  iteration-body environment pod keyed per iteration
+//   G3  fresh pod per iteration + teardown scoping per (scope-instance, environment)
+//   G4  aggregates post-loop route exactly once (all_succeeded / any_failed)
+//   G5  parallel concurrency guard (parallel_safe kinds only; parallel_max bounds)
+//   G6  borrow-not-owned (borrowers never provision/teardown/respawn the
+//       pass-in session; iteration exit never kills a borrowed session)
+//   G7  ADR-0009 substitution (parent pins/shadows the callee's same-key
+//       environment; conformance post-substitution for the passed adapter only)
+//   G8  SessionManager alias ledger (multiple identity spellings resolve to
+//       the same canonical instance)
+//   G9  callee-default environment without override
+//   G10 live-operator re-assert of B7 (boot manifests contain every member)
+//       + B9 (drift-recreate absent, pod create census == 1 per scope+env)
+//   G11 KNOWN GAP (pinned, defect files to the engine carrier): a subworkflow
+//       `environment` traversal is NOT validated to exist in the parent —
+//       the dangling shape compiles and only fails at runtime. Fixture:
+//       tests/fixtures/g11_dangling_env (validate-green by design).
+//   G12 KNOWN GAP (pinned, defect files to the engine carrier):
+//       SubworkflowNode.Environment is compiled-but-unread — the subworkflow
+//       block's traversal resolves and stores, then is inert at runtime.
+//       Pinned here: the callee_compose block carries a VALID traversal that
+//       must change nothing (the substitution comes from same-key identity,
+//       not from this attribute).
+//
+// The acceptance lane for G1-G10 is the live green-run (run events: runner
+// lifecycle provision/release per (scope, environment), the WorkflowGraphs
+// composition payload, operator pod census); this tree's standalone suite
+// pins the compiled/source shapes that the live observations read.
+
+workflow {
+    name             = "harness_composition_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "owner_dial"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 16
+    }
+}
+
+// ── G6/G8 stimulus: establish the OWNER session on the pass-in identity ──────
+// The root scope dials adapter.shell.pass_in FIRST, before any borrower scope
+// exists: the session on the shared remote.comp_main identity is established
+// by the owner, and every later spelling of the same definition identity
+// (the callee's adapter.shell.pass_in — G1's cross-layer collision) resolves
+// against that canonical instance through the SessionManager alias ledger.
+// The record carries the runtime composition_env_shadow probe: the parent
+// environment's variable value (see adapters.chcl) — G7's substituted-side
+// evidence.
+step "owner_dial" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "owner_dial"
+            record_value = "owner-dial scope=root identity=shell.pass_in@remote.comp_main"
+        })
+    }
+    outcome "success" { next = step.compose_callee }
+    outcome "failure" { next = state.failed }
+}
+
+// ── The subworkflow block: G1/G12 carrier ────────────────────────────────────
+// The G12 KNOWN GAP carrier: the block's `environment` traversal resolves
+// into the compiled SubworkflowNode and is inert at runtime — the composition
+// works through same-key environment identity (G7), never through this
+// attribute. It is declared (a VALID identity: remote.comp_main) so the tree
+// pins the exact shape that must stay harmless; the dangling-traversal half
+// of the gap (G11 — compiles green even when the identity does not exist) is
+// pinned by tests/fixtures/g11_dangling_env.
+subworkflow "callee_compose" {
+    source      = "./workflows/callee_compose"
+    environment = remote.comp_main
+    input = {
+        probe_root = var.probe_root
+    }
+}
+
+// ── G1/G7/G12 carrier: embedded callee over the same-key environment ─────────
+// The embedded callee declares its OWN remote.comp_main environment (with
+// contrast value "callee-shadow") and re-spells adapter.shell.pass_in, so the
+// composed graph carries members for the same definition identity across both
+// layers (G1) and the parent's declaration substitutes the callee's (G7).
+// The subworkflow block's `environment` traversal is the G12 carrier: it is
+// a VALID identity (remote.comp_main) and must be inert at runtime — the
+// substitution works through same-key identity, never through this
+// attribute. Its probe_root input is the composition plumbing observation.
+step "compose_callee" {
+    target      = subworkflow.callee_compose
+    allow_tools = []
+    input {
+        probe_root = var.probe_root
+    }
+    outcome "success" { next = step.loop_iterations }
+    outcome "failure" { next = state.failed }
+}
+
+// ── G2/G3/G4 carrier: three-iteration for_each with an iteration-body env ────
+// The step-level `environment = remote.iter_body` traversal is the referenced
+// environment from inside an iteration body (G2): each iteration resolves a
+// per-iteration (scope-instance, environment) pod — a fresh one per item,
+// released at iteration exit (G3; per_scope_sessions is pinned on the
+// environment in adapters.chcl). The traversal matches the member's own
+// binding on purpose, so the environment grouping stays single-keyed and the
+// pod census per environment stays clean. The aggregate arms are the G4
+// carrier: the loop routes through them exactly once, post-loop.
+step "loop_iterations" {
+    target      = adapter.shell.iter_dialer
+    allow_tools = []
+    environment = remote.iter_body
+    for_each    = var.iter_labels
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "iter_${each.value}"
+            record_value = "iteration label=${each.value} idx=${each._idx} of ${each._total}"
+        })
+    }
+    outcome "all_succeeded" { next = step.parallel_probe }
+    outcome "any_failed"    { next = state.failed }
+}
+
+// ── G5 carrier: parallel guard + bounded concurrency ─────────────────────────
+// A parallel iterating step over a parallel_safe adapter kind (the shell
+// adapter declares parallel_safe in its Info()). parallel_max bounds the
+// observed concurrency to 2. The negative half of the guard — a parallel step
+// over a NON-parallel-safe member refusing at compile — is pinned by the
+// fixtures/g5_parallel_guard fixture tree (asserted in the standalone
+// suite when the pinned copilot binary is resolvable).
+step "parallel_probe" {
+    target       = adapter.shell.iter_dialer
+    allow_tools  = []
+    environment  = remote.iter_body
+    parallel     = var.parallel_labels
+    parallel_max = 2
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "parallel_${each.value}"
+            record_value = "parallel label=${each.value} idx=${each._idx} of ${each._total}"
+        })
+    }
+    outcome "all_succeeded" { next = step.late_join_probe }
+    outcome "any_failed"    { next = state.failed }
+}
+
+// ── G10/B7 carrier: late-join member dial ────────────────────────────────────
+// adapter.shell.late_join is declared in the composed graph from the start
+// and dialed for the FIRST time only here, well after the run is underway.
+// On the live operator this is the B7 re-assert stimulus: every boot manifest
+// (root scope, borrower scopes, iteration scopes) already carried the
+// late-join member — the graph was complete before any provision.
+step "late_join_probe" {
+    target      = adapter.shell.late_join
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "late_join"
+            record_value = "late-join scope=root identity=shell.late_join@remote.comp_main"
+        })
+    }
+    outcome "success" { next = step.survivor_redial }
+    outcome "failure" { next = state.failed }
+}
+
+// ── G6 carrier: borrowed sessions outlive borrower scoping ───────────────────
+// A root re-dial of the pass-in identity AFTER the callee scope (compose_callee)
+// and both iteration scopes (loop_iterations, parallel_probe) have exited:
+// iteration exit must never kill a borrowed/owner session, and the root scope's
+// session for remote.comp_main is the same one owner_dial established. The
+// record re-reads the composition_env_shadow probe — identical to owner_dial's
+// value is the substituted-side evidence that no borrower shadow leaked across
+// scoping (G7) and that no respawn happened in between (G6).
+step "survivor_redial" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "survivor_redial"
+            record_value = "survivor-redial scope=root after=callee_scope+iteration_scopes"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Variables ────────────────────────────────────────────────────────────────
+// Declared in variables.chcl: probe_root (the records' root, outside the repo),
+// iter_labels and parallel_labels (the three-item stimuli the SHAPE
+// prescribes: a 3-iteration for_each with an iteration-body env).

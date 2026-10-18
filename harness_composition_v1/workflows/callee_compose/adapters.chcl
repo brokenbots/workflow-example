@@ -1,0 +1,59 @@
+// KB-278 (composition card): callee-side environments + adapters.
+//
+// remote.comp_main — the SHADOWED same-key declaration (G7): the callee's own
+//   value ("callee-shadow") must never surface on a pod; the parent's
+//   declaration substitutes this one at composition.
+// remote.callee_default — the callee-ONLY environment (G9): no parent
+//   declaration exists anywhere in the composition for this identity.
+
+environment "remote" "comp_main" {
+    // Per-scope sessions: each scope's dials of this environment dispatch
+    // as per-scope operator-spawned peer pods (CRI-269 deferred-remote).
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The contrast value (G7): if THIS value is ever observed on a pod, the
+    // parent pin/shadow did not substitute — a defect files to the engine
+    // carrier, never fixed from a harness card.
+    variables = {
+        COMPOSITION_ENV_SHADING = "callee-shadow"
+    }
+}
+
+environment "remote" "callee_default" {
+    // Per-scope sessions: the callee dial is its own (callee-scope,
+    // environment) pod — the callee-only identity's single provision.
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+    // The callee-only marker: records from this identity carry it; no parent
+    // path can (G9 evidence — no override exists for this identity).
+    variables = {
+        CALLEE_ONLY_ENV_MARKER = "callee_default"
+    }
+}
+
+// The SAME definition identity the parent declares (G1 collision, G8 spelling
+// #2, G6 borrower dial) — deliberately identical to the parent's pass_in.
+adapter "shell" "pass_in" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.comp_main
+}
+
+// The callee-only member (G9): bound only to the callee-only environment.
+adapter "shell" "callee_unique" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.callee_default
+}

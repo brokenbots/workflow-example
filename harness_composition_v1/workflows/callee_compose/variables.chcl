@@ -1,0 +1,9 @@
+// Variables for the KB-278 embedded callee. A single input the parent binds
+// (composition plumbing observation): the probe root shared with the parent,
+// passed through the subworkflow input block. No default — the parent MUST
+// bind it, so an unbound composition fails closed at compile.
+
+variable "probe_root" {
+    description = "Absolute root under which the composition probe records are written; bound by the parent's subworkflow input block."
+    type        = string
+}

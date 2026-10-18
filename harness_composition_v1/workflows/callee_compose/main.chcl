@@ -1,0 +1,81 @@
+// KB-278 (composition card): embedded callee of harness_composition_v1 — the
+// G1/G7/G9/G8 stimulus layer. The callee is authoritative for its own
+// declarations and re-states the SAME identities the parent uses, deliberately:
+//
+//   environment remote.comp_main — the same-key declaration the parent
+//     shadows (G7): this layer declares the contrast value "callee-shadow"
+//     that must NEVER be observed on a pod (substituted away by the parent).
+//   environment remote.callee_default — the callee-only environment (G9):
+//     never declared in the parent, never overridden, never touched by root
+//     steps.
+//
+//   adapter shell.pass_in — the SAME definition identity the parent declares
+//     (G1 cross-layer collision; G8 alias ledger spelling #2): the borrower
+//     dial (dial_shared) joins the pass-in session the parent's scope
+//     established, without provisioning its own (G6).
+//   adapter shell.callee_unique — bound ONLY to remote.callee_default (G9).
+//
+// The callee writes its own composition records (shellquote lanes) — the
+// live green-run asserts from run events + records that the shared dial
+// borrowed rather than re-provisioned, and that the substituted marker reads
+// "parent" here.
+
+workflow {
+    name             = "harness_composition_callee"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "dial_shared"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 8
+    }
+}
+
+// ── G6/G7/G8 carrier: borrower dial of the pass-in identity ──────────────────
+// adapter.shell.pass_in re-spells the parent's member definition. The dial
+// lands in a (callee-scope, remote.comp_main) session joined over the shared
+// identity — the record's composition_env_shadow marker must read "parent"
+// (the substituted-side value), never "callee-shadow".
+step "dial_shared" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "callee_shared"
+            record_value = "callee-dial scope=callee identity=shell.pass_in@remote.comp_main"
+        })
+    }
+    outcome "success" { next = step.dial_unique }
+    outcome "failure" { next = state.failed }
+}
+
+// ── G9 carrier: callee-default environment without override ──────────────────
+// The only two touches of remote.callee_default in the entire composition:
+// this member's binding and this dial. No parent declaration, no override —
+// the environment exists only in the callee layer.
+step "dial_unique" {
+    target      = adapter.shell.callee_unique
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "callee_unique"
+            record_value = "callee-dial scope=callee identity=shell.callee_unique@remote.callee_default"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

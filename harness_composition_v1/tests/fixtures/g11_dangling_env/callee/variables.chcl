@@ -1,0 +1,7 @@
+// KB-278 G11 fixture callee variables.
+
+variable "g11_root" {
+    description = "Absolute root for the fixture environments' working directory (under the sandbox-allowed $HOME surface)."
+    type        = string
+    default     = "/home/criteria/criteria-harness-composition-g11"
+}

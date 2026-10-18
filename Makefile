@@ -107,6 +107,12 @@ validate:
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
 	/usr/local/bin/criteria validate harness_contracts_v1
+	/usr/local/bin/criteria validate harness_composition_v1
+	# KB-278: the G11 gap fixture validates green by design (the KNOWN GAP
+	# is pinned); the G5 guard-violation fixture is owned by the tree's
+	# standalone suite — validating it here would flip red/green with the
+	# local copilot cache state (permissive pre-pull, guard refusal in CI).
+	/usr/local/bin/criteria validate harness_composition_v1/tests/fixtures/g11_dangling_env
 	# KB-267: the handler tree is its own module now — validate it with the
 	# rest (its regression suite compiles it, but this is the canonical leg).
 	/usr/local/bin/criteria validate workstream_handler_v1
@@ -195,6 +201,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_outcome_reason_flow.sh
 	@echo "Running harness_contracts_v1 standalone regression test (KB-277)..."
 	./harness_contracts_v1/tests/test_contracts_standalone.sh
+	@echo "Running harness_composition_v1 standalone regression test (KB-278)..."
+	./harness_composition_v1/tests/test_composition_standalone.sh
 	@echo "Running harness-expectations matrix guard regression test (KB-254)..."
 	./k8s/tests/test_harness_expectations.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
@@ -232,6 +240,7 @@ lint: lint-go
 		k8s/tests/test_criteria_base_pin.sh \
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
 		harness_contracts_v1/tests/test_contracts_standalone.sh \
+		harness_composition_v1/tests/test_composition_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh \
 		k8s/tests/test_harness_expectations.sh
@@ -301,6 +310,7 @@ ci: validate
 	bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
 	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
 	bash harness_contracts_v1/tests/test_contracts_standalone.sh
+	bash harness_composition_v1/tests/test_composition_standalone.sh
 	bash k8s/tests/test_workflow_graphs_flat.sh
 	@echo "== ci: workstream_handler_v1 regression suite =="
 	@for t in workstream_handler_v1/tests/test_*.sh; do \

@@ -1,0 +1,20 @@
+// KB-278 G11 fixture parent-side environment/adapters: one REAL declared
+// identity for the shell member. remote.does_not_exist (referenced by the
+// subworkflow block in main.chcl) is deliberately NOT here.
+
+environment "remote" "root_env" {
+    per_scope_sessions = true
+    working_directory  = var.g11_root
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+adapter "shell" "probe_member" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.root_env
+}
