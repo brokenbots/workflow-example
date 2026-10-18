@@ -10,6 +10,15 @@
 # unchanged ["*"] policy (developer responsibilities are not restricted) and
 # the pr_reviewer_loop charter scoping (pr_review keeps ["*"] and is corrected
 # at charter level because it needs gh read commands).
+#
+# KB-285 (castle run dc50b933, 2026-10-18): the review leg burned its turn
+# budget re-attempting a denied `sed -n` ranged read and died without a
+# verdict. The policy fix is two-sided: head/tail/wc ranged shell reads stay
+# allowlisted with the full depth-band structure (shell + bash kinds), and
+# sed/awk/cat are refused BY DESIGN — each is write-capable (sed -i, awk
+# redirection, cat + redirection) and glob entries cannot express read-only
+# usage. The charter sends ranged reads to head/tail and file inspection to
+# the read kinds.
 
 set -euo pipefail
 
@@ -134,6 +143,27 @@ for universal in '*' 'shell' 'shell:*' 'shell*'; do
         echo "FAIL: review allow_tools contains universal pattern '${universal}' (CRI-260)" >&2
         exit 1
     fi
+done
+
+echo "==> Checking KB-285 trap: no write-capable ranged-read binary is allowlisted (sed/awk/cat)..."
+for verb in sed awk cat; do
+    if grep -qE "^(shell|bash):${verb}( |$)" "${ALLOWLIST}"; then
+        echo "FAIL: review allow_tools allows write-capable binary '${verb}' (KB-285: sed -i, awk redirection, cat + redirection; ranged shell reads are head/tail/wc only)" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking KB-285: head/tail/wc carry the full depth-band structure (shell + bash kinds)..."
+for kind in shell bash; do
+    for verb in head tail wc; do
+        for suffix in '' ' *' ' */**' ' */**/**' ' */**/**/**' ' */**/**/**/**' ' */**/**/**/**/**' ' */**/**/**/**/**/**'; do
+            entry="${kind}:${verb}${suffix}"
+            if ! grep -qxF "${entry}" "${ALLOWLIST}"; then
+                echo "FAIL: review allow_tools lacks '${entry}' (KB-285 ranged-read depth band)" >&2
+                exit 1
+            fi
+        done
+    done
 done
 
 echo "==> Checking bash-kind mirror of every read-only shell: pattern (copilot names its command tool bash)..."
@@ -266,6 +296,21 @@ for cmd in \
     fi
 done
 
+echo "==> Checking KB-285 refusals: sed/awk/cat-shaped reads are denied by design..."
+for cmd in \
+    "sed -n '150,230p' criteria-k8s/internal/routes/routes.go" \
+    "sed -i 's/old/new/g' file.go" \
+    "awk -F, '{print \$1}' data.csv" \
+    "cat README.md" \
+    "cat workstreams/KB-26/spec.md" \
+    "cat run.log > copy.log" \
+    "sed -n '150,230p' criteria-k8s/internal/routes/routes.go && git log --oneline -5"; do
+    if allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools permits sed/awk/cat command '${cmd}' (KB-285: write-capable binaries are refused by design; the charter redirects ranged reads to head/tail)" >&2
+        exit 1
+    fi
+done
+
 echo "==> Checking reviewer-prompt evidence reads are covered as single commands (KB-61)..."
 for cmd in \
     "ls -la /data/intake/KB-61/" \
@@ -306,8 +351,9 @@ for cmd in \
     "go build -o bin/app ./cmd/tool" \
     "./bin/tool --fixture tests/fixtures/in.json" \
     "./build/app --help" \
-    "cat README.md" \
-    "cat workstreams/KB-26/spec.md" \
+    "head -n 120 workstreams/KB-26/spec.md" \
+    "head -n 40 criteria-k8s/internal/routes/routes.go" \
+    "wc -l src/main.go" \
     "grep -rn handler src/" \
     "rg pattern ./pkg" \
     "ls" \
@@ -438,6 +484,48 @@ grep -qF "This is a hard rule, not a style preference." "${REVIEWER_MD}"
 for bad in "run curl" "use curl" "curl -fsSL" "wget -qO-" "use web_fetch"; do
     if grep -qF "${bad}" "${REVIEWER_MD}"; then
         echo "FAIL: reviewer.md appears to instruct a network fetch: '${bad}' (KB-74 in-pod boundary: no network fetches)" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking KB-285: round mirrors publish the identical review allow_tools policy..."
+ROUND_OUT="$(mktemp)"
+ROUND_LIST="$(mktemp)"
+trap 'rm -f "${COMPILE_OUT}" "${ALLOWLIST}" "${PR_OUT}" "${ROUND_OUT}" "${ROUND_LIST}"' EXIT
+for round_name in pair_programming_loop_round2 pair_programming_loop_round3; do
+    criteria compile "${SCRIPT_DIR}/../workflows/${round_name}" >"${ROUND_OUT}" 2>/dev/null
+    jq -r '.steps[] | select(.name == "review") | .allow_tools[]' "${ROUND_OUT}" >"${ROUND_LIST}"
+    if ! cmp -s "${ALLOWLIST}" "${ROUND_LIST}"; then
+        echo "FAIL: ${round_name} review step allow_tools differs from pair_programming_loop (KB-285: identical ranged-read policy across rounds)" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking KB-285: every pair-loop reviewer charter carries the ranged-read rule..."
+for charter_md in \
+    "${HANDLER_DIR}/workflows/pair_programming_loop/agents/reviewer.md" \
+    "${HANDLER_DIR}/workflows/pair_programming_loop_round2/agents/reviewer.md" \
+    "${HANDLER_DIR}/workflows/pair_programming_loop_round3/agents/reviewer.md"; do
+    for expect in \
+        "sed/awk/cat are refused BY DESIGN (KB-285, castle run dc50b933)" \
+        "a read kind never denies for review evidence" \
+        'reach for `head -n` / `tail -n`, plus `wc` to size a file first' \
+        'no `allow_tools` entry for them will ever exist' \
+        "Never emit one and never re-attempt after a refusal"; do
+        if ! grep -qF "${expect}" "${charter_md}"; then
+            echo "FAIL: ${charter_md} lacks the KB-285 ranged-read charter text '${expect}'" >&2
+            exit 1
+        fi
+    done
+done
+
+echo "==> Checking KB-285: pr_reviewer.md carries the read-only ranged-read discipline (its policy stays [\"*\"])..."
+for expect in \
+    "KB-285 ranged-read discipline" \
+    'head`/`tail`/`wc` for a shell byte range' \
+    "write-capable binaries, not reads"; do
+    if ! grep -qF "${expect}" "${HANDLER_DIR}/workflows/pr_reviewer_loop/agents/pr_reviewer.md"; then
+        echo "FAIL: pr_reviewer.md lacks the KB-285 ranged-read discipline text '${expect}'" >&2
         exit 1
     fi
 done

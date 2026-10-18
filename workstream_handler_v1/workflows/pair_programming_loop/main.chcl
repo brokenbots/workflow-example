@@ -434,10 +434,16 @@ step "review" {
         // vestigial and kept only for this wave's stability).
         "shell:find", "shell:find *", "bash:find", "bash:find *",
         "shell:go env", "shell:go env *", "bash:go env", "bash:go env *",
-        // reads, fixture inspection, log tailing
+        // KB-285 (castle run dc50b933: the review leg burned its turn budget
+        // on a denied `sed -n` ranged read): reads, fixture inspection, log
+        // tailing. Ranged shell reads are head/tail/wc ONLY, with the same
+        // depth-band structure as the git entries. sed/awk/cat stay OUT BY
+        // DESIGN: each is write-capable (sed -i, awk redirection, cat +
+        // redirection) and glob entries cannot express read-only usage, so
+        // the refusal is the policy — agents/reviewer.md directs ranged
+        // reads to head/tail and file inspection to the read kinds. Never
+        // add them back (regression: test_reviewer_tool_policy.sh).
         "shell:echo", "shell:echo *", "bash:echo", "bash:echo *",
-        "shell:cat", "shell:cat *", "shell:cat */**", "shell:cat */**/**", "shell:cat */**/**/**", "shell:cat */**/**/**/**", "shell:cat */**/**/**/**/**", "shell:cat */**/**/**/**/**/**",
-        "bash:cat", "bash:cat *", "bash:cat */**", "bash:cat */**/**", "bash:cat */**/**/**", "bash:cat */**/**/**/**", "bash:cat */**/**/**/**/**", "bash:cat */**/**/**/**/**/**",
         "shell:head", "shell:head *", "shell:head */**", "shell:head */**/**", "shell:head */**/**/**", "shell:head */**/**/**/**", "shell:head */**/**/**/**/**", "shell:head */**/**/**/**/**/**",
         "bash:head", "bash:head *", "bash:head */**", "bash:head */**/**", "bash:head */**/**/**", "bash:head */**/**/**/**", "bash:head */**/**/**/**/**", "bash:head */**/**/**/**/**/**",
         "shell:tail", "shell:tail *", "shell:tail */**", "shell:tail */**/**", "shell:tail */**/**/**", "shell:tail */**/**/**/**", "shell:tail */**/**/**/**/**", "shell:tail */**/**/**/**/**/**",
