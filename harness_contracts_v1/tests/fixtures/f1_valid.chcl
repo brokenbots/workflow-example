@@ -1,0 +1,36 @@
+// Fixture F1 (C14): a schema-valid payload is accepted and routes the
+// declared outcome. Single copilot step; the undeclared rejected arm is
+// declared (the C13 carrier) but never fired in this fixture — F4 fires it.
+workflow {
+    name             = "harness_contracts_v1_f1_valid"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_valid"
+    target_state     = "done"
+    policy { max_total_steps = 4 }
+}
+
+step "contract_valid" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_valid.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+    outcome "rejected" {
+        next = state.failed
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

@@ -1,0 +1,66 @@
+// Fixture F2 (C15/C16/D19): the bounded repair loop — wrong-field-set and
+// wrong-lane submissions are rejected loudly (payload_invalid) and commit
+// nothing; the schema-valid engineered rejection then routes the DECLARED
+// rejected lane green, with the verdict echoed into run-state records.
+workflow {
+    name             = "harness_contracts_v1_f2_reject_echo"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_reject"
+    target_state     = "echo_done"
+    policy { max_total_steps = 4 }
+}
+
+data "internal" "d19_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c17_comment" {
+    type  = string
+    value = ""
+}
+
+step "contract_reject" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_reject.md.tftpl", {})
+    }
+    outcome "rejected" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.d19_verdict.value
+            value  = output.reason
+        }
+        next = step.echo_verdict
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
+}
+
+step "echo_verdict" {
+    target      = adapter.shell.recorder
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/echo_verdict.sh.tftpl", {
+            probe_root  = var.probe_root
+            d19_verdict = data.internal.d19_verdict.value
+            c17_comment = data.internal.c17_comment.value
+        })
+    }
+    outcome "success" { next = state.echo_done }
+    outcome "failure" { next = state.failed }
+}
+
+state "echo_done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

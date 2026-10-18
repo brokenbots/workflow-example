@@ -1,0 +1,39 @@
+// Fixture F4 (C13 carrier fired for real): the undeclared arm — declared in
+// the tree with no schema, so it carries no outcome_contracts entry on a
+// contracted step — must fail LOUD within seconds with the outcome_uncontracted
+// schema contract diagnostic (the KB-246 no_work class inverted: the failure
+// is observed, never silent). The stub submits it; the run fails loud on
+// purpose and the fixture asserts that failure shape.
+workflow {
+    name             = "harness_contracts_v1_f4_undeclared"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_valid"
+    target_state     = "done"
+    policy { max_total_steps = 4 }
+}
+
+step "contract_valid" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_valid.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+    outcome "rejected" {
+        next = state.failed
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

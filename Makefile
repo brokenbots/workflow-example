@@ -106,6 +106,7 @@ validate:
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
+	/usr/local/bin/criteria validate harness_contracts_v1
 	# KB-267: the handler tree is its own module now — validate it with the
 	# rest (its regression suite compiles it, but this is the canonical leg).
 	/usr/local/bin/criteria validate workstream_handler_v1
@@ -192,6 +193,8 @@ test: validate test-criteria-k8s
 	./decision_demo_local_v1/tests/test_decision_demo_runtime.sh
 	@echo "Running outcome-reason flow rule regression test (KB-217)..."
 	./k8s/tests/test_outcome_reason_flow.sh
+	@echo "Running harness_contracts_v1 standalone regression test (KB-277)..."
+	./harness_contracts_v1/tests/test_contracts_standalone.sh
 	@echo "Running harness-expectations matrix guard regression test (KB-254)..."
 	./k8s/tests/test_harness_expectations.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
@@ -228,6 +231,7 @@ lint: lint-go
 		k8s/tests/test_criteria_base_entrypoint.sh \
 		k8s/tests/test_criteria_base_pin.sh \
 		decision_demo_v1/tests/test_decision_demo_standalone.sh \
+		harness_contracts_v1/tests/test_contracts_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh \
 		k8s/tests/test_harness_expectations.sh
@@ -296,6 +300,7 @@ ci: validate
 	bash kanboard_triage_v1/tests/test_triage_standalone.sh
 	bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
 	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
+	bash harness_contracts_v1/tests/test_contracts_standalone.sh
 	bash k8s/tests/test_workflow_graphs_flat.sh
 	@echo "== ci: workstream_handler_v1 regression suite =="
 	@for t in workstream_handler_v1/tests/test_*.sh; do \

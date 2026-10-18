@@ -1,0 +1,30 @@
+// Fixture F8 (C18b): budget exhaustion with EVERY lane absent — the
+// synthetic failure outcome name from finalize_kind=missing is unmapped (no
+// default arm, no fallback arm), so the engine must fail the run LOUD with
+// the outcome_not_allowed routing error instead of swallowing it. The run
+// fails on purpose; the fixture asserts that loud shape.
+workflow {
+    name             = "harness_contracts_v1_f8_unmapped"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_unmapped"
+    target_state     = "done"
+    policy { max_total_steps = 6 }
+}
+
+step "contract_unmapped" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_unmapped.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}

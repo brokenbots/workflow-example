@@ -1,0 +1,27 @@
+// Fixture F5 (C13 contrast): the same top-level reason shape the contracted
+// steps reject is ACCEPTED here — this step declares no schema at all, so
+// nothing is contracted (contract activation is per-step).
+workflow {
+    name             = "harness_contracts_v1_f5_uncontracted"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_uncontracted"
+    target_state     = "done"
+    policy { max_total_steps = 4 }
+}
+
+step "contract_uncontracted" {
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_uncontracted.md.tftpl", {})
+    }
+    outcome "approved" {
+        next = state.done
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}

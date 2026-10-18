@@ -126,6 +126,14 @@ jobs:
         run: |
           bash k8s/tests/test_workflow_graphs_flat.sh
 
+      # KB-277: the contracts harness (matrix C13-C18 + D19/D21/D22) —
+      # per-shape fixture runs over a scripted local model stub; each matrix
+      # shape asserted in run events. Skips cleanly without the pinned
+      # adapter binaries (pre-pulled above).
+      - name: Run harness_contracts_v1 standalone regression test (KB-277)
+        run: |
+          bash harness_contracts_v1/tests/test_contracts_standalone.sh
+
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
       - name: Run workstream_handler_v1 regression tests
