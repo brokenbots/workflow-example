@@ -80,7 +80,7 @@ jobs:
           CRITERIA_HOME: /home/runner/.local/criteria
         run: |
           mkdir -p "$CRITERIA_HOME/adapters"
-          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.4
+          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.5
           criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15
 
       # The copilot adapter's CLI server execs the `copilot` CLI from PATH

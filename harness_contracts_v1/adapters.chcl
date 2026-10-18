@@ -46,6 +46,6 @@ adapter "copilot" "main" {
 // the C17/D19 verdict texts into fixed-content records under the probe root.
 adapter "shell" "recorder" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.4"
+    version     = "0.5.5"
     environment = remote.probe_members
 }
