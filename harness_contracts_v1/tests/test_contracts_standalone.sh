@@ -427,6 +427,15 @@ if [ "$(cat "$PROOT/d21_shell_band_record" 2>/dev/null || true)" = "d21-shell-ba
 else
     fail "F6: d21_shell_band_record missing or wrong — the granted shell call did not run"
 fi
+# The submitted reason (top-level lane — the one the engine projects) flows
+# into run state via the step's write of output.reason; the captured value
+# equals the submitted reason (fault-sensitive: a broken projection or a
+# dropped lane yields an empty/different captured reason).
+if grep 'StepOutputCaptured' "$EV" 2>/dev/null | grep -F '"reason":"D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering"' >/dev/null; then
+    ok "F6 projected reason captured in run state (StepOutputCaptured content)"
+else
+    fail "F6: projected reason missing from run state — output.reason was not captured"
+fi
 expect_run_green F6
 
 # ── F6c: D21 — compound per-segment matching, every-segment refusal ─────────
@@ -694,6 +703,15 @@ if grep -qF 'C17 observed: the empty adapter comment on the require_comment arm 
     ok "F9 c17 record carries the engineered observed verdict"
 else
     fail "F9: shipped-chain c17 record content wrong"
+fi
+# The D21 lane: the permission step's write lands output.reason (the lane
+# the engine projects) — carried verbatim into the d21 record by the echo
+# verdict rendering (same shellquote opaque-argument lane, no re-rendering).
+D21_REC="$PROOT/contracts_probe_records/d21_reason_record"
+if grep -qxF 'd21_reason=D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering' "$D21_REC" 2>/dev/null; then
+    ok "F9 d21 record carries the projected outcome reason verbatim (outputs in run state)"
+else
+    fail "F9: d21_reason_record missing or does not carry the projected reason"
 fi
 # Positive content-carry proof via the schema-less lane: the
 # contract_uncontracted approved arm writes c13_reason <- output.reason of

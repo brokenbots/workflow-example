@@ -35,6 +35,11 @@ data "internal" "c13_reason" {
     value = ""
 }
 
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
 step "contract_valid" {
     target      = adapter.copilot.main
     allow_tools = []
@@ -63,6 +68,7 @@ step "echo_verdict" {
             c14_reason   = data.internal.c14_reason.value
             d19_verdict  = data.internal.d19_verdict.value
             c17_comment  = data.internal.c17_comment.value
+            d21_reason   = data.internal.d21_reason.value
             c13_reason   = data.internal.c13_reason.value
         })
     }

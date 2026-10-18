@@ -11,6 +11,11 @@ workflow {
     policy { max_total_steps = 4 }
 }
 
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
 data "internal" "d19_verdict" {
     type  = string
     value = ""
@@ -52,6 +57,7 @@ step "echo_verdict" {
     input {
         command = templatefile("./scripts/echo_verdict.sh.tftpl", {
             probe_root  = var.probe_root
+            d21_reason  = ""
             c14_reason  = ""
             d19_verdict = data.internal.d19_verdict.value
             c17_comment = data.internal.c17_comment.value

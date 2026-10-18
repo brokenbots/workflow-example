@@ -3,10 +3,10 @@ set -euo pipefail
 command -v mkdir >/dev/null
 
 # Fixed-content verdict records (KB-277): the verdict values are the run-state
-# strings the contracted arms wrote (C17/D19 carry the adapter comment
-# verbatim across from data.internal into the record — the shellquote
-# rendering treats the adapter text as opaque single arguments, never part of
-# the command grammar), plus the probe_root from the variable. Every value
+# strings the contracted arms wrote (D19/C17 carry their texts across from
+# data.internal into the record — the shellquote rendering treats the
+# adapter text as opaque single arguments, never part of the command
+# grammar), plus the probe_root from the variable. Every value
 # here arrives via the ONE lane the engine projects into arm outputs — the
 # submission's top-level reason (the C13 reason lane, or the reason lane each
 # dual-lane submission writes); payload body fields are dropped by the engine
@@ -14,8 +14,9 @@ command -v mkdir >/dev/null
 # record's lane-discriminated content proves.
 records_dir="$probe_root/contracts_probe_records"
 mkdir -p "$records_dir"
+printf 'd21_reason=%s\n' {{ .d21_reason | shellquote }} > "$records_dir/d21_reason_record"
 printf 'c14_reason=%s\n' {{ .c14_reason | shellquote }} > "$records_dir/c14_reason_record"
 printf 'd19_verdict=%s\n' {{ .d19_verdict | shellquote }} > "$records_dir/d19_verdict_record"
 printf 'c17_comment=%s\n' {{ .c17_comment | shellquote }} > "$records_dir/c17_comment_record"
 printf 'c13_reason=%s\n' {{ .c13_reason | shellquote }} > "$records_dir/c13_reason_record"
-echo "contracts verdict records written: $records_dir/c14_reason_record $records_dir/d19_verdict_record $records_dir/c17_comment_record $records_dir/c13_reason_record"
+echo "contracts verdict records written: $records_dir/d21_reason_record $records_dir/c14_reason_record $records_dir/d19_verdict_record $records_dir/c17_comment_record $records_dir/c13_reason_record"
