@@ -88,6 +88,11 @@ data "internal" "c17_comment" {
     value = ""
 }
 
+data "internal" "c13_reason" {
+    type  = string
+    value = ""
+}
+
 data "internal" "d21_reason" {
     type  = string
     value = ""
@@ -199,6 +204,12 @@ step "contract_comment" {
 }
 
 // C13: the uncontracted reason lane is accepted on a step with no schema.
+// The approved arm carries a write (not a schema — writes do not activate
+// contract mode) so the reason-lane text lands in run state: output is
+// projected only from the top-level reason field, and the reason lane is
+// exactly what the uncontracted step accepts, so this is the one arm of the
+// chain whose submission text demonstrably flows into the echo_verdict
+// record (the payload lanes project reason "" — see the suite notes).
 step "contract_uncontracted" {
     target      = adapter.copilot.main
     allow_tools = []
@@ -206,6 +217,10 @@ step "contract_uncontracted" {
         prompt = templatefile("./agents/contract_uncontracted.md.tftpl", {})
     }
     outcome "approved" {
+        write {
+            target = data.internal.c13_reason.value
+            value  = output.reason
+        }
         next = step.contract_permissions
     }
 }
@@ -275,6 +290,7 @@ step "echo_verdict" {
             probe_root   = var.probe_root
             d19_verdict  = data.internal.d19_verdict.value
             c17_comment  = data.internal.c17_comment.value
+            c13_reason   = data.internal.c13_reason.value
         })
     }
     outcome "success" { next = step.contract_unmapped }

@@ -24,6 +24,15 @@
 // marker present in the serialized input (conversation history carries the
 // earlier steps' prompts) and counts requests per marker, resetting on step
 // change.
+//
+// Committed-tail rule (proven against the shipped chain): once a step's
+// submit_outcome call is COMMITTED ("recorded successfully" tool result),
+// the CLI's agentic loop calls the model one more time BEFORE the next
+// step's prompt is appended — the turn boundary is locked. Answering that
+// stray call with a submission would land it on the NEXT step's contracts
+// while its marker is still absent from the input, so any request whose
+// tail is a committed submit_outcome result is answered with plain text
+// (never another submission) and never advances the per-step counters.
 import http from "node:http";
 
 const mode = process.env.STUB_MODE || "f1_valid";
@@ -51,8 +60,9 @@ const plain = (text) => ({
 });
 
 // The engineered submission chains. Call order matches the fixed step
-// prompts; no comment parameters except the C17 probes (the empty comment on
-// the require_comment arm, and the corrected-comment defect variant).
+// prompts, transcribed verbatim — including the prescribed comment
+// parameter on the probes whose prompts carry one (C14, C13, D21, the C17
+// empty-comment probe, and the C17 corrected-comment defect variant).
 //
 // NOTE ON THE DUAL-LANE SUBMITS (payload + identical top-level reason):
 // the engine projects ONLY the top-level reason field into the arm's output
@@ -72,6 +82,7 @@ const MODES = {
       payload: {
         reason: "C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact",
       },
+      comment: "C14 valid payload accepted",
     }),
   ],
 
@@ -158,6 +169,7 @@ const MODES = {
     submit({
       outcome: "approved",
       reason: "C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps",
+      comment: "C13 uncontracted reason lane",
     }),
   ],
 
@@ -208,6 +220,24 @@ const MARKER_STEPS = [
 const PLAIN_NEVER_FINALIZE = () =>
   plain("KB-277 never-finalize probe: this step never finalizes on purpose (turn budget must exhaust)");
 
+// True when the LAST conversation item is the tool result of a submit_outcome
+// call that was already committed ("recorded successfully") — the stray
+// post-commit model call the CLI makes before the next step's prompt is
+// appended. Anything else (a fresh step prompt, rejection feedback, a real
+// tool result) is normal dispatch flow.
+function committedFinalizeTail(input) {
+  const last = input[input.length - 1];
+  if (!last || typeof last !== "object") return false;
+  if (last.type !== "function_call_output" && last.role !== "tool") return false;
+  const callId = last.call_id ?? last.tool_call_id;
+  const out = typeof last.output === "string" ? last.output : JSON.stringify(last.content ?? last.output ?? "");
+  if (!out.includes("recorded successfully")) return false;
+  const call = input.find(
+    (it) => it && typeof it === "object" && it.type === "function_call" && it.call_id === callId,
+  );
+  return !call || call.name === "submit_outcome";
+}
+
 // full_chain dispatch state: the active step marker and the number of
 // scriptable requests it has seen; resets on marker change.
 let chainStep = null;
@@ -247,6 +277,12 @@ function replyTo(body) {
     }
   }
   const idx = calls.push(1) - 1;
+  if (committedFinalizeTail(input)) {
+    process.stderr.write(`stub[${mode}] call ${idx + 1}: committed submit_outcome tail — plain end-of-turn\n`);
+    return [
+      plain("KB-277 stub: the finalize call was already committed; the turn is complete — no further submissions."),
+    ];
+  }
   if (mode !== "full_chain") {
     process.stderr.write(`stub[${mode}] call ${idx + 1}\n`);
     return serve(mode, idx);

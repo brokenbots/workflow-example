@@ -46,6 +46,7 @@ step "echo_verdict" {
             probe_root  = var.probe_root
             d19_verdict = data.internal.d19_verdict.value
             c17_comment = data.internal.c17_comment.value
+            c13_reason  = ""
         })
     }
     outcome "success" { next = state.echo_done }

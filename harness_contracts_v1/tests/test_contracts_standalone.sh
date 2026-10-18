@@ -57,11 +57,26 @@ fi
 if [ -z "$SKIP" ] && ! "$CRITERIA" version >/dev/null 2>&1; then
     SKIP="criteria cannot report a version ('$CRITERIA version' failed)"
 fi
-if [ -z "$SKIP" ] && ! "$CRITERIA" adapter list 2>/dev/null | grep -q "0.5.15"; then
-    SKIP="pinned copilot adapter 0.5.15 not cached ('criteria adapter list' lacks it)"
+# pin_installed VERSION: true when the harness tree's lockfile-referenced
+# adapter pinned at this version is present in the local OCI cache. The
+# digest join runs against the tree's own lockfile ('list --referenced'
+# resolves pins relative to the caller's cwd) and matches it against the
+# installed cache by digest — plain list output renders cached entries
+# unattributed, so a cwd like the repo root would never see the version.
+pin_installed() {
+    local refdig
+    refdig="$(cd "$TREE_ROOT" && "$CRITERIA" adapter list --referenced 2>/dev/null \
+        | awk -v v=":$1" '$2 ~ v"$" {print $3}')"
+    [ -n "$refdig" ] || return 1
+    # No -q in pipelines: with pipefail a left grep killed by SIGPIPE turns a
+    # found match into a spurious failure — drain the stream instead.
+    "$CRITERIA" adapter list --installed 2>/dev/null | grep "$refdig" >/dev/null
+}
+if [ -z "$SKIP" ] && ! pin_installed 0.5.15; then
+    SKIP="pinned copilot adapter 0.5.15 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15')"
 fi
-if [ -z "$SKIP" ] && ! "$CRITERIA" adapter list 2>/dev/null | grep -q "0.5.4"; then
-    SKIP="pinned shell adapter 0.5.4 not cached ('criteria adapter list' lacks it)"
+if [ -z "$SKIP" ] && ! pin_installed 0.5.4; then
+    SKIP="pinned shell adapter 0.5.4 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.4')"
 fi
 if [ -n "$SKIP" ]; then
     echo "SKIP: harness_contracts_v1 standalone suite: $SKIP" >&2
@@ -92,13 +107,20 @@ count_type() {
     events "$1" | grep -c "^$2\$" || true
 }
 
+# kind_count FILE KIND: the loud shapes (payload_invalid, comment_missing,
+# finalize_exhausted, permission.*) are AdapterEvent KINDS, not payload
+# types — counting them requires the kind member, never the payload_type.
+kind_count() {
+    grep -o "\"kind\":\"$2\"" "$1" 2>/dev/null | grep -c . || true
+}
+
 # run_shipped NAME MODE [TIMEOUT]: like run_fixture but does NOT replace
 # main.chcl — the SHIPPED flow runs verbatim, so every assertion below
 # exercises the tree the routes entry actually deploys, not a fixture
 # copy. The stub still supplies the engineered call chain for the whole
-# fixed-prompt chain (stub mode full_chain: concatenated per-step
-# sequences; calls past the engineered prefix repeat the same
-# never-finalize reply so budget/unmapped steps cannot drift the index).
+# fixed-prompt chain (stub mode full_chain: per-step marker dispatch;
+# committed finalize tails answer plain end-of-turn so the CLI's stray
+# post-commit model call cannot drift the next step's dispatch).
 run_shipped() {
     local name="$1" mode="$2"
     local tmo="${3:-$TIMEOUT_SECS}"
@@ -208,11 +230,15 @@ expect_event() {
 }
 
 expect_run_green() {
+    # expect_run_green LABEL [FINALSTATE]: the green terminal of a fixture is
+    # its declared final state — single-probe flows end in done, flows that
+    # chain the verdict echo end in echo_done.
     expect_event "$1" RunCompleted
-    if grep '"payload_type":"RunCompleted"' "$EV" | grep -q '"finalState":"done"'; then
-        ok "$1 run completed with finalState=done"
+    local want="${2:-done}"
+    if grep '"payload_type":"RunCompleted"' "$EV" | grep "\"finalState\":\"$want\"" >/dev/null; then
+        ok "$1 run completed with finalState=$want"
     else
-        fail "$1: RunCompleted payload was not finalState=done"
+        fail "$1: RunCompleted payload was not finalState=$want"
     fi
 }
 
@@ -232,22 +258,32 @@ fi
 
 run_fixture f2_reject_echo f2_reject
 expect_rc_zero F2
-if [ "$(count_type "$EV" payload_invalid 2>/dev/null || true)" = "2" ]; then
+if [ "$(kind_count "$EV" outcome.payload_invalid)" = "2" ]; then
     ok "F2 repair loop bounded: exactly 2 payload_invalid rejections then success"
 else
-    fail "F2: expected exactly 2 payload_invalid repair-loop rejections, saw $(count_type "$EV" payload_invalid)"
+    fail "F2: expected exactly 2 payload_invalid repair-loop rejections, saw $(kind_count "$EV" outcome.payload_invalid)"
 fi
-expect_run_green F2
+expect_run_green F2 echo_done
 
 # C16: rejected attempts commit NOTHING. Both rejected submissions carry
 # probe strings; the record file is written once by the final valid
 # submission, so its content must equal that reason alone — a write-before-
 # validate defect would leak a probe string or an extra verdict line here.
+# Exactly one commit exists per chain node: the engine emits one StepOutcome
+# per committed step, so a rejected submission that committed would surface
+# a second StepOutcome for the step. (Record content is carried by the
+# dual-lane submit: the payload satisfies the schema and the identical
+# top-level reason is what the engine projects into output.reason.)
 D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 if [ -f "$D19_REC" ]; then
     ok "F2 d19 verdict record written to run-state files"
 else
     fail F2: d19_verdict_record missing from probe root
+fi
+if [ "$(count_type "$EV" StepOutcome)" = "2" ]; then
+    ok "F2 exactly one committed outcome per step (reject + echo; no rejected commit)"
+else
+    fail "F2: expected exactly 2 StepOutcome events, saw $(count_type "$EV" StepOutcome)"
 fi
 if [ "$(wc -l <"$D19_REC" 2>/dev/null | tr -d ' ')" = "1" ]; then
     ok "F2 record holds exactly one verdict line (no rejected writes)"
@@ -275,17 +311,17 @@ fi
 
 run_fixture f3_comment_echo f3_comment
 expect_rc_zero F3
-if has_ev 'comment_missing'; then
+if kind_count "$EV" comment_missing | grep -qv '^0$'; then
     ok "F3 empty adapter comment rejected loudly (comment_missing)"
 else
     fail F3: comment_missing loud rejection not observed
 fi
-if has_ev 'payload_invalid'; then
+if [ "$(kind_count "$EV" outcome.payload_invalid)" -ge 1 ] 2>/dev/null; then
     ok "F3 rejection surfaced as payload_invalid"
 else
     fail F3: loud rejection missing the payload_invalid shape
 fi
-expect_run_green F3
+expect_run_green F3 echo_done
 if [ -f "$PROOT/contracts_probe_records/c17_comment_record" ]; then
     ok "F3 c17 verdict record written to run-state files"
 else
@@ -295,6 +331,11 @@ if grep -qF 'C17 observed: the empty adapter comment on the require_comment arm 
     ok "F3 c17 record carries the engineered observed verdict"
 else
     fail "F3: c17_comment_record content != the engineered observed verdict"
+fi
+if has_ev 'C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)'; then
+    ok "F3 engineered observed verdict carried verbatim in run events"
+else
+    fail F3: engineered observed verdict not found verbatim in run events
 fi
 
 # ── F3b: C17 defect evidence — corrected comment never reaches the engine ───
@@ -343,12 +384,12 @@ expect_rc_zero F6
 # Grant attribution: the trailing-* band matched the shell tool call
 # FIRST-MATCH-WINS — the permission.granted payload echoes the winning
 # pattern (s*) and the policy tool name (shell).
-if grep 'permission\.granted' "$EV" 2>/dev/null | grep -Fq '"pattern":"s*"'; then
+if grep 'permission\.granted' "$EV" 2>/dev/null | grep -F '"pattern":"s*"' >/dev/null; then
     ok "F6 permission.granted echoes the winning trailing-* pattern (s*) — first match wins"
 else
     fail "F6: permission.granted does not echo pattern=s* (grant not attributable to the trailing-* band)"
 fi
-if grep 'permission\.granted' "$EV" 2>/dev/null | grep -Fq '"tool":"shell"'; then
+if grep 'permission\.granted' "$EV" 2>/dev/null | grep -F '"tool":"shell"' >/dev/null; then
     ok "F6 allowed tool call attributed: shell"
 else
     fail "F6: no permission.granted attributable to the shell tool call"
@@ -356,12 +397,12 @@ fi
 
 # Denial attribution: every denied permission event names the read tool —
 # a band that denied the shell call too would surface a shell-named denial.
-if grep 'permission\.denied' "$EV" 2>/dev/null | grep -Fq '"tool":"read"'; then
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"tool":"read"' >/dev/null; then
     ok "F6 permission.denied attributed to the read tool call"
 else
     fail "F6: permission.denied not attributable to the read tool call"
 fi
-if grep 'permission\.denied' "$EV" 2>/dev/null | grep -Fq '"tool":"shell"'; then
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"tool":"shell"' >/dev/null; then
     fail "F6: the band policy denied the allowed shell tool call"
 else
     ok "F6 the allowed shell tool call was never denied"
@@ -380,7 +421,7 @@ expect_run_green F6
 
 run_fixture f7_budget_echo f7_budget
 expect_rc_zero F7
-if has_ev 'finalize_exhausted'; then
+if [ "$(kind_count "$EV" turn.finalize_exhausted)" -ge 1 ] 2>/dev/null; then
     ok "F7 turn budget exhaustion observed"
 else
     fail F7: turn.finalize_exhausted not observed
@@ -390,7 +431,7 @@ if has_ev '"finalize_kind":"missing"'; then
 else
     fail F7: finalize_kind=missing class not observed
 fi
-expect_run_green F7
+expect_run_green F7 echo_done
 
 # ── F8: C18b — unmapped outcome name fails loud ─────────────────────────────
 
@@ -422,8 +463,16 @@ expect_step F9 contract_uncontracted approved
 expect_step F9 contract_permissions approved
 expect_step F9 contract_budget failure
 expect_step F9 echo_verdict success
-expect_event F9 outcome_not_allowed
+expect_step F9 contract_unmapped failure
 expect_event F9 RunFailed
+# The unmapped routing error surfaces as a StepOutcomeInvalid issue string
+# ("outcome_not_allowed: outcome ... not in allowed_outcomes") and an
+# AdapterEvent kind outcome.failure — the same loud shape F8 asserts.
+if has_ev 'outcome_not_allowed'; then
+    ok "F9 unmapped-arm routing error observed loud (outcome_not_allowed)"
+else
+    fail F9: outcome_not_allowed routing error not observed
+fi
 if grep -q '"finalState":"done"' "$EV"; then
     fail "F9: the loud-terminal chain must not complete with finalState=done"
 else
@@ -434,32 +483,40 @@ if has_ev 'outcome_uncontracted'; then
 else
     ok "F9 uncontracted contrast step accepted the reason lane"
 fi
-if [ "$(count_type "$EV" payload_invalid 2>/dev/null || true)" = "2" ]; then
-    ok "F9 payload rejection count bounded (1 repair loop + 1 empty comment)"
+if [ "$(kind_count "$EV" outcome.payload_invalid)" = "3" ]; then
+    ok "F9 payload rejection count bounded (2 repair-loop rejections + 1 empty comment)"
 else
-    fail "F9: expected exactly 2 payload_invalid rejections, saw $(count_type "$EV" payload_invalid)"
+    fail "F9: expected exactly 3 payload_invalid rejections, saw $(kind_count "$EV" outcome.payload_invalid)"
 fi
-if [ "$(count_type "$EV" comment_missing 2>/dev/null || true)" = "1" ]; then
+if [ "$(kind_count "$EV" comment_missing)" = "1" ]; then
     ok "F9 empty-comment loud rejection observed once (comment_missing)"
 else
-    fail "F9: expected exactly 1 comment_missing, saw $(count_type "$EV" comment_missing)"
+    fail "F9: expected exactly 1 comment_missing, saw $(kind_count "$EV" comment_missing)"
 fi
-expect_event F9 finalize_exhausted
-expect_event F9 '"finalize_kind":"missing"'
+if [ "$(kind_count "$EV" turn.finalize_exhausted)" = "2" ]; then
+    ok "F9 both never-finalize steps exhausted their turn budget"
+else
+    fail "F9: expected exactly 2 finalize_exhausted turns, saw $(kind_count "$EV" turn.finalize_exhausted)"
+fi
+if has_ev '"finalize_kind":"missing"'; then
+    ok "F9 missing-finalize class marked on the exhausted turns"
+else
+    fail F9: finalize_kind=missing class not observed
+fi
 
 # D21 attribution on the shipped step: the granted/denied split and the
 # executed side-effect record, exactly as in F6 but on the flown tree.
-if grep 'permission\.granted' "$EV" 2>/dev/null | grep -Fq '"pattern":"s*"'; then
+if grep 'permission\.granted' "$EV" 2>/dev/null | grep -F '"pattern":"s*"' >/dev/null; then
     ok "F9 trailing-* band granted first-match-wins (pattern s* echoed)"
 else
     fail "F9: permission.granted does not echo pattern=s*"
 fi
-if grep 'permission\.denied' "$EV" 2>/dev/null | grep -Fq '"tool":"read"'; then
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"tool":"read"' >/dev/null; then
     ok "F9 D21 denial attributed to the read tool call"
 else
     fail "F9: permission.denied not attributable to the read tool call"
 fi
-if grep 'permission\.denied' "$EV" 2>/dev/null | grep -Fq '"tool":"shell"'; then
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"tool":"shell"' >/dev/null; then
     fail "F9: the shipped band policy denied the allowed shell tool call"
 else
     ok "F9 the allowed shell tool call was never denied"
@@ -472,6 +529,19 @@ fi
 
 D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 C17_REC="$PROOT/contracts_probe_records/c17_comment_record"
+C13_REC="$PROOT/contracts_probe_records/c13_reason_record"
+# C16 on the shipped chain, same rule as F2: exactly one outcome event per
+# non-unmapped step, the d19 record equals the final engineered reason
+# alone, and no rejected probe string reached run state (dual-lane submits
+# carry the top-level reason through the projection; rejected payloads never
+# commit). 7 StepOutcome events = 5 finalize commits + the budget-exhausted
+# contract_budget failure + the echo_verdict success; the unmapped loud
+# terminal emits StepOutcomeInvalid (never a committed StepOutcome).
+if [ "$(count_type "$EV" StepOutcome)" = "7" ]; then
+    ok "F9 exactly one outcome event per non-unmapped step (5 commits + 1 failure + 1 echo)"
+else
+    fail "F9: expected exactly 7 StepOutcome events across the chain, saw $(count_type "$EV" StepOutcome)"
+fi
 if grep -qF 'D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason' "$D19_REC" 2>/dev/null \
     && ! grep -qF 'wrong field set on purpose' "$D19_REC" 2>/dev/null \
     && ! grep -qF 'wrong lane on purpose' "$D19_REC" 2>/dev/null; then
@@ -483,6 +553,16 @@ if grep -qF 'C17 observed: the empty adapter comment on the require_comment arm 
     ok "F9 c17 record carries the engineered observed verdict"
 else
     fail "F9: shipped-chain c17 record content wrong"
+fi
+# Positive content-carry proof via the schema-less lane: the
+# contract_uncontracted approved arm writes c13_reason <- output.reason of
+# a reason-only submit — the lane the engine projects — and the text flows
+# verbatim through run state into the echo record. This is the C13 record
+# complement to the F4/F5 event observations.
+if grep -qxF 'c13_reason=C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps' "$C13_REC" 2>/dev/null; then
+    ok "F9 c13 record carries the reason-lane submission verbatim (positive content flow)"
+else
+    fail "F9: c13_reason_record missing or does not carry the reason-lane text"
 fi
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
