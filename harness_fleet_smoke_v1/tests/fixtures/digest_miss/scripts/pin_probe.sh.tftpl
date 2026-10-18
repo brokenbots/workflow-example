@@ -1,0 +1,16 @@
+probe_root={{ .probe_root | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# The digest-miss fixture's probe: NEVER designed to run — the admission gate
+# refuses the tampered pin before any session can open (zero pod creates). If
+# this probe somehow executes, it writes a loud never-green marker so the run
+# cannot pass silently.
+records_dir="$probe_root/fleet_smoke_records"
+mkdir -p "$records_dir"
+record="$records_dir/digest_miss_unreachable"
+{
+    printf 'record_name=digest_miss_unreachable\n'
+    printf 'marker=this-must-never-run (the designed refusal happens at admission, before any session opens)\n'
+} > "$record"
+echo "digest-miss marker written: $record"

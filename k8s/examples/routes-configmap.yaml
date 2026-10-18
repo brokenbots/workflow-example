@@ -172,6 +172,19 @@
 # gating (tagMatch=all on harness-validation + harness-failures) over
 # the criteria project, same name-referenced secrets and verbatim fleet
 # adapterImages pins.
+#
+# KB-280 (2026-10-18, dave go): the 'harness-fleet-smoke-url' object +
+# 'harness-fleet-smoke' route ship the series' fast-feedback canary
+# (harness_fleet_smoke_v1 — the ~90s deterministic pre-leg gate: identity
+# handshake, one contract-mode-equivalent pinned green step, one engineered
+# failure-class marker, boot-manifest shape assert; matrix slice
+# A1/A2+F33-F37, no-agent). Same url-ONLY/pinless-at-close convention as the
+# other harness legs, same tag-gated Ready-for-Development gating
+# (tagMatch=all on harness-validation + harness-fleet-smoke) over the
+# criteria project, same name-referenced secrets (github-tokens exists for
+# the private-repo URL fetch, not the canary's own use — the tree declares
+# no copilot member and no secret channel of its own), and a shell-only
+# adapterImages pin (the fleet-smoke fleet is shell identity only).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -535,6 +548,49 @@ data:
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
           }
+        },
+        "harness-fleet-smoke-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//harness_fleet_smoke_v1",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
+              }
+            }
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1"
+          }
         }
       },
       "configLibrary": {
@@ -611,6 +667,18 @@ data:
           "tags": [
             "harness-validation",
             "harness-failures"
+          ],
+          "states": [
+            "Ready for Development"
+          ]
+        },
+        {
+          "name": "harness-fleet-smoke",
+          "workflow": "harness-fleet-smoke-url",
+          "project": "Criteria K8s Workflow Runner",
+          "tags": [
+            "harness-validation",
+            "harness-fleet-smoke"
           ],
           "states": [
             "Ready for Development"
