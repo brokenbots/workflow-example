@@ -95,7 +95,27 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-# Re-audited to d9fe5881 (v0.5.55, 2026-10-17): pin moves one release past the last recorded
+# Re-audited to 70959d34 (v0.5.56, 2026-10-18): pin moves one release past the last recorded
+# AUDITED_COMMIT d9fe5881 (v0.5.55). Delta d9fe5881..70959d34 spans TWO commits:
+#   8e44e3ae (KB-158, #541): cmd/criteria-adapter-mcp protocol negotiation — probe-first
+#     server/discover (protocol rev 2026-07-28, SEP-2549) with the legacy 2025-03-26
+#     initialize retained as the probe-failure fallback; internal/adapterhost honors the
+#     callee-reported input_required call_error as a typed nested-caller failure (the
+#     MRTR retry round-trip is a follow-up card).
+#   70959d34 (KB-212, #542): criteria-adapter-proto dep bump to v0.8.0 — ADDITIVE
+#     ExecuteRequest.timeout_ms (KB-282); loader.go forwards a DECLARED step timeout only
+#     (step.Timeout > 0), unset/non-positive stay byte-identical to pre-v0.8.0 (timeout_ms
+#     0 = the adapter's own default; enforcement stays adapter policy); go work sync
+#     raises the shared golang.org/x/* indirect floor.
+# proto/ delta in the criteria tree over the whole span: EMPTY (verified by range audit);
+# the only wire change rides the additive v0.8.0 dep field. adapter wire v2 untouched
+# (criteria-base builds the engine, not the SDK). Castle ingest is envelope-verbatim,
+# consumer-safe.
+# Dependabot note: the METADATA check is red on this sha — grouped-update updater crash
+# (run #1633595964, unknown_error, un-retryable via API; the @dependabot rebase fired on
+# PR #534 as the equivalent) — deps-PR fallout tracked in #534, NOT engine content:
+# product CI (17 success) + Remote E2E are green on this same sha.
+# Prior: Re-audited to d9fe5881 (v0.5.55, 2026-10-17): pin moves one release past the last recorded
 # AUDITED_COMMIT 6e77270 (v0.5.53). Delta 6e77270..d9fe5881 spans TWO releases:
 #   v0.5.54 (0969b641): KB-246 binary-path type-half completion (#535), KB-259 eval-functions
 #     extension (#537), KB-264 templatefile numeric-arg format() pre-string-pipe (#538),
@@ -103,9 +123,7 @@ DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
 #     proto/ diff EMPTY (verified by range audit); no event contract change.
 #   v0.5.55 (d9fe5881): TEST-ONLY — KB-245 legacy shim wiring test removal (net -81 lines
 #     in internal/engine tests); zero runtime code.
-# proto/ delta over the whole span: EMPTY; adapter wire v2 untouched (criteria-base builds
-# the engine, not the SDK). Castle ingest is envelope-verbatim, consumer-safe.
-AUDITED_COMMIT="d9fe5881a29f7aa7009a052398eea59c6743913c"
+AUDITED_COMMIT="70959d34082199a2561fb5a579a964e6024e8570"
 
 fail() {
     echo "FAIL: $1" >&2
