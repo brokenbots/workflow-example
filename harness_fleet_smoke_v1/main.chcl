@@ -1,0 +1,176 @@
+// KB-280 (KB-254 series, fleet-smoke card): harness_fleet_smoke_v1 — the
+// fast-feedback CANARY of the harness series. NEW tree; production trees are
+// never modified from a harness card. No adapter/engine code changes are
+// declared anywhere: the tree only aims its probes at the shapes the matrix
+// pins. Series-wide defect routing: anything this tree OBSERVES red on an
+// engine or operator surface files to that carrier's own card.
+//
+// SHAPE (card 280): a ~1-minute deterministic smoke over the HIGHEST-SIGNAL
+// fleet invariants — the slice is selected so that VIOLATING any pinned
+// invariant would waste a whole develop leg (the KB-246/KB-253 class). The
+// green path is: one identity handshake (A1), the fleet census + designed
+// class registry (F33/F34/F35 + A2-miss vocabulary), a borrower scope with
+// NOTHING new to wire (zero provision_wanted, E27/G6 shape), and the fleet
+// pin resolve record closed by a survivor redial (A2 resolve half). Every
+// engineered miss ROUTES LOUD: state.failed is the bug terminal, never a
+// silent green. The card prose's "contract-mode" probe lives in the
+// contracts leg (KB-277, C-band): this canary is the NO-AGENT slice the
+// matrix of record assigns (docs/harness-expectations.md, matrix A1/A2 +
+// F33-F37) and declares no agent sessions.
+//
+// Matrix rows in scope (docs/harness-expectations.md, matrix A + F band):
+//   A1 identity handshake: the adapter session presents the type-presented
+//       name on the wire (CRITERIA_ADAPTER_NAME). The handshake probe fails
+//       LOUD when the session binds without it (exit 3, class marker on
+//       stderr, state.failed route) — a nameless session is never green.
+//   A2 digest-pin resolve + miss: resolve half — the fleet pin records into
+//       fleet_pin.json from the tree's lockfile of record (sha256:...), and
+//       the survivor redial after the borrower scope proves the pinned
+//       provision outlives the borrowed scope. Miss half — the engineered
+//       digest_miss_refused class: a wrong pinned digest must refuse
+//       fail-closed BEFORE any pod opens a session (zero creates); the
+//       standalone suite OBSERVES that refusal locally (tampered lockfile +
+//       --warnings-as-errors) and the registry pins the class marker.
+//   F33 zero re-creates: the census record pins pod creates == 1 per
+//       (scope, adapter/environment) pair — the root scope's single
+//       provision, and ZERO provision_wanted for the borrower scope (the
+//       live pod census is the acceptance observation).
+//   F34 zero refused dials: every dial on the green path (root handshake,
+//       borrower dial, survivor redial) lands on its joined session; a
+//       refusal would fail the run LOUD on state.failed. The registry pins
+//       refused_dial_zero as the designed marker.
+//   F35 queue discipline: Queue.Position counts to 0 (0 == admitted and
+//       running). Registry class queue_position_zero pins the vocabulary;
+//       the live run events carry the counter.
+//   F36 secret-free configs: the tree declares no copilot member, no secret
+//       channel and no token surface — probe records and registry content
+//       are fixed strings only. The routes object for this tree keeps the
+//       name-reference-only secret discipline (CRI-250/CRI-214).
+//   F37 memory-ceiling parity: registry class memory_ceiling_parity pins
+//       the designed mechanism (peer container ceilings seed from the SAME
+//       shared adapterResources table, then per-member resMax — a lone
+//       hand-written ceiling would be the defect); the standalone suite pins
+//       the source mechanisms read-only.
+//
+// The acceptance lane for this card is the live green-run pre-leg gate on
+// every roll/pin change, plus this tree's standalone suite pinning the
+// compiled, source, and probe shapes the live observations read.
+
+workflow {
+    name             = "harness_fleet_smoke_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "identity_handshake"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 8
+    }
+}
+
+// ── A1: the identity handshake (the canary's first dial) ─────────────────────
+// The root scope's first dial establishes the pass-in provision; the probe
+// asserts the session bound WITH its type-presented identity (exit 3 = loud
+// bug class, routed to state.failed) and writes the identity record the run
+// events and triage read. Scope/instance facets are recorded with ${VAR:-}
+// guards: an identity that never binds them expands empty under set -u
+// instead of aborting.
+step "identity_handshake" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/handshake_probe.sh.tftpl", {
+            probe_root = var.probe_root
+            # The adapter TYPE presented by the operator's env injection
+            # (CRITERIA_ADAPTER_NAME = kind, matrix A1). Declared here, beside
+            # the step's own target (adapters.chcl: adapter "shell"
+            # "pass_in"), so a type drift is visible at the wiring site — the
+            # probe carries no independent copy.
+            expected_adapter_type = "shell"
+        })
+    }
+    outcome "success" { next = step.fleet_census }
+    outcome "failure" { next = state.failed }
+}
+
+// ── The fleet census + designed-class registry (the map live observations read)
+// One fixed-content pair of records: census_vocabulary.jsonl pins the F33
+// pod-census and F34/F35 dial/queue EXPECTED vocabulary (live operator events
+// supply the actual counts) for the whole GREEN run; registry.jsonl names
+// every designed class marker of the card slice (A1, A2 resolve + miss,
+// F33-F37) plus the loud bug arms. A live observation mapping a marker that
+// lacks a registry line is NOT a designed class of this card.
+step "fleet_census" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/fleet_registry.sh.tftpl", {
+            probe_root = var.probe_root
+        })
+    }
+    outcome "success" { next = step.borrower_callee }
+    outcome "failure" { next = state.failed }
+}
+
+// ── The borrower scope with NOTHING new to wire (F33/F34 carrier) ────────────
+// The embedded callee re-spells the SAME pass-in identity (cross-layer
+// grouping) under the same-key environment identity. A scope with nothing new
+// to wire must emit ZERO provision_wanted events — the live pod census is
+// the acceptance observation; the callee's substituted marker must read
+// "owner" (never the callee's contrast value).
+subworkflow "borrow_scope" {
+    source = "./workflows/borrow_scope"
+    input = {
+        probe_root = var.probe_root
+    }
+}
+
+step "borrower_callee" {
+    target      = subworkflow.borrow_scope
+    allow_tools = []
+    input {
+        probe_root = var.probe_root
+    }
+    outcome "success" { next = step.fleet_pin_record }
+    outcome "failure" { next = state.failed }
+}
+
+// ── A2 resolve half: the fleet pin record + survivor redial ──────────────────
+// The LAST dial re-joins the root pass-in provision AFTER the borrower scope
+// exited: the pinned provision survives the borrowed scope (E27/G6 survivor
+// shape). The record carries the lockfile pin of record (the fleet pin) so
+// the run evidence shows WHICH digest the pinned provision ran under.
+step "fleet_pin_record" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/fleet_pin_record.sh.tftpl", {
+            probe_root = var.probe_root
+            fleet_pin  = "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+// done: the GREEN terminal — every fleet invariant held on the way here. The
+// whole tree costs ONE provision (root scope) and a handful of sub-second
+// probes: the ~1-minute wall budget is the run's own shape, not a timeout.
+state "done" {
+    terminal = true
+    success  = true
+}
+
+// failed: the loud bug terminal. A run landing here means an invariant the
+// canary pins did NOT hold (or something genuinely went wrong) — never a
+// silent green, never parked.
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Variables ────────────────────────────────────────────────────────────────
+// Declared in variables.chcl: probe_root (the records' root, outside the
+// repo, beneath the pod home the remote environment binds as its
+// working_directory).

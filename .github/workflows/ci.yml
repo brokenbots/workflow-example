@@ -197,6 +197,25 @@ jobs:
             exit 1
           fi
 
+      # KB-280 (fleet-smoke leg, series leg armed on dave's go): the
+      # fast-feedback canary — identity handshake, pinned green step,
+      # engineered A2-miss admission refusal, boot-manifest shape asserts.
+      # Gate integrity: the suite's green banner is conditional on the
+      # A2-miss OBSERVATION leg (a skipped refusal refuses the banner), so a
+      # banner-grep here cannot pass a silently-skipped suite.
+      - name: Run harness_fleet_smoke_v1 standalone regression test (KB-280)
+        env:
+          SUITE_DEBUG: "1"
+        run: |
+          set -o pipefail
+          bash harness_fleet_smoke_v1/tests/test_fleet_smoke_standalone.sh \
+            2>&1 | tee /tmp/kb280_suite.log
+          banner='harness_fleet_smoke_v1 standalone suite: all canary shapes asserted (compile + probes + pin gates + route wiring green)'
+          if ! grep -qF "$banner" /tmp/kb280_suite.log; then
+            echo "::error::harness_fleet_smoke_v1 suite skipped (criteria/jq absent at run time) — gate coverage silently lost; restore the toolchain"
+            exit 1
+          fi
+
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
       - name: Run workstream_handler_v1 regression tests

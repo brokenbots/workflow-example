@@ -118,6 +118,12 @@ validate:
 	/usr/local/bin/criteria validate harness_failures_v1/tests/fixtures/e24_stall_wedge
 	/usr/local/bin/criteria validate harness_failures_v1/tests/fixtures/e30_stale_pin
 	/usr/local/bin/criteria validate harness_failures_v1/tests/fixtures/g12_silent_change
+	# KB-280: the fleet-smoke canary validates green, and so does its
+	# A2-miss fixture as SHIPPED (the tampered-pin refusal is engineered for
+	# ADMISSION via the suite's --warnings-as-errors leg, never at plain
+	# validate — plain validate tolerates the unknown-pin warning by design).
+	/usr/local/bin/criteria validate harness_fleet_smoke_v1
+	/usr/local/bin/criteria validate harness_fleet_smoke_v1/tests/fixtures/digest_miss
 	# KB-278: the G11 gap fixture validates green by design (the KNOWN GAP
 	# is pinned); the G5 guard-violation fixture is owned by the tree's
 	# standalone suite — validating it here would flip red/green with the
@@ -215,6 +221,8 @@ test: validate test-criteria-k8s
 	./harness_composition_v1/tests/test_composition_standalone.sh
 	@echo "Running harness_failures_v1 standalone regression test (KB-279)..."
 	./harness_failures_v1/tests/test_failures_standalone.sh
+	@echo "Running harness_fleet_smoke_v1 standalone regression test (KB-280, the fast-feedback canary)..."
+	./harness_fleet_smoke_v1/tests/test_fleet_smoke_standalone.sh
 	@echo "Running harness-expectations matrix guard regression test (KB-254)..."
 	./k8s/tests/test_harness_expectations.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
@@ -254,6 +262,7 @@ lint: lint-go
 		harness_contracts_v1/tests/test_contracts_standalone.sh \
 		harness_composition_v1/tests/test_composition_standalone.sh \
 		harness_failures_v1/tests/test_failures_standalone.sh \
+		harness_fleet_smoke_v1/tests/test_fleet_smoke_standalone.sh \
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh \
 		k8s/tests/test_harness_expectations.sh
@@ -325,6 +334,7 @@ ci: validate
 	bash harness_contracts_v1/tests/test_contracts_standalone.sh
 	bash harness_composition_v1/tests/test_composition_standalone.sh
 	bash harness_failures_v1/tests/test_failures_standalone.sh
+	bash harness_fleet_smoke_v1/tests/test_fleet_smoke_standalone.sh
 	bash k8s/tests/test_workflow_graphs_flat.sh
 	@echo "== ci: workstream_handler_v1 regression suite =="
 	@for t in workstream_handler_v1/tests/test_*.sh; do \

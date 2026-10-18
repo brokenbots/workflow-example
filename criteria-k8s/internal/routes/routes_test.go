@@ -91,11 +91,11 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 8 {
-		t.Errorf("workflowLibrary size = %d, want 8", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 9 {
+		t.Errorf("workflowLibrary size = %d, want 9", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 6 {
-		t.Errorf("routes size = %d, want 6", len(p.Routes))
+	if len(p.Routes) != 7 {
+		t.Errorf("routes size = %d, want 7", len(p.Routes))
 	}
 	// KB-281: the retired criteria-triage / criteria-develop routes are gone.
 	// Surviving route order: the criteria project's cleanup-only route, then
@@ -163,6 +163,38 @@ func TestParseAndValidate(t *testing.T) {
 	}
 	if len(p.Routes[5].Tags) == 0 || p.Routes[5].Tags[0] != "harness-validation" {
 		t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[5].Tags)
+	}
+	// KB-280: the harness-fleet-smoke leg rides routes[6] — the series'
+	// fast-feedback canary (harness_fleet_smoke_v1, ~90s deterministic
+	// no-agent pre-leg gate) with the same pinless-at-close convention.
+	if n := p.Routes[6].Name; n != "harness-fleet-smoke" {
+		t.Errorf("routes[6] = %q, want %q (KB-280 harness fleet-smoke route)", n, "harness-fleet-smoke")
+	}
+	if p.Routes[6].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-fleet-smoke route project = %q, want %q", p.Routes[6].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[6].Workflow != "harness-fleet-smoke-url" {
+		t.Errorf("harness-fleet-smoke route workflow = %q, want %q", p.Routes[6].Workflow, "harness-fleet-smoke-url")
+	}
+	fsmoke, ok := p.WorkflowLibrary["harness-fleet-smoke-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-fleet-smoke-url (KB-280)")
+	}
+	if fsmoke.Type != TypeURL || fsmoke.Class != ClassTriage || fsmoke.Namespace != "criteria-jobs" ||
+		fsmoke.Ref != "" || len(fsmoke.Volumes) != 3 || len(fsmoke.Secrets) != 1 {
+		t.Errorf("harness-fleet-smoke-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-280)", fsmoke)
+	}
+	// KB-280 is the no-agent slice: the object pins the Shell adapter ONLY
+	// (no copilot identity to image — the canary declares no copilot member).
+	if fsmoke.AdapterImages == nil {
+		t.Errorf("harness-fleet-smoke-url adapterImages missing — want the shell-only surface (KB-280)")
+	} else if _, hasCopilot := fsmoke.AdapterImages["copilot"]; hasCopilot {
+		t.Errorf("harness-fleet-smoke-url adapterImages pins copilot — the canary is the no-agent slice (KB-280)")
+	} else if fsmoke.AdapterImages["shell"] != "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1" {
+		t.Errorf("harness-fleet-smoke-url shell pin = %q, want the recorded fleet pin set (KB-280)", fsmoke.AdapterImages["shell"])
+	}
+	if len(p.Routes[6].Tags) == 0 || p.Routes[6].Tags[0] != "harness-validation" {
+		t.Errorf("harness-fleet-smoke route tags = %v, want the tag-gated harness pair (KB-280)", p.Routes[6].Tags)
 	}
 	// Absence regressions (KB-281): the retired linear url objects must not
 	// return in the shipped example.

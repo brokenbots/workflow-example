@@ -662,15 +662,16 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 6,
+shipped_err(len(base["routes"]) == 7,
             f"shipped example routes = {len(base['routes'])}, want the CRI-310 cleanup route, "
-            "the two kanboard routes, and the KB-277/KB-278/KB-279 harness legs (the criteria split "
+            "the two kanboard routes, and the KB-277/KB-278/KB-279/KB-280 harness legs (the criteria split "
             "routes are retired, KB-281)")
 route_names = {r.get("name") for r in base["routes"] if isinstance(r, dict)}
 shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-develop",
-                            "harness-contracts", "harness-composition", "harness-failures"},
+                            "harness-contracts", "harness-composition", "harness-failures",
+                            "harness-fleet-smoke"},
             f"shipped example route names = {sorted(route_names)}, want cleanup + kanboard pair"
-            " + harness-contracts + harness-composition + harness-failures")
+            " + harness-contracts + harness-composition + harness-failures + harness-fleet-smoke")
 for retired_route in ("criteria-triage", "criteria-develop"):
     shipped_err(retired_route not in route_names,
                 f"shipped example: the retired {retired_route} route returned (KB-281)")
@@ -680,6 +681,7 @@ kanboard_develop_route = next((r for r in base["routes"] if r.get("name") == "ka
 harness_contracts_route = next((r for r in base["routes"] if r.get("name") == "harness-contracts"), None)
 harness_composition_route = next((r for r in base["routes"] if r.get("name") == "harness-composition"), None)
 harness_failures_route = next((r for r in base["routes"] if r.get("name") == "harness-failures"), None)
+harness_fleet_smoke_route = next((r for r in base["routes"] if r.get("name") == "harness-fleet-smoke"), None)
 shipped_err(cleanup_route is not None, "shipped example: routes missing the criteria-cleanup route (CRI-310)")
 shipped_err(kanboard_triage_route is not None,
             "shipped example: routes missing the kanboard-triage route (dual-source coexistence)")
@@ -811,6 +813,27 @@ else:
                         "want [Ready for Development]")
     if "tagMatch" in harness_failures_route:
         failures.append("shipped example: harness-failures must keep the tagMatch=all default")
+
+# KB-280 (the fast-feedback canary): the harness-fleet-smoke route fires the
+# series' fleet-smoke leg (harness_fleet_smoke_v1 — the ~90s deterministic
+# pre-leg gate) with the same gating discipline as the other harness legs:
+# tagMatch=all on harness-validation + harness-fleet-smoke over the criteria
+# project's Ready for Development state.
+if harness_fleet_smoke_route is None:
+    failures.append("shipped example: routes missing the harness-fleet-smoke route (KB-280)")
+else:
+    if harness_fleet_smoke_route.get("workflow") != "harness-fleet-smoke-url":
+        failures.append("shipped example: harness-fleet-smoke must fire harness-fleet-smoke-url")
+    if harness_fleet_smoke_route.get("project") != "Criteria K8s Workflow Runner":
+        failures.append("shipped example: harness-fleet-smoke must target the criteria project")
+    if harness_fleet_smoke_route.get("tags") != ["harness-validation", "harness-fleet-smoke"]:
+        failures.append(f"shipped example: harness-fleet-smoke tags = {harness_fleet_smoke_route.get('tags')}, "
+                        "want [harness-validation, harness-fleet-smoke] (the dave-go tag gate)")
+    if harness_fleet_smoke_route.get("states") != ["Ready for Development"]:
+        failures.append(f"shipped example: harness-fleet-smoke states = {harness_fleet_smoke_route.get('states')}, "
+                        "want [Ready for Development]")
+    if "tagMatch" in harness_fleet_smoke_route:
+        failures.append("shipped example: harness-fleet-smoke must keep the tagMatch=all default")
 
 # CRI-310: ticket-cleanup-url — the dirty-label cleanup workflow object
 # (url-only, on criteria-base). Validation run C corrected two assumptions
@@ -994,6 +1017,45 @@ else:
     hfail_volume_names = [v.get("name") for v in hfail_volumes] if isinstance(hfail_volumes, list) else []
     if hfail_volume_names != ["data", "repo", "scratch"]:
         failures.append(f"shipped example: harness-failures-url volumes = {hfail_volume_names},"
+                        " want [data, repo, scratch] (the KB-241 peer-pod surface)")
+
+# KB-280: the harness_fleet_smoke_v1 tree object — url-only, class=triage,
+# shipped PINLESS pre-close (same convention as the other harness legs). The
+# canary is the no-agent slice: no copilot member, so adapterImages is
+# SHELL-ONLY, and the github-tokens binding exists for the private-repo URL
+# fetch, not for the canary's own use (F36: name references only).
+harness_fleet_smoke_wf = base[LIB].get("harness-fleet-smoke-url")
+if not isinstance(harness_fleet_smoke_wf, dict):
+    failures.append("shipped example: workflowLibrary missing the harness-fleet-smoke-url object (KB-280)")
+else:
+    if harness_fleet_smoke_wf.get("type") != "url" or "url" not in harness_fleet_smoke_wf:
+        failures.append("shipped example: harness-fleet-smoke-url must be a url workflow")
+    if not str(harness_fleet_smoke_wf.get("url", "")).startswith(
+            "git::https://github.com/brokenbots/workflow-example.git//harness_fleet_smoke_v1"):
+        failures.append("shipped example: harness-fleet-smoke-url must point at the harness_fleet_smoke_v1 subtree")
+    if str(harness_fleet_smoke_wf.get("url", "")).endswith("?ref=") or not str(harness_fleet_smoke_wf.get("url", "")).endswith("//harness_fleet_smoke_v1"):
+        failures.append("shipped example: harness-fleet-smoke-url must be url-only and PINLESS pre-close")
+    if harness_fleet_smoke_wf.get("class") != "triage":
+        failures.append("shipped example: harness-fleet-smoke-url must declare class=triage (CRI-242 read-only admission)")
+    if "image" in harness_fleet_smoke_wf:
+        failures.append("shipped example: harness-fleet-smoke-url must be url-only (no process image)")
+    hfsm_images = harness_fleet_smoke_wf.get("adapterImages")
+    if not isinstance(hfsm_images, dict) or set(hfsm_images.keys()) != {"shell"}:
+        failures.append("shipped example: harness-fleet-smoke-url must pin the Shell adapter ONLY"
+                        " (the canary is the no-agent slice — no copilot identity to image, F36)")
+    hfsm_secrets = harness_fleet_smoke_wf.get("secrets")
+    hfsm_secret_names = [s.get("name") for s in hfsm_secrets] if isinstance(hfsm_secrets, list) else []
+    if hfsm_secret_names != ["github-tokens"]:
+        failures.append("shipped example: harness-fleet-smoke-url must bind exactly the github-tokens CSI surface"
+                        " (exists for the private-repo URL fetch; name references only, CRI-214 section 3.8)")
+    for s in hfsm_secrets if isinstance(hfsm_secrets, list) else []:
+        if s.get("env") != {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}:
+            failures.append("shipped example: harness-fleet-smoke-url github-tokens env must bind"
+                            " WORKFLOW_GITHUB_TOKEN=workflow_github_token (name reference only)")
+    hfsm_volumes = harness_fleet_smoke_wf.get("volumes")
+    hfsm_volume_names = [v.get("name") for v in hfsm_volumes] if isinstance(hfsm_volumes, list) else []
+    if hfsm_volume_names != ["data", "repo", "scratch"]:
+        failures.append(f"shipped example: harness-fleet-smoke-url volumes = {hfsm_volume_names},"
                         " want [data, repo, scratch] (the KB-241 peer-pod surface)")
 
 # KB-230: adapter-image pin state. The shipped example is the deploy source

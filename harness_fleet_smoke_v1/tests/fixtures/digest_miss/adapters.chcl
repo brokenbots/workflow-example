@@ -1,0 +1,21 @@
+// KB-280 (fleet-smoke card): digest-miss fixture adapter set — the SAME
+// identity shape as the canary's green set; only the lockfile pin differs
+// (tampered: sha256:ffff... in .criteria.lock.hcl). The refusal is the
+// designed observation.
+
+environment "remote" "smoke" {
+    per_scope_sessions = true
+    working_directory  = "/home/criteria"
+    process = {
+        exec = ["*"]
+    }
+    listen_address     = "0.0.0.0:0"
+    accept_token       = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+adapter "shell" "pass_in" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = remote.smoke
+}

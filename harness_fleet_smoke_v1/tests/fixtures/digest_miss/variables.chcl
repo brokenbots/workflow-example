@@ -1,0 +1,5 @@
+variable "probe_root" {
+    description = "Record root for the miss probe (never written by the designed refusal: the admission gate refuses before any session opens)."
+    type        = string
+    default     = "/home/criteria/criteria-harness-fleet-smoke-miss"
+}

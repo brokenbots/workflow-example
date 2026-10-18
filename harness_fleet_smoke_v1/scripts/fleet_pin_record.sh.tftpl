@@ -1,0 +1,35 @@
+probe_root={{ .probe_root | shellquote }}
+fleet_pin={{ .fleet_pin | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# A2 resolve half (fleet-smoke): the fleet pin record + survivor redial. The
+# LAST dial re-joins the root pass-in provision AFTER the borrower scope
+# exited — the pinned provision survives the borrowed scope (E27/G6 survivor
+# shape). The record carries the lockfile pin of record so the run evidence
+# shows WHICH digest the pinned provision ran under. Resolve-mechanics guard:
+# the pin must be a digest address (sha256: prefix, non-empty) — a pin-less
+# provision is not the fleet pin of record. The owned substitution marker is
+# expanded with a ${VAR:-} guard (empty = the identity never declared it).
+case "$fleet_pin" in
+    sha256:*) ;;
+    *)
+        printf 'class=A2 name=fleet_pin_missing marker=pin-not-a-digest-address (the canary always runs under the lockfile pin of record)\n' >&2
+        exit 3
+        ;;
+esac
+fleet_marker="${FLEET_SMOKE_MARKER:-}"
+scope="${CRITERIA_SCOPE:-}"
+scope_instance="${CRITERIA_SCOPE_INSTANCE:-}"
+records_dir="$probe_root/fleet_smoke_records"
+mkdir -p "$records_dir"
+record="$records_dir/fleet_pin"
+{
+    printf 'record_name=fleet_pin_resolve\n'
+    printf 'fleet_pin=%s\n' "$fleet_pin"
+    printf 'survivor_redial=scope=root after=borrower_scope (the pinned provision outlives the borrowed scope)\n'
+    printf 'fleet_smoke_env_marker=%s\n' "$fleet_marker"
+    printf 'scope=%s\n' "$scope"
+    printf 'scope_instance=%s\n' "$scope_instance"
+} > "$record"
+echo "fleet-smoke pin record written: $record"

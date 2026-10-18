@@ -1,0 +1,44 @@
+// KB-280 (fleet-smoke card): A2-miss fixture — the engineered digest-pin
+// miss. This tree is IDENTICAL in shape to the canary's green identity set
+// except its lockfile pins a WRONG digest (sha256:ffff... — never pullable,
+// never cached): the designed digest_miss_refused class. The miss must
+// refuse fail-closed at admission BEFORE any pod opens a session (zero pod
+// creates); the standalone suite OBSERVES that refusal locally with
+// `criteria validate --warnings-as-errors` (the tampered pin is reported and
+// refused; D7 fail-closed). The fixture stays in its designed shape: it
+// never runs green, never parks silently.
+
+workflow {
+    name             = "harness_fleet_smoke_digest_miss"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "miss_probe"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 2
+    }
+}
+
+step "miss_probe" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/pin_probe.sh.tftpl", {
+            probe_root = var.probe_root
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

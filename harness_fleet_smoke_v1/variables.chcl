@@ -1,0 +1,9 @@
+// Variables for the KB-280 fleet-smoke canary tree. The probes are
+// deterministic and need no secret channel (the tree carries no copilot
+// member — only the one shell identity, so no token surface is declared).
+
+variable "probe_root" {
+    description = "Absolute root under which the fleet-smoke probe records are written (created by the probe scripts at run time). Must live under $HOME or CRITERIA_SHELL_ALLOWED_PATHS: the shell adapter's sandbox refuses a resolved working_directory outside that surface, so the default sits beneath the pod home the remote environment binds as its working_directory."
+    type        = string
+    default     = "/home/criteria/criteria-harness-fleet-smoke"
+}
