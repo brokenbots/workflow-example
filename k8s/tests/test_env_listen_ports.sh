@@ -66,6 +66,7 @@ repo_root = sys.argv[1]
 deployed = {
     "kanboard_develop_v1/adapters.chcl": ["develop"],
     "kanboard_triage_v1/adapters.chcl": ["triage"],
+    "review_triage_v1/adapters.chcl": ["review"],
     "qa_triage_v1/adapters.chcl": ["primary", "scratch"],
     "qa_triage_v1/workflows/repro_runner/adapters.chcl": ["primary", "worktree"],
     "workstream_handler_v1/adapters.chcl": ["worktree", "primary"],

@@ -8,7 +8,7 @@ set -euo pipefail
 #   1. the tree validates standalone and references no linear_* tree asset;
 #   2. the graph has exactly two terminal states, both success, both
 #      reachable, and no develop steps (no handler subworkflow, no work/done
-#      states, no reviewer token);
+#      states, no reviewer_github_token - the develop handler's credential);
 #   3. the internal-reproduced gate is deterministic on the real ticket.json
 #      shape (the {task, tags, comments} envelope fetch_ticket stores) — the
 #      same input always yields the same routing token;
@@ -195,10 +195,83 @@ require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "review_triage_v1") | .body.adapters[] | select(.name == "triage_reviewer") | .environment' "$GRAPH")" \
     "remote.review" \
     "reviewer copilot binds the per-scope remote.review env (KB-284)"
+# The remote.review env declaration must carry the CRI-269 per-scope flag:
+# without per_scope_sessions a remote-bound adapter falls back to an eager
+# local OCI verify and dies at the handshake budget - the exact KB-284 root
+# defect. The adapter's env binding alone does not select deferred-remote
+# hosting, so guard the flag itself (compile does not lift env declarations).
+review_env_block="$(awk '
+    /^environment "remote" "review" \{/ { in_env = 1 }
+    in_env && /^\}/ { exit }
+    in_env { print }
+' "$REPO_ROOT/review_triage_v1/adapters.chcl")"
+[ -n "$review_env_block" ] || fail 'review_triage_v1 declares no environment "remote" "review" block'
+require_equal \
+    "$(printf '%s\n' "$review_env_block" | grep -cE '^[[:space:]]*per_scope_sessions[[:space:]]*=[[:space:]]*true')" \
+    "1" \
+    "review env sets per_scope_sessions = true (CRI-269 deferred-remote hosting)"
+
+# The copilot pin is the live-proven QA/reviewer digest (copilot 0.5.15).
+# Pin it literally instead of comparing graph values to each other, which
+# would pass vacuously if compile ever emitted null for both.
+COPILOT_PIN="sha256:827e39ad040a24ad81251b802b1996a00195121ce2c97b7b6ba62d558d581773"
 require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "review_triage_v1") | .body.adapters[] | select(.name == "triage_reviewer") | .pinned_digest' "$GRAPH")" \
+    "$COPILOT_PIN" \
+    "reviewer copilot pins the live-proven 827e39ad digest"
+require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "qa_triage_v1") | .body.adapters[] | select(.name == "investigator") | .pinned_digest' "$GRAPH")" \
-    "reviewer copilot is pinned to the digest the qa_triage_v1 copilots proved live"
+    "$COPILOT_PIN" \
+    "qa_triage_v1 investigator pins the same live-proven digest"
+require_equal \
+    "$(jq -r '.subworkflows[] | select(.body.name == "qa_triage_v1") | .body.adapters[] | select(.name == "supervisor") | .pinned_digest' "$GRAPH")" \
+    "$COPILOT_PIN" \
+    "qa_triage_v1 supervisor pins the same live-proven digest"
+
+# The rewired decision surface: route_review must map the reviewer's ruling
+# tokens onto exactly the lanes the inline reviewer step routed onto (KB-284
+# left this switch's contract unchanged), so a swapped or missing arm fails
+# here instead of at triage time.
+require_equal \
+    "$(jq -r '.switches[] | select(.name == "route_review") | ([(.conditions[] | (.match + " -> " + .next)), ("default -> " + .default_next)] | join("\n"))' "$GRAPH")" \
+    'data.internal.review_ruling.value == "valid_run_handler" -> route_ready
+data.internal.review_ruling.value == "invalid_close" -> comment_invalid
+data.internal.review_ruling.value == "needs_human" -> comment_needs_human
+default -> comment_triage_failed' \
+    "route_review maps valid_run_handler/invalid_close/needs_human/default onto the unchanged decision surface"
+
+require_equal \
+    "$(jq -r '.steps[] | select(.name == "run_review_output") | .outcomes[] | select(.name == "success") | .next' "$GRAPH")" \
+    "route_review" \
+    "run_review_output success continues into switch.route_review"
+require_equal \
+    "$(jq -r '.steps[] | select(.name == "run_review_output") | .outcomes[] | select(.name == "failure") | .next' "$GRAPH")" \
+    "comment_triage_failed" \
+    "run_review_output failure stays in the comment_triage_failed lane (defaults intact)"
+
+# Compile lifts step outcomes but not step writes: pin the ruling/reason
+# capture at source as target<->value pairs - route_review reads exactly
+# these sinks, and a swapped capture would compile cleanly while silently
+# dead-ending every arm.
+review_step_block="$(awk '
+    /^step "run_review_output" \{/ { in_step = 1 }
+    in_step && /^\}/ { exit }
+    in_step { print }
+' "$TREE_ROOT/main.chcl")"
+[ -n "$review_step_block" ] || fail "kanboard_triage_v1 declares no run_review_output step"
+review_write_pairs="$(printf '%s\n' "$review_step_block" | awk '
+    /^[[:space:]]*target[[:space:]]*=/ {
+        getline v
+        sub(/^[[:space:]]*/, "", v)
+        sub(/^[[:space:]]*/, "")
+        print $0 " <=> " v
+    }
+')"
+printf '%s\n' "$review_write_pairs" | grep -qF 'target = data.internal.review_ruling.value <=> value  = subworkflow.ruling != null ? subworkflow.ruling : ""' || \
+    fail "run_review_output must capture subworkflow.ruling into data.internal.review_ruling.value (route_review reads it)"
+printf '%s\n' "$review_write_pairs" | grep -qF 'target = data.internal.review_reason.value <=> value  = subworkflow.reason != null ? subworkflow.reason : ""' || \
+    fail "run_review_output must capture subworkflow.reason into data.internal.review_reason.value"
+ok "run_review_output captures subworkflow.ruling/reason into data.internal.review_ruling/review_reason"
 
 # No develop coupling anywhere in the compiled graph. "run_handler" is quoted
 # exactly so the documented reviewer outcome token valid_run_handler does not
