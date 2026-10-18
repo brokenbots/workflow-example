@@ -67,6 +67,19 @@ data "internal" "internal_reproduced" {
     value = false
 }
 
+// The QA-output reviewer's ruling (review_triage_v1 declared output) and its
+// structured reason. Routing reads the ruling; the comment scripts prefer the
+// persisted review-notes.md on disk and fall back to the reason.
+data "internal" "review_ruling" {
+    type  = string
+    value = ""
+}
+
+data "internal" "review_reason" {
+    type  = string
+    value = ""
+}
+
 // ── Subworkflows ─────────────────────────────────────────────────────────────
 // A sibling of this directory, referenced by relative path and locked
 // recursively by `criteria adapter lock` from this directory. The only
@@ -93,6 +106,28 @@ subworkflow "qa_triage" {
         investigator       = var.investigator
         supervisor         = var.supervisor
         provider_base_url  = var.provider_base_url
+        workflow_github_token = var.workflow_github_token
+    }
+}
+
+// The QA-output reviewer runs in ITS OWN subworkflow (review_triage_v1) so its
+// copilot dispatches as a per-scope operator pod under the CRI-269
+// deferred-remote contract — the same hosting that made the qa_triage_v1
+// agents work while the root-scope reviewer died on a local CLI bind
+// (2026-10-17 batch failures). Inputs are forwarded verbatim; the child
+// returns `ruling` + `reason` as declared outputs.
+
+subworkflow "review_output" {
+    source = "../review_triage_v1"
+    input = {
+        ticket_id        = var.ticket_id
+        verdict          = data.internal.verdict.value
+        workstream_file  = data.internal.workstream_file.value
+        intake_root      = var.intake_root
+        triage_root      = var.triage_root
+        max_agent_visits = var.max_agent_visits
+        triage_reviewer  = var.triage_reviewer
+        provider_base_url = var.provider_base_url
         workflow_github_token = var.workflow_github_token
     }
 }
@@ -269,47 +304,52 @@ switch "route_qa_result" {
         condition = startswith(data.internal.verdict.value, "needs_human_") || data.internal.verdict.value == "needs_design_decision"
         next      = step.comment_needs_human
     }
-    default { next = step.review_qa_output }
+    default { next = step.run_review_output }
 }
 
-step "review_qa_output" {
-    target      = adapter.copilot.triage_reviewer
-    max_visits  = var.max_agent_visits
-    allow_tools = ["*"]
+// The reviewer runs inside review_triage_v1 (per-scope hosted copilot) and
+// returns its ruling + reason as declared outputs. Any submitted token is a
+// child success; the router below decides what it means. The child's failure
+// outcome (adapter-level failure / no outcome submitted) goes to the triage
+// failure lane with the defaults intact.
+step "run_review_output" {
+    target = subworkflow.review_output
 
-    input {
-        prompt = templatefile("./agents/review_qa_output.md.tftpl", {
-            ticket_id       = var.ticket_id
-            triage_root     = var.triage_root
-            verdict         = data.internal.verdict.value
-            workstream_file = data.internal.workstream_file.value
-            intake_root     = var.intake_root
-        })
-    }
-
-    // The outcome token keeps its intake-era name (valid_run_handler): the
-    // reviewer's system prompt contract is copied verbatim. Here it routes to
-    // the ready-for-development terminal — no handler is invoked.
-    outcome "valid_run_handler" {
-        schema = object({ reason = string })
-        next = switch.route_ready
-    }
-    outcome "invalid_close" {
-        schema = object({ reason = string })
-        next = step.comment_invalid
-    }
-    outcome "needs_human" {
-        schema = object({ reason = string })
-        next = step.comment_needs_human
+    outcome "success" {
+        next = switch.route_review
+        write {
+            target = data.internal.review_ruling.value
+            value  = subworkflow.ruling != null ? subworkflow.ruling : ""
+        }
+        write {
+            target = data.internal.review_reason.value
+            value  = subworkflow.reason != null ? subworkflow.reason : ""
+        }
     }
     outcome "failure" {
-        schema = object({ reason = string })
         next = step.comment_triage_failed
     }
-    outcome "default" {
-        schema = object({ reason = string })
-        next = step.comment_triage_failed
+}
+
+// Same decision surface the inline reviewer step had, now over the child's
+// ruling token. The outcome names keep their intake-era contract.
+switch "route_review" {
+    match {
+        condition = data.internal.review_ruling.value == "valid_run_handler"
+        next      = switch.route_ready
     }
+    match {
+        condition = data.internal.review_ruling.value == "invalid_close"
+        next      = step.comment_invalid
+    }
+    match {
+        condition = data.internal.review_ruling.value == "needs_human"
+        next      = step.comment_needs_human
+    }
+    // Empty ruling (child failure through the success lane — impossible today),
+    // an unrecognized token, or the child's default outcome: today's parent
+    // treated all of these exactly like a triage failure.
+    default { next = step.comment_triage_failed }
 }
 
 // The reviewer ruled the finding valid, but a confirmed finding needs a

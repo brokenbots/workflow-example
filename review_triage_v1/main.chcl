@@ -1,0 +1,146 @@
+// review_triage_v1 — the kanboard_triage_v1 output-review agent, extracted into
+// its own subworkflow tree (CRI-238 copies doctrine).
+//
+// WHY a separate tree at all: the reviewer copilot previously declared at the
+// kanboard_triage_v1 ROOT scope. Root-scope remote-bound agents do not hit the
+// CRI-269 deferred-remote per-scope contract — they fall back to an eager local
+// CLI bind in the runner pod, where the copilot CLI does not exist, and die with
+// 'failed to start CLI server: exec: "copilot": executable file not found in
+// $PATH' (live evidence: kb-254-1792278257 / kb-282-1792278257 triage runs,
+// 2026-10-17, castle run 1d012446-... seq 121). Subworkflow-scope agents get
+// operator per-scope pods — the qa_triage_v1 agents ran fine in the SAME runs.
+// So the reviewer lives here, inside a subworkflow, under its own remote env.
+//
+// Contract: run one reviewer turn over the published triage artifacts, capture
+// the submitted ruling + reason as declared outputs, and return them. Routing
+// stays in the parent (kanboard_triage_v1), exactly as before.
+
+workflow {
+    name             = "review_triage_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "review_qa_output"
+    target_state     = "review_complete"
+
+    policy {
+        max_total_steps = 60
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// The reviewer's submitted ruling token. Empty on a child failure (adapter
+// crash / gate failure) — the parent routes that to its failure lane.
+data "internal" "ruling" {
+    type  = string
+    value = ""
+}
+
+// The reviewer's structured reason, captured from the outcome schema.
+data "internal" "reason" {
+    type  = string
+    value = ""
+}
+
+// ── The review ───────────────────────────────────────────────────────────────
+
+step "review_qa_output" {
+    target      = adapter.copilot.triage_reviewer
+    max_visits  = var.max_agent_visits
+    allow_tools = ["*"]
+
+    input {
+        prompt = templatefile("./agents/review_qa_output.md.tftpl", {
+            ticket_id       = var.ticket_id
+            triage_root     = var.triage_root
+            verdict         = var.verdict
+            workstream_file = var.workstream_file
+            intake_root     = var.intake_root
+        })
+    }
+
+    // The outcome token keeps its intake-era name (valid_run_handler): the
+    // reviewer's system prompt contract is copied verbatim. Every ruling is a
+    // child success — the ruling token itself is the signal the parent routes on.
+    outcome "valid_run_handler" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.ruling.value
+            value  = "valid_run_handler"
+        }
+        write {
+            target = data.internal.reason.value
+            value  = output.reason
+        }
+        next = state.review_complete
+    }
+    outcome "invalid_close" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.ruling.value
+            value  = "invalid_close"
+        }
+        write {
+            target = data.internal.reason.value
+            value  = output.reason
+        }
+        next = state.review_complete
+    }
+    outcome "needs_human" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.ruling.value
+            value  = "needs_human"
+        }
+        write {
+            target = data.internal.reason.value
+            value  = output.reason
+        }
+        next = state.review_complete
+    }
+    // A submitted token that failed schema validation or is not one of the
+    // three declared rulings: today the parent treats this exactly like a
+    // triage failure. Capture it and let the parent's default lane run.
+    outcome "default" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.ruling.value
+            value  = "default"
+        }
+        write {
+            target = data.internal.reason.value
+            value  = output.reason
+        }
+        next = state.review_complete
+    }
+    // Adapter-level failure (agent crashed, gate failed, no outcome submitted):
+    // exit the child as a failure with the defaults untouched.
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
+}
+
+// ── Terminal states ──────────────────────────────────────────────────────────
+
+state "review_complete" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+
+output "ruling" {
+    type  = string
+    value = data.internal.ruling.value
+}
+
+output "reason" {
+    type  = string
+    value = data.internal.reason.value
+}

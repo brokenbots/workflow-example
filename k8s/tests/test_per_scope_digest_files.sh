@@ -9,7 +9,9 @@ set -euo pipefail
 # wrong image) and the shim handshake never completed.
 #
 # Part 1 exercises the runner's lockfile parsing against the real workflow
-# lockfile plus a synthetic multi-entry lockfile. Part 2 runs pod-adapter-
+# lockfiles (the both-kinds qa_triage_v1 exemplar and the shell-only
+# kanboard_triage_v1 triage tree) plus a synthetic multi-entry lockfile.
+# Part 2 runs pod-adapter-
 # adapter.sh end-to-end with a stubbed criteria-adapter-remote-runner binary
 # and a seeded discovery directory, asserting the resolved connection env and
 # that the poll loop terminates.
@@ -17,14 +19,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER="$REPO_ROOT/k8s/pod-adapter-runner.sh"
 ADAPTER="$REPO_ROOT/k8s/pod-adapter-adapter.sh"
-LOCKFILE="$REPO_ROOT/kanboard_triage_v1/.criteria.lock.hcl"
+TRIAGE_LOCKFILE="$REPO_ROOT/kanboard_triage_v1/.criteria.lock.hcl"
+EXEMPLAR_LOCKFILE="$REPO_ROOT/qa_triage_v1/.criteria.lock.hcl"
 
 fail() {
     echo "FAIL: $1" >&2
     exit 1
 }
 
-[ -f "$LOCKFILE" ] || fail "workflow lockfile is missing"
+[ -f "$TRIAGE_LOCKFILE" ] || fail "kanboard_triage_v1 workflow lockfile is missing"
+[ -f "$EXEMPLAR_LOCKFILE" ] || fail "qa_triage_v1 workflow lockfile is missing"
 [ -f "$RUNNER" ] || fail "k8s/pod-adapter-runner.sh is missing"
 [ -f "$ADAPTER" ] || fail "k8s/pod-adapter-adapter.sh is missing"
 
@@ -44,10 +48,6 @@ eval "$(awk '/^adapter_entry_digests\(\) \{/,/^\}/' "$RUNNER")" || fail "cannot 
 declare -f adapter_digest > /dev/null || fail "adapter_digest extraction from k8s/pod-adapter-runner.sh failed"
 declare -f adapter_entry_digests > /dev/null || fail "adapter_entry_digests extraction from k8s/pod-adapter-runner.sh failed"
 
-lockfile="$LOCKFILE"
-run_dir="$tmp/runs/cri-140"
-mkdir -p "$run_dir"
-
 # The runner's publication call site, extracted from the "Publish the
 # digests keyed by kind" comment through the instance-keyed loop's closing
 # "done". The guards below make marker drift fail loudly instead of
@@ -63,7 +63,6 @@ printf '%s\n' "$publication_block" | grep -q '^adapter_entry_digests | while rea
     fail "cannot extract the instance-keyed publication loop from k8s/pod-adapter-runner.sh"
 [ "$(printf '%s\n' "$publication_block" | grep -c '^done$')" -eq 2 ] || \
     fail "digest publication block extraction is truncated (expected both loops closed)"
-eval "$publication_block"
 
 digest_of() {
     [ -f "$run_dir/digest-$1" ] || fail "discovery directory is missing digest-$1"
@@ -84,16 +83,44 @@ entry_digest() {
     ' "$lockfile"
 }
 
-expect_shell="sha256:$(entry_digest shell triage)"
-expect_copilot="sha256:$(entry_digest copilot triage_reviewer)"
-[ -n "$expect_shell" ] || fail "oracle could not read the shell/triage entry from the lockfile"
-[ -n "$expect_copilot" ] || fail "oracle could not read the copilot/triage_reviewer entry from the lockfile"
+# kanboard_triage_v1 keeps only its shell/triage pin now: the QA-output
+# reviewer copilot moved to review_triage_v1 (KB-284). The runner's copilot
+# kind leg still fires against this shell-only lockfile, emitting its
+# expected "criteria adapter copilot not found" stderr and an empty
+# digest-copilot that the both-kinds pass below repins.
+lockfile="$TRIAGE_LOCKFILE"
+run_dir="$tmp/runs/cri-140"
+mkdir -p "$run_dir"
+eval "$publication_block"
 
+expect_shell="sha256:$(entry_digest shell triage)"
+[ -n "$expect_shell" ] || fail "oracle could not read the shell/triage entry from the lockfile"
 [ "$(digest_of triage)" = "$expect_shell" ] || fail "digest-triage must be published keyed by adapter instance (CRI-140)"
 [ "$(digest_of shell)" = "$expect_shell" ] || fail "digest-shell must keep the kind-keyed shell digest"
+[ "$(adapter_entry_digests)" = "triage $(entry_digest shell triage)" ] || \
+    fail "the triage tree must publish exactly its shell/triage instance digest"
+
+# qa_triage_v1 is the repo exemplar for a lockfile carrying BOTH kinds -
+# copilot investigator/supervisor agents plus the shell repo adapter - so it
+# exercises the kind-keyed copilot file and copilot instance keying in one
+# pass. Its instance names never collide with the triage tree's and both
+# trees pin the same shell 0.5.4 digest, so the exemplar publishes into the
+# same run dir unambiguously; this pass must stay last so digest-copilot
+# ends at the both-kinds value the part-2 kind fallback resolves.
+lockfile="$EXEMPLAR_LOCKFILE"
+eval "$publication_block"
+
+expect_shell="sha256:$(entry_digest shell repo)"
+[ -n "$expect_shell" ] || fail "oracle could not read the shell/repo entry from the lockfile"
+[ "$(digest_of shell)" = "$expect_shell" ] || fail "digest-shell must keep the kind-keyed shell digest"
+[ "$(digest_of repo)" = "$expect_shell" ] || fail "missing instance-keyed digest for repo"
+
+expect_copilot="sha256:$(entry_digest copilot investigator)"
+[ -n "$expect_copilot" ] || fail "oracle could not read the copilot/investigator entry from the lockfile"
 [ "$(digest_of copilot)" = "$expect_copilot" ] || fail "digest-copilot must keep the kind-keyed copilot digest"
-[ -f "$run_dir/digest-triage_reviewer" ] || fail "missing instance-keyed digest for triage_reviewer"
-[ -f "$run_dir/digest-triage_reviewer" ] || fail "missing instance-keyed digest for triage_reviewer"
+[ "$(digest_of investigator)" = "$expect_copilot" ] || fail "missing instance-keyed digest for investigator"
+[ "$(digest_of supervisor)" = "sha256:$(entry_digest copilot supervisor)" ] || \
+    fail "missing instance-keyed digest for supervisor"
 
 [ -z "$(adapter_digest nonexistentkind 2> /dev/null)" ] || \
     fail "adapter_digest must not resolve an unknown kind"

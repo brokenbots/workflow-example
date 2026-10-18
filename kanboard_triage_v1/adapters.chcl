@@ -33,21 +33,8 @@ adapter "shell" "triage" {
 
 // The routing gate at the end of triage. Reads artifacts from disk — the
 // triage report and the workstream file — never another agent's transcript.
-adapter "copilot" "triage_reviewer" {
-    environment = remote.triage
-    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.15"
-    secrets {
-        GITHUB_TOKEN = var.workflow_github_token
-        GH_TOKEN     = var.workflow_github_token
-    }
-    config {
-        model             = var.triage_reviewer.model
-        max_turns         = "${var.triage_reviewer.max_turns}"
-        reasoning_effort  = var.triage_reviewer.reasoning_effort
-        system_prompt     = file("./agents/triage_reviewer.md")
-        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.triage_reviewer.provider.base_url
-        provider_wire_api = var.triage_reviewer.provider.wire_api
-        working_directory = var.intake_root
-    }
-}
+// The reviewer copilot MOVED to review_triage_v1 (its own per-scope remote
+// environment, CRI-269 deferred-remote contract applies to subworkflow scopes;
+// root-scope remote agents bind locally and die in the runner pod — see the
+// 2026-10-17 batch triage failures). This tree passes the reviewer's knobs
+// through the subworkflow declaration.

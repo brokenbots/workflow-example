@@ -1,0 +1,71 @@
+// review_triage_v1 — reviewer knobs, passed in verbatim from
+// kanboard_triage_v1 (defaults preserved from the parent tree).
+
+variable "max_agent_visits" {
+    description = "Maximum attempts for the QA-review agent gate."
+    type        = number
+    default     = 2
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the reviewer. Empty preserves the configured URL."
+    type        = string
+    default     = ""
+}
+
+variable "triage_reviewer" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 20)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+
+    default = {
+        model     = "deepseek-v4.1-flash:cloud"
+        max_turns = 20
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}
+
+// ── Step-input variables (from the parent) ───────────────────────────────────
+
+variable "ticket_id" {
+    description = "Kanboard task identifier being triaged (e.g. \"KB-254\")."
+    type        = string
+}
+
+variable "verdict" {
+    description = "Verdict recorded by the QA triage parent (empty means triage crashed)."
+    type        = string
+}
+
+variable "workstream_file" {
+    description = "Absolute path of the published workstream file; empty when none was produced."
+    type        = string
+}
+
+variable "intake_root" {
+    description = "Absolute intake root the reviewer's working directory points at (review-notes.md lands under <intake_root>/<ticket_id>/). Default only for standalone validation — the parent always passes the real value."
+    type        = string
+    default     = "/tmp/criteria-intake"
+}
+
+variable "triage_root" {
+    description = "Absolute triage root holding the evidence directory (<triage_root>/<ticket_id>/evidence/). Default only for standalone validation — the parent always passes the real value."
+    type        = string
+    default     = "/tmp/criteria-triage"
+}
