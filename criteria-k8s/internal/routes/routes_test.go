@@ -91,11 +91,11 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 7 {
-		t.Errorf("workflowLibrary size = %d, want 7", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 8 {
+		t.Errorf("workflowLibrary size = %d, want 8", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 5 {
-		t.Errorf("routes size = %d, want 5", len(p.Routes))
+	if len(p.Routes) != 6 {
+		t.Errorf("routes size = %d, want 6", len(p.Routes))
 	}
 	// KB-281: the retired criteria-triage / criteria-develop routes are gone.
 	// Surviving route order: the criteria project's cleanup-only route, then
@@ -109,8 +109,9 @@ func TestParseAndValidate(t *testing.T) {
 	if p.Routes[1].Project != "Kanboard Tickets" || p.Routes[2].Project != "Kanboard Tickets" {
 		t.Errorf("routes[1:3] projects = %q/%q, want the kanboard pair on %q", p.Routes[1].Project, p.Routes[2].Project, "Kanboard Tickets")
 	}
-	// KB-277: the harness-contracts route rides last — the criteria project's
-	// dave-go tag-gated harness series leg (fires harness-contracts-url).
+	// KB-277: harness-contracts, then the KB-278 composition leg and the
+	// KB-279 failures leg — the criteria project's dave-go tag-gated harness
+	// series legs (each firing its own *-url object).
 	if n := p.Routes[3].Name; n != "harness-contracts" {
 		t.Errorf("routes[3] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
 	}
@@ -122,6 +123,46 @@ func TestParseAndValidate(t *testing.T) {
 	}
 	if _, ok := p.WorkflowLibrary["harness-contracts-url"]; !ok {
 		t.Errorf("workflowLibrary missing the harness-contracts-url object (KB-277)")
+	}
+	// KB-278: the harness-composition leg rides routes[4].
+	if n := p.Routes[4].Name; n != "harness-composition" {
+		t.Errorf("routes[4] = %q, want %q (KB-278 harness composition route)", n, "harness-composition")
+	}
+	if p.Routes[4].Workflow != "harness-composition-url" {
+		t.Errorf("harness-composition route workflow = %q, want %q", p.Routes[4].Workflow, "harness-composition-url")
+	}
+	// KB-278: the object must stay url-ONLY — no commit ref/refKey may bind
+	// the pinless-at-close harness series (CRI-260 three-way check).
+	comp, ok := p.WorkflowLibrary["harness-composition-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-composition-url (KB-278)")
+	}
+	if comp.Type != TypeURL || comp.Class != ClassTriage || comp.Namespace != "criteria-jobs" ||
+		comp.Ref != "" || len(comp.Volumes) != 3 || len(comp.Secrets) != 1 {
+		t.Errorf("harness-composition-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-278)", comp)
+	}
+	// KB-279: the harness-failures leg rides routes[5] — the failures leg
+	// fires harness_failures_v1 (engineered failure-path fixtures, matrix
+	// E24-E32 + G12) with the same pinless-at-close convention.
+	if n := p.Routes[5].Name; n != "harness-failures" {
+		t.Errorf("routes[5] = %q, want %q (KB-279 harness failures route)", n, "harness-failures")
+	}
+	if p.Routes[5].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-failures route project = %q, want %q", p.Routes[5].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[5].Workflow != "harness-failures-url" {
+		t.Errorf("harness-failures route workflow = %q, want %q", p.Routes[5].Workflow, "harness-failures-url")
+	}
+	fail, ok := p.WorkflowLibrary["harness-failures-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-failures-url (KB-279)")
+	}
+	if fail.Type != TypeURL || fail.Class != ClassTriage || fail.Namespace != "criteria-jobs" ||
+		fail.Ref != "" || len(fail.Volumes) != 3 || len(fail.Secrets) != 1 {
+		t.Errorf("harness-failures-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-279)", fail)
+	}
+	if len(p.Routes[5].Tags) == 0 || p.Routes[5].Tags[0] != "harness-validation" {
+		t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[5].Tags)
 	}
 	// Absence regressions (KB-281): the retired linear url objects must not
 	// return in the shipped example.
