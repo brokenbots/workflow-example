@@ -6,9 +6,12 @@
 // ${record_value}: fixed marker content.
 set -eu
 
-probe_root="${PROBE_ROOT:-${1:-/home/criteria/criteria-harness-failures}}"
-record_name="${RECORD_NAME:-${2:-pin_probe}}"
-record_value="${RECORD_VALUE:-${3:-pin-probe}}"
+probe_root={{ .probe_root | shellquote }}
+: "${probe_root:=${PROBE_ROOT:-${1:-/home/criteria/criteria-harness-failures}}}"
+record_name={{ .record_name | shellquote }}
+: "${record_name:=${RECORD_NAME:-${2:-pin_probe}}}"
+record_value={{ .record_value | shellquote }}
+: "${record_value:=${RECORD_VALUE:-${3:-pin-probe}}}"
 
 case "$probe_root" in
     ''|*..*|*[;&|`$<>]*) echo "e30-pin: probe_root refused (unsafe shape)" >&2; exit 9 ;;

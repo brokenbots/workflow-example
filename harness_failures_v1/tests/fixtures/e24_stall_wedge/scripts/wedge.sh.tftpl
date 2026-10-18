@@ -10,8 +10,13 @@
 // window is exhausted (success arm declared loud in main.chcl).
 set -eu
 
-wedge_seconds="${WEDGE_SECONDS:-${1:-900}}"
-probe_root="${PROBE_ROOT:-${2:-/home/criteria/criteria-harness-failures}}"
+# Rendered knobs (primary): the parent's templatefile declaration — the
+# render contract the standalone suite asserts. The env/positional/default
+# chain below is a safety net for a direct (out-of-graph) invocation only.
+wedge_seconds={{ .wedge_seconds | shellquote }}
+: "${wedge_seconds:=${WEDGE_SECONDS:-${1:-900}}}"
+probe_root={{ .probe_root | shellquote }}
+: "${probe_root:=${PROBE_ROOT:-${2:-/home/criteria/criteria-harness-failures}}}"
 
 # Anti-injection: both knobs must be numeric before they reach sleep/printf.
 case "$wedge_seconds" in

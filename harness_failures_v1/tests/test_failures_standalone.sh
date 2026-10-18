@@ -478,9 +478,101 @@ else
     fi
 fi
 
-# ── 4. E24 fixture: the heartbeat-only wedge (shape-only, never run) ──────────
+# ── 4. Fixture render contract: templatefile knobs must interpolate ──────────
+# Every knob a parent .chcl passes to templatefile must reach the rendered
+# script through a {{ .key | shellquote }} placeholder — a template that only
+# carries shell-default fallbacks would silently IGNORE its declared knobs
+# and bake in the defaults instead (review item 2). One assertion per
+# fixture: placeholders present in the template, configured values present
+# in the render.
+render_fixture_script() {
+    # render_fixture_script <template> <out> <key>=<value>...
+    # Bash-native literal substitution: knob values may contain any character
+    # (e.g. '@' in identity strings) that would collide with a sed delimiter.
+    local tpl="$1" out="$2"
+    shift 2
+    local content pair key value ph
+    content="$(cat "$tpl")" || return 1
+    for pair in "$@"; do
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        ph="{{ .$key | shellquote }}"
+        content="${content//"$ph"/"$(shquote "$value")"}"
+    done
+    printf '%s\n' "$content" > "$out"
+    ! grep -q '{{' "$out"
+}
 
 E24_FIXTURE="$FIXTURES/e24_stall_wedge"
+e24_wedge_tpl="$E24_FIXTURE/scripts/wedge.sh.tftpl"
+if [ "$(grep -cF '{{ .wedge_seconds | shellquote }}' "$e24_wedge_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .probe_root | shellquote }}' "$e24_wedge_tpl")" = "1" ]; then
+    if render_fixture_script "$e24_wedge_tpl" "$WORK/e24_wedge_rendered.sh" \
+        "wedge_seconds=900" "probe_root=/home/criteria/criteria-harness-failures" && \
+       grep -Fq "wedge_seconds=$(shquote 900)" "$WORK/e24_wedge_rendered.sh" && \
+       grep -Fq "probe_root=$(shquote /home/criteria/criteria-harness-failures)" "$WORK/e24_wedge_rendered.sh"; then
+        ok "E24 fixture render contract: the configured wedge window and probe root carry through to the rendered script (defaults can never silently win)"
+    else
+        fail "E24 fixture render contract: configured knobs missing from the rendered script"
+    fi
+else
+    fail "E24 fixture render contract: template lost a {{ .knob | shellquote }} placeholder (knobs would be silently ignored)"
+fi
+
+pin_tpl="$FIXTURES/e30_stale_pin/scripts/pin_write.sh.tftpl"
+if [ "$(grep -cF '{{ .probe_root | shellquote }}' "$pin_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .record_name | shellquote }}' "$pin_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .record_value | shellquote }}' "$pin_tpl")" = "1" ]; then
+    if render_fixture_script "$pin_tpl" "$WORK/pin_write_rendered.sh" \
+        "probe_root=/home/criteria/criteria-harness-failures" "record_name=pin_probe" \
+        "record_value=pin-probe identity=shell.pass_in@remote.pin_env (admission pin gate exercised at archive level)" && \
+       grep -Fq "record_name=$(shquote pin_probe)" "$WORK/pin_write_rendered.sh" && \
+       grep -Fq "record_value=$(shquote 'pin-probe identity=shell.pass_in@remote.pin_env (admission pin gate exercised at archive level)')" "$WORK/pin_write_rendered.sh"; then
+        ok "E30 fixture render contract: the declared identity values carry through to the rendered pin probe"
+    else
+        fail "E30 fixture render contract: configured record knobs missing from the rendered script"
+    fi
+else
+    fail "E30 fixture render contract: template lost a {{ .knob | shellquote }} placeholder (knobs would be silently ignored)"
+fi
+
+g12_parent_tpl="$FIXTURES/g12_silent_change/scripts/parent_write.sh.tftpl"
+if [ "$(grep -cF '{{ .probe_root | shellquote }}' "$g12_parent_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .record_name | shellquote }}' "$g12_parent_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .record_value | shellquote }}' "$g12_parent_tpl")" = "1" ]; then
+    if render_fixture_script "$g12_parent_tpl" "$WORK/parent_write_rendered.sh" \
+        "probe_root=/home/criteria/criteria-harness-failures" "record_name=g12_silent_parent" \
+        "record_value=g12-silent scope=root identity=shell.pass_in@remote.side_a (block traversal below is the inert attribute)" && \
+       grep -Fq "record_name=$(shquote g12_silent_parent)" "$WORK/parent_write_rendered.sh" && \
+       grep -Fq "record_value=$(shquote 'g12-silent scope=root identity=shell.pass_in@remote.side_a (block traversal below is the inert attribute)')" "$WORK/parent_write_rendered.sh"; then
+        ok "G12 fixture render contract (parent): the declared root identity values carry through to the rendered script"
+    else
+        fail "G12 fixture render contract (parent): configured record knobs missing from the rendered script"
+    fi
+else
+    fail "G12 fixture render contract (parent): template lost a {{ .knob | shellquote }} placeholder (knobs would be silently ignored)"
+fi
+
+g12_callee_tpl="$FIXTURES/g12_silent_change/workflows/callee_b/scripts/g12_write.sh.tftpl"
+if [ "$(grep -cF '{{ .probe_root | shellquote }}' "$g12_callee_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .record_name | shellquote }}' "$g12_callee_tpl")" = "1" ] && \
+   [ "$(grep -cF '{{ .record_value | shellquote }}' "$g12_callee_tpl")" = "1" ]; then
+    if render_fixture_script "$g12_callee_tpl" "$WORK/g12_write_rendered.sh" \
+        "probe_root=/home/criteria/criteria-harness-failures" "record_name=g12_silent_callee" \
+        "record_value=g12-silent scope=callee identity=shell.callee_declared@remote.callee_side (pod marker would read callee-shadow, never a block-attribute value)" && \
+       grep -Fq "record_name=$(shquote g12_silent_callee)" "$WORK/g12_write_rendered.sh" && \
+       grep -Fq "record_value=$(shquote 'g12-silent scope=callee identity=shell.callee_declared@remote.callee_side (pod marker would read callee-shadow, never a block-attribute value)')" "$WORK/g12_write_rendered.sh" && \
+       grep -Fq "probe_root=$(shquote /home/criteria/criteria-harness-failures)" "$WORK/g12_write_rendered.sh"; then
+        ok "G12 fixture render contract (callee): the required probe_root + declared callee identity values carry through to the rendered script"
+    else
+        fail "G12 fixture render contract (callee): configured record knobs missing from the rendered script"
+    fi
+else
+    fail "G12 fixture render contract (callee): template lost a {{ .knob | shellquote }} placeholder (knobs would be silently ignored)"
+fi
+
+# ── 5. E24 fixture: the heartbeat-only wedge (shape-only, never run) ──────────
+
 if "$CRITERIA" validate "$E24_FIXTURE" >"$WORK/e24_validate.log" 2>&1; then
     ok "E24: wedge fixture validates green"
 else
@@ -509,7 +601,7 @@ else
     fail "E24: no compiled wedge graph to assert on"
 fi
 
-# ── 5. G12 fixture: the silent env-change experiment ─────────────────────────
+# ── 6. G12 fixture: the silent env-change experiment ─────────────────────────
 
 G12_FIXTURE="$FIXTURES/g12_silent_change"
 if "$CRITERIA" validate "$G12_FIXTURE" >"$WORK/g12_validate.log" 2>&1; then
@@ -556,13 +648,15 @@ else
     fail "G12: parent identities missing (the flip experiment needs both spellings valid)"
 fi
 
-# ── 6. E30 admission pin observation (needs go; loud-skip without it) ─────────
+# ── 7. E30 admission pin observation (REQUIRES go — an unobserved E30
+#    fails the suite; coverage that silently skips is not coverage) ───────────
 
 E30_FIXTURE="$FIXTURES/e30_stale_pin"
+E30_OBSERVED=0
 e30_server_pid=""
 e30_leg() { echo "$1"; }
 if ! command -v go >/dev/null 2>&1; then
-    e30_leg "SKIP (leg): E30 admission pin observation needs go (the throwaway TLS archive server) — loud-skipped on this runner"
+    e30_leg "SKIP (leg): E30 admission pin observation needs go (the throwaway TLS archive server) — recorded UNOBSERVED; the verdict will exit non-zero"
 else
     if "$CRITERIA" validate "$E30_FIXTURE" >"$WORK/e30_validate.log" 2>&1; then
         ok "E30: stale-pin fixture tree validates green (the refusal is exercised at ADMISSION, against the archive)"
@@ -626,6 +720,10 @@ else
         if [ -n "$e30_port" ] && curl -s --cacert "$WORK/e30_cert.pem" -o /dev/null \
             "https://127.0.0.1:${e30_port}/tree.tgz" >/dev/null 2>&1; then
             e30_url="https://127.0.0.1:${e30_port}/tree.tgz"
+            # The refusal assertions below EXECUTE from this point on — mark
+            # the leg observed regardless of their pass/fail verdicts (those
+            # outcomes are already counted through fail()).
+            E30_OBSERVED=1
 
             # (1) matched expectation → the source resolves and validates GREEN.
             e30_out="$(SSL_CERT_FILE="$WORK/e30_cert.pem" "$CRITERIA" validate --workflow-ref "sha256:${e30_real}" "$e30_url" 2>&1)"
@@ -675,6 +773,13 @@ fi
 
 if [ "$FAILED" -ne 0 ]; then
     echo "harness_failures_v1 standalone suite: FAILED ($FAILED assert(s))"
+    exit 1
+fi
+# The green banner is conditional on EVERY leg being OBSERVED: an E30 that
+# never executed (go absent) must fail the suite loudly — a skip is not a
+# pass, and gate coverage that silently drops a leg is not coverage.
+if [ "${E30_OBSERVED:-0}" -ne 1 ]; then
+    echo "harness_failures_v1 standalone suite: all observed failure shapes asserted; E30 SKIPPED (tooling absent) — the designed-class admission observation did not execute; refusing the green banner"
     exit 1
 fi
 echo "harness_failures_v1 standalone suite: all failure shapes asserted (compile + probes + fixtures + admission pins green)"
