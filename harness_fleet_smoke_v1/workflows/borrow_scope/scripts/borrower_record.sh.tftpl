@@ -1,0 +1,31 @@
+probe_root={{ .probe_root | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# The borrower record (KB-280, F33/F34 carrier): the borrower scope dials ONLY
+# the owner-established pass-in identity — a scope with nothing new to wire
+# must emit ZERO provision_wanted events. The record carries the guarded
+# substitution marker: it must read "owner" (the substituted side) on the
+# callee's pod — the "callee-shadow" contrast value on a pod is substitution
+# leakage (defect files to the engine carrier). The handshake contract holds
+# on the borrower scope too: a nameless session fails LOUDLY (exit 3).
+adapter_name="${CRITERIA_ADAPTER_NAME:-}"
+if [ -z "$adapter_name" ]; then
+    printf 'class=A1 name=identity_handshake_missing marker=borrower-session-bound-without-CRITERIA_ADAPTER_NAME (zero provision_wanted still means a bound identity)\n' >&2
+    exit 3
+fi
+fleet_marker="${FLEET_SMOKE_MARKER:-}"
+scope="${CRITERIA_SCOPE:-}"
+scope_instance="${CRITERIA_SCOPE_INSTANCE:-}"
+records_dir="$probe_root/fleet_smoke_records"
+mkdir -p "$records_dir"
+record="$records_dir/borrower"
+{
+    printf 'record_name=borrower_shared\n'
+    printf 'adapter_name=%s\n' "$adapter_name"
+    printf 'fleet_smoke_env_marker=%s\n' "$fleet_marker"
+    printf 'scope=%s\n' "$scope"
+    printf 'scope_instance=%s\n' "$scope_instance"
+    printf 'zero_provision=provision_wanted==0 (nothing new to wire: the borrower joins the owner provision)\n'
+} > "$record"
+echo "fleet-smoke borrower record written: $record"

@@ -1,0 +1,31 @@
+probe_root={{ .probe_root | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# A1 (fleet-smoke): the identity handshake probe. The session's handshake
+# contract is the adapter presenting its type-presented name on the wire
+# (CRITERIA_ADAPTER_NAME); per-scope sessions additionally bind the scope
+# facets. A nameless session must NEVER run green: the probe fails LOUDLY in
+# its designed class (exit 3, marker on stderr — the shell driver maps the
+# step to its failure arm, which routes state.failed). The scope facets are
+# expanded with ${VAR:-} guards captured into plain variables before the
+# record is created: an identity that never binds a facet expands it empty
+# under `set -u` instead of aborting, and a failed expansion can never leave
+# a truncated record behind.
+adapter_name="${CRITERIA_ADAPTER_NAME:-}"
+if [ -z "$adapter_name" ]; then
+    printf 'class=A1 name=identity_handshake_missing marker=session-bound-without-CRITERIA_ADAPTER_NAME (a nameless session must never run green)\n' >&2
+    exit 3
+fi
+scope="${CRITERIA_SCOPE:-}"
+scope_instance="${CRITERIA_SCOPE_INSTANCE:-}"
+records_dir="$probe_root/fleet_smoke_records"
+mkdir -p "$records_dir"
+record="$records_dir/identity"
+{
+    printf 'record_name=identity_handshake\n'
+    printf 'adapter_name=%s\n' "$adapter_name"
+    printf 'scope=%s\n' "$scope"
+    printf 'scope_instance=%s\n' "$scope_instance"
+} > "$record"
+echo "fleet-smoke identity record written: $record"

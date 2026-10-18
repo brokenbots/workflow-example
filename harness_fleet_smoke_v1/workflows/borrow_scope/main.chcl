@@ -1,0 +1,58 @@
+// KB-280 (fleet-smoke card): borrower callee of harness_fleet_smoke_v1 — the
+// borrower scope with NOTHING new to wire (F33/F34 carrier, E27/G6 shape).
+// The callee re-states the SAME identity the parent uses, deliberately:
+//
+//   environment remote.smoke — the same-key declaration the parent shadows
+//     (ADR-0009 substitution): this layer declares the contrast value
+//     "callee-shadow" that must NEVER be observed on a pod.
+//
+//   adapter shell.pass_in — the SAME definition identity the parent declares:
+//     the borrower dial joins the pass-in provision the parent's scope
+//     established, without provisioning its own. A scope with nothing new to
+//     wire must emit ZERO provision_wanted events — the live pod census is
+//     the acceptance observation; the borrower record's substituted marker
+//     ("owner", never "callee-shadow") is the pod-side evidence.
+//
+// The callee dials NOTHING else: the borrower's target set is exactly the
+// owner-established pass-in identity (asserted by the standalone suite's
+// compiled-graph check).
+
+workflow {
+    name             = "harness_fleet_smoke_borrow"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "dial_borrowed"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 2
+    }
+}
+
+// ── F33/F34 carrier: borrower dial of the pass-in identity ───────────────────
+// The dial lands in the (borrower-scope, remote.smoke) session joined over
+// the shared identity — the record's substituted marker must read "owner"
+// (never "callee-shadow"), and the handshake contract holds here too: a
+// nameless borrower session fails LOUDLY (exit 3, designed class marker).
+step "dial_borrowed" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/borrower_record.sh.tftpl", {
+            probe_root = var.probe_root
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

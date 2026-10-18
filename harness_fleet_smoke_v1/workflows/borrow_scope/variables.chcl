@@ -1,0 +1,8 @@
+// Variables for the KB-280 borrower callee (fleet-smoke): the probe_root is
+// passed in by the parent's subworkflow input; the probes need no other
+// surface.
+
+variable "probe_root" {
+    description = "Absolute root under which the fleet-smoke probe records are written (passed in from the parent tree)."
+    type        = string
+}
