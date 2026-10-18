@@ -36,6 +36,10 @@ set -uo pipefail
 #   G5-negative  the parallel-over-non-parallel-safe fixture must be refused
 #       at compile when the pinned copilot binary is resolvable (CI), and is
 #       permissively green when not (guard defers to the runtime gate).
+#   Probe-exec  both record_write.sh.tftpl copies render through the engine's
+#       template contract and run under env -i across the four marker
+#       permutations — a guarded-expansion or truncation regression on the
+#       path the live run executes fails here instead of only on the runner.
 #
 # Pins are cross-checked against the tree's own lockfile digests so a bumped
 # binary cannot sneak through a stale pin. Skips cleanly when the engine or
@@ -150,6 +154,25 @@ if [ "$(jq -r '.step_order | length' "$WORK/graph.json")" = "6" ] && \
 else
     fail "G6: survivor re-dial missing or not after the callee scope"
 fi
+# The survival stimulus must ALSO come after both iterating scopes exited:
+# every scope release (the iterating two included) must have happened before
+# the borrowed session is probed again — placing the survivor re-dial
+# anywhere ahead of loop_iterations or parallel_probe would probe a session
+# whose borrowing scopes never released, so assert against BOTH.
+if jq -e '.step_order as $o
+    | ([( $o | index("compose_callee") ), ( $o | index("loop_iterations") ),
+        ( $o | index("parallel_probe") ), ( $o | index("late_join_probe") ),
+        ( $o | index("survivor_redial") )] | all(. != null))
+    and (( $o | index("survivor_redial") ) > ( $o | index("loop_iterations") ))
+    and (( $o | index("survivor_redial") ) > ( $o | index("parallel_probe") ))
+    and (( $o | index("late_join_probe") ) > ( $o | index("loop_iterations") ))
+    and (( $o | index("late_join_probe") ) > ( $o | index("parallel_probe") ))
+    and (( $o | index("survivor_redial") ) > ( $o | index("late_join_probe") ))
+    and ( $o[-1] == "survivor_redial" )' "$WORK/graph.json" >/dev/null 2>&1; then
+    ok "G6/G10: survivor re-dial routes after BOTH iterating scopes and the late-join probe, and closes the chain (iteration exits precede the survival stimulus)"
+else
+    fail "G6/G10: survivor re-dial ordering wrong — it must follow loop_iterations, parallel_probe, and late_join_probe and be the final step"
+fi
 
 # G10/B7: the late-join member is declared in the composed graph and dialed
 # only by the late_join_probe (first dial comes at the end of the chain).
@@ -227,7 +250,79 @@ else
     fail "G12: the subworkflow block lost its environment traversal"
 fi
 
-# ── 4. G11: the dangling-traversal fixture compiles green (the gap) ──────────
+# ── 4. Probe templates render and execute (the scripts the live run runs) ────
+
+# The compiled graph does not expose rendered commands, so the render →
+# execute lane is replayed here directly: the engine renders the probe
+# templates with Go text/template and POSIX single-quoted arguments. The
+# mini-render below reproduces that contract; any leftover `{{` marker fails
+# the case loudly instead of silently diverging from the engine. Each rendered
+# script then runs under `env -i` across the four marker permutations the
+# composition identities exercise: neither marker (comp_main pre-substitution
+# / callee_default), shading only, marker only (iter_body), or both. A guard
+# regression (`$VAR` instead of `${VAR:-}` under `set -u`) aborts the none /
+# single-marker cases and fails here — the live-run abort the card forbids is
+# caught at suite time.
+shquote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+render_probe() {
+    local tpl="$1" out="$2" pr="$3" rn="$4" rv="$5"
+    sed -e "s@{{ .probe_root | shellquote }}@$(shquote "$pr")@" \
+        -e "s@{{ .record_name | shellquote }}@$(shquote "$rn")@" \
+        -e "s@{{ .record_value | shellquote }}@$(shquote "$rv")@" \
+        "$tpl" > "$out" || return 1
+    ! grep -q '{{' "$out"
+}
+
+run_probe_case() {
+    local case_name="$1" tpl="$2" want_shadow="$3" want_marker="$4"
+    local rendered="$WORK/rendered_${case_name}.sh" rec_root="$WORK/probe_records_${case_name}"
+    local env_cmd=(env -i PATH=/usr/bin:/bin)
+    local out rc rec
+    # `<unset>` keeps the marker out of the child environment; the record line
+    # must then exist with the guard-expanded EMPTY value.
+    local want_shadow_file="$want_shadow" want_marker_file="$want_marker"
+    [ "$want_shadow_file" = "<unset>" ] && want_shadow_file=""
+    [ "$want_marker_file" = "<unset>" ] && want_marker_file=""
+    if [ "$want_shadow" != "<unset>" ]; then
+        env_cmd+=("COMPOSITION_ENV_SHADING=$want_shadow")
+    fi
+    if [ "$want_marker" != "<unset>" ]; then
+        env_cmd+=("ITERATION_ENV_MARKER=$want_marker")
+    fi
+    if ! render_probe "$tpl" "$rendered" "$rec_root" "rec_${case_name}" "value_${case_name}"; then
+        fail "probe render ($case_name): template failed to render cleanly"
+        return
+    fi
+    rec="$rec_root/composition_probe_records/rec_${case_name}"
+    out="$("${env_cmd[@]}" sh "$rendered" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$rec" ] && \
+       grep -Fxq "record_name=rec_${case_name}" "$rec" && \
+       grep -Fxq "record_value=value_${case_name}" "$rec" && \
+       grep -Fxq "composition_env_shadow=$want_shadow_file" "$rec" && \
+       grep -Fxq "iteration_env_marker=$want_marker_file" "$rec" && \
+       case "$out" in *"composition record written: $rec"*) true ;; *) false ;; esac; then
+        ok "probe exec ($case_name): exit 0, record complete (shadow='$want_shadow_file' marker='$want_marker_file')"
+    else
+        fail "probe exec ($case_name): script exited $rc or record incomplete" "${out:-<no output>}"
+    fi
+}
+
+ROOT_TPL="$TREE_ROOT/scripts/record_write.sh.tftpl"
+CALLEE_TPL="$TREE_ROOT/workflows/callee_compose/scripts/record_write.sh.tftpl"
+for tpl_path in "$ROOT_TPL" "$CALLEE_TPL"; do
+    tpl_label="root"
+    [ "$tpl_path" = "$CALLEE_TPL" ] && tpl_label="callee"
+    run_probe_case "${tpl_label}_none" "$tpl_path" "<unset>" "<unset>"
+    run_probe_case "${tpl_label}_shadow" "$tpl_path" "parent" "<unset>"
+    run_probe_case "${tpl_label}_marker" "$tpl_path" "<unset>" "iter-two"
+    run_probe_case "${tpl_label}_both" "$tpl_path" "parent" "iter-three"
+done
+
+# ── 5. G11: the dangling-traversal fixture compiles green (the gap) ──────────
 
 G11_FIXTURE="$FIXTURES/g11_dangling_env"
 if grep -q 'environment = remote.does_not_exist' "$G11_FIXTURE/main.chcl"; then
@@ -241,7 +336,7 @@ else
     fail "G11: the fixture FAILED validation — the gap shape has changed; if an engine fix now validates the traversal (expected), the fixture-and-suite must flip the assertion" "$(<"$WORK/g11.log")"
 fi
 
-# ── 5. G5 (negative half): the parallel guard fixture ────────────────────────
+# ── 6. G5 (negative half): the parallel guard fixture ────────────────────────
 
 G5_FIXTURE="$FIXTURES/g5_parallel_guard"
 if grep -q 'parallel    = var.guard_labels' "$G5_FIXTURE/main.chcl" && \
