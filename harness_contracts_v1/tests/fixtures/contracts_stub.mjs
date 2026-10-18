@@ -190,6 +190,40 @@ const MODES = {
   // writes the same side-effect record the fixed prompt engineers — RELATIVE
   // path, because the CLI bash tool's working directory is the probe root
   // the shim points the shell environment at.
+
+  f6c_compound: () => [
+    tool("bash", {
+      command: "printf d21c-first-segment-granted > ./d21c_seg1_record && ls /d21c_no_such_dir",
+      description: "D21 compound segmentation probe: second segment matches no band",
+    }),
+    tool("bash", {
+      command: "printf d21c-segment-a > ./d21c_seg2_record && printf d21c-segment-b > ./d21c_seg3_record",
+      description: "D21 compound all-matching probe",
+    }),
+    submit({
+      outcome: "approved",
+      payload: {
+        reason:
+          "D21 compound segmentation: the compound command was denied when one segment matched no allow band (per-segment matching, one allowed segment never rescues a denied one), the all-matching compound was granted by the kind-prefixed trailing band, and the step still finalized approved after recovering",
+      },
+      comment: "D21 compound segmentation probe",
+    }),
+  ],
+  f6d_kindprefix: () => [
+    tool("bash", {
+      command: "printf d21d-kind-prefixed-band > ./d21d_record",
+      description: "D21 kind-prefixed band probe",
+    }),
+    tool("view", { path: "main.chcl" }),
+    submit({
+      outcome: "approved",
+      payload: {
+        reason:
+          "D21 kind-prefixed bands: the grant echoes which band won (kind-prefixed argument form versus adapter namespace form), the unmatched call was denied, and the step finalized approved after recovering",
+      },
+      comment: "D21 kind-prefix probe",
+    }),
+  ],
   f6_permissions: () => [
     tool("bash", {
       command: "printf d21-shell-band-ok > ./d21_shell_band_record",
@@ -227,6 +261,9 @@ const MARKER_STEPS = [
   ["KB-277 C15/C16/D19 probe", "f2_reject"],
   ["KB-277 C17 probe", "f3_comment"],
   ["KB-277 C13 probe", "f5_uncontracted"],
+
+  ["KB-277 D21 compound-segmentation probe", "f6c_compound"],
+  ["KB-277 D21 kind/adapter namespace probe", "f6d_kindprefix"],
   ["KB-277 D21 probe", "f6_permissions"],
   ["KB-277 C18a/D22 probe", "f7_budget"],
   ["KB-277 C18 default-lane probe", "f8b_default"],

@@ -1,0 +1,38 @@
+KB-277 D21 compound-segmentation probe (per-segment matching over compound
+commands, grant attribution to the winning band, recovered denial keeps
+success).
+
+This step's allow_tools band is exactly ["shell:printf *"]: a kind-prefixed
+trailing-* band whose pattern matches the command segment of a shell-kind
+tool call. The matcher splits a compound command on unquoted && segments and
+requires EVERY segment to match an allow band — one allowed segment never
+rescues a denied one.
+
+Make precisely this three-call sequence. Call (1) is ENGINEERED to be
+denied; the denial is NOT a step failure — you recover and the step still
+finalizes success.
+
+(1) Call the bash tool now, precisely once:
+
+        command: printf d21c-first-segment-granted > ./d21c_seg1_record && ls /d21c_no_such_dir
+
+    Segment one matches the band; segment two (`ls /d21c_no_such_dir`)
+    matches no band, so the whole compound must be refused for the
+    every-segment rule. The denied call executes nothing. Expect the
+    permission denied result naming the every-segment rule, then continue.
+
+(2) Call the bash tool now, precisely once:
+
+        command: printf d21c-segment-a > ./d21c_seg2_record && printf d21c-segment-b > ./d21c_seg3_record
+
+    EVERY segment matches the band (both are printf segments), so this
+    compound runs. Both records land in this step's working directory.
+
+(3) Call the submit_outcome tool now, precisely once — the approved outcome
+    declares a reason payload schema, so use the payload lane:
+
+        outcome = "approved"
+        payload = {"reason": "D21 compound segmentation: the compound command was denied when one segment matched no allow band (per-segment matching, one allowed segment never rescues a denied one), the all-matching compound was granted by the kind-prefixed trailing band, and the step still finalized approved after recovering"}
+        comment = "D21 compound segmentation probe"
+
+No other tools, no other calls.

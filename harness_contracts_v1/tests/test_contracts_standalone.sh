@@ -429,6 +429,82 @@ else
 fi
 expect_run_green F6
 
+# ── F6c: D21 — compound per-segment matching, every-segment refusal ─────────
+
+run_fixture f6c_compound f6c_compound
+expect_rc_zero F6c
+
+# The denied compound is refused with the EXACT every-segment refusal: the
+# matcher split printf && ls and required EVERY segment to match — segment
+# one matched the kind-prefixed argument band, segment two matched nothing.
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"reason":"no matching allow_tools entry for every segment of the compound command"' >/dev/null; then
+    ok "F6c compound denial carries the exact every-segment refusal"
+else
+    fail "F6c: compound refusal not observed verbatim (per-segment matcher unobserved)"
+fi
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"tool":"shell"' >/dev/null; then
+    ok "F6c denial attributed to the shell tool call"
+else
+    fail "F6c: no denial attributable to the shell tool call"
+fi
+
+# The granted all-matching compound is attributed to the winning
+# kind-prefixed argument band (shell kind + printf * argument pattern).
+if grep 'permission\.granted' "$EV" 2>/dev/null | grep -F '"pattern":"shell:printf *"' >/dev/null; then
+    ok "F6c compound grant attributed to the kind-prefixed argument band (shell:printf *)"
+else
+    fail "F6c: no grant attributable to the kind-prefixed argument band"
+fi
+
+# The denied compound executed NOTHING (no seg1 record) while the granted
+# compound executed BOTH segments (seg2 + seg3 records with engineered
+# content).
+if [ ! -e "$PROOT/d21c_seg1_record" ]; then
+    ok "F6c denied compound committed nothing (seg1 record absent)"
+else
+    fail "F6c: d21c_seg1_record exists — the refused compound was not fully denied"
+fi
+if [ "$(cat "$PROOT/d21c_seg2_record" 2>/dev/null || true)" = "d21c-segment-a" ] \
+    && [ "$(cat "$PROOT/d21c_seg3_record" 2>/dev/null || true)" = "d21c-segment-b" ]; then
+    ok "F6c granted compound executed both segments (side-effect records content)"
+else
+    fail "F6c: d21c_seg2_record/d21c_seg3_record missing or wrong — the granted compound did not run"
+fi
+expect_run_green F6c
+
+# ── F6d: D21 — kind-prefixed + adapter-namespace bands match nothing ────────
+
+run_fixture f6d_kindprefix f6d_kindprefix
+expect_rc_zero F6d
+
+# No band form in this set matches the policy tool naming (command tool maps
+# to `shell`, view maps to `read`): the bash call denial is a plain
+# no-matching-entry refusal, NOT the every-segment form.
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"reason":"no matching allow_tools entry"' >/dev/null \
+    && ! grep -F 'for every segment of the compound command' "$EV" >/dev/null; then
+    ok "F6d kind-prefixed bash band matches nothing (plain no-entry refusal, tool shell)"
+else
+    fail "F6d: expected the plain no-matching-entry refusal for the kind-prefixed band set"
+fi
+if grep 'permission\.denied' "$EV" 2>/dev/null | grep -F '"tool":"read"' >/dev/null; then
+    ok "F6d the read call is denied too (adapter-namespace band matches nothing)"
+else
+    fail "F6d: the read call was not denied (no no-match observation)"
+fi
+if [ "$(kind_count "$EV" permission.granted)" != "0" ]; then
+    fail "F6d: a grant was observed under a band set that matches nothing"
+else
+    ok "F6d no permission.granted under the no-match band set"
+fi
+
+# The denied bash call executed nothing.
+if [ ! -e "$PROOT/d21d_record" ]; then
+    ok "F6d denied call committed nothing (kind-prefix record absent)"
+else
+    fail "F6d: d21d_record exists — the denied call was not fully denied"
+fi
+expect_run_green F6d
+
 # ── F7: C18a/D22 — turn budget exhausted routes the fallback lane ───────────
 
 run_fixture f7_budget_echo f7_budget

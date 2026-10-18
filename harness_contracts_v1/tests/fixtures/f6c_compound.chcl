@@ -1,0 +1,51 @@
+// Fixture F6c (D21): compound-segmentation probe — a single-stimulus copy
+// of the shipped contract_permissions step body (same target, prompt
+// templating, payload-schema arm, fallback lane, and terminal states),
+// trimmed to the band set the stimulus requires. A matching NAME band
+// short-circuits per-segment evaluation (empirically pinned: granted via
+// pattern=s* even for a printf && ls compound), so the every-segment
+// matcher is only observable on a band set without one: here
+// ["shell:printf *"] — a kind-prefixed trailing-* argument band. Stimulus
+// call (1): "printf ... && ls ..." — segment one matches the band, segment
+// two matches nothing, the whole compound is REFUSED with the exact
+// every-segment refusal ("no matching allow_tools entry for every segment
+// of the compound command") and the denied call executes nothing (no
+// seg1 record lands). Stimulus call (2): an all-matching compound runs,
+// granted with the winning kind-prefixed pattern echoed, and both segment
+// records land. The recovered denial keeps the turn's success. The
+// shell kind prefix — not bash — is what matches on this adapter's policy
+// naming (the no-match half is pinned by F6d).
+workflow {
+    name             = "harness_contracts_v1_f6c_compound"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_permissions"
+    target_state     = "done"
+    policy { max_total_steps = 8 }
+}
+
+step "contract_permissions" {
+    target      = adapter.copilot.main
+    allow_tools = ["shell:printf *"]
+    input {
+        prompt = templatefile("./agents/contract_f6c.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+    outcome "failure" {
+        fallback = true
+        next     = state.failed
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

@@ -239,18 +239,27 @@ step "contract_uncontracted" {
 // band winning over the later exact "shell" entry is the first-match-wins
 // glob-contract observation. The view call maps to policy tool read,
 // matches neither band, and is DENIED with a permission.denied event that
-// names the tool; the recovered denial keeps the turn's success. The
-// namespace-prefixed shapes ("adapter.copilot.main.tools.s*") match
-// NOTHING — every tool under them is denied with "no matching allow_tools
-// entry" (empirically observed; that defect is why the earlier shape could
-// not distinguish grant from denial). The approved arm carries a reason
-// payload schema: a turn that carried tool activity is contract-validated
-// even when the arm would otherwise be schema-less (a tool-bearing turn on
-// a schema-less arm fails loud with outcome_uncontracted — proven by the
-// standalone suite). Argument-level segmentation (band keys over tool
-// arguments) is not reachable through any run-event surface and is not
-// stimulatable here; the adapter-scope/first-match/trailing-* halves of the
-// D21 matrix row are pinned by the grant/denial attribution below.
+// names the tool; the recovered denial keeps the turn's success. A
+// matching name band SHORT-CIRCUITS per-segment evaluation: granted
+// compounds are granted via the name band regardless of segment content
+// (empirically pinned: ["s*", "shell:printf *"] grants a printf && ls
+// compound with pattern=s*), so the compound-segmentation and kind-prefix
+// halves of the D21 row need band sets with no matching name band — the
+// standalone suite fires them as F6c (["shell:printf *"]: a compound whose
+// second segment matches no band is refused with the exact every-segment
+// refusal "no matching allow_tools entry for every segment of the compound
+// command", the denied call executes nothing, the all-matching compound is
+// granted with the winning kind-prefixed pattern echoed, and the turn
+// recovers to success) and F6d (kind-prefixed ["bash:printf *"] and
+// adapter-namespace ["adapter.copilot.main.tools.*"] bands match NOTHING on
+// this adapter's policy naming — both the bash and the read call are
+// denied with "no matching allow_tools entry": the no-match half of the
+// kind and adapter-namespace band grammar, pinned in run events; a shell
+// kind prefix DOES match, as F6c's grant shows). The approved arm carries a
+// reason payload schema: a turn that carried tool activity is
+// contract-validated even when the arm would otherwise be schema-less (a
+// tool-bearing turn on a schema-less arm fails loud with
+// outcome_uncontracted — proven by the standalone suite).
 
 step "contract_permissions" {
     target      = adapter.copilot.main
