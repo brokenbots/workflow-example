@@ -140,7 +140,10 @@ const MODES = {
     tool("view", { path: "main.chcl" }),
     submit({
       outcome: "approved",
-      reason: "D21 recovered denial keeps success: the trailing-* band allowed the shell tool call, the read tool call was denied with a permission event, and the step still finalized approved after recovering",
+      payload: {
+        reason:
+          "D21 recovered denial keeps success: the trailing-* band allowed the shell tool call, the read tool call was denied with a permission event, and the step still finalized approved after recovering",
+      },
     }),
   ],
 

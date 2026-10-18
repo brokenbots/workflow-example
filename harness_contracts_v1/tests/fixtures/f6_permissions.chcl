@@ -1,0 +1,39 @@
+// Fixture F6 (D21): permission policy — the trailing-* allow band lets the
+// shell tool call execute while the read tool call is DENIED with a
+// permission.denied event; the recovered denial keeps the turn's success.
+// The approved arm is contracted with a reason payload (the turn carries
+// tool activity, so the outcome must have a contract entry).
+workflow {
+    name             = "harness_contracts_v1_f6_permissions"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_permissions"
+    target_state     = "done"
+    policy { max_total_steps = 8 }
+}
+
+step "contract_permissions" {
+    target      = adapter.copilot.main
+    allow_tools = ["adapter.copilot.main.tools.s*"]
+    input {
+        prompt = templatefile("./agents/contract_permissions.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+    outcome "failure" {
+        fallback = true
+        next     = state.failed
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
