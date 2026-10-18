@@ -148,6 +148,17 @@
 # the kanboard project). Secrets stay name references (CRI-214 plan
 # section 3.8), and adapterImages pin the recorded fleet pin set verbatim
 # (three-way pin agreement).
+#
+# KB-278 (2026-10-17, series ARMED on dave's parallel directive): the
+# 'harness-composition-url' object + 'harness-composition' route ship the
+# KB-254 harness series' composition leg (harness_composition_v1, matrix
+# G1-G12 — embedded callee env grouping, iteration-body env pods, parallel
+# concurrency guard, ADR-0009 substitution, SessionManager alias ledger,
+# plus the composition KNOWN-GAP pins). Same url-ONLY/pinless-at-close
+# convention as the contracts leg, same tag-gated Ready-for-Development
+# gating (tagMatch=all on harness-validation + harness-composition) over
+# the criteria project, same name-referenced secrets and verbatim fleet
+# adapterImages pins.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -423,6 +434,50 @@ data:
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
           }
+        },
+        "harness-composition-url": {
+          "type": "url",
+          "url": "git::https://github.com/brokenbots/workflow-example.git//harness_composition_v1",
+          "class": "triage",
+          "namespace": "criteria-jobs",
+          "volumes": [
+            {
+              "name": "data",
+              "kind": "pvc",
+              "claim": "criteria-data",
+              "mountPath": "/data",
+              "env": {
+                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
+              }
+            },
+            {
+              "name": "repo",
+              "kind": "pvc",
+              "claim": "criteria-repo",
+              "mountPath": "/repo"
+            },
+            {
+              "name": "scratch",
+              "kind": "tmp",
+              "mountPath": "/tmp/scratch",
+              "sizeLimit": "8Gi"
+            }
+          ],
+          "secrets": [
+            {
+              "name": "github-tokens",
+              "secretProviderClass": "copilot-spc",
+              "mountPath": "/home/criteria/secrets",
+              "env": {
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
+              }
+            }
+          ],
+          "adapterImages": {
+            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1"
+          }
         }
       },
       "configLibrary": {
@@ -475,6 +530,18 @@ data:
           "tags": [
             "harness-validation",
             "harness-contracts"
+          ],
+          "states": [
+            "Ready for Development"
+          ]
+        },
+        {
+          "name": "harness-composition",
+          "workflow": "harness-composition-url",
+          "project": "Criteria K8s Workflow Runner",
+          "tags": [
+            "harness-validation",
+            "harness-composition"
           ],
           "states": [
             "Ready for Development"

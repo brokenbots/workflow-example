@@ -91,11 +91,11 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 6 {
-		t.Errorf("workflowLibrary size = %d, want 6", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 7 {
+		t.Errorf("workflowLibrary size = %d, want 7", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 4 {
-		t.Errorf("routes size = %d, want 4", len(p.Routes))
+	if len(p.Routes) != 5 {
+		t.Errorf("routes size = %d, want 5", len(p.Routes))
 	}
 	// KB-281: the retired criteria-triage / criteria-develop routes are gone.
 	// Surviving route order: the criteria project's cleanup-only route, then
