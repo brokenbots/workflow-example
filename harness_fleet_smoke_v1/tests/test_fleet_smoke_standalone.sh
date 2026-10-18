@@ -10,18 +10,33 @@ set -uo pipefail
 #
 #   A1 identity handshake: the handshake probe fails LOUDLY (exit 3, designed
 #       class marker on stderr) when a session binds without its
-#       type-presented identity (CRITERIA_ADAPTER_NAME), and writes the
-#       identity record (adapter_name + guarded scope facets) when it holds;
-#       the borrower scope carries the same discipline.
+#       type-presented identity (CRITERIA_ADAPTER_NAME) or presents anything
+#       that is NOT the type-presented name adapter.shell.pass_in (a node-name
+#       presentation is exactly the violation matrix A1 exists to catch), and
+#       writes the identity record (adapter_name + expected_identity + guarded
+#       scope facets) when it holds; the borrower scope carries the same
+#       discipline.
 #   A2 digest-pin resolve + miss: RESOLVE — `criteria adapter list
 #       --referenced` resolves the tree's lockfile to the recorded fleet pin,
 #       the compiled graph boots from THAT digest, and the fleet-pin record
 #       pins it into the run evidence (survivor redial proves the pinned
 #       provision outlives the borrowed scope). MISS — the digest_miss
-#       fixture (lockfile pinning sha256:ffff..., never pullable, never
-#       cached) OBSERVES the fail-closed admission refusal:
-#       `criteria validate --warnings-as-errors` refuses and names the
-#       tampered pin, BEFORE any pod opens a session (zero pod creates).
+#       fixture OBSERVES the REAL D7 admission pin gate through an archive
+#       source (the E30 shape): the admission pin gate only fires for remote
+#       archive sources — a local-tree `--warnings-as-errors` run is stopped
+#       earlier, with the fixture's bogus never-pullable digest uncached (the
+#       refusal would be schema, not pin) — so the leg serves the fixture
+#       archive over a throwaway TLS server (tlsServe.go, self-signed cert
+#       trusted via SSL_CERT_FILE for that invocation only) and exercises
+#       `criteria validate --workflow-ref sha256:<pin> <url>`: matched pin →
+#       resolves and validates GREEN; wrong pin (sha256:0000…) → the
+#       fail-closed refusal names pinned-vs-resolved verbatim BEFORE any pod
+#       opens a session (zero pod creates); a byte-tampered archive → the
+#       RESOLVED digest changes and the PRE-TAMPER expectation still fires
+#       (pin checked before content). The shipped fixture keeps its designed
+#       bogus-pin lockfile; the healthy served archive is a work copy
+#       re-pinned to the fleet digest of record — the miss enters through the
+#       CLI expectation, not the fixture.
 #   F33 zero re-creates / zero provision for the borrower: the census record
 #       pins pod_creates==1 per (scope, adapter/environment) pair and
 #       provision_wanted==0 for the borrower scope; the compiled borrower
@@ -60,7 +75,6 @@ CRITERIA="${CRITERIA_BIN:-criteria}"
 # files): ghcr.io/brokenbots/criteria-adapter-shell:0.5.5. The suite refuses
 # to assert anything if the tree's own lockfile drifted from it.
 FLEET_PIN="sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
-MISS_PIN="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
 FAILED=0
 A2_OBSERVED=0
@@ -220,7 +234,16 @@ else
     fail "A2 resolve: lockfile digest = [$lockfile_pin], want [$FLEET_PIN]"
 fi
 
-# ── 2. A2 miss half (OBSERVED): the engineered digest-pin refusal ────────────
+# ── 2. A2 miss half (OBSERVED via archive source): the engineered digest-pin
+#    refusal at the REAL D7 admission gate ────────────────────────────────────
+# The admission pin gate only fires for REMOTE archive sources (a local tree
+# path ignores --workflow-ref), and a local-tree --warnings-as-errors run is
+# stopped EARLIER by the fixture's bogus never-pullable digest being uncached
+# (adapter "shell" schema unverified — schema refusal, not pin refusal). So
+# the leg mirrors the E30 shape (harness_failures_v1): serve the fixture
+# archive over a throwaway TLS archive server (tlsServe.go; self-signed cert
+# trusted via SSL_CERT_FILE for that invocation only) and exercise
+# `criteria validate --workflow-ref sha256:<pin> <url>`.
 
 MISS_FIXTURE="$FIXTURES/digest_miss"
 if "$CRITERIA" validate "$MISS_FIXTURE" >"$WORK/miss_plain.log" 2>&1; then
@@ -230,16 +253,141 @@ if "$CRITERIA" validate "$MISS_FIXTURE" >"$WORK/miss_plain.log" 2>&1; then
 else
     fail "A2 miss precondition: fixture does not validate as a well-formed tree:" "$(<"$WORK/miss_plain.log")"
 fi
-if "$CRITERIA" validate --warnings-as-errors "$MISS_FIXTURE" >"$WORK/miss_strict.log" 2>&1; then
-    fail "A2 miss: the tampered pin was ACCEPTED fail-open (refused nowhere) — D7 fail-closed is broken"
+
+dm_bogus="sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+if grep -qF "$dm_bogus" "$MISS_FIXTURE/.criteria.lock.hcl"; then
+    ok "A2 miss fixture: the shipped lockfile still pins the engineered bogus digest (the designed never-runs-green shape)"
 else
-    miss_rc=0
-    "$CRITERIA" validate --warnings-as-errors "$MISS_FIXTURE" >/dev/null 2>&1 || miss_rc=$?
-    if grep -qF "$MISS_PIN" "$WORK/miss_strict.log"; then
-        ok "A2 miss (OBSERVED): admission refuses fail-closed and names the tampered pin (rc=$miss_rc) — zero sessions, zero pod creates"
-        A2_OBSERVED=1
+    fail "A2 miss fixture design drifted: the shipped lockfile no longer pins the engineered bogus digest ($dm_bogus)"
+fi
+
+dm_server_pid=""
+if ! command -v go >/dev/null 2>&1; then
+    echo "SKIP (leg): A2-miss admission pin observation needs go (the throwaway TLS archive server) — recorded UNOBSERVED; the verdict will exit non-zero"
+else
+    if go build -o "$WORK/dm_tlsServe" "$MISS_FIXTURE/tlsServe.go" 2>"$WORK/dm_build.log"; then
+        ok "A2 miss: throwaway TLS archive server builds (stdlib only)"
     else
-        fail "A2 miss: strict refusal fired without naming the tampered pin $\{MISS_PIN\}: $(<"$WORK/miss_strict.log")"
+        fail "A2 miss: tlsServe build failed:" "$(<"$WORK/dm_build.log")"
+    fi
+
+    if [ -x "$WORK/dm_tlsServe" ]; then
+        # Healthy archive: a WORK COPY of the fixture re-pinned to the fleet
+        # digest of record (so the adapter schema resolves and the serve-side
+        # refusal can only be about the PIN). The shipped fixture keeps its
+        # designed bogus-pin shape (asserted above); the miss enters through
+        # the CLI expectation and the byte tamper — exactly the admission-gate
+        # refusals the canary must observe.
+        rm -rf "$WORK/dm_src"
+        cp -R "$MISS_FIXTURE" "$WORK/dm_src"
+        sed -i "s|$dm_bogus|$FLEET_PIN|" "$WORK/dm_src/.criteria.lock.hcl"
+        if grep -qF "$FLEET_PIN" "$WORK/dm_src/.criteria.lock.hcl"; then
+            ok "A2 miss: the served archive is the fixture re-pinned to the fleet digest of record (a green resolve is reachable; refusals can only be the pin gate)"
+        else
+            fail "A2 miss: re-pinning the work-copy lockfile failed (the archive would refuse for the wrong reason — schema, not pin)"
+        fi
+        # Archive with the tree's .chcl at extraction ROOT (the observed
+        # engine contract for archive sources).
+        tar -C "$WORK/dm_src" -czf "$WORK/dm_pristine.tgz" .
+        tar -C "$WORK/dm_src" -czf "$WORK/dm_tampered.tgz" .
+        printf 'tamper' >> "$WORK/dm_tampered.tgz"
+        dm_real="$(sha256sum "$WORK/dm_pristine.tgz" | cut -d' ' -f1)"
+        dm_tam="$(sha256sum "$WORK/dm_tampered.tgz" | cut -d' ' -f1)"
+        dm_zero="0000000000000000000000000000000000000000000000000000000000000000"
+        dm_port=""
+
+        stop_dm_server() {
+            if [ -n "$dm_server_pid" ]; then
+                kill "$dm_server_pid" 2>/dev/null || true
+                wait "$dm_server_pid" 2>/dev/null || true
+                dm_server_pid=""
+            fi
+        }
+
+        start_dm_server() {
+            # start_dm_server <file-to-serve>
+            local file_to_serve="$1" port="$2" attempt=0
+            "$WORK/dm_tlsServe" -port "$port" -file "$file_to_serve" -certout "$WORK/dm_cert.pem" \
+                > "$WORK/dm_server.log" 2>&1 &
+            dm_server_pid=$!
+            while [ "$attempt" -lt 50 ]; do
+                if curl -s --cacert "$WORK/dm_cert.pem" -o /dev/null \
+                    "https://127.0.0.1:${port}/tree.tgz" >/dev/null 2>&1; then
+                    return 0
+                fi
+                attempt=$((attempt + 1))
+                sleep 0.1
+            done
+            return 1
+        }
+
+        # Find a free port by probing the curl reachability of a fresh server.
+        dm_try=0
+        while [ "$dm_try" -lt 10 ]; do
+            dm_port="241$((RANDOM % 10))$((RANDOM % 10))"
+            if start_dm_server "$WORK/dm_pristine.tgz" "$dm_port"; then
+                break
+            fi
+            stop_dm_server
+            dm_try=$((dm_try + 1))
+        done
+
+        if [ -n "$dm_port" ] && curl -s --cacert "$WORK/dm_cert.pem" -o /dev/null \
+            "https://127.0.0.1:${dm_port}/tree.tgz" >/dev/null 2>&1; then
+            dm_url="https://127.0.0.1:${dm_port}/tree.tgz"
+
+            # (1) matched expectation → the source resolves and validates GREEN.
+            a2_matched=0
+            dm_out="$(SSL_CERT_FILE="$WORK/dm_cert.pem" "$CRITERIA" validate --workflow-ref "sha256:${dm_real}" "$dm_url" 2>&1)"
+            dm_rc=$?
+            if [ "$dm_rc" -eq 0 ]; then
+                ok "A2 miss (admission): matched expected-pin — the archive source resolves and validates GREEN"
+                a2_matched=1
+            else
+                fail "A2 miss (admission): matched expectation should validate green (rc=$dm_rc):" "$dm_out"
+            fi
+
+            # (2) wrong expectation → fail-closed refusal naming pinned-vs-resolved.
+            a2_wrong=0
+            dm_out="$(SSL_CERT_FILE="$WORK/dm_cert.pem" "$CRITERIA" validate --workflow-ref "sha256:${dm_zero}" "$dm_url" 2>&1)"
+            dm_rc=$?
+            if [ "$dm_rc" -ne 0 ] && printf '%s\n' "$dm_out" | grep -q 'expected-pin mismatch' && \
+               printf '%s\n' "$dm_out" | grep -q "expected \"sha256:${dm_zero}\"" && \
+               printf '%s\n' "$dm_out" | grep -q "resolved \"sha256:${dm_real}\"" && \
+               printf '%s\n' "$dm_out" | grep -q 'refusing to run'; then
+                ok "A2 miss (admission): wrong expectation REFUSED fail-closed, pinned-vs-resolved named verbatim — zero sessions, zero pod creates"
+                a2_wrong=1
+            else
+                fail "A2 miss (admission): wrong-expectation refusal shape missing (rc=$dm_rc):" "$dm_out"
+            fi
+            # OBSERVED only when BOTH arms above executed their designed
+            # outcomes: the observation is the green resolve AND the wrong-pin
+            # refusal, never either alone.
+            if [ "$a2_matched" -eq 1 ] && [ "$a2_wrong" -eq 1 ]; then
+                A2_OBSERVED=1
+            fi
+
+            # (3) tampered archive → the RESOLVED digest changes → refusal with
+            # the PRE-TAMPER expectation (pin checked before content).
+            # Best-effort leg: its outcomes already count through fail().
+            stop_dm_server
+            if start_dm_server "$WORK/dm_tampered.tgz" "$dm_port"; then
+                dm_out="$(SSL_CERT_FILE="$WORK/dm_cert.pem" "$CRITERIA" validate --workflow-ref "sha256:${dm_real}" "$dm_url" 2>&1)"
+                dm_rc=$?
+                if [ "$dm_rc" -ne 0 ] && printf '%s\n' "$dm_out" | grep -q "expected \"sha256:${dm_real}\"" && \
+                   printf '%s\n' "$dm_out" | grep -q "resolved \"sha256:${dm_tam}\"" && \
+                   printf '%s\n' "$dm_out" | grep -q 'refusing to run'; then
+                    ok "A2 miss (admission): tampered archive refuses with the REAL resolved digest named (pre-tamper expectation, content-blind)"
+                else
+                    fail "A2 miss (admission): tampered-archive refusal shape missing (rc=$dm_rc):" "$dm_out"
+                fi
+            else
+                fail "A2 miss (admission): the tampered-archive server leg failed to start"
+            fi
+        else
+            fail "A2 miss (admission): could not start the throwaway TLS archive server" "$(<"$WORK/dm_server.log")"
+        fi
+        stop_dm_server
     fi
 fi
 
@@ -284,11 +432,34 @@ else
     if [ "$rc" -eq 0 ] && \
        grep -Fxq 'record_name=identity_handshake' "$h_rec" && \
        grep -Fxq "adapter_name=adapter.shell.pass_in" "$h_rec" && \
+       grep -Fxq "expected_identity=adapter.shell.pass_in" "$h_rec" && \
        grep -Fxq "scope=sc-1" "$h_rec" && \
        grep -Fxq "scope_instance=inst-1" "$h_rec"; then
-        ok "A1 record: the bound handshake writes the identity record (adapter_name + guarded scope facets)"
+        ok "A1 record: the bound handshake writes the identity record (type-presented adapter_name + expected_identity + guarded scope facets)"
     else
         fail "A1 record leg: rc=$rc record=$h_rec got: ${out:-<no output>}"
+    fi
+    # A1 type-presented invariant: a non-type presentation fails LOUD in its
+    # designed class naming the observed value (matrix A1: a session must
+    # present adapter.<type>.<name>, never the node name).
+    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=shell.pass_in_node CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 3 ] && \
+       grep -q 'class=A1 name=identity_handshake_type_mismatch' <<<"$out" && \
+       grep -q 'marker=session-presented-node-name=shell.pass_in_node' <<<"$out" && \
+       grep -Fxq "adapter_name=shell.pass_in_node" "$h_rec" && \
+       grep -Fxq "expected_identity=adapter.shell.pass_in" "$h_rec"; then
+        ok "A1 probe: a non-type presentation (shell.pass_in_node) fails loud (rc=3) with the observed-vs-expected identity recorded as evidence"
+    else
+        fail "A1 type-mismatch leg: rc=$rc, expected 3 + type marker + evidence record; got: ${out:-<no output>}"
+    fi
+    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=remote.smoke CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 3 ] && \
+       grep -q 'marker=session-presented-node-name=remote.smoke' <<<"$out"; then
+        ok "A1 probe: the NODE-NAME presentation (remote.smoke) fails loud — exactly the violation matrix A1 exists to catch"
+    else
+        fail "A1 node-name leg: rc=$rc, expected 3 + node-name marker; got: ${out:-<no output>}"
     fi
     unset h_rc
 fi
@@ -335,15 +506,21 @@ else
     (env -i PATH=/usr/bin:/bin sh "$r_rendered") >"$WORK/registry_run.log" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ] && \
-       grep -Fqx 'class=F33 name=zero_pod_recreates marker=pod_creates==1 scope=root identity=shell.pass_in@remote.smoke (one provision, zero recreates)' "$r_rec/census.jsonl" 2>/dev/null 2>&1; then
-        ok "census record: the F33 vocabulary pins pod_creates==1 per (scope, adapter/environment)"
+       grep -Fqx 'class=F33 name=zero_pod_recreates marker=pod_creates==1 scope=root identity=shell.pass_in@remote.smoke (one provision, zero recreates)' "$r_rec/census_vocabulary.jsonl" >/dev/null 2>&1; then
+        ok "census record: the F33 EXPECTED vocabulary pins pod_creates==1 per (scope, adapter/environment)"
     else
-        fail "census record leg: rc=$rc, census=[$r_rec/census.jsonl] missing F33 census line (got: $(cat "$r_rec/census.jsonl" 2>/dev/null | head -3))"
+        fail "census record leg: rc=$rc, census=[$r_rec/census_vocabulary.jsonl] missing F33 census line (got: $(cat "$r_rec/census_vocabulary.jsonl" 2>/dev/null | head -3))"
     fi
-    if grep -Fqx 'designed_pod_creates_total=1' "$r_rec/census.jsonl" 2>/dev/null 2>&1; then
-        ok "census record: the designed green run costs exactly ONE provision (root scope); the borrower adds zero"
+    if grep -Fqx 'designed_pod_creates_expected=1' "$r_rec/census_vocabulary.jsonl" >/dev/null 2>&1; then
+        ok "census record: the designed green run's EXPECTED budget is exactly ONE provision (root scope); the borrower adds zero"
     else
-        fail "census record: designed_pod_creates_total=1 missing"
+        fail "census record: designed_pod_creates_expected=1 missing"
+    fi
+    if grep -Fqx 'record_name=fleet_census_vocabulary' "$r_rec/census_vocabulary.jsonl" >/dev/null 2>&1 && \
+       grep -qF 'source=expected-vocabulary (live operator events supply the actual counts; this file pins the shape)' "$r_rec/census_vocabulary.jsonl" >/dev/null 2>&1; then
+        ok "census record: the file self-describes as EXPECTED vocabulary (live operator events supply the counts — it never reads as a measurement it never made)"
+    else
+        fail "census record: expected-vocabulary self-description missing (record_name/source lines)"
     fi
     want_reg_classes="A1,A2,A2,F33,F33,F34,F35,F36,F37,BUG"
     got_reg_classes="$(grep -o '^class=[A-Z0-9]*' "$r_rec/registry.jsonl" 2>/dev/null | sed 's/^class=//' | paste -sd, -)"
@@ -359,15 +536,10 @@ else
         fail "registry record: engineered A2-miss / F37 parity marker lines missing"
     fi
     # Byte-stable records: the SAME render run twice writes identical bytes.
-    (env -i PATH=/usr/bin:/bin sh "$r_rendered") >"$WORK/registry_run2.log" 2>&1
-    if cmp -s "$r_rec/census.jsonl" <(sed -n 'p' "$r_rec/census.jsonl") && \
-       ! { (env -i PATH=/usr/bin:/bin sh "$r_rendered") && cmp "$r_rec/census.jsonl" "$WORK/census_first" >/dev/null 2>&1; }; then
-        : # handled below via a real first-run copy
-    fi
-    cp "$r_rec/census.jsonl" "$WORK/census_first"
+    cp "$r_rec/census_vocabulary.jsonl" "$WORK/census_first"
     cp "$r_rec/registry.jsonl" "$WORK/registry_first"
-    (env -i PATH=/usr/bin:/bin sh "$r_rendered") >"$WORK/registry_run3.log" 2>&1
-    if cmp -s "$WORK/census_first" "$r_rec/census.jsonl" && cmp -s "$WORK/registry_first" "$r_rec/registry.jsonl"; then
+    (env -i PATH=/usr/bin:/bin sh "$r_rendered") >"$WORK/registry_rerun.log" 2>&1
+    if cmp -s "$WORK/census_first" "$r_rec/census_vocabulary.jsonl" && cmp -s "$WORK/registry_first" "$r_rec/registry.jsonl"; then
         ok "registry byte-stability: re-written census/registry records are byte-identical (a replay can never fake different evidence)"
     else
         fail "registry byte-stability: re-written records drifted"

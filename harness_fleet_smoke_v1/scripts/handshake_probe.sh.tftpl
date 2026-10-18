@@ -13,8 +13,30 @@ command -v printf >/dev/null
 # under `set -u` instead of aborting, and a failed expansion can never leave
 # a truncated record behind.
 adapter_name="${CRITERIA_ADAPTER_NAME:-}"
+# A1 (fleet-smoke): the presented identity must be the TYPE-PRESENTED name
+# (adapter.<type>.<name>), never the node name (matrix A1). The tree binds
+# the shell pass-in adapter on the remote.smoke node; the type-presented
+# identity is adapter.shell.pass_in. A node-name (or any non-type) presentation
+# fails LOUD in its designed class with the observed value named on stderr —
+# and the identity record still lands as evidence, carrying BOTH the observed
+# and the expected values.
+expected_type="shell.pass_in"
+expected_identity="adapter.$expected_type"
 if [ -z "$adapter_name" ]; then
     printf 'class=A1 name=identity_handshake_missing marker=session-bound-without-CRITERIA_ADAPTER_NAME (a nameless session must never run green)\n' >&2
+    exit 3
+fi
+if [ "$adapter_name" != "$expected_identity" ]; then
+    records_dir="$probe_root/fleet_smoke_records"
+    mkdir -p "$records_dir"
+    {
+        printf 'record_name=identity_handshake\n'
+        printf 'adapter_name=%s\n' "$adapter_name"
+        printf 'expected_identity=%s\n' "$expected_identity"
+        printf 'scope=%s\n' "${CRITERIA_SCOPE:-}"
+        printf 'scope_instance=%s\n' "${CRITERIA_SCOPE_INSTANCE:-}"
+    } > "$records_dir/identity"
+    printf 'class=A1 name=identity_handshake_type_mismatch marker=session-presented-node-name=%s (a session must present its type-presented name, never the node name)\n' "$adapter_name" >&2
     exit 3
 fi
 scope="${CRITERIA_SCOPE:-}"
@@ -25,6 +47,7 @@ record="$records_dir/identity"
 {
     printf 'record_name=identity_handshake\n'
     printf 'adapter_name=%s\n' "$adapter_name"
+    printf 'expected_identity=%s\n' "$expected_identity"
     printf 'scope=%s\n' "$scope"
     printf 'scope_instance=%s\n' "$scope_instance"
 } > "$record"

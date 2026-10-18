@@ -5,11 +5,13 @@ command -v printf >/dev/null
 # The fleet census + designed-class registry (KB-280). Two fixed-content
 # records the live run events and triage read:
 #
-#   census.jsonl — the F33/F34/F35 vocabulary of the GREEN run: pod creates
-#     == 1 per (scope, adapter/environment) pair (the root scope's single
-#     provision; the borrower scope joins it with ZERO provision_wanted),
-#     zero refused session dials anywhere on the green path, and the queue
-#     discipline (Queue.Position counts to 0; 0 == admitted and running).
+#   census_vocabulary.jsonl — the F33/F34/F35 EXPECTED vocabulary of the
+#     GREEN run: pod creates == 1 per (scope, adapter/environment) pair (the
+#     root scope's single provision; the borrower scope joins it with ZERO
+#     provision_wanted), zero refused session dials anywhere on the green
+#     path, and the queue discipline (Queue.Position counts to 0; 0 ==
+#     admitted and running). The live operator events supply the ACTUAL
+#     counts — this file pins only the shape and vocabulary they read.
 #
 #   registry.jsonl — every designed class marker of the card slice (A1, A2
 #     resolve + the engineered miss, F33-F37) plus the loud bug arms. A live
@@ -19,14 +21,15 @@ command -v printf >/dev/null
 records_dir="$probe_root/fleet_smoke_records"
 mkdir -p "$records_dir"
 
-census="$records_dir/census.jsonl"
+census="$records_dir/census_vocabulary.jsonl"
 {
-    printf 'record_name=fleet_census\n'
+    printf '%s\n' 'source=expected-vocabulary (live operator events supply the actual counts; this file pins the shape)'
+    printf 'record_name=fleet_census_vocabulary\n'
     printf 'class=F33 name=zero_pod_recreates marker=pod_creates==1 scope=root identity=shell.pass_in@remote.smoke (one provision, zero recreates)\n'
     printf 'class=F33 name=zero_provision_borrow marker=provision_wanted==0 scope=borrower identity=shell.pass_in@remote.smoke (the borrower joins the owner provision)\n'
     printf 'class=F34 name=refused_dial_zero marker=refused_session_dials==0 (every green-path dial lands on its joined session; a refusal is a red)\n'
     printf 'class=F35 name=queue_position_zero marker=Queue.Position==0 (0 == admitted and running)\n'
-    printf 'designed_pod_creates_total=1\n'
+    printf 'designed_pod_creates_expected=1\n'
 } > "$census"
 
 registry="$records_dir/registry.jsonl"
