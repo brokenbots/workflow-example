@@ -23,7 +23,7 @@ environment "remote" "triage" {
 // channel. They are never interpolated into step input.
 adapter "shell" "triage" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.4"
+    version     = "0.5.5"
     environment = remote.triage
     secrets {
         KANBOARD_APP_TOKEN = var.kanboard_app_token

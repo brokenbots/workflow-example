@@ -40,7 +40,7 @@ environment "remote" "scratch" {
 
 adapter "shell" "repo" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.4"
+    version     = "0.5.5"
     environment = remote.primary
     secrets {
         GH_TOKEN = var.workflow_github_token
