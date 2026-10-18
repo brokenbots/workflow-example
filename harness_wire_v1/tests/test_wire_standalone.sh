@@ -146,9 +146,11 @@ ok "both environments accept digests from the lockfile (A2)"
 
 # The callee declares the SAME environment identity (A4's shared scope set):
 # remote.probe_shell by type+name, mirroring the parent's declaration.
-grep -q '^environment "remote" "probe_shell" {' "$TREE_ROOT/workflows/scope_probe/adapters.chcl" \
-    && ok "callee re-declares the same environment identity (A4)" \
-    || fail "callee must declare environment remote.probe_shell (the shared scope set)"
+if grep -q '^environment "remote" "probe_shell" {' "$TREE_ROOT/workflows/scope_probe/adapters.chcl"; then
+    ok "callee re-declares the same environment identity (A4)"
+else
+    fail "callee must declare environment remote.probe_shell (the shared scope set)"
+fi
 
 # ── 4. Lifecycle stimulus stays in force (A5/A6) ─────────────────────────────
 
@@ -236,7 +238,7 @@ while [ "${#frontier[@]}" -gt 0 ]; do
     done
     frontier=("${next_frontier[@]}")
 done
-for node in boot_probe scope_probe_one scope_probe_two late_join_probe redial_probe_a done failed; do
+for node in boot_probe scope_probe_one scope_probe_two late_join_probe redial_probe_a "done" failed; do
     [ "${reachable[$node]+set}" = "set" ] || fail "node not reachable from initial_state: $node"
 done
 ok "every step and terminal is reachable from initial_state"
@@ -415,7 +417,7 @@ hostile_render="$TMP/hostile.sh"
 render_record "$hostile" "boot_record" "wire-probe=hostile" \
     "$TREE_ROOT/scripts/record_write.sh.tftpl" "$hostile_render"
 chmod +x "$hostile_render"
-if out="$("$hostile_render" >/dev/null 2>&1)"; then
+if "$hostile_render" >/dev/null 2>&1; then
     ok "hostile probe_root renders without breaking out"
 else
     fail "hostile probe_root must still write its record (opaque single path)"

@@ -940,6 +940,40 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
 # shipped PINLESS pre-close (the ADR-0005 D7 follow-up convention per
 # decision-demo-url precedent: a subtree cannot pin its own landing commit,
 # so KB-277 re-pins ref/?ref= to the squash-merge commit at the card's
+# KB-230: adapter-image pin state. The shipped example is the deploy source
+# for the live criteria-routes CM (make apply-routes applies it wholesale),
+# so its adapterImages pins must agree three ways: example == RECORDED_PIN_SET
+# (below) == live CM. The KB-216 fleet leg repinned live copilot-peer
+# everywhere to k8s-0.5.16 (verified 2026-10-09) while this file lagged at
+# 0.5.15 — exactly the drift class both legs below fail on. Version drift of
+# one pin family is caught per kind present; the objects that declare no
+# adapterImages (the retained linear-intake-v1 image object and the
+# decision-demo-url placeholder, KB-205/KB-281) skip the check.
+RECORDED_PIN_SET = {
+    "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
+    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1",
+}
+
+
+def check_adapter_pins(where, library):
+    for wf_name, wf_obj in library.items():
+        images = wf_obj.get("adapterImages") if isinstance(wf_obj, dict) else None
+        if not isinstance(images, dict):
+            continue
+        for kind, image in images.items():
+            recorded = RECORDED_PIN_SET.get(kind)
+            if recorded is None:
+                failures.append(
+                    f"{where}: {wf_name} adapterImages pins kind {kind!r} with no recorded pin"
+                    " — record the fleet pin in RECORDED_PIN_SET in k8s/tests/test_routes_config.sh")
+            elif image != recorded:
+                failures.append(
+                    f"{where}: {wf_name} adapterImages.{kind} = {image!r}, want the recorded pin"
+                    f" {recorded!r} (three-way pin agreement: example == recorded pin set == live"
+                    " criteria-routes CM — bump the whole pin family in the same change)")
+
+
+check_adapter_pins("shipped example", base[LIB])
 # KB-276: the harness_wire_v1 tree object — url-only, class=triage, shipped
 # PINLESS pre-close (the ADR-0005 D7 follow-up convention per
 # decision-demo-url precedent: a subtree cannot pin its own landing commit,
@@ -1119,41 +1153,6 @@ else:
     if harness_wf.get("adapterImages") != RECORDED_PIN_SET:
         failures.append(f"shipped example: harness-wire-url adapterImages = {harness_wf.get('adapterImages')!r}, "
                         "want the recorded pin set verbatim (three-way pin agreement)")
-
-# KB-230: adapter-image pin state. The shipped example is the deploy source
-# for the live criteria-routes CM (make apply-routes applies it wholesale),
-# so its adapterImages pins must agree three ways: example == RECORDED_PIN_SET
-# (below) == live CM. The KB-216 fleet leg repinned live copilot-peer
-# everywhere to k8s-0.5.16 (verified 2026-10-09) while this file lagged at
-# 0.5.15 — exactly the drift class both legs below fail on. Version drift of
-# one pin family is caught per kind present; the objects that declare no
-# adapterImages (the retained linear-intake-v1 image object and the
-# decision-demo-url placeholder, KB-205/KB-281) skip the check.
-RECORDED_PIN_SET = {
-    "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1",
-    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.51-1",
-}
-
-
-def check_adapter_pins(where, library):
-    for wf_name, wf_obj in library.items():
-        images = wf_obj.get("adapterImages") if isinstance(wf_obj, dict) else None
-        if not isinstance(images, dict):
-            continue
-        for kind, image in images.items():
-            recorded = RECORDED_PIN_SET.get(kind)
-            if recorded is None:
-                failures.append(
-                    f"{where}: {wf_name} adapterImages pins kind {kind!r} with no recorded pin"
-                    " — record the fleet pin in RECORDED_PIN_SET in k8s/tests/test_routes_config.sh")
-            elif image != recorded:
-                failures.append(
-                    f"{where}: {wf_name} adapterImages.{kind} = {image!r}, want the recorded pin"
-                    f" {recorded!r} (three-way pin agreement: example == recorded pin set == live"
-                    " criteria-routes CM — bump the whole pin family in the same change)")
-
-
-check_adapter_pins("shipped example", base[LIB])
 
 # Pin-duality cross-check (the KB-11/KB-94 gotcha recorded in both headers):
 # a workflow ref is ONE pin recorded twice — the url's '?ref=' query and the
