@@ -18,5 +18,4 @@ printf 'd21_reason=%s\n' {{ .d21_reason | shellquote }} > "$records_dir/d21_reas
 printf 'c14_reason=%s\n' {{ .c14_reason | shellquote }} > "$records_dir/c14_reason_record"
 printf 'd19_verdict=%s\n' {{ .d19_verdict | shellquote }} > "$records_dir/d19_verdict_record"
 printf 'c17_comment=%s\n' {{ .c17_comment | shellquote }} > "$records_dir/c17_comment_record"
-printf 'c13_reason=%s\n' {{ .c13_reason | shellquote }} > "$records_dir/c13_reason_record"
-echo "contracts verdict records written: $records_dir/d21_reason_record $records_dir/c14_reason_record $records_dir/d19_verdict_record $records_dir/c17_comment_record $records_dir/c13_reason_record"
+echo "contracts verdict records written: $records_dir/d21_reason_record $records_dir/c14_reason_record $records_dir/d19_verdict_record $records_dir/c17_comment_record"

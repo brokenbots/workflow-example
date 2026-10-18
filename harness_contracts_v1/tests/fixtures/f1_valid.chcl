@@ -30,11 +30,6 @@ data "internal" "c17_comment" {
     value = ""
 }
 
-data "internal" "c13_reason" {
-    type  = string
-    value = ""
-}
-
 data "internal" "d21_reason" {
     type  = string
     value = ""
@@ -69,7 +64,6 @@ step "echo_verdict" {
             d19_verdict  = data.internal.d19_verdict.value
             c17_comment  = data.internal.c17_comment.value
             d21_reason   = data.internal.d21_reason.value
-            c13_reason   = data.internal.c13_reason.value
         })
     }
     outcome "success" { next = state.done }

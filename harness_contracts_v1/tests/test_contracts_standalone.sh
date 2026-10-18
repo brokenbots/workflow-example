@@ -671,7 +671,6 @@ fi
 C14_REC="$PROOT/contracts_probe_records/c14_reason_record"
 D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 C17_REC="$PROOT/contracts_probe_records/c17_comment_record"
-C13_REC="$PROOT/contracts_probe_records/c13_reason_record"
 # C16 on the shipped chain, same rule as F2: exactly one outcome event per
 # non-unmapped step, the d19 record equals the final engineered reason
 # alone, and no rejected probe string reached run state (dual-lane submits
@@ -713,15 +712,18 @@ if grep -qxF 'd21_reason=D21 recovered denial keeps success: the trailing-* band
 else
     fail "F9: d21_reason_record missing or does not carry the projected reason"
 fi
-# Positive content-carry proof via the schema-less lane: the
-# contract_uncontracted approved arm writes c13_reason <- output.reason of
-# a reason-only submit — the lane the engine projects — and the text flows
-# verbatim through run state into the echo record. This is the C13 record
-# complement to the F4/F5 event observations.
-if grep -qxF 'c13_reason=C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps' "$C13_REC" 2>/dev/null; then
-    ok "F9 c13 record carries the reason-lane submission verbatim (positive content flow)"
+# C13 complement: the positive content-carry proof for the schema-less
+# reason lane. The contract_uncontracted approved arm (deliberately
+# schema-less — ANY schema would contract all of the step's outcomes and
+# destroy the stimulus) writes output.reason into run state; the captured
+# write event carries the reason-only submission verbatim — the one lane the
+# engine projects. The KB-247 flow rule keeps this reason OUT of downstream
+# inputs on an untypeable arm, so the run-state write (not an echo record)
+# is the content-carry observation surface.
+if grep 'StepOutputCaptured' "$EV" 2>/dev/null | grep -F '"reason":"C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps"' >/dev/null; then
+    ok "F9 c13 reason lane flows verbatim into run state (StepOutputCaptured content)"
 else
-    fail "F9: c13_reason_record missing or does not carry the reason-lane text"
+    fail "F9: uncontracted-arm reason write missing from run state"
 fi
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
