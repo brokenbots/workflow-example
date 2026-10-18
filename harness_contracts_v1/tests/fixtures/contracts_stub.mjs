@@ -174,7 +174,8 @@ function replyTo(body) {
   const idx = calls.push(1) - 1;
   const seq = (MODES[mode] || (() => [submit({ outcome: "approved", payload: { reason: "fixture stub default: mode unknown" } })]))();
   process.stderr.write(`stub[${mode}] call ${idx + 1}\n`);
-  return seq[Math.min(idx, seq.length - 1)];
+  const out = seq[Math.min(idx, seq.length - 1)];
+  return Array.isArray(out) ? out : [out];
 }
 
 const server = http.createServer((req, res) => {
