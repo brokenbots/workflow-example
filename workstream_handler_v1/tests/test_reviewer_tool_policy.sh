@@ -396,7 +396,7 @@ grep -qF "A review that ends without a verdict is a failed review, not a longer 
 echo "==> Checking KB-72: ported review charters carry the turn-discipline rule..."
 for ported_md in \
     "${HANDLER_DIR}/workflows/pr_reviewer_loop/agents/pr_reviewer.md" \
-    "${SCRIPT_DIR}/../../kanboard_triage_v1/agents/triage_reviewer.md"; do
+    "${SCRIPT_DIR}/../../review_triage_v1/agents/triage_reviewer.md"; do
     grep -q "Turn discipline: deliver the verdict" "${ported_md}" || {
         echo "FAIL: ${ported_md} lacks the KB-72 turn-discipline rule" >&2
         exit 1
