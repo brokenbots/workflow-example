@@ -1,0 +1,14 @@
+KB-277 C14 probe (valid payload accepted).
+
+The outcomes of this step are CONTRACTED: the step declares a payload schema
+(`schema = object({ reason = string })`), so the submit_outcome tool only
+accepts this outcome's submission in the typed payload lane — a `payload`
+object argument, not a top-level reason.
+
+Call the submit_outcome tool now, exactly once:
+
+    outcome = "approved"
+    payload = {"reason": "C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact"}
+    comment = "C14 valid payload accepted"
+
+Do not call any tools. Do not send text beyond the single finalize call.

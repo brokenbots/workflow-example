@@ -1,0 +1,24 @@
+KB-277 C17 probe (empty adapter comment rejected on a require_comment arm).
+
+This step's `approved` arm declares BOTH `schema = object({ reason = string })`
+AND `require_comment = true` — the adapter's comment must be non-empty because
+this arm's reason renders into a downstream step's input (the verdict-echo
+step; the KB-217 mechanical rule).
+
+Make the submit_outcome calls below IN ORDER. Call (1) is ENGINEERED to be
+rejected (an empty comment); after the rejection the adapter re-prompts you,
+and you resubmit with call (2). Do not invent your own repair.
+
+(1) EMPTY-COMMENT VIOLATION:
+
+        outcome = "approved"
+        payload = {"reason": "C17 comment contract payload (this submission carries an empty comment and must be rejected)"}
+        comment = ""
+
+(2) VALID RESUBMISSION with a non-empty comment:
+
+        outcome = "approved"
+        payload = {"reason": "C17 empty comment was rejected loudly, then the corrected submission with a non-empty comment routed green — the comment renders verbatim into the downstream verdict record"}
+        comment = "C17: adapter comment required and rendered downstream"
+
+Do not call any tools.

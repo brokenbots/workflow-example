@@ -1,0 +1,16 @@
+KB-277 C18b probe (unmapped outcome name fails LOUD instead of being swallowed).
+
+This step is the never-finalize stimulus with EVERY lane absent: it declares
+its schema'd `approved` arm and NOTHING else — no `outcome "default"`, no
+fallback arm. Its session must produce NO submit_outcome call. allow_tools is
+empty (no tools), so there is nothing else to do either — just send a single
+short text turn now saying "C18b: this step never finalizes on purpose" and
+then STOP. Keep doing nothing on every later turn.
+
+When the turn budget exhausts without a finalize, the adapter's synthetic
+failure outcome name has NO mapping on this step (no default arm, no fallback
+arm), so the engine must reject it and fail the run LOUD with an explicit
+routing error — never a silent no-observation pass. That loud routing error is
+EXACTLY what this probe exists to observe.
+
+Do NOT call submit_outcome in this step, whatever happens.
