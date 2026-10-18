@@ -1,0 +1,13 @@
+// KB-278 G5 fixture variables.
+
+variable "guard_root" {
+    description = "Absolute root for the fixture environment's working directory (outside the repository)."
+    type        = string
+    default     = "/tmp/criteria-harness-composition"
+}
+
+variable "guard_labels" {
+    description = "Parallel labels for the violating step."
+    type        = list(string)
+    default     = ["a", "b"]
+}

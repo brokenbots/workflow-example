@@ -1,0 +1,7 @@
+// KB-278 G11 fixture callee variables.
+
+variable "g11_root" {
+    description = "Absolute root for the fixture environments' working directory (outside the repository)."
+    type        = string
+    default     = "/tmp/criteria-harness-composition"
+}

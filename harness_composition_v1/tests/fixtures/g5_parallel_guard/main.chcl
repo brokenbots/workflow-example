@@ -1,0 +1,49 @@
+// KB-278 G5 (parallel concurrency guard) — the designed-violation fixture.
+// A parallel iterating step over a member of the copilot kind, which does NOT
+// declare parallel_safe in its Info() (its capabilities are multi_turn,
+// structured_events, permission_gating, adapter_tools). The engine's
+// compile-time guard must refuse this shape when the pinned adapter binary is
+// resolvable: "parallel execution requires the adapter to be safe for
+// concurrent Execute calls. Use for_each for sequential iteration or declare
+// parallel_safe in the adapter's Info()." When the binary is NOT resolvable
+// the guard is skipped at compile and enforced at runtime — the standalone
+// suite checks which half is observable and asserts it.
+//
+// This tree is a FIXTURE, not the exercised tree: it is never run — only
+// validated (and that validation is EXPECTED to fail under a resolvable
+// copilot binary).
+
+workflow {
+    name             = "g5_parallel_guard"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "parallel_guarded"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 8
+    }
+}
+
+// A parallel step over the non-parallel-safe member: the violation whose
+// compile-time refusal is the G5 row's subject.
+step "parallel_guarded" {
+    target      = adapter.copilot.guarded
+    allow_tools = []
+    parallel    = var.guard_labels
+    input {
+        message = "g5 guard fixture: this step must be refused at compile time"
+    }
+    outcome "all_succeeded" { next = state.done }
+    outcome "any_failed"    { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+state "failed" {
+    terminal = true
+    success  = false
+}

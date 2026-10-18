@@ -1,0 +1,34 @@
+// KB-278 G11 fixture callee: a minimal valid subtree — the dangling reference
+// lives on the parent's subworkflow block, exactly as the gap describes.
+
+workflow {
+    name             = "g11_dangling_callee"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "dial"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+step "dial" {
+    target      = adapter.shell.callee_member
+    allow_tools = []
+    input {
+        command = "echo g11 fixture: callee dial"
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+state "failed" {
+    terminal = true
+    success  = false
+}

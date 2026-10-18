@@ -1,0 +1,59 @@
+// KB-278 G11 (KNOWN GAP, pinned) — the dangling environment fixture.
+// The subworkflow block's `environment` traversal references
+// remote.does_not_exist, which is declared NOWHERE in this tree — and the
+// tree still compiles and validates GREEN. The gap: a subworkflow environment
+// traversal is not validated to exist in the parent (adapter-level env
+// references ARE resolved against declared environments; the subworkflow
+// block's is not). The runtime half — the composition traversal failing when
+// it dereferences the dangling identity — is the failures card's slice; this
+// fixture pins the compile-green half so a future engine fix (validating the
+// traversal) turns this validate-green shape loud, in this suite, on purpose.
+//
+// This tree is a FIXTURE, not the exercised tree: it is never run.
+
+workflow {
+    name             = "g11_dangling_env"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "root_dial"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 8
+    }
+}
+
+step "root_dial" {
+    target      = adapter.shell.probe_member
+    allow_tools = []
+    input {
+        command = "echo g11 fixture: root member dial"
+    }
+    outcome "success" { next = step.loop_probe }
+    outcome "failure" { next = state.failed }
+}
+
+// THE G11 SHAPE: environment = remote.does_not_exist — the dangling identity
+// that must NOT survive a future validation fix silently.
+subworkflow "callee" {
+    source      = "./callee"
+    environment = remote.does_not_exist
+}
+
+step "loop_probe" {
+    target      = subworkflow.callee
+    allow_tools = []
+    for_each    = ["x"]
+    outcome "all_succeeded" { next = state.done }
+    outcome "any_failed"    { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+state "failed" {
+    terminal = true
+    success  = false
+}
