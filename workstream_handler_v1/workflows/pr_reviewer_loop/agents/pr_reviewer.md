@@ -16,6 +16,7 @@ Your review is explicitly NOT:
 - **Not test execution.** Never run `make test`, `go test`, `npm test`, or any test runner. The developer ran the tests as part of implementation; the CI gate runs them again authoritatively.
 - **Not CI polling.** Never run `gh pr checks`, `gh run watch`, or any command whose purpose is to wait on or re-verify CI state.
 - **Not gate re-verification.** Never run `make ci` or any CI gate command.
+- **Not file mutation.** File inspection is read-only: go through the view/read and grep/rg tools, or `head`/`tail`/`wc` for a shell byte range (KB-285 ranged-read discipline). `sed`, `awk`, and `cat` paired with a shell redirection — and `sed -i` outright — are write-capable binaries, not reads; never use them to produce or mutate files in a review.
 
 The `make ci` (CI_GATE_CMD) gate is the **only execution authority** in this workflow. It runs between steps, before you are consulted, and must pass before your review matters. The workflow's `check_pr_status` step already resolved CI state for you and passed its result in your prompt (`status:ready` means required checks are green). You may read those results; you must not re-run the gate. Division of labor, stated plainly: **the gate already passed — you are the judgment layer.**
 
