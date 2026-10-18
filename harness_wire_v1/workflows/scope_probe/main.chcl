@@ -1,0 +1,40 @@
+// The scope-dial flow of the KB-276 callee: the scope's single step dials
+// shell.probe_dialer and writes this scope's fixed-content record. Success
+// or failure ends the scope immediately (release stimulus for A6; a fresh
+// scope instance respawns the child verbatim on the next invocation — A5).
+
+workflow {
+    name             = "harness_wire_scope_probe"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "record_scope"
+    target_state     = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+step "record_scope" {
+    target      = adapter.shell.probe_dialer
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/scope_record.sh.tftpl", {
+            probe_root   = var.probe_root
+            scope_label  = var.scope_label
+            record_lines = "definition-identity=shell.probe_dialer\nscope-set-role=subscope-dial\nwire-probe=harness_wire_v1/scope_probe_${var.scope_label}"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

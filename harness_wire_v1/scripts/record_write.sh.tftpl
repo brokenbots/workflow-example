@@ -1,0 +1,12 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+set -euo pipefail
+command -v mkdir >/dev/null
+
+# Fixed-content probe record (KB-276): the identity lines are interpolated
+# ONLY from compile-time templatefile values, never from the environment —
+# the record content is byte-identical across runs.
+records_dir="$probe_root/wire_probe_records"
+mkdir -p "$records_dir"
+printf '%b\n' {{ .record_lines | shellquote }} > "$records_dir/$record_name"
+echo "wire-probe record written: $records_dir/$record_name"
