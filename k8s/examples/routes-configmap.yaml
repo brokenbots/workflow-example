@@ -647,7 +647,6 @@ data:
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1"
           }
-
         }
       },
       "configLibrary": {
