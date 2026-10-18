@@ -16,6 +16,14 @@
 //   - a scripted reply is a function_call item (submit_outcome or a real
 //     tool). The adapter echoes tool results back into `input`, so fixture
 //     sequence position is tracked per-process by call counters.
+//
+// full_chain mode (the shipped main.chcl run) dispatches BY STEP MARKER
+// instead of a global counter: rejection retries and permission denials add
+// extra requests per step, so concatenated indices drift. Each step prompt
+// opens with a unique "KB-277 Cnn probe" marker; the stub takes the LAST
+// marker present in the serialized input (conversation history carries the
+// earlier steps' prompts) and counts requests per marker, resetting on step
+// change.
 import http from "node:http";
 
 const mode = process.env.STUB_MODE || "f1_valid";
@@ -45,6 +53,17 @@ const plain = (text) => ({
 // The engineered submission chains. Call order matches the fixed step
 // prompts; no comment parameters except the C17 probes (the empty comment on
 // the require_comment arm, and the corrected-comment defect variant).
+//
+// NOTE ON THE DUAL-LANE SUBMITS (payload + identical top-level reason):
+// the engine projects ONLY the top-level reason field into the arm's output
+// (output.reason); payload fields are not projected (payload is not an
+// output key), so a payload-only submission leaves output.reason "" and the
+// echo_verdict records would render empty. The record-carrying submissions
+// therefore carry BOTH lanes with identical text. This does not weaken the
+// lane separation the fixtures prove: the wrong-lane probe (f2 item 2) is
+// reason-ONLY on a contracted step and is rejected loudly, and the C13
+// contrast (f5) proves the reason lane accepted exactly on the step that
+// declares no schema.
 const MODES = {
   // C14: a schema-valid payload is accepted and routes the declared outcome.
   f1_valid: () => [
@@ -58,7 +77,9 @@ const MODES = {
 
   // C15/C16/D19: wrong-field-set and wrong-lane rejections (nothing
   // committed), then the schema-valid engineered rejection routes the
-  // declared green lane.
+  // declared green lane. The final submission carries both lanes (payload
+  // valid and identical top-level reason) so the engine projects the D19
+  // reason into the verdict record sink.
   f2_reject: () => [
     submit({ outcome: "rejected", payload: { verdict: "wrong field set on purpose" } }),
     submit({
@@ -67,14 +88,19 @@ const MODES = {
     }),
     submit({
       outcome: "rejected",
+      reason:
+        "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
       payload: {
-        reason: "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
+        reason:
+          "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
       },
     }),
   ],
 
   // C17: empty adapter comment rejected loudly on the require_comment arm,
   // then the probe observation routes the green exit (the `observed` arm).
+  // The observed submission carries both lanes so the c17_comment record
+  // renders the observation text.
   f3_comment: () => [
     submit({
       outcome: "approved",
@@ -85,8 +111,11 @@ const MODES = {
     }),
     submit({
       outcome: "observed",
+      reason:
+        "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
       payload: {
-        reason: "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
+        reason:
+          "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
       },
     }),
   ],
@@ -136,15 +165,12 @@ const MODES = {
   // (the first matching band wins per the permission event's pattern echo)
   // while the read tool call is denied with a permission event naming the
   // tool; the recovered denial keeps the turn's success. The bash command
-  // writes the same side-effect record the fixed prompt engineers — into
-  // the probe root the suite passes via PROBEROOT — so the suite can prove
-  // the granted call actually executed.
+  // writes the same side-effect record the fixed prompt engineers — RELATIVE
+  // path, because the CLI bash tool's working directory is the probe root
+  // the shim points the shell environment at.
   f6_permissions: () => [
     tool("bash", {
-      command:
-        "printf d21-shell-band-ok > " +
-        process.env.PROBEROOT +
-        "/d21_shell_band_record",
+      command: "printf d21-shell-band-ok > ./d21_shell_band_record",
       description: "D21 band-matched shell call",
     }),
     tool("view", { path: "main.chcl" }),
@@ -158,87 +184,45 @@ const MODES = {
     }),
   ],
 
-  // F9 full-chain mode: the shipped main.chcl runs ALL eight steps in one
-  // session against ONE stub process. The array is the concatenation of
-  // every step's engineered sequence in chain order (the stub's call
-  // counter is per-process, so position = step progress):
-  //   contract_valid(1) contract_reject(3) contract_comment(2)
-  //   contract_uncontracted(1) contract_permissions(3) then the two
-  //   never-finalize stimuli (budget + unmapped) — every call past the
-  //   engineered prefix serves the same plain never-finalize reply, so the
-  //   turn-budget steps cannot drift the index. echo_verdict dials the
-  //   shell adapter and never hits this stub.
-  full_chain: (() => {
-    const tail = [];
-    for (let i = 0; i < 16; i++)
-      tail.push(
-        plain(
-          "KB-277 never-finalize probe: this step never finalizes on purpose (turn budget must exhaust)",
-        ),
-      );
-    return () =>
-      [
-        submit({
-          outcome: "approved",
-          payload: {
-            reason: "C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact",
-          },
-        }),
-        submit({ outcome: "rejected", payload: { verdict: "wrong field set on purpose" } }),
-        submit({
-          outcome: "rejected",
-          reason: "wrong lane on purpose: reason string outside the typed payload lane",
-        }),
-        submit({
-          outcome: "rejected",
-          payload: {
-            reason: "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
-          },
-        }),
-        submit({
-          outcome: "approved",
-          payload: {
-            reason: "C17 comment contract payload (this submission carries an empty adapter comment and must be rejected)",
-          },
-          comment: "",
-        }),
-        submit({
-          outcome: "observed",
-          payload: {
-            reason: "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
-          },
-        }),
-        submit({
-          outcome: "approved",
-          reason:
-            "C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps",
-        }),
-        tool("bash", {
-          command:
-            "printf d21-shell-band-ok > " +
-            (process.env.PROBEROOT || "/tmp") +
-            "/d21_shell_band_record",
-          description: "D21 band-matched shell call",
-        }),
-        tool("view", { path: "main.chcl" }),
-        submit({
-          outcome: "approved",
-          payload: {
-            reason:
-              "D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering",
-          },
-          comment: "D21 permission band probe",
-        }),
-        ...tail,
-      ];
-  })(),
-
   // C18a/D22 + C18b: never-finalize stimuli — the turn budget exhausts and
   // the missing-finalize class (or, with no lanes mapped, the loud routing
   // error) is the designed shape.
   f7_budget: () => [plain("KB-277 C18a/D22 probe: this step never finalizes on purpose (turn budget must exhaust)")],
   f8_unmapped: () => [plain("KB-277 C18b probe: this step never finalizes on purpose (the synthetic failure outcome must hit the loud routing error)")],
 };
+
+// Step markers -> per-step dispatch mode for full_chain (the shipped-tree
+// run). Every step prompt in the shipped agents/*.md.tftpl templates opens
+// with one of these marker phrases; conversation history keeps the earlier
+// steps' prompts around, so the LAST marker occurrence in the serialized
+// input names the active step.
+const MARKER_STEPS = [
+  ["KB-277 C14 probe", "f1_valid"],
+  ["KB-277 C15/C16/D19 probe", "f2_reject"],
+  ["KB-277 C17 probe", "f3_comment"],
+  ["KB-277 C13 probe", "f5_uncontracted"],
+  ["KB-277 D21 probe", "f6_permissions"],
+  ["KB-277 C18a/D22 probe", "f7_budget"],
+  ["KB-277 C18b probe", "f8_unmapped"],
+];
+const PLAIN_NEVER_FINALIZE = () =>
+  plain("KB-277 never-finalize probe: this step never finalizes on purpose (turn budget must exhaust)");
+
+// full_chain dispatch state: the active step marker and the number of
+// scriptable requests it has seen; resets on marker change.
+let chainStep = null;
+let chainCount = 0;
+
+function serve(modeName, idx) {
+  const gen = MODES[modeName];
+  if (!gen) {
+    process.stderr.write(`stub[${mode}] mode unknown: ${modeName}\n`);
+    return [plain("stub: fixture mode unknown")];
+  }
+  const seq = gen();
+  const out = seq[Math.min(idx, seq.length - 1)];
+  return Array.isArray(out) ? out : [out];
+}
 
 function replyTo(body) {
   if (body === '{"x":1}') return {};
@@ -247,24 +231,48 @@ function replyTo(body) {
     const parsed = JSON.parse(body);
     input = parsed.input || parsed.conversation || parsed.messages || [];
   } catch {
-    return plain("stub: unparsable request body");
+    return [plain("stub: unparsable request body")];
   }
   for (let i = input.length - 1; i >= 0; i--) {
     const it = input[i];
     const text = typeof it?.content === "string" ? it.content : JSON.stringify(it?.content ?? it);
     if (text.includes("Please create a detailed summary of the conversation so far")) {
-      return plain(
-        "<overview> KB-277 contracts harness fixture probe session running one fixed probe; submit_outcome is the only finalize path. " +
-          "Earlier turns: the current fixture step asked for exactly the engineered submit_outcome/tool calls prescribed by its prompt; no other work is in flight.</overview> " +
-          "Next: continue the current fixture step's engineered call sequence and finalize exactly once.",
-      );
+      return [
+        plain(
+          "<overview> KB-277 contracts harness fixture probe session running one fixed probe; submit_outcome is the only finalize path. " +
+            "Earlier turns: the current fixture step asked for exactly the engineered submit_outcome/tool calls prescribed by its prompt; no other work is in flight.</overview> " +
+            "Next: continue the current fixture step's engineered call sequence and finalize exactly once.",
+        ),
+      ];
     }
   }
   const idx = calls.push(1) - 1;
-  const seq = (MODES[mode] || (() => [submit({ outcome: "approved", payload: { reason: "fixture stub default: mode unknown" } })]))();
-  process.stderr.write(`stub[${mode}] call ${idx + 1}\n`);
-  const out = seq[Math.min(idx, seq.length - 1)];
-  return Array.isArray(out) ? out : [out];
+  if (mode !== "full_chain") {
+    process.stderr.write(`stub[${mode}] call ${idx + 1}\n`);
+    return serve(mode, idx);
+  }
+  // full_chain: marker-based per-step dispatch.
+  const blob = JSON.stringify(input);
+  let best = -1;
+  let step = null;
+  for (const [marker, stepMode] of MARKER_STEPS) {
+    const pos = blob.lastIndexOf(marker);
+    if (pos > best) {
+      best = pos;
+      step = stepMode;
+    }
+  }
+  if (!step) {
+    process.stderr.write(`stub[full_chain] call ${idx + 1}: no step marker in input — plain never-finalize\n`);
+    return [PLAIN_NEVER_FINALIZE()];
+  }
+  if (step !== chainStep) {
+    chainStep = step;
+    chainCount = 0;
+  }
+  const within = chainCount++;
+  process.stderr.write(`stub[full_chain] step ${step} call ${within + 1} (global ${idx + 1})\n`);
+  return serve(step, within);
 }
 
 const server = http.createServer((req, res) => {

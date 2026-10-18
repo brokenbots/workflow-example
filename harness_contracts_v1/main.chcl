@@ -234,9 +234,7 @@ step "contract_permissions" {
     target      = adapter.copilot.main
     allow_tools = ["s*", "shell"]
     input {
-        prompt = templatefile("./agents/contract_permissions.md.tftpl", {
-            probe_root = var.probe_root
-        })
+        prompt = templatefile("./agents/contract_permissions.md.tftpl", {})
     }
     outcome "approved" {
         schema = object({ reason = string })

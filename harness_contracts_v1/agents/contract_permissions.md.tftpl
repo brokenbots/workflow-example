@@ -13,11 +13,13 @@ lane.
 
 (1) Call the bash tool now, exactly once:
 
-        command: printf d21-shell-band-ok > {{ .probe_root }}/d21_shell_band_record
+        command: printf d21-shell-band-ok > ./d21_shell_band_record
 
     This runs: its policy tool name `shell` matches the `s*` band, which is
     the FIRST matching band even though the later exact `shell` entry would
-    also match (the grant echoes the winning pattern in run events).
+    also match (the grant echoes the winning pattern in run events). The
+    record lands in this step's working directory (the probe root the
+    harness points the shell environment at).
 
 (2) Call the view tool now, exactly once, on the file ../harness_contracts_v1/main.chcl
 
