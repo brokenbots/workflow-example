@@ -242,16 +242,28 @@ expect_run_green() {
     fi
 }
 
-# ── F1: C14 — valid payload accepted ─────────────────────────────────────────
+# ── F1: C14 — valid payload accepted, projected outputs in run state ────────
 
 run_fixture f1_valid f1_valid
 expect_rc_zero F1
 expect_event F1 StepOutcome
 expect_run_green F1
-if has_ev 'C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact'; then
-    ok "F1 engineered payload reason carried verbatim in run events"
+# The lane-discriminated projection observation: the record is written from
+# data.internal (run state) — it must carry the one lane the engine projects
+# (top-level reason) VERBATIM, and must NOT carry the payload lane text (the
+# engine drops payload body fields — the pinned projection gap). Exact
+# content, not a whole-log grep: a broken projection (empty output.reason) or
+# a payload-text projection fails both checks.
+C14_REC="$PROOT/contracts_probe_records/c14_reason_record"
+if grep -qxF 'c14_reason=C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record' "$C14_REC" 2>/dev/null; then
+    ok "F1 c14_reason record carries the projected reason-lane text exactly (run-state projection observed)"
 else
-    fail F1: engineered payload reason not found verbatim in run events
+    fail "F1: c14_reason record missing or does not carry the projected lane text exactly"
+fi
+if ! grep -qF 'C14 payload lane:' "$C14_REC" 2>/dev/null; then
+    ok "F1 payload lane text absent from run state (projection gap pinned: payload fields dropped)"
+else
+    fail F1: the payload lane text leaked into the projected run state
 fi
 
 # ── F2: C15/C16/D19 — repair loop, no commit, engineered rejection green ────
@@ -571,6 +583,7 @@ else
     fail "F9: d21_shell_band_record missing or wrong — the shipped step's granted call did not run"
 fi
 
+C14_REC="$PROOT/contracts_probe_records/c14_reason_record"
 D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 C17_REC="$PROOT/contracts_probe_records/c17_comment_record"
 C13_REC="$PROOT/contracts_probe_records/c13_reason_record"
@@ -585,6 +598,14 @@ if [ "$(count_type "$EV" StepOutcome)" = "7" ]; then
     ok "F9 exactly one outcome event per finalized step (5 commits + 1 failure + 1 echo; the default-routed step emits none)"
 else
     fail "F9: expected exactly 7 StepOutcome events across the chain, saw $(count_type "$EV" StepOutcome)"
+fi
+# C14 projection observed on the shipped chain too: the c14 record must carry
+# the projected reason-lane text exactly and never the payload lane text.
+if grep -qxF 'c14_reason=C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record' "$C14_REC" 2>/dev/null \
+    && ! grep -qF 'C14 payload lane:' "$C14_REC" 2>/dev/null; then
+    ok "F9 c14 record carries the projected lane verbatim, payload lane absent (projection pin)"
+else
+    fail "F9: shipped-chain c14 record content wrong (projection gap assertion)"
 fi
 if grep -qF 'D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason' "$D19_REC" 2>/dev/null \
     && ! grep -qF 'wrong field set on purpose' "$D19_REC" 2>/dev/null \

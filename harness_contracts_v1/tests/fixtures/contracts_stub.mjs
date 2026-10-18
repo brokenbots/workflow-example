@@ -76,11 +76,21 @@ const plain = (text) => ({
 // declares no schema.
 const MODES = {
   // C14: a schema-valid payload is accepted and routes the declared outcome.
+  // The submission carries BOTH lanes with DISTINCT content: the engine
+  // projects ONLY the top-level reason into the arm outputs (payload body
+  // fields are dropped — the pinned projection gap, filed back to the engine
+  // carrier), so the c14_reason record must carry the top-level lane content
+  // and must NOT carry the payload lane content — the lanes are discriminated,
+  // not echoed. Both texts avoid the lowercase character the engine's
+  // projection pipeline redacts (see the pinned defect on this row).
   f1_valid: () => [
     submit({
       outcome: "approved",
+      reason:
+        "C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record",
       payload: {
-        reason: "C14 valid payload: schema-valid payload routes the declared approved outcome with its projected outputs intact",
+        reason:
+          "C14 payload lane: schema-valid payload body — the pinned engine projection gap drops payload body fields, they never surface in the arm outputs",
       },
       comment: "C14 valid payload accepted",
     }),
