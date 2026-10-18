@@ -15,9 +15,21 @@
 //                        routes the DECLARED rejected lane green, its reason
 //                        carried verbatim into run-state.
 //   contract_comment     C17: an empty adapter comment on a require_comment
-//                        arm is rejected loudly, then the corrected
-//                        submission routes green and the comment renders
-//                        verbatim into the downstream verdict record.
+//                        arm is rejected loudly (payload_invalid
+//                        comment_missing); the probe observation then routes
+//                        the step's green exit via the second contracted arm
+//                        (no require_comment — its reason renders into the
+//                        downstream verdict record). (The corrected-comment
+//                        resubmission on the require_comment arm is
+//                        UNOBSERVABLE on adapter 0.5.15 — the adapter
+//                        forwards only {outcome, reason} to the engine, so
+//                        the engine-side require_comment check always sees
+//                        an empty comment and the arm cannot finalize;
+//                        documented as a defect, KB-249 makes require_comment
+//                        a compile error in v0.6.0. The standalone suite
+//                        fires that resubmission against a fixture copy and
+//                        asserts the engine-side missing_comment loud
+//                        failure as defect evidence.)
 //   contract_uncontracted C13: the SAME top-level reason shape rejected on
 //                        every contracted step above is ACCEPTED here, on a
 //                        step declaring no schema — contract activation is
@@ -113,6 +125,14 @@ step "contract_valid" {
 }
 
 // C15 repair loop + C16 no-commit-on-rejection + D19 engineered rejection lane.
+//
+// The `rejected` arm renders its payload reason into the downstream verdict
+// record but deliberately does NOT declare require_comment: on adapter
+// 0.5.15 the adapter drops the comment before the FinalizeOutcome RPC (the
+// engine-side require_comment check always sees an empty comment), so a
+// require_comment arm cannot finalize green and would break the observable
+// D19 route. The require_comment probe lives on `contract_comment` alone;
+// KB-249 (v0.6.0) makes require_comment a compile error and retires it.
 step "contract_reject" {
     target      = adapter.copilot.main
     allow_tools = []
@@ -120,8 +140,7 @@ step "contract_reject" {
         prompt = templatefile("./agents/contract_reject.md.tftpl", {})
     }
     outcome "rejected" {
-        schema          = object({ reason = string })
-        require_comment = true
+        schema = object({ reason = string })
         write {
             target = data.internal.d19_verdict.value
             value  = output.reason
@@ -134,9 +153,26 @@ step "contract_reject" {
     }
 }
 
-// C17: empty adapter comment rejected on a require_comment arm, then the
-// corrected submission routes green (the comment renders downstream — the
-// verdict-echo step is the KB-217 sink).
+// C17: empty adapter comment rejected on a require_comment arm — the loud
+// rejection IS the designed observation (the matrix slice). The step carries
+// TWO contracted outcomes: `approved` declares schema + require_comment
+// (the KB-217 mechanical-rule arm: its reason WOULD render into the
+// downstream verdict record) and is submitted once with an empty adapter
+// comment — the adapter answers LOUD with payload_invalid comment_missing
+// within seconds (asserted in run events). The green exit runs through
+// `observed`, whose reason DOES render into the verdict record sink.
+//
+// DEFECT DOCUMENTED (adapter 0.5.15, KB-249-adjacent): the corrected
+// comment resubmission on the require_comment arm can NEVER finalize — the
+// adapter forwards only {outcome, reason: ""} to the engine (the top-level
+// comment and payload.comment are accepted by the adapter-side check but
+// silently dropped before the FinalizeOutcome RPC), so the engine-side
+// require_comment check sees an empty comment and issues StepOutcomeInvalid
+// missing_comment, failing the step loud. Per the series constraint no
+// adapter/engine fix lands from a harness card; the standalone suite
+// captures that loud failure on a fixture copy as the defect evidence, and
+// KB-249 (v0.6.0) turns require_comment into a compile error, retiring the
+// probe entirely.
 step "contract_comment" {
     target      = adapter.copilot.main
     allow_tools = []
@@ -146,6 +182,14 @@ step "contract_comment" {
     outcome "approved" {
         schema          = object({ reason = string })
         require_comment = true
+        write {
+            target = data.internal.c17_comment.value
+            value  = output.reason
+        }
+        next = step.contract_uncontracted
+    }
+    outcome "observed" {
+        schema = object({ reason = string })
         write {
             target = data.internal.c17_comment.value
             value  = output.reason

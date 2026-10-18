@@ -1,24 +1,29 @@
-KB-277 C17 probe (empty adapter comment rejected on a require_comment arm).
+KB-277 C17 probe (empty adapter comment rejected on the require_comment arm).
 
 This step's `approved` arm declares BOTH `schema = object({ reason = string })`
-AND `require_comment = true` — the adapter's comment must be non-empty because
-this arm's reason renders into a downstream step's input (the verdict-echo
-step; the KB-217 mechanical rule).
+AND `require_comment = true` — the KB-217 mechanical-rule arm: its reason
+would render into the downstream verdict record. The `observed` arm is a
+contracted schema lane (note = string): the green exit of this step.
 
 Make the submit_outcome calls below IN ORDER. Call (1) is ENGINEERED to be
-rejected (an empty comment); after the rejection the adapter re-prompts you,
-and you resubmit with call (2). Do not invent your own repair.
+rejected; after the rejection the adapter re-prompts you, and you submit
+call (2). Do not invent your own repair.
 
-(1) EMPTY-COMMENT VIOLATION:
+(1) EMPTY-COMMENT VIOLATION (must be rejected loudly):
 
         outcome = "approved"
-        payload = {"reason": "C17 comment contract payload (this submission carries an empty comment and must be rejected)"}
+        payload = {"reason": "C17 comment contract payload (this submission carries an empty adapter comment and must be rejected)"}
         comment = ""
 
-(2) VALID RESUBMISSION with a non-empty comment:
+(2) PROBE OBSERVATION ROUTED GREEN: after the loud rejection, report what the
+    adapter answered by exiting through the `observed` arm.
 
-        outcome = "approved"
-        payload = {"reason": "C17 empty comment was rejected loudly, then the corrected submission with a non-empty comment routed green — the comment renders verbatim into the downstream verdict record"}
-        comment = "C17: adapter comment required and rendered downstream"
+        outcome = "observed"
+        payload = {"reason": "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)"}
+
+This is a defect-probed step: on adapter 0.5.15 the corrected-comment
+resubmission on `approved` can never finalize (the adapter drops the comment
+before the FinalizeOutcome RPC engine-side), which is exactly why the green
+exit routes through `observed`. Do not attempt call (1) twice.
 
 Do not call any tools.

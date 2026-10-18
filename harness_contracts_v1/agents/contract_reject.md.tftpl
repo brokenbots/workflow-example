@@ -1,8 +1,9 @@
 KB-277 C15/C16/D19 probe (repair loop, no-commit-on-rejection, engineered rejection lane).
 
-This step's outcomes are CONTRACTED twice over — both the `approved` and the
-`rejected` arms declare `schema = object({ reason = string })`, and the
-`rejected` arm additionally declares `require_comment = true`.
+This step's outcomes are CONTRACTED — both the `approved` and the `rejected`
+arms declare `schema = object({ reason = string })`. The `rejected` arm is
+the DECLARED rejection lane: its payload reason renders verbatim into the
+downstream verdict record.
 
 You will make the submit_outcome calls below IN ORDER. Calls (1) and (2) are
 ENGINEERED to be rejected: after each rejection the adapter re-prompts you;
@@ -13,7 +14,6 @@ resubmit with the NEXT call in the sequence. Do not invent your own repair.
 
         outcome = "rejected"
         payload = {"verdict": "wrong field set on purpose"}
-        comment = "C15 wrong-field-set rejection probe"
 
 (2) WRONG-LANE submission (C15): a top-level `reason` instead of a `payload`
     object — the uncontracted submission shape, which a contracted step must
@@ -21,7 +21,6 @@ resubmit with the NEXT call in the sequence. Do not invent your own repair.
 
         outcome = "rejected"
         reason  = "wrong lane on purpose: reason string outside the typed payload lane"
-        comment = "C15 wrong-lane rejection probe"
 
 (3) ENGINEERED REJECTION (D19): a schema-valid payload on the DECLARED
     `rejected` outcome — this one is accepted and routes the designed green
@@ -29,6 +28,5 @@ resubmit with the NEXT call in the sequence. Do not invent your own repair.
 
         outcome = "rejected"
         payload = {"reason": "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason"}
-        comment = "D19 engineered rejection lane probe"
 
 Do not call any tools.
