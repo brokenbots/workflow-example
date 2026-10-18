@@ -210,14 +210,36 @@ step "contract_uncontracted" {
     }
 }
 
-// D21: permission policy — trailing-* band, recovered denial keeps success.
+// D21 step "contract_permissions" — proven shape, verbatim fixture carrier
+// f6_permissions.chcl. allow_tools bands match POLICY TOOL NAMES, first
+// match wins: ["s*", "shell"] grants the bash call (whose policy tool name
+// is shell) with pattern=s* echoed in permission.granted — the trailing-*
+// band winning over the later exact "shell" entry is the first-match-wins
+// glob-contract observation. The view call maps to policy tool read,
+// matches neither band, and is DENIED with a permission.denied event that
+// names the tool; the recovered denial keeps the turn's success. The
+// namespace-prefixed shapes ("adapter.copilot.main.tools.s*") match
+// NOTHING — every tool under them is denied with "no matching allow_tools
+// entry" (empirically observed; that defect is why the earlier shape could
+// not distinguish grant from denial). The approved arm carries a reason
+// payload schema: a turn that carried tool activity is contract-validated
+// even when the arm would otherwise be schema-less (a tool-bearing turn on
+// a schema-less arm fails loud with outcome_uncontracted — proven by the
+// standalone suite). Argument-level segmentation (band keys over tool
+// arguments) is not reachable through any run-event surface and is not
+// stimulatable here; the adapter-scope/first-match/trailing-* halves of the
+// D21 matrix row are pinned by the grant/denial attribution below.
+
 step "contract_permissions" {
     target      = adapter.copilot.main
-    allow_tools = ["adapter.copilot.main.tools.s*"]
+    allow_tools = ["s*", "shell"]
     input {
-        prompt = templatefile("./agents/contract_permissions.md.tftpl", {})
+        prompt = templatefile("./agents/contract_permissions.md.tftpl", {
+            probe_root = var.probe_root
+        })
     }
     outcome "approved" {
+        schema = object({ reason = string })
         write {
             target = data.internal.d21_reason.value
             value  = output.reason

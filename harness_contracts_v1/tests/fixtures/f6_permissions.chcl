@@ -1,8 +1,14 @@
-// Fixture F6 (D21): permission policy — the trailing-* allow band lets the
-// shell tool call execute while the read tool call is DENIED with a
-// permission.denied event; the recovered denial keeps the turn's success.
-// The approved arm is contracted with a reason payload (the turn carries
-// tool activity, so the outcome must have a contract entry).
+// Fixture F6 (D21): permission policy — verbatim carrier of the shipped
+// contract_permissions step (harness_contracts_v1/main.chcl): the same
+// step body, data declaration, prompt template, allow band, payload-schema
+// arm, and write block, trimmed to this single step + the done terminal.
+// The trailing-* band s* grants the bash call first-match-wins (pattern
+// echoed in permission.granted) while the view call maps to policy tool
+// read, matches no band, and is DENIED (permission.denied names the tool);
+// the recovered denial keeps the turn's success. Argument-level
+// segmentation (band keys over tool arguments) is not reachable through
+// any run-event surface; the adapter-scope/first-match/trailing-* halves
+// of the D21 matrix row are pinned by the grant/denial attribution.
 workflow {
     name             = "harness_contracts_v1_f6_permissions"
     version          = "1"
@@ -12,15 +18,26 @@ workflow {
     policy { max_total_steps = 8 }
 }
 
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
 step "contract_permissions" {
     target      = adapter.copilot.main
-    allow_tools = ["adapter.copilot.main.tools.s*"]
+    allow_tools = ["s*", "shell"]
     input {
-        prompt = templatefile("./agents/contract_permissions.md.tftpl", {})
+        prompt = templatefile("./agents/contract_permissions.md.tftpl", {
+            probe_root = var.probe_root
+        })
     }
     outcome "approved" {
         schema = object({ reason = string })
-        next   = state.done
+        write {
+            target = data.internal.d21_reason.value
+            value  = output.reason
+        }
+        next = state.done
     }
     outcome "failure" {
         fallback = true
