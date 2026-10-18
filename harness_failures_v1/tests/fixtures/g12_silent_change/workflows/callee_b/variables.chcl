@@ -1,0 +1,4 @@
+// KB-279 G12 fixture callee variables (required: the parent thread).
+variable "probe_root" {
+    type = string
+}

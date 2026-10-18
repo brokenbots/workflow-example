@@ -1,0 +1,48 @@
+// KB-279 (failures card) fixture — matrix E24: provider stall → watchdog /
+// timeout class.
+//
+// SHAPE: an engineered heartbeat-only WEDGE. The single step emits heartbeat
+// lines forever (session alive, LastStepProgress frozen): the stall carrier —
+// the StallWatchdog condition — must classify this run as STALLED (watchdog /
+// timeout class), never as idle and never as parked-without-error.
+//
+// The suite NEVER runs this tree: it is compile- and validate-time shape
+// evidence only (the live E24 fault fires as its own run within the
+// green-run plan). The wedge stimulus lives in scripts/wedge.sh.tftpl —
+// heartbeat chatter on stderr, zero step progress, sleeping past any stall
+// window.
+
+workflow {
+    name             = "e24_stall_wedge"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "wedge_poll"
+    target_state  = "failed"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+// The wedge: heartbeat-only, no step progress. `failed` IS the designed
+// terminal: a live run wedges until the StallWatchdog classifies it. Both
+// arms land on state.failed by design — a somehow-successful live wedge is
+// an observed failure through the loud success arm, never a silent pass.
+step "wedge_poll" {
+    target      = adapter.shell.pass_in
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/wedge.sh.tftpl", {
+            probe_root    = var.probe_root
+            wedge_seconds = var.wedge_seconds
+        })
+    }
+    outcome "success" { next = state.failed }
+    outcome "failure" { next = state.failed }
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

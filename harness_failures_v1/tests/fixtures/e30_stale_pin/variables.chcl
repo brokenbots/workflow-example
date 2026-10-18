@@ -1,0 +1,5 @@
+// KB-279 E30 fixture variables.
+variable "probe_root" {
+    type    = string
+    default = "/home/criteria/criteria-harness-failures"
+}

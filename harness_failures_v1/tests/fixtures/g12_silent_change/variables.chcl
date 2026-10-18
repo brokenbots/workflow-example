@@ -1,0 +1,5 @@
+// KB-279 G12 fixture variables (parent).
+variable "probe_root" {
+    type    = string
+    default = "/home/criteria/criteria-harness-failures"
+}

@@ -1,0 +1,41 @@
+// KB-279 G12 fixture callee (embedded-tree callee_b): re-states the identity
+// the parent's block traverses, with the CONTRAST shadow value the parent's
+// ADR-0009 substitution removes. Never run by the suite — the fixture exists
+// to prove the traversal flip is SILENT in the static layers.
+
+workflow {
+    name             = "g12_silent_callee_b"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "callee_b_dial"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+step "callee_b_dial" {
+    target      = adapter.shell.callee_declared
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/g12_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "g12_silent_callee"
+            record_value = "g12-silent scope=callee identity=shell.callee_declared@remote.callee_side (pod marker would read callee-shadow, never a block-attribute value)"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
