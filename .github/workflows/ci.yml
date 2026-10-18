@@ -129,10 +129,19 @@ jobs:
       # KB-277: the contracts harness (matrix C13-C18 + D19/D21/D22) —
       # per-shape fixture runs over a scripted local model stub; each matrix
       # shape asserted in run events. Skips cleanly without the pinned
-      # adapter binaries (pre-pulled above).
+      # adapter binaries (pre-pulled above). Gate integrity: a green suite
+      # that skipped would prove nothing, so the run must show the
+      # all-shapes-observed banner from actual observations.
       - name: Run harness_contracts_v1 standalone regression test (KB-277)
         run: |
-          bash harness_contracts_v1/tests/test_contracts_standalone.sh
+          set -o pipefail
+          bash harness_contracts_v1/tests/test_contracts_standalone.sh \
+            | tee /tmp/kb277_suite.log
+          banner='harness_contracts_v1 standalone suite: all fixture shapes observed in run events'
+          if ! grep -qF "$banner" /tmp/kb277_suite.log; then
+            echo "::error::harness_contracts_v1 suite skipped (pinned adapters absent at run time) — gate coverage silently lost; restore the pre-pull"
+            exit 1
+          fi
 
       # The adapter binaries pre-pulled above match workstream_handler_v1's
       # lockfile pins, so structural compile tests can resolve them locally.
