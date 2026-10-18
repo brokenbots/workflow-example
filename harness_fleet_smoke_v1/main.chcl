@@ -82,6 +82,12 @@ step "identity_handshake" {
     input {
         command = templatefile("./scripts/handshake_probe.sh.tftpl", {
             probe_root = var.probe_root
+            # The adapter TYPE presented by the operator's env injection
+            # (CRITERIA_ADAPTER_NAME = kind, matrix A1). Declared here, beside
+            # the step's own target (adapters.chcl: adapter "shell"
+            # "pass_in"), so a type drift is visible at the wiring site — the
+            # probe carries no independent copy.
+            expected_adapter_type = "shell"
         })
     }
     outcome "success" { next = step.fleet_census }
@@ -89,8 +95,9 @@ step "identity_handshake" {
 }
 
 // ── The fleet census + designed-class registry (the map live observations read)
-// One fixed-content pair of records: census.jsonl pins the F33 pod-census and
-// F34/F35 dial/queue vocabulary for the whole GREEN run; registry.jsonl names
+// One fixed-content pair of records: census_vocabulary.jsonl pins the F33
+// pod-census and F34/F35 dial/queue EXPECTED vocabulary (live operator events
+// supply the actual counts) for the whole GREEN run; registry.jsonl names
 // every designed class marker of the card slice (A1, A2 resolve + miss,
 // F33-F37) plus the loud bug arms. A live observation mapping a marker that
 // lacks a registry line is NOT a designed class of this card.

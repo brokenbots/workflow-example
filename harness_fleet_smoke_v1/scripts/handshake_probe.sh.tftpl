@@ -1,38 +1,39 @@
 probe_root={{ .probe_root | shellquote }}
+expected_adapter_type={{ .expected_adapter_type | shellquote }}
 set -eu
 command -v printf >/dev/null
 
-# A1 (fleet-smoke): the identity handshake probe. The session's handshake
-# contract is the adapter presenting its type-presented name on the wire
-# (CRITERIA_ADAPTER_NAME); per-scope sessions additionally bind the scope
-# facets. A nameless session must NEVER run green: the probe fails LOUDLY in
-# its designed class (exit 3, marker on stderr — the shell driver maps the
-# step to its failure arm, which routes state.failed). The scope facets are
-# expanded with ${VAR:-} guards captured into plain variables before the
-# record is created: an identity that never binds a facet expands it empty
-# under `set -u` instead of aborting, and a failed expansion can never leave
-# a truncated record behind.
+# A1 (fleet-smoke): the identity handshake probe. Matrix A1 of record
+# (docs/harness-expectations.md): "the adapter pod presents the type-presented
+# name (`CRITERIA_ADAPTER_NAME` = adapter **type**, never the node name)".
+# The operator injects the adapter TYPE verbatim into the session pod env
+# (criteria-k8s/internal/jobbuilder/per_scope_adapter.go:
+# {Name: "CRITERIA_ADAPTER_NAME", Value: kind}), because the engine's
+# lockfile has no node-level entries; k8s/pod-adapter-adapter.sh keys the
+# per-instance digest lookup file digest-$CRITERIA_ADAPTER_NAME off the same
+# value — so a non-type presentation is not just a wire lie, it breaks the
+# digest lookup. The EXPECTED presented name is therefore the adapter TYPE of
+# this tree (adapters.chcl declares adapter "shell" "pass_in"), injected at
+# render time from the tree's own step wiring (main.chcl) — never hardcoded
+# here. A non-type presentation (a node-instance or node name) and a nameless
+# session both fail LOUDLY in their designed classes (exit 3, marker on
+# stderr — the shell driver maps the step to its failure arm, which routes
+# state.failed). The scope facets are expanded with ${VAR:-} guards captured
+# into plain variables before the record is created: an identity that never
+# binds a facet expands it empty under `set -u` instead of aborting, and a
+# failed expansion can never leave a truncated record behind.
 adapter_name="${CRITERIA_ADAPTER_NAME:-}"
-# A1 (fleet-smoke): the presented identity must be the TYPE-PRESENTED name
-# (adapter.<type>.<name>), never the node name (matrix A1). The tree binds
-# the shell pass-in adapter on the remote.smoke node; the type-presented
-# identity is adapter.shell.pass_in. A node-name (or any non-type) presentation
-# fails LOUD in its designed class with the observed value named on stderr —
-# and the identity record still lands as evidence, carrying BOTH the observed
-# and the expected values.
-expected_type="shell.pass_in"
-expected_identity="adapter.$expected_type"
 if [ -z "$adapter_name" ]; then
     printf 'class=A1 name=identity_handshake_missing marker=session-bound-without-CRITERIA_ADAPTER_NAME (a nameless session must never run green)\n' >&2
     exit 3
 fi
-if [ "$adapter_name" != "$expected_identity" ]; then
+if [ "$adapter_name" != "$expected_adapter_type" ]; then
     records_dir="$probe_root/fleet_smoke_records"
     mkdir -p "$records_dir"
     {
         printf 'record_name=identity_handshake\n'
         printf 'adapter_name=%s\n' "$adapter_name"
-        printf 'expected_identity=%s\n' "$expected_identity"
+        printf 'expected_adapter_type=%s\n' "$expected_adapter_type"
         printf 'scope=%s\n' "${CRITERIA_SCOPE:-}"
         printf 'scope_instance=%s\n' "${CRITERIA_SCOPE_INSTANCE:-}"
     } > "$records_dir/identity"
@@ -47,7 +48,7 @@ record="$records_dir/identity"
 {
     printf 'record_name=identity_handshake\n'
     printf 'adapter_name=%s\n' "$adapter_name"
-    printf 'expected_identity=%s\n' "$expected_identity"
+    printf 'expected_adapter_type=%s\n' "$expected_adapter_type"
     printf 'scope=%s\n' "$scope"
     printf 'scope_instance=%s\n' "$scope_instance"
 } > "$record"

@@ -36,6 +36,7 @@ registry="$records_dir/registry.jsonl"
 {
     printf 'record_name=fleet_registry\n'
     printf 'class=A1 name=identity_handshake_missing marker=session-bound-without-CRITERIA_ADAPTER_NAME (a nameless session must never run green)\n'
+    printf 'class=A1 name=identity_handshake_type_mismatch marker=session-presented-node-name=<observed-at-emission> (a session must present its type-presented name, never the node name)\n'
     printf 'class=A2 name=digest_pin_resolved marker=session-opened-under-lockfile-pin resolve-half (survivor redial proves the pinned provision outlives the borrowed scope)\n'
     printf 'class=A2 name=digest_miss_refused marker=admission-refused-before-session-open (a wrong pinned digest refuses fail-closed with ZERO pod creates; D7 fail-closed)\n'
     printf 'class=F33 name=zero_pod_recreates marker=pod_creates==1-per-scope-adapter-environment\n'

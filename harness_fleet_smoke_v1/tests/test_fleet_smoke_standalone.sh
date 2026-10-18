@@ -9,13 +9,14 @@ set -uo pipefail
 # silently:
 #
 #   A1 identity handshake: the handshake probe fails LOUDLY (exit 3, designed
-#       class marker on stderr) when a session binds without its
-#       type-presented identity (CRITERIA_ADAPTER_NAME) or presents anything
-#       that is NOT the type-presented name adapter.shell.pass_in (a node-name
-#       presentation is exactly the violation matrix A1 exists to catch), and
-#       writes the identity record (adapter_name + expected_identity + guarded
-#       scope facets) when it holds; the borrower scope carries the same
-#       discipline.
+#       class marker on stderr) when a session binds without its presented
+#       identity (CRITERIA_ADAPTER_NAME) or presents anything that is NOT the
+#       adapter TYPE — matrix A1 of record: `CRITERIA_ADAPTER_NAME` = adapter
+#       type, never the node name (the operator injects the type verbatim,
+#       and pod-adapter-adapter.sh keys the digest file lookup off it) — and
+#       writes the identity record (adapter_name + expected_adapter_type +
+#       guarded scope facets) when it holds; the borrower scope carries the
+#       same discipline.
 #   A2 digest-pin resolve + miss: RESOLVE — `criteria adapter list
 #       --referenced` resolves the tree's lockfile to the recorded fleet pin,
 #       the compiled graph boots from THAT digest, and the fleet-pin record
@@ -31,7 +32,8 @@ set -uo pipefail
 #       `criteria validate --workflow-ref sha256:<pin> <url>`: matched pin →
 #       resolves and validates GREEN; wrong pin (sha256:0000…) → the
 #       fail-closed refusal names pinned-vs-resolved verbatim BEFORE any pod
-#       opens a session (zero pod creates); a byte-tampered archive → the
+#       opens a session — the pin gate fires at admission, before any
+#       session could open; a byte-tampered archive → the
 #       RESOLVED digest changes and the PRE-TAMPER expectation still fires
 #       (pin checked before content). The shipped fixture keeps its designed
 #       bogus-pin lockfile; the healthy served archive is a work copy
@@ -355,7 +357,7 @@ else
                printf '%s\n' "$dm_out" | grep -q "expected \"sha256:${dm_zero}\"" && \
                printf '%s\n' "$dm_out" | grep -q "resolved \"sha256:${dm_real}\"" && \
                printf '%s\n' "$dm_out" | grep -q 'refusing to run'; then
-                ok "A2 miss (admission): wrong expectation REFUSED fail-closed, pinned-vs-resolved named verbatim — zero sessions, zero pod creates"
+                ok "A2 miss (admission): wrong expectation REFUSED fail-closed, pinned-vs-resolved named verbatim (the refusal fires at the admission gate, before a session could open)"
                 a2_wrong=1
             else
                 fail "A2 miss (admission): wrong-expectation refusal shape missing (rc=$dm_rc):" "$dm_out"
@@ -416,7 +418,7 @@ RECORDS_DIRNAME="fleet_smoke_records"
 # (a) A1 handshake: a nameless session fails LOUD in its designed class.
 h_tpl="$TREE_ROOT/scripts/handshake_probe.sh.tftpl"
 h_rendered="$WORK/handshake.sh"
-if ! render_probe "$h_tpl" "$h_rendered" "probe_root=$WORK/probes"; then
+if ! render_probe "$h_tpl" "$h_rendered" "probe_root=$WORK/probes" "expected_adapter_type=shell"; then
     fail "handshake render: leftover template markers"
 else
     out="$(env -i PATH=/usr/bin:/bin sh "$h_rendered" 2>&1)"
@@ -427,31 +429,36 @@ else
         fail "A1 probe loud leg: rc=$rc, expected 3 + class marker; got: ${out:-<no output>}"
     fi
     h_rec="$WORK/probes/$RECORDS_DIRNAME/identity"
-    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=adapter.shell.pass_in CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
+    # Green leg feeds the OPERATOR's real env shape: the operator injects the
+    # adapter TYPE verbatim (per_scope_adapter.go {Name: "CRITERIA_ADAPTER_NAME",
+    # Value: kind}) — anything else on the suite's green path would prove only
+    # that the probe agrees with itself.
+    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=shell CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ] && \
        grep -Fxq 'record_name=identity_handshake' "$h_rec" && \
-       grep -Fxq "adapter_name=adapter.shell.pass_in" "$h_rec" && \
-       grep -Fxq "expected_identity=adapter.shell.pass_in" "$h_rec" && \
+       grep -Fxq "adapter_name=shell" "$h_rec" && \
+       grep -Fxq "expected_adapter_type=shell" "$h_rec" && \
        grep -Fxq "scope=sc-1" "$h_rec" && \
        grep -Fxq "scope_instance=inst-1" "$h_rec"; then
-        ok "A1 record: the bound handshake writes the identity record (type-presented adapter_name + expected_identity + guarded scope facets)"
+        ok "A1 record: the operator-shaped handshake (adapter TYPE) writes the identity record (adapter_name + expected_adapter_type + guarded scope facets)"
     else
         fail "A1 record leg: rc=$rc record=$h_rec got: ${out:-<no output>}"
     fi
-    # A1 type-presented invariant: a non-type presentation fails LOUD in its
-    # designed class naming the observed value (matrix A1: a session must
-    # present adapter.<type>.<name>, never the node name).
-    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=shell.pass_in_node CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
+    # A1 type-presented invariant: a NON-TYPE presentation fails LOUD in its
+    # designed class naming the observed value (matrix A1: CRITERIA_ADAPTER_NAME
+    # = adapter type, never the node name). The values are the ones a real
+    # violation would present: the node-instance name and the node name.
+    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=shell.pass_in CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
     rc=$?
     if [ "$rc" -eq 3 ] && \
        grep -q 'class=A1 name=identity_handshake_type_mismatch' <<<"$out" && \
-       grep -q 'marker=session-presented-node-name=shell.pass_in_node' <<<"$out" && \
-       grep -Fxq "adapter_name=shell.pass_in_node" "$h_rec" && \
-       grep -Fxq "expected_identity=adapter.shell.pass_in" "$h_rec"; then
-        ok "A1 probe: a non-type presentation (shell.pass_in_node) fails loud (rc=3) with the observed-vs-expected identity recorded as evidence"
+       grep -q 'marker=session-presented-node-name=shell.pass_in' <<<"$out" && \
+       grep -Fxq "adapter_name=shell.pass_in" "$h_rec" && \
+       grep -Fxq "expected_adapter_type=shell" "$h_rec"; then
+        ok "A1 probe: a node-instance-name presentation (shell.pass_in) fails loud (rc=3) with the observed-vs-expected identity recorded as evidence"
     else
-        fail "A1 type-mismatch leg: rc=$rc, expected 3 + type marker + evidence record; got: ${out:-<no output>}"
+        fail "A1 node-instance leg: rc=$rc, expected 3 + type marker + evidence record; got: ${out:-<no output>}"
     fi
     out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=remote.smoke CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$h_rendered" 2>&1)"
     rc=$?
@@ -471,7 +478,7 @@ if ! render_probe "$b_tpl" "$b_rendered" "probe_root=$WORK/probes_b"; then
     fail "borrower render: leftover template markers"
 else
     b_rec="$WORK/probes_b/$RECORDS_DIRNAME/borrower"
-    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=adapter.shell.pass_in FLEET_SMOKE_MARKER=owner CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$b_rendered" 2>&1)"
+    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=shell FLEET_SMOKE_MARKER=owner CRITERIA_SCOPE=sc-1 CRITERIA_SCOPE_INSTANCE=inst-1 sh "$b_rendered" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ] && \
        grep -Fxq "fleet_smoke_env_marker=owner" "$b_rec" && \
@@ -480,7 +487,7 @@ else
     else
         fail "borrower record leg (owner): rc=$rc got: ${out:-<no output>}"
     fi
-    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=adapter.shell.pass_in FLEET_SMOKE_MARKER=callee-shadow sh "$b_rendered" 2>&1)"
+    out="$(env -i PATH=/usr/bin:/bin CRITERIA_ADAPTER_NAME=shell FLEET_SMOKE_MARKER=callee-shadow sh "$b_rendered" 2>&1)"
     rc=$?
     if [ "$rc" -eq 0 ] && grep -Fxq "fleet_smoke_env_marker=callee-shadow" "$b_rec"; then
         ok "borrower contrast leg: the record CARRIES the facet value it is given (callee-shadow on a pod would be substitution leakage, observable)"
@@ -522,7 +529,7 @@ else
     else
         fail "census record: expected-vocabulary self-description missing (record_name/source lines)"
     fi
-    want_reg_classes="A1,A2,A2,F33,F33,F34,F35,F36,F37,BUG"
+    want_reg_classes="A1,A1,A2,A2,F33,F33,F34,F35,F36,F37,BUG"
     got_reg_classes="$(grep -o '^class=[A-Z0-9]*' "$r_rec/registry.jsonl" 2>/dev/null | sed 's/^class=//' | paste -sd, -)"
     if [ "$got_reg_classes" = "$want_reg_classes" ]; then
         ok "registry record: all designed class markers present (A1, A2 resolve+miss, F33-F37, loud bug arms)"
@@ -582,7 +589,7 @@ fi
 # through a {{ .key | shellquote }} placeholder — a template that only
 # carries shell-default fallbacks would silently IGNORE its declared knobs.
 for knob_pair in \
-    "$TREE_ROOT|scripts/handshake_probe.sh.tftpl|probe_root" \
+    "$TREE_ROOT|scripts/handshake_probe.sh.tftpl|probe_root expected_adapter_type" \
     "$TREE_ROOT|scripts/fleet_registry.sh.tftpl|probe_root" \
     "$TREE_ROOT|scripts/fleet_pin_record.sh.tftpl|probe_root fleet_pin" \
     "$TREE_ROOT/workflows/borrow_scope|scripts/borrower_record.sh.tftpl|probe_root"; do

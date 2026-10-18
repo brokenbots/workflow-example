@@ -45,7 +45,7 @@ func main() {
 		log.Fatal(err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
+		SerialNumber:          big.NewInt(time.Now().UnixNano()), // per-run serial (one mint per invocation)
 		Subject:               pkix.Name{CommonName: "criteria-dm-throwaway"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
