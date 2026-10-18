@@ -1,0 +1,15 @@
+// Variables for the KB-279 failures harness tree. The probes are
+// deterministic and need no secret channel (the tree carries no copilot
+// member — only shell identities, so no token surface is declared).
+
+variable "probe_root" {
+    description = "Absolute root under which the failures probe records are written (created by the probe scripts at run time). Must live under $HOME or CRITERIA_SHELL_ALLOWED_PATHS: the shell adapter's sandbox refuses a resolved working_directory outside that surface, so the default sits beneath the pod home the remote environments bind as their working_directory."
+    type        = string
+    default     = "/home/criteria/criteria-harness-failures"
+}
+
+variable "iter_labels" {
+    description = "For-each iteration labels (engineered iteration-failure stimulus): label \"two\" is engineered to exit 7 in loop_fail_probe."
+    type        = list(string)
+    default     = ["one", "two", "three"]
+}

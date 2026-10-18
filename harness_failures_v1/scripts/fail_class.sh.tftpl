@@ -1,0 +1,16 @@
+stimulus_class={{ .stimulus_class | shellquote }}
+stimulus_rc={{ .stimulus_rc | shellquote }}
+stimulus_step={{ .stimulus_step | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# Engineered step-failure stimulus (KB-279, E-class lane workhorse): the step
+# is DESIGNED to fail — a deterministic rc with the class marker on the
+# run-evidence channel (stderr). The class marker is what the failure outcome
+# lane and the follow-on marker record name; a success here would be a design
+# bug and must land loud (the tree's success arm routes to state.failed).
+# No record is written from a failing stimulus: the marker record is written
+# by the follow-on mark_* step on the designed lane.
+echo "engineered-failure stimulus: step=${stimulus_step} class=${stimulus_class} designed_rc=${stimulus_rc}" >&2
+printf '%s\n' "[engineered stimulus: step=${stimulus_step} class=${stimulus_class} designed_rc=${stimulus_rc}]" >&2
+exit "${stimulus_rc}"

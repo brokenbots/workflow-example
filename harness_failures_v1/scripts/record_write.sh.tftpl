@@ -1,0 +1,37 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# Fixed-content failure-probe records (KB-279): every record carries the
+# static identity value AND the three runtime environment markers:
+#   failure_main_env_marker — readable only on pods whose environment identity
+#     carried the parent's substituted declaration ("owner"); a borrower
+#     shadow value ("callee-shadow") would be substitution leakage (E27's
+#     borrower pod must never print it); empty means the pod runs an identity
+#     that never declared it (e.g. the iteration body env).
+#   failure_iter_env_marker — readable only on per-iteration pods.
+#   failure_g12_env_marker  — readable only on the g12 callee pod (the G12
+#     identity; must read "parent" — the substituted side — proving the pod
+#     evidence comes from same-key identity, never from the subworkflow
+#     block's inert `environment` traversal).
+# The markers are expanded with `${VAR:-}` guards (captured into plain
+# variables before the record file is created): identities that never
+# declared a marker expand it empty under `set -u` instead of aborting, and a
+# failed expansion can never leave a truncated record behind. One script
+# discriminates all the environment identities the failures exercise touches.
+records_dir="$probe_root/failure_probe_records"
+main_env="${FAILURE_MAIN_ENV_MARKER:-}"
+iter_env="${FAILURE_ITER_ENV_MARKER:-}"
+g12_env="${FAILURE_G12_ENV_MARKER:-}"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'failure_main_env_marker=%s\n' "$main_env"
+    printf 'failure_iter_env_marker=%s\n' "$iter_env"
+    printf 'failure_g12_env_marker=%s\n' "$g12_env"
+} > "$record"
+echo "failure record written: $record"

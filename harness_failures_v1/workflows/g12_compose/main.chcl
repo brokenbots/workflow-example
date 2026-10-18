@@ -1,0 +1,56 @@
+// KB-279 (failures card): G12 callee of harness_failures_v1 — the silent
+// env-change closeout layer. The callee re-states the G12 identity the
+// parent also declares, deliberately:
+//
+//   environment remote.g12_side — the same-key declaration the parent
+//     shadows (ADR-0009 substitution): this layer declares the contrast value
+//     "callee-shadow" that must NEVER be observed on a pod. The subworkflow
+//     block's `environment` traversal (carried by the parent block) is the
+//     compiled-but-unread attribute: pod evidence must come from same-key
+//     identity, never from that attribute.
+//
+//   adapter shell.g12_declared — the SAME definition identity the parent
+//     declares; the callee dial provisions its own (callee-scope,
+//     remote.g12_side) pod — this identity's single provision.
+
+workflow {
+    name             = "harness_failures_g12"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "dial_g12"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+// ── G12 carrier: dial over the shadowed g12_side identity ────────────────────
+// The record's failure_g12_env_marker must read "parent" (the substituted-
+// side value), never "callee-shadow" — and the subworkflow block attribute
+// must contribute nothing (G12 failure shape: changing it silently does
+// nothing; the fixture pins the changed-traversal spelling).
+step "dial_g12" {
+    target      = adapter.shell.g12_declared
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/record_write.sh.tftpl", {
+            probe_root   = var.probe_root
+            record_name  = "g12_dial"
+            record_value = "g12-dial scope=callee identity=shell.g12_declared@remote.g12_side (block traversal inert by design)"
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" { next = state.failed }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}

@@ -1,0 +1,146 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+max_attempts={{ .max_attempts | shellquote }}
+backoff_seconds={{ .backoff_seconds | shellquote }}
+sleep_budget={{ .sleep_budget | shellquote }}
+fail_all={{ .fail_all | shellquote }}
+set -eu
+command -v printf >/dev/null
+command -v sleep >/dev/null
+
+# Bounded-retry probe (KB-279, E25 carrier): the KB-219 retry contract as a
+# designed in-run stimulus, with its honest routes. Bounded: RETRY_MAX
+# attempts over the RETRY_BACKOFF schedule, clamped by a cumulative sleep
+# budget so a step's wall clock extends by at most the budget. Classification:
+# only transient transport classes are retried (5xx, rate limit, timeout,
+# refused/reset, tls, dns — the rate-limit class is checked BEFORE the 4xx
+# branch so 429 stays transient); verdict-shaped/non-transient results are
+# never retried. Evidence: attempt#= + error class go to stderr per attempt
+# as run evidence; stdout stays reserved for the record lane. Exhaustion is
+# the honest route: the exhaustion record names the class and the step's
+# failure outcome routes to the awaiting-human PARK spelling
+# (state.need_assistance) — never a silent swallow, never a failed route.
+#
+# The synthetic stimulus fails transiently (a 503-shaped body) for the first
+# two attempts and recovers on attempt 3, so the GREEN run proves the
+# bounded-retry shape resolves back onto its success lane; the exhaustion
+# half (fail_all) is exercised by the standalone suite.
+RETRY_MAX=4
+case "$max_attempts" in ''|*[!0-9]*) : ;; *) RETRY_MAX=$max_attempts ;; esac
+[ "$RETRY_MAX" -ge 1 ] || RETRY_MAX=1
+RETRY_BUDGET=30
+case "$sleep_budget" in ''|*[!0-9]*) : ;; *) RETRY_BUDGET=$sleep_budget ;; esac
+RETRY_SLEEP_USED=0
+
+retry_is_transient() {
+    # Classifies combined command output as a transient transport error.
+    # Sets RETRY_ERR_CLASS and returns 0 when transient, else returns 1.
+    _rt_text=$1
+    case "$_rt_text" in
+        *"rate limit"*|*"abuse detection"*|*"too many requests"*|*"returned error: 429"*|*"http 429"*)
+            RETRY_ERR_CLASS=rate_limit ;;
+        *"tls handshake"*|*"handshake timeout"*|*"ssl connect"*|*"tlsv1"*)
+            RETRY_ERR_CLASS=tls_handshake_timeout ;;
+        *"connection reset"*|*"broken pipe"*)
+            RETRY_ERR_CLASS=connection_reset ;;
+        *"connection refused"*)
+            RETRY_ERR_CLASS=connection_refused ;;
+        *"connection timed out"*|*"i/o timeout"*|*"timed out"*|*"failed to connect"*|*"unable to connect"*)
+            RETRY_ERR_CLASS=connect_timeout ;;
+        *"could not resolve host"*|*"name resolution"*|*"no address associated"*)
+            RETRY_ERR_CLASS=dns_failure ;;
+        *"http 4"*|*"returned error: 4"*)
+            return 1 ;;
+        *"http 5"*|*"502"*|*"503"*|*"504"*|*"internal server error"*|*"bad gateway"*|*"service unavailable"*|*"gateway timeout"*|*"returned error: 5"*)
+            RETRY_ERR_CLASS=http_5xx ;;
+        *)
+            return 1 ;;
+    esac
+    return 0
+}
+
+stimulate() {
+    # The engineered stimulus: transient (503-shaped, class http_5xx) on the
+    # first two attempts, success from attempt 3 — unless fail_all=1, in
+    # which case every attempt fails transiently (the exhaustion half).
+    _sa_attempt=$1
+    if [ "$fail_all" = "1" ] || [ "$_sa_attempt" -le 2 ]; then
+        printf 'http 503 service unavailable (engineered)\n'
+        return 3
+    fi
+    printf 'stimulus recovered\n'
+    return 0
+}
+
+attempt=0
+recovered=0
+exhausted=0
+err_class=none
+final_rc=0
+while :; do
+    attempt=$((attempt + 1))
+    RETRY_ERR_CLASS=non_transient
+    _out=$(stimulate "$attempt" 2>&1) && _rc=0 || _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        recovered=1
+        err_class=none
+        break
+    fi
+    if retry_is_transient "$_out"; then
+        err_class=$RETRY_ERR_CLASS
+        if [ "$attempt" -ge "$RETRY_MAX" ]; then
+            exhausted=1
+            final_rc=$_rc
+            break
+        fi
+        _wait=""
+        _seen=0
+        for _s in $backoff_seconds; do
+            case "$_s" in *[!0-9]*) continue ;; esac
+            _seen=$((_seen + 1))
+            _wait=$_s
+            [ "$_seen" -ge "$attempt" ] && break
+        done
+        [ -n "$_wait" ] || _wait=1
+        _allowance=$((RETRY_BUDGET - RETRY_SLEEP_USED))
+        [ "$_allowance" -le 0 ] && _allowance=0
+        [ "$_wait" -le "$_allowance" ] || _wait=$_allowance
+        [ "$_wait" -ge 0 ] || _wait=0
+        if [ "$_wait" -gt 0 ]; then
+            sleep "$_wait"
+            RETRY_SLEEP_USED=$((RETRY_SLEEP_USED + _wait))
+        fi
+        printf 'retry engine: attempt=%s/%s result=retry class=%s wait=%ss\n' "$attempt" "$RETRY_MAX" "$err_class" "$_wait" >&2
+    else
+        # Non-transient: never retried — the caller's honest failure route
+        # stays in charge (exit the original rc, no park).
+        final_rc=$_rc
+        break
+    fi
+done
+
+if [ "$recovered" -eq 0 ] && [ "$exhausted" -eq 0 ]; then
+    printf 'retry engine: attempt=%s result=pass_through class=non_transient (honest failure route)\n' "$attempt" >&2
+    exit "$final_rc"
+fi
+
+records_dir="$probe_root/failure_probe_records"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'retry_recovered=%s\n' "$recovered"
+    printf 'retry_exhausted=%s\n' "$exhausted"
+    printf 'retry_attempts=%s\n' "$attempt"
+    printf 'retry_err_class=%s\n' "$err_class"
+    printf 'retry_sleep_used_seconds=%s\n' "$RETRY_SLEEP_USED"
+} > "$record"
+echo "failure record written: $record"
+if [ "$recovered" -eq 1 ]; then
+    printf 'retry engine: attempt=%s result=recovered class=none\n' "$attempt" >&2
+    exit 0
+fi
+printf 'retry engine: attempt=%s result=exhausted class=%s — park route (need_assistance)\n' "$attempt" "$err_class" >&2
+exit 1

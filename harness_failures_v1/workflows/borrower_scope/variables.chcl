@@ -1,0 +1,7 @@
+// Variables for the KB-279 borrower callee (E27): the probe_root is passed in
+// by the parent's subworkflow input; the probes need no other surface.
+
+variable "probe_root" {
+    description = "Absolute root under which the failures probe records are written (passed in from the parent tree)."
+    type        = string
+}

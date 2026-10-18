@@ -1,0 +1,56 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+iter_label={{ .iter_label | shellquote }}
+fail_label={{ .fail_label | shellquote }}
+designed_rc={{ .designed_rc | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# Iteration probe with the ENGINEERED iteration-failure stimulus (KB-279):
+# the fail_label iteration is designed to fail (deterministic rc, class
+# marker on the run-evidence stderr channel AND on its record before exit) so
+# the loop's any_failed aggregate arm is the exercised lane. Non-failing
+# iterations record normally. The designed_rc value is validated numeric
+# before use so a rendered misconfiguration can never smuggle a shell word
+# into the exit status.
+case "$designed_rc" in
+    ''|*[!0-9]*) echo "designed_rc must be numeric, got: $designed_rc" >&2; exit 2 ;;
+esac
+[ "$designed_rc" -ge 1 ] && [ "$designed_rc" -le 255 ] || {
+    echo "designed_rc must be within 1..255, got: $designed_rc" >&2
+    exit 2
+}
+
+records_dir="$probe_root/failure_probe_records"
+main_env="${FAILURE_MAIN_ENV_MARKER:-}"
+iter_env="${FAILURE_ITER_ENV_MARKER:-}"
+g12_env="${FAILURE_G12_ENV_MARKER:-}"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+
+if [ "$iter_label" = "$fail_label" ]; then
+    # The engineered failing iteration: class marker into the evidence
+    # stream, marker into the record, then the designed exit status.
+    {
+        printf 'record_name=%s\n' "$record_name"
+        printf 'record_value=%s\n' "$record_value"
+        printf 'engineered_iteration_failure=1\n'
+        printf 'engineered_iteration_class=engineered_iteration_failure\n'
+        printf 'failure_main_env_marker=%s\n' "$main_env"
+        printf 'failure_iter_env_marker=%s\n' "$iter_env"
+        printf 'failure_g12_env_marker=%s\n' "$g12_env"
+    } > "$record"
+    echo "engineered iteration failure: label=${iter_label} class=engineered_iteration_failure designed_rc=${designed_rc}" >&2
+    exit "${designed_rc}"
+fi
+
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'engineered_iteration_failure=0\n'
+    printf 'failure_main_env_marker=%s\n' "$main_env"
+    printf 'failure_iter_env_marker=%s\n' "$iter_env"
+    printf 'failure_g12_env_marker=%s\n' "$g12_env"
+} > "$record"
+echo "failure record written: $record"

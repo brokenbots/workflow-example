@@ -1,0 +1,21 @@
+probe_root={{ .probe_root | shellquote }}
+record_name={{ .record_name | shellquote }}
+record_value={{ .record_value | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# Borrower-side failure record (KB-279, E27): the borrower pod's evidence.
+# failure_main_env_marker must read "owner" (the substituted side). The zero
+# provision_wanted expectation is carried in the record value: the borrower
+# scope wires nothing new, so no pod provisioning event is designed for it.
+records_dir="$probe_root/failure_probe_records"
+main_env="${FAILURE_MAIN_ENV_MARKER:-}"
+mkdir -p "$records_dir"
+record="$records_dir/$record_name"
+{
+    printf 'record_name=%s\n' "$record_name"
+    printf 'record_value=%s\n' "$record_value"
+    printf 'failure_main_env_marker=%s\n' "$main_env"
+    printf 'provision_wanted_events=0\n'
+} > "$record"
+echo "failure record written: $record"

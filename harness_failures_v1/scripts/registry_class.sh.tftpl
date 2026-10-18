@@ -1,0 +1,29 @@
+probe_root={{ .probe_root | shellquote }}
+set -eu
+command -v printf >/dev/null
+
+# The designed failure-class registry (KB-279, matrix E24-E32 + G12): one
+# fixed-content record enumerating every DESIGNED class marker the card's
+# failure slice can land in, its carrier (who owns the failure surface) and
+# its lane (where the designed route ends). Live observations map onto this
+# vocabulary; a class missing from this registry is not a designed class of
+# this card — anything else is an undesignated failure and must stay loud.
+records_dir="$probe_root/failure_probe_records"
+mkdir -p "$records_dir"
+record="$records_dir/failure_class_registry"
+{
+    printf 'record_name=failure_class_registry\n'
+    printf '# KB-279 designed failure-class registry (matrix E24-E32 + G12).\n'
+    printf 'class=E24 name=stall_watchdog carrier=operator-condition/StallWatchdog stimulus=fixture:tests/fixtures/e24_stall_wedge lane=engine-owned (LastStepProgress staleness, heartbeat-only sessions)\n'
+    printf 'class=E25 name=bounded_retry_park carrier=retry-evidence(github.com/brokenbots/criteria-adapter-shell session) stimulus=in-run retry_bounded_probe lane=state.need_assistance on exhaustion; recovered attempts stay on the success lane\n'
+    printf 'class=E26 name=unscheduled_capacity carrier=operator pod-scheduling events stimulus=manifest/capacity lane=distinct marker from handshake_budget_exhausted (never a merged "failed" class)\n'
+    printf 'class=E26 name=handshake_budget_exhausted carrier=operator adapter-session handshake budget lane=distinct marker from unscheduled_capacity (never a merged "failed" class)\n'
+    printf 'class=E27 name=zero_provision_wanted_borrower carrier=runner provision_wanted census stimulus=in-run borrower_scope lane=none (a scope with nothing new to wire must emit ZERO provision_wanted events)\n'
+    printf 'class=E28 name=heartbeat_park carrier=operator heartbeat reaper lane=state.need_assistance (parked, never failed; heartbeats never count as step progress)\n'
+    printf 'class=E29 name=restart_resume carrier=operator pod lifecycle stimulus=container restart lane=resume-not-replay (records are byte-stable, so a replay cannot fake a resume)\n'
+    printf 'class=E30 name=stale_pin_refusal carrier=admission (criteria validate) stimulus=fixture:tests/fixtures/e30_stale_pin lane=fail-closed refusal naming the expected-pin mismatch (asserted by the standalone suite)\n'
+    printf 'class=E31 name=base_image_mismatch carrier=operator-condition/BaseImageMismatch (CRI-264) lane=fail-closed refusal (pinned base image vs resolved runner image)\n'
+    printf 'class=E32 name=mirror_unreachable carrier=operator pod-pull events lane=own identified class naming the broken mirror (localhost:5000 registry), never a generic failure\n'
+    printf 'class=G12 name=silent_env_change carrier=engine (SubworkflowNode.Environment compiled-but-unread) stimulus=fixture:tests/fixtures/g12_silent_change lane=inert (a traversal change must change nothing; defect files to the engine carrier)\n'
+} > "$record"
+echo "failure class registry written: $record"
