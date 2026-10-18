@@ -178,11 +178,27 @@ for state_name in need_assistance ready_for_development; do
     fi
 done
 
-# Only cross-tree dependency allowed: the qa_triage_v1 subworkflow.
+# Cross-tree dependencies are exactly two: the qa_triage_v1 QA sweep and
+# KB-284's review_triage_v1 subworkflow hosting the QA-output reviewer copilot
+# in its own tree (CRI-269 per-scope remote env, the same hosting contract the
+# qa_triage_v1 agents already run under).
 subwf_count="$(jq -r '.subworkflows | length' "$GRAPH")"
-[ "$subwf_count" -eq 1 ] || fail "expected exactly 1 subworkflow (qa_triage), got $subwf_count"
-subwf_name="$(jq -r '.subworkflows[0].body.name // ""' "$GRAPH")"
-require_equal "$subwf_name" "qa_triage_v1" "subworkflow is qa_triage_v1"
+[ "$subwf_count" -eq 2 ] || fail "expected exactly 2 subworkflows (qa_triage + review_output), got $subwf_count"
+subwf_names="$(jq -r '[.subworkflows[] | .body.name] | sort | join(" ")' "$GRAPH")"
+require_equal "$subwf_names" "qa_triage_v1 review_triage_v1" "subworkflows are exactly qa_triage_v1 and review_triage_v1"
+
+# The reviewer must stay per-scope hosted: the reviewer copilot binds the
+# remote.review env inside its own subworkflow (never an eager local CLI bind
+# at the parent root scope, the KB-284 defect), and it pins the same copilot
+# digest the qa_triage_v1 investigators/supervisors proved live.
+require_equal \
+    "$(jq -r '.subworkflows[] | select(.body.name == "review_triage_v1") | .body.adapters[] | select(.name == "triage_reviewer") | .environment' "$GRAPH")" \
+    "remote.review" \
+    "reviewer copilot binds the per-scope remote.review env (KB-284)"
+require_equal \
+    "$(jq -r '.subworkflows[] | select(.body.name == "review_triage_v1") | .body.adapters[] | select(.name == "triage_reviewer") | .pinned_digest' "$GRAPH")" \
+    "$(jq -r '.subworkflows[] | select(.body.name == "qa_triage_v1") | .body.adapters[] | select(.name == "investigator") | .pinned_digest' "$GRAPH")" \
+    "reviewer copilot is pinned to the digest the qa_triage_v1 copilots proved live"
 
 # No develop coupling anywhere in the compiled graph. "run_handler" is quoted
 # exactly so the documented reviewer outcome token valid_run_handler does not
@@ -812,7 +828,7 @@ jq -n '{}' > "$MOCK_CFG"
 
 # ── 7. linear_* trees untouched ──────────────────────────────────────────────
 
-untouched="$(git -C "$REPO_ROOT" status --porcelain -- linear_intake_v1 linear_triage_v1 linear_develop_v1 qa_triage_v1 workstream_handler_v1)"
+untouched="$(git -C "$REPO_ROOT" status --porcelain -- linear_intake_v1 linear_triage_v1 linear_develop_v1 qa_triage_v1 review_triage_v1 workstream_handler_v1)"
 if [ -z "$untouched" ]; then
     ok "linear_* and shared subworkflow trees are untouched (no uncommitted changes)"
 else
