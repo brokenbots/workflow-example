@@ -84,6 +84,15 @@ data "internal" "d21_reason" {
 // ── Steps ────────────────────────────────────────────────────────────────────
 
 // C14: valid payload accepted.
+// C13 carrier: this step declares one schema'd arm (approved) and one
+// deliberately UNDECLARED arm (rejected, no schema, documented no-op route).
+// Declaring any schema contracts ALL arms of the step: the undeclared arm
+// compiles but carries no outcome_contracts entry, so a submission on it
+// fails LOUD at run time — StepOutcomeInvalid issued with the
+// "outcome_uncontracted: ... has no outcome_contracts entry" schema
+// contract diagnostic within seconds of the step (the KB-246 no_work
+// class). The fixed prompt never submits it; the standalone suite fires it
+// against the real tree with a scripted stub and asserts the loud shape.
 step "contract_valid" {
     target      = adapter.copilot.main
     allow_tools = []
@@ -97,6 +106,9 @@ step "contract_valid" {
             value  = output.reason
         }
         next = step.contract_reject
+    }
+    outcome "rejected" {
+        next = state.failed
     }
 }
 
