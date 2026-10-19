@@ -16,7 +16,9 @@ PAUSE_S="{{ .pause_s }}"
 # numeric round; empty/degarbage degrades to 1 (bounded start, never unbounded)
 if printf '%s' "$ROUND" | grep -qE '^[0-9]+$'; then NEW=$((ROUND + 1)); else NEW=1; fi
 
-# stall tracking: wait -> stall++ ; anything else resets
+# stall tracking: bare wait -> stall++ ; wait_live (in-flight child PR/CR
+# progressing) or any real action resets. A live develop run taking 1-2h is
+# EXPECTED state, not a deadlock (dave 10-19).
 if [ "$LAST" = "wait" ]; then
     if printf '%s' "$STALL" | grep -qE '^[0-9]+$'; then NEWSTALL=$((STALL + 1)); else NEWSTALL=1; fi
 else

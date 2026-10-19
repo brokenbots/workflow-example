@@ -142,9 +142,11 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                 exit 0
                 ;;
             "Running"|"Pending"|"boot")
-                jq -n --arg a wait --arg r "CR $cr_nm phase $cr_ph" \
+                # live in-flight child = PROGRESS wait, not a stall (dave 10-19: the
+                # shepherd must idle calmly while the developer grinds, 1-2h is normal)
+                jq -n --arg a wait_live --arg r "CR $cr_nm phase $cr_ph (in-flight)" \
                     '{action:$a,reason:$r}' > "$ACTION_FILE"
-                token wait
+                token wait_live
                 exit 0
                 ;;
             "Succeeded"|"Failed"|"Completed")
@@ -231,8 +233,8 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                         exit 0
                         ;;
                     wait)
-                        jq -n --arg a wait '{action:$a}' > "$ACTION_FILE"
-                        token wait
+                        jq -n --arg a wait_live --arg r "own PR checks pending" '{action:$a,reason:$r}' > "$ACTION_FILE"
+                        token wait_live
                         exit 0
                         ;;
                     red)

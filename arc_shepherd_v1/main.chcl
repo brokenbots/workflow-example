@@ -293,6 +293,10 @@ switch "route_action" {
         next      = step.round_close
     }
     match {
+        condition = data.internal.last_action.value == "wait_live"
+        next      = step.round_close
+    }
+    match {
         condition = data.internal.last_action.value == "budget_exhausted"
         next      = step.write_cycle_summary
     }
