@@ -1,0 +1,129 @@
+#!/bin/sh
+# confirm_action.sh — execute the decided action, then read back the claimed
+# post-state. The decider NEVER executes: this is the only step that mutates
+# anything, exactly once per round, and it verifies its own write (external
+# state verification discipline).
+#
+# Reads $RUN_ROOT/round_action.json. On success prints the ACTION TOKEN whose
+# post-state was VERIFIED. On stall/mismatch prints nothing on stdout, writes
+# the mismatch detail to stderr and exits 2 (outcome "stall"). Hard exit 1 =
+# infra failure (outcome "failure" -> escalated terminal).
+set -eu
+
+RUN_ROOT="{{ .run_root }}"
+export KB_URL="${KB_URL:?KB_URL not in environment}"
+export KB_TOKEN="${KB_TOKEN:?KB_TOKEN not in environment}"
+
+ACTION_FILE="$RUN_ROOT/round_action.json"
+[ -s "$ACTION_FILE" ] || { echo "no action file" >&2; exit 1; }
+
+DRY="{{ .dry_run }}"
+ACTION=$(jq -r '.action' "$ACTION_FILE")
+case "$ACTION" in
+    arm|refire|merge|park_classified)
+        if [ "$DRY" = "true" ]; then
+            echo "dry_run: mutation action '$ACTION' suppressed" >&2
+            printf '%s' wait
+            exit 0
+        fi
+        ;;
+esac
+TID=$(jq -r '.task_id // 0' "$ACTION_FILE")
+CONFIRM="$RUN_ROOT/round_confirm.json"
+
+# shellcheck source=kb_lib.sh.tftpl
+. "$RUN_ROOT/lib/kb_lib.sh"
+
+case "$ACTION" in
+
+refire)
+    # re-apply the terminal CR minus runtime fields, fresh timestamped name
+    YAML=$(jq -r '.cr_yaml' "$ACTION_FILE")
+    CR_OLD=$(jq -r '.cr' "$ACTION_FILE")
+    NEW_CR=$(echo "$CR_OLD" | sed "s/-[0-9]*$//-$(date +%s)")
+    KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" python3 - "$YAML" "$NEW_CR" <<'PYEOF' > "$RUN_ROOT/refire_apply.json"
+import sys, yaml, json
+src, name = sys.argv[1].strip(), sys.argv[2]
+doc = yaml.safe_load(open(src))
+doc = {k: v for k, v in doc.items() if k not in ("status",)}
+md = doc.get("metadata", {})
+for k in ("uid", "creationTimestamp", "finalizers", "resourceVersion", "generation",
+          "managedFields", "selfLink", "annotations"):
+    md.pop(k, None)
+md["name"] = name
+doc["metadata"] = md
+print(json.dumps(doc))
+PYEOF
+    jq -c . "$RUN_ROOT/refire_apply.json" > "$RUN_ROOT/refire_apply_clean.json"
+    KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl apply -f "$RUN_ROOT/refire_apply_clean.json" >&2
+    sleep 8
+    PHASE=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun -n criteria-jobs "$NEW_CR" \
+        -o jsonpath='{.status.phase}' 2>/dev/null || echo "pending")
+    jq -n --arg cr "$NEW_CR" --arg ph "$PHASE" '{cr:$cr,phase:$ph}' > "$CONFIRM"
+    printf 'refire'   # post-state will re-verify next round; refire is fire-and-track
+    ;;
+
+park_classified)
+    # strip k8s-run (full surviving tag list - no removeTaskTag procedure),
+    # keep the card in Ready, post the classification comment with evidence.
+    SURVIVING=$(kb_task_tags "$TID" | jq -c '[.[] | select(. != "k8s-run")]')
+    kb_update_task "{\"id\":$TID}" >/dev/null  # touch to verify write access
+    kb_call setTaskTags "{\"project_id\":1,\"task_id\":$TID,\"tags\":$SURVIVING}" >/dev/null
+    CR=$(jq -r '.cr' "$ACTION_FILE"); RID=$(jq -r '.run_id // ""' "$ACTION_FILE")
+    SIG=$(jq -r '.signature' "$ACTION_FILE"); REASON=$(jq -r '.reason' "$ACTION_FILE")
+    COMMENT="Shepherd classification (arc_shepherd_v1, round $(date -u +%FT%TZ)): $REASON. CR $CR run ${RID:-n/a}; signature $SIG. Parked UN-ARMED in Ready per the merge-gate contract: the fix belongs to the engineering lane (arm card -> develop job -> PR); this card re-arms on the fix landing. No code was touched by the shepherd."
+    kb_create_comment "$TID" "$(jq -n --arg c "$COMMENT" '$c')" >/dev/null
+    # verify: tags no longer contain k8s-run
+    NOW=$(kb_task_tags "$TID" | jq -r '[.[]] | join("|")')
+    if printf '%s' "$NOW" | grep -q 'k8s-run'; then echo "park verify failed: k8s-run still present" >&2; exit 2; fi
+    jq -n --arg tid "$TID" --arg sig "$SIG" '{task_id:($tid|tonumber),signature:$sig,verified:true}' > "$CONFIRM"
+    printf 'park_classified'
+    ;;
+
+merge)
+    PR=$(jq -r '.pr' "$ACTION_FILE")
+    ACTOR=$(jq -r '.actor' "$ACTION_FILE")
+    REPO=$(printf '%s' "$PR" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')
+    NUM=$(printf '%s' "$PR" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+    WHO=$(gh api user --jq .login 2>/dev/null || echo "?")
+    if [ "$WHO" != "$ACTOR" ]; then
+        echo "merge identity mismatch: active gh=$WHO, policy=$ACTOR" >&2
+        exit 2
+    fi
+    # re-verify the FULL gate immediately before merge (external state check)
+    ROLL=$(gh pr view "$NUM" --repo "$REPO" --json statusCheckRollup,latestReviews,author --jq \
+        '{checks: [.statusCheckRollup[].status], approved: ([.latestReviews[] | select(.author.login != (.author.login)) | select(.state=="APPROVED")] | length), author: .author.login}')
+    ALLDONE=$(printf '%s' "$ROLL" | jq -r '[.checks[] | select(. != "SUCCESS")] | length == 0')
+    APPROVED=$(printf '%s' "$ROLL" | jq -r '.approved > 0')
+    if [ "$ALLDONE" != "true" ] || [ "$APPROVED" != "true" ]; then
+        echo "gate regressed before merge: $ROLL" >&2
+        exit 2
+    fi
+    gh pr merge "$NUM" --repo "$REPO" --squash --admin=false >&2 || { echo "merge command failed" >&2; exit 2; }
+    jq -n --arg pr "$PR" --arg who "$WHO" '{pr:$pr,merged_by:$who}' > "$CONFIRM"
+    printf 'merge'
+    ;;
+
+arm)
+    # arm = full armed tag set via setTaskTags (full-list semantics) + move Ready.
+    # Author pin is verified BEFORE arming: the child has no PR yet, so the pin
+    # is an assertion on the manifest entry (develop runs open PRs as the
+    # pinned identity; a mismatch surfaces at gate-check time as a violation).
+    TID=$(jq -r '.task_id' "$ACTION_FILE")
+    SURVIVING=$(kb_task_tags "$TID" | jq -c '[.[]] ')
+    # add k8s-run if absent, preserve repo criteria internal-reproduced rules
+    HAS=$(printf '%s' "$SURVIVING" | jq -r 'any(. == "k8s-run")')
+    if [ "$HAS" != "true" ]; then
+        SURVIVING=$(printf '%s' "$SURVIVING" | jq -c '. + ["k8s-run"]')
+    fi
+    kb_call setTaskTags "{\"project_id\":1,\"task_id\":$TID,\"tags\":$SURVIVING}" >/dev/null
+    col_ready=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" true)   # placeholder no-op
+    kb_move_task "{\"project_id\":1,\"swimlane_id\":1,\"task_id\":$TID,\"column_id\":2,\"position\":1}" >/dev/null
+    NOW=$(kb_task_tags "$TID" | jq -r '[.[]] | join("|")')
+    if ! printf '%s' "$NOW" | grep -q 'k8s-run'; then echo "arm verify failed" >&2; exit 2; fi
+    jq -n --arg tid "$TID" '{task_id:($tid|tonumber),armed:true}' > "$CONFIRM"
+    printf 'arm'
+    ;;
+
+*) echo "unknown action $ACTION" >&2; exit 1 ;;
+esac

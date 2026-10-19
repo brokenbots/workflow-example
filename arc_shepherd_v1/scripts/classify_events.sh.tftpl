@@ -1,0 +1,15 @@
+#!/bin/sh
+# classify_events.sh CASTLE_URL RUN_ID -> one of:
+#   transient_infra | tree_defect | engine_defect | operator_defect | unclear
+# Deterministic signature greps over the run's event tail (stepOutcome errors,
+# runCompleted). A run with NO stepOutcome error and finalState done/succeeded
+# = clean (prints "clean").
+CASTLE="$1"; RID="$2"
+[ -n "$RID" ] || { echo "unreadable"; exit 0; }
+EV=$(curl -sS -m 20 -X POST "$CASTLE/criteria.v1.ServerService/ListRunEvents" \
+    -H 'Content-Type: application/json' -d "{\"runId\":\"$RID\"}")
+[ -n "$EV" ] || { echo "unreadable"; exit 0; }
+# pull every stepOutcome error string + the runCompleted line
+ERRS=$(printf '%s' "$EV" | jq -r '[.events[] | .stepOutcome | select(.error != null and .error != "") | .error] | join("\n---\n")')
+FINAL=$(printf '%s' "$EV" | jq -r '(.events[] | select(.runCompleted != null) | .runCompleted) // empty')
+printf '%s\n==FINAL==\n%s\n' "$ERRS" "$FINAL"

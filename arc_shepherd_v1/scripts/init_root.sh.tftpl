@@ -1,0 +1,27 @@
+#!/bin/sh
+# init_root.sh — idempotent run-root preparation. Evidence accumulates across
+# rounds; round state resets. Prints "initialized".
+set -eu
+RUN_ROOT="{{ .run_root }}"
+MANIFEST="{{ .arc_manifest }}"
+
+mkdir -p "$RUN_ROOT/consult" "$RUN_ROOT/evidence"
+
+# The manifest is read-only input: verify it exists and parses before any
+# round touches the board. Fail loudly here, not mid-arc.
+if [ ! -r "$MANIFEST" ]; then
+    echo "FATAL manifest unreadable: $MANIFEST" >&2
+    exit 1
+fi
+if ! jq -e . "$MANIFEST" >/dev/null 2>&1; then
+    echo "FATAL manifest not valid JSON: $MANIFEST" >&2
+    exit 1
+fi
+
+# round state files (reset each cycle; evidence/ is append-only history)
+for f in round_action.json round_confirm.json round_counter stall_counter; do
+    : > "$RUN_ROOT/$f"
+done
+
+# seed stall + round if absent (re-entrant relaunch keeps evidence, resets counters)
+echo "initialized $RUN_ROOT (manifest bytes: $(wc -c < "$MANIFEST"))"

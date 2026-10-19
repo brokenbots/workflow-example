@@ -1,0 +1,24 @@
+Guidance consult prompt (no tools are offered — the bundle COMES to you).
+The consult bundle content follows at the bottom of this prompt. Read it
+fully. Then submit the typed verdict as the FINAL message with EXACTLY
+this shape (top-level fields, no payload wrapper, no comment):
+
+  reason = {"verdict_class":"execute"|"escalate","rationale":"...","actions":[...]}
+
+- reason: ONLY the JSON document above, as a single string. No prose outside
+  it. Do NOT wrap it in a payload object. Do NOT add a comment field.
+- verdict_class execute: every action token is inside the allowed set
+  (refire_cr | park_ticket | comment_ticket | hold_merge | watch_fix) and
+  verified against the bundle + doctrine excerpts.
+- verdict_class escalate: anything needing authority beyond that set, or a
+  bundle too thin to judge safely (say exactly what is missing in rationale).
+  Empty actions array.
+- actions: JSON array of {"action":"<token>","args":{...}}; args per the
+  guidance system prompt.
+
+Judge ONLY from the material below; if it is insufficient for a safe execute
+verdict, escalate with the missing-material list in rationale.
+
+===================== THE CONSULT BUNDLE =====================
+
+{{ .bundle_text }}

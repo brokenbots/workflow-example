@@ -1,0 +1,36 @@
+#!/bin/sh
+# round_close.sh — bump the round counter (string-typed data block, house
+# round-bound doctrine). stdout = the NEW counter value, or the token
+# "budget_spent" when counter+1 would exceed the budget. Also tracks stalls:
+# a wait round with no state change increments stall_count (persisted here,
+# read back by decide_action next round; stall >= 3 flips wait -> ambiguous
+# before the budget burns).
+set -eu
+RUN_ROOT="{{ .run_root }}"
+ROUND="{{ .round }}"
+LAST="{{ .last_action }}"
+STALL="{{ .stall_count }}"
+BUDGET="{{ .budget }}"
+PAUSE_S="{{ .pause_s }}"
+
+# numeric round; empty/degarbage degrades to 1 (bounded start, never unbounded)
+if printf '%s' "$ROUND" | grep -qE '^[0-9]+$'; then NEW=$((ROUND + 1)); else NEW=1; fi
+
+# stall tracking: wait -> stall++ ; anything else resets
+if [ "$LAST" = "wait" ]; then
+    if printf '%s' "$STALL" | grep -qE '^[0-9]+$'; then NEWSTALL=$((STALL + 1)); else NEWSTALL=1; fi
+else
+    NEWSTALL=0
+fi
+echo "$NEWSTALL" > "$RUN_ROOT/stall_counter"
+
+if [ "$NEW" -gt "$BUDGET" ]; then
+    printf 'budget_spent'
+    exit 0
+fi
+
+# persist the new round BEFORE pausing? No: heartbeat_wait pauses, round_open
+# reads data.internal.round which the step write updated. The counter file is
+# a mirror for post-mortems.
+echo "$NEW" > "$RUN_ROOT/round_counter"
+printf '%s' "$NEW"

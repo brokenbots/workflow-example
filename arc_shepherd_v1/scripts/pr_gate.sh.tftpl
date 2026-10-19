@@ -1,0 +1,29 @@
+#!/bin/sh
+# pr_gate.sh REPO DEV_ACTOR -> JSON {state,author,url,gate} for the newest open
+# PR on the arc branch naming convention (develop runs open PRs from KB-<id>
+# branches); gate = green | wait | red | none. Deterministic gh reads only.
+REPO="$1"; DEV_ACTOR="$2"
+PR_JSON=$(gh pr list --repo "$REPO" --state open --limit 5 --json number,author,url,headRefName,mergeable,mergeStateStatus 2>/dev/null)
+[ -n "$PR_JSON" ] || { echo "{}"; exit 0; }
+PR=$(printf '%s' "$PR_JSON" | jq -c 'sort_by(.number) | reverse | .[0] // empty')
+[ -n "$PR" ] || { echo "{}"; exit 0; }
+NUM=$(printf '%s' "$PR" | jq -r '.number')
+AUTH=$(printf '%s' "$PR" | jq -r '.author.login // "none"')
+URL=$(printf '%s' "$PR" | jq -r '.url')
+# check rollup: all completed + all success = green; any pending/in_progress = wait; any failure = red
+ROLL=$(gh pr view "$NUM" --repo "$REPO" --json statusCheckRollup 2>/dev/null | jq -c '.statusCheckRollup')
+if [ -z "$ROLL" ] || [ "$ROLL" = "null" ]; then GATE=none
+else
+  GATE=$(printf '%s' "$ROLL" | jq -r '
+    map(.status) | if length == 0 then "none"
+    elif any(. == "IN_PROGRESS" or . == "PENDING" or . == "QUEUED") then "wait"
+    elif any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED") then "red"
+    else "green" end')
+fi
+# approvals: >=1 REVIEW from a non-author identity
+APPROVED=$(gh pr view "$NUM" --repo "$REPO" --json latestReviews 2>/dev/null | jq -r \
+  --arg dev "$DEV_ACTOR" \
+  '[.latestReviews[] | select(.author.login != $dev) | select(.state == "APPROVED")] | length > 0')
+[ "$APPROVED" = "true" ] && GATE="$GATE" || GATE=$(printf '%s' "$GATE" | sed 's/^green$/wait/')
+jq -n --arg state open --arg author "$AUTH" --arg url "$URL" --arg gate "$GATE" \
+  '{state:$state,author:$author,url:$url,gate:$gate}'

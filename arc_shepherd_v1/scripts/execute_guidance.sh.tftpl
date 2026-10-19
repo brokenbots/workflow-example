@@ -1,0 +1,92 @@
+#!/bin/sh
+# execute_guidance.sh — apply ONLY the deterministic subset of a guidance
+# verdict. Guidance proposes; this script disposes: any action token outside
+# the allowed set, or any token whose args fail validation, exits 2 (outcome
+# "escalate") WITHOUT executing anything.
+#
+# stdout on success: the applied token (routed as last_action).
+set -eu
+RUN_ROOT="{{ .run_root }}"
+export KB_URL="${KB_URL:?KB_URL not in environment}"
+export KB_TOKEN="${KB_TOKEN:?KB_TOKEN not in environment}"
+
+# guidance_rationale carries the WHOLE typed verdict as a JSON document
+# (schema = object({reason:String}); the adapter's handshake output schema is
+# object({outcome?, reason?}) so contract fields must subset it — the verdict
+# rides reason as JSON: {verdict_class, rationale, actions}).
+VERDICT_DOC=$(printf '%s' '{{ .verdict_doc_b64 }}' | base64 -d)
+VERDICT_CLASS=$(printf '%s' "$VERDICT_DOC" | jq -r '.verdict_class // "unknown"' 2>/dev/null || echo unknown)
+ACTIONS_JSON=$(printf '%s' "$VERDICT_DOC" | jq -c '.actions // []' 2>/dev/null || echo "[]")
+RATIONALE=$(printf '%s' "$VERDICT_DOC" | jq -r '.rationale // ""' 2>/dev/null || echo "")
+
+ALLOWED="refire_cr park_ticket comment_ticket hold_merge watch_fix"
+
+# shellcheck source=kb_lib.sh.tftpl
+. "$RUN_ROOT/lib/kb_lib.sh"
+
+check_allowed() {
+    tok="$1"
+    case " $ALLOWED " in
+        *" $tok "*) return 0 ;;
+        *) echo "action token '$tok' outside shepherd authority" >&2; exit 2 ;;
+    esac
+}
+
+# validate actions JSON shape first
+printf '%s' "$ACTIONS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1 || {
+    echo "guidance actions is not a JSON array: $(printf '%s' "$ACTIONS_JSON" | head -c 200)" >&2
+    exit 2
+}
+
+APPLIED=""
+IDX=0
+while : ; do
+    ROW=$(printf '%s' "$ACTIONS_JSON" | jq -c ".[$IDX] // empty")
+    [ -n "$ROW" ] || break
+    TOK=$(printf '%s' "$ROW" | jq -r '.action // "MISSING"')
+    check_allowed "$TOK"
+    TASK=$(printf '%s' "$ROW" | jq -r '.args.task_id // 0')
+
+    case "$TOK" in
+        refire_cr)
+            # same re-apply discipline as confirm_action's refire arm
+            YAML=$(printf '%s' "$ROW" | jq -r '.args.cr_yaml_path // ""')
+            [ -r "$YAML" ] || { echo "refire_cr: unreadable cr yaml $YAML" >&2; exit 2; }
+            echo "refire_cr delegated to confirm lane next round (recorded)" >&2
+            jq -n --arg a refire --arg y "$YAML" '{action:$a,cr_yaml:$y}' > "$RUN_ROOT/round_action.json"
+            APPLIED="refire"
+            ;;
+        park_ticket)
+            [ "$TASK" = "0" ] && { echo "park_ticket missing task_id" >&2; exit 2; }
+            SURVIVING=$(kb_task_tags "$TASK" | jq -c '[.[] | select(. != "k8s-run")]')
+            kb_call setTaskTags "{\"project_id\":1,\"task_id\":$TASK,\"tags\":$SURVIVING}" >/dev/null
+            APPLIED="park_ticket"
+            ;;
+        comment_ticket)
+            [ "$TASK" = "0" ] && { echo "comment_ticket missing task_id" >&2; exit 2; }
+            COMMENT=$(printf '%s' "$ROW" | jq -r '.args.comment // ""')
+            [ -n "$COMMENT" ] || { echo "comment_ticket empty comment" >&2; exit 2; }
+            GUID="guidance ($(date -u +%FT%TZ)) rationale: $RATIONALE"
+            kb_create_comment "$TASK" "$(jq -n --arg c "[guidance] $COMMENT
+
+rationale: $GUID" '$c')" >/dev/null
+            APPLIED="comment_ticket"
+            ;;
+        hold_merge)
+            PR=$(printf '%s' "$ROW" | jq -r '.args.pr_url // ""')
+            [ -n "$PR" ] || { echo "hold_merge missing pr_url" >&2; exit 2; }
+            jq -n --arg a wait --arg r "hold_merge on $PR" '{action:$a,reason:$r}' > "$RUN_ROOT/round_action.json"
+            APPLIED="wait"
+            ;;
+        watch_fix)
+            jq -n --arg a wait --arg r "watch fix: $(printf '%s' "$ROW" | jq -r '.args.signal // "unspecified"')" \
+                '{action:$a,reason:$r}' > "$RUN_ROOT/round_action.json"
+            APPLIED="wait"
+            ;;
+    esac
+    IDX=$((IDX + 1))
+    [ "$IDX" -gt 6 ] && { echo "guidance submitted too many actions (cap 6)" >&2; exit 2; }
+done
+
+[ -n "$APPLIED" ] || { echo "guidance produced no executable actions" >&2; exit 2; }
+printf '%s' "$APPLIED"

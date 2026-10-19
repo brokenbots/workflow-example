@@ -1,0 +1,243 @@
+#!/bin/sh
+# decide_action.sh — ONE reconcile round. Snapshot (board + PRs + CRs + castle),
+# decide deterministically, execute exactly ONE manager action, print its
+# machine token on stdout (the switch routes on it; stdout carries NOTHING
+# else — detail goes to round_action.json).
+#
+# Decision order (first hit wins):
+#   1. armed child with a live CR          -> observe (wait; classification
+#                                             happens when the CR terminates)
+#   2. armed child with terminal/missing CR-> classify:
+#        transient-infra signature         -> action=refire
+#        workflow/engine/operator evidence -> action=park_classified
+#        no evidence readable              -> action=ambiguous
+#   3. open child PR                        -> gate check:
+#        green+approved+non-author         -> action=merge
+#        in-progress/pending               -> action=wait
+#        red/failing                       -> classify (same ladder as 2)
+#        author != manifest.author         -> action=ambiguous (gate violation)
+#   4. no in-flight child                   -> next per manifest (deps closed):
+#        found                             -> action=arm
+#        none eligible                     -> action=wait
+#        manifest exhausted / impossible   -> action=ambiguous
+#   5. stall guard: NO_CHANGE repeat >=3    -> action=ambiguous (before budget)
+# stdout: the token, and NOTHING more.
+set -eu
+
+RUN_ROOT="{{ .run_root }}"
+export KB_URL="${KB_URL:?KB_URL not in environment}"
+export KB_TOKEN="${KB_TOKEN:?KB_TOKEN not in environment}"
+CASTLE="{{ .castle_url }}"
+MANIFEST="{{ .arc_manifest }}"
+MERGE_ACTOR="{{ .merge_actor }}"
+DEV_ACTOR="{{ .developer_actor }}"
+ROUND="{{ .round }}"
+LAST="{{ .last_action }}"
+STALL="{{ .stall_count }}"
+DRY="{{ .dry_run }}"
+
+LIB_DIR="$RUN_ROOT/lib"
+mkdir -p "$LIB_DIR"
+cat > "$LIB_DIR/kb_lib.sh" <<'KB_LIB_EOF'
+{{ .kb_lib }}
+KB_LIB_EOF
+cat > "$LIB_DIR/castle_last_run.sh" <<'CR_EOF'
+{{ .castle_last_run }}
+CR_EOF
+cat > "$LIB_DIR/classify_events.sh" <<'CE_EOF'
+{{ .classify_events }}
+CE_EOF
+cat > "$LIB_DIR/pr_gate.sh" <<'PG_EOF'
+{{ .pr_gate }}
+PG_EOF
+ACTION_FILE="$RUN_ROOT/round_action.json"
+EVDIR="$RUN_ROOT/round_evidence"
+
+# shellcheck source=kb_lib.sh.tftpl
+# shell adapter runs /bin/sh (dash on this image): kb_lib is POSIX-safe.
+. "$RUN_ROOT/lib/kb_lib.sh"
+
+token() { printf '%s' "$1"; }
+fail_ambiguous() {
+    # $1 = reason string (already safe: jq-assembled into the file)
+    jq -n --arg a ambiguous --arg r "$1" '{action:$a,reason:$r}' > "$ACTION_FILE"
+    token ambiguous
+}
+
+mkdir -p "$RUN_ROOT/evidence/r$ROUND"
+
+# ── 1. board snapshot ────────────────────────────────────────────────────────
+kb_board_tasks > "$RUN_ROOT/board.json" 2>"$RUN_ROOT/board.err" || {
+    # board unreadable = infra, retryable next round naturally
+    echo "board fetch failed: $(head -c 200 "$RUN_ROOT/board.err")" >&2
+    jq -n --arg a wait '{action:$a}' > "$ACTION_FILE"
+    token wait
+}
+
+# armed = has tag k8s-run; map task ids to manifest entries
+jq -c '[.[] | {id, title, column_id, is_active}]' "$RUN_ROOT/board.json" > "$RUN_ROOT/board_active.json"
+
+for id in $(jq -r '.[].id' "$RUN_ROOT/board.json"); do
+    tags=$(kb_task_tags "$id" | jq -r '[.[]] | join("|")' 2>/dev/null || echo "")
+    printf '%s\t%s\n' "$id" "$tags" >> "$RUN_ROOT/board_tags.tsv"
+done
+
+# children of interest from the manifest (ids only)
+MANIFEST_IDS=$(jq -r '[.children[].task_id] | join(" ")' "$MANIFEST")
+
+# ── stall guard FIRST (before per-child early-exits) ────────────────────────
+STALLNOW="{{ .stall_count }}"
+if printf '%s' "$STALLNOW" | grep -qE '^[0-9]+$' && [ "$STALLNOW" -ge 3 ]; then
+    jq -n --arg a ambiguous --arg r "no actionable change for ${STALLNOW} consecutive rounds" '{action:$a,reason:$r}' > "$ACTION_FILE"
+    token ambiguous
+    exit 0
+fi
+
+# ── decide: iterate manifest order ──────────────────────────────────────────
+DECISION=""
+for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFEST"); do
+    # manifest entry
+    jq -c --argjson tid "$tid" '.children[] | select(.task_id == $tid)' "$MANIFEST" \
+        > "$RUN_ROOT/entry.json"
+    entry_repo=$(jq -r '.repo' "$RUN_ROOT/entry.json")
+    entry_author=$(jq -r '.author' "$RUN_ROOT/entry.json")
+    entry_deps=$(jq -r 'if has("deps") then (.deps|join(" ")) else "" end' "$RUN_ROOT/entry.json")
+
+    # closed? (task absent from open-board fetch means Done+closed)
+    open_row=$(jq -r --argjson id "$tid" '[.[] | select(.id == $id)] | length' "$RUN_ROOT/board.json")
+    [ "$open_row" = "0" ] && continue   # child closed -> next
+
+    # deps all closed?
+    deps_open=0
+    for d in $entry_deps; do
+        d_open=$(jq -r --argjson id "$d" '[.[] | select(.id == $id)] | length' "$RUN_ROOT/board.json")
+        [ "$d_open" != "0" ] && deps_open=1
+    done
+    [ "$deps_open" = "1" ] && continue
+
+    tags=$(grep -P "^${tid}\t" "$RUN_ROOT/board_tags.tsv" | cut -f2)
+    armed=$(printf '%s' "$tags" | grep -o 'k8s-run' || true)
+
+    col=$(jq -r --argjson id "$tid" '.[] | select(.id == $id) | .column_id' "$RUN_ROOT/board.json")
+
+    # ── live CR for this child? ─────────────────────────────────────────────
+    cr_name=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun -n criteria-jobs \
+        -o json 2>/dev/null | jq -r --arg pre "kb-${tid}-" \
+        '[.items[] | select(.metadata.name | startswith($pre))] |
+         sort_by(.metadata.creationTimestamp) | reverse | .[0] |
+         .metadata.name + ":" + (.status.phase // "(none)")' || echo "")
+
+    if printf '%s' "$tags" | grep -q 'k8s-run'; then
+        cr_ph=$(printf '%s' "$cr_name" | cut -d: -f2-)
+        cr_nm=$(printf '%s' "$cr_name" | cut -d: -f1)
+        case "$cr_ph" in
+            ""|"(none)")
+                # armed but no CR: watcher lag (wait one round) or dead child.
+                # Decision: wait THIS round; if still absent next round, the
+                # stall guard escalates. Avoid arm-storms.
+                jq -n --arg a wait --arg r "armed $tid, no CR yet (watcher lag?)" \
+                    '{action:$a,reason:$r}' > "$ACTION_FILE"
+                token wait
+                exit 0
+                ;;
+            "Running"|"Pending"|"boot")
+                jq -n --arg a wait --arg r "CR $cr_nm phase $cr_ph" \
+                    '{action:$a,reason:$r}' > "$ACTION_FILE"
+                token wait
+                exit 0
+                ;;
+            "Succeeded"|"Failed"|"Completed")
+                # terminal CR -> classify from castle events
+                rid=$("$LIB_DIR/castle_last_run.sh" "$CASTLE" "$cr_nm" 2>/dev/null || echo "")
+                sig=$("$LIB_DIR/classify_events.sh" "$CASTLE" "$rid" 2>/dev/null || echo "unreadable")
+                case "$sig" in
+                    transient_infra)
+                        cp "$RUN_ROOT/evidence/$cr_nm.yaml" "$RUN_ROOT/last.yaml" 2>/dev/null || \
+                            KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun -n criteria-jobs "$cr_nm" -o yaml > "$RUN_ROOT/last.yaml"
+                        jq -n --arg a refire --arg r "transient infra on $cr_nm ($rid): $sig" \
+                            --arg tid "$tid" --arg crn "$cr_nm" --arg rid "$rid" \
+                            --arg yaml "$RUN_ROOT/last.yaml" \
+                            '{action:$a,reason:$r,task_id:($tid|tonumber),cr:$crn,run_id:$rid,cr_yaml:$yaml}' > "$ACTION_FILE"
+                        token refire
+                        exit 0
+                        ;;
+                    tree_defect|engine_defect|operator_defect)
+                        jq -n --arg a park_classified --arg tid "$tid" --arg crn "$cr_nm" \
+                            --arg rid "$rid" --arg sig "$sig" \
+                            --arg r "$cr_nm ($rid) died: $sig" \
+                            '{action:$a,reason:$r,task_id:($tid|tonumber),cr:$crn,run_id:$rid,signature:$sig}' > "$ACTION_FILE"
+                        token park_classified
+                        exit 0
+                        ;;
+                    *)
+                        jq -n --arg a ambiguous --arg tid "$tid" --arg crn "$cr_nm" \
+                            --arg rid "$rid" --arg sig "$sig" \
+                            --arg r "unclassifiable CR death: $sig" \
+                            '{action:$a,reason:$r,task_id:($tid|tonumber),cr:$crn,run_id:$rid,signature:$sig}' > "$ACTION_FILE"
+                        token ambiguous
+                        exit 0
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+
+    # ── open PR for this child? ─────────────────────────────────────────────
+    pr_json=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" 2>"$RUN_ROOT/pr.err" || echo "")
+    if [ -n "$pr_json" ] && printf '%s' "$pr_json" | jq -e . >/dev/null 2>&1; then
+        pr_state=$(printf '%s' "$pr_json" | jq -r '.state // "none"')
+        pr_author=$(printf '%s' "$pr_json" | jq -r '.author // ""')
+        pr_checks=$(printf '%s' "$pr_json" | jq -r '.gate // "none"')
+        pr_url=$(printf '%s' "$pr_json" | jq -r '.url // ""')
+        if [ "$pr_author" != "$entry_author" ] && [ "$pr_author" != "none" ]; then
+            jq -n --arg a ambiguous --arg tid "$tid" \
+                --arg r "gate violation: PR author '$pr_author' != expected '$entry_author' on $entry_repo" \
+                --arg pa "$pr_author" \
+                '{action:$a,reason:$r,task_id:($tid|tonumber),pr_author:$pa}' > "$ACTION_FILE"
+            token ambiguous
+            exit 0
+        fi
+        case "$pr_state" in
+            open)
+                case "$pr_checks" in
+                    green)
+                        jq -n --arg a merge --arg tid "$tid" --arg pr "$pr_url" --arg actor "$MERGE_ACTOR" \
+                            '{action:$a,reason:"gate green",task_id:($tid|tonumber),pr:$pr,actor:$actor}' > "$ACTION_FILE"
+                        token merge
+                        exit 0
+                        ;;
+                    wait)
+                        jq -n --arg a wait '{action:$a}' > "$ACTION_FILE"
+                        token wait
+                        exit 0
+                        ;;
+                    red)
+                        jq -n --arg a ambiguous --arg r "PR checks red on $pr_url (needs classification)" \
+                            '{action:$a,reason:$r}' > "$ACTION_FILE"
+                        token ambiguous
+                        exit 0
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+
+    # ── idle child, deps closed, not yet armed? ─────────────────────────────
+    if [ "$DRY" = "true" ]; then
+        # shakeout: never arm; treat as steady-state so the loop still exercises
+        # every read + the budget/heartbeat/summary path.
+        jq -n --arg a wait --arg r "dry_run: would arm $tid"             '{action:$a,reason:$r}' > "$ACTION_FILE"
+        token wait
+        exit 0
+    fi
+    if ! printf '%s' "$tags" | grep -q 'k8s-run' && [ "$col" = "1" ]; then
+        jq -n --arg a arm --arg tid "$tid" --arg repo "$entry_repo" \
+            '{action:$a,reason:"next per manifest",task_id:($tid|tonumber),repo:$repo}' > "$ACTION_FILE"
+        token arm
+        exit 0
+    fi
+done
+
+# nothing matched -> wait (steady state)
+jq -n --arg a wait '{action:$a}' > "$ACTION_FILE"
+token wait

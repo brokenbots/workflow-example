@@ -1,0 +1,651 @@
+// arc_shepherd_v1 — the manager lane for a feature arc (dogfood, ADR-0011):
+// a LOCAL criteria workflow that shepherds the arc's kanboard tickets through
+// arm → develop run → PR gate → merge → close → next child, with live
+// telemetry into castle (the run is fired with --server against the castle
+// ClusterIP; every step's stdout lands in the run's event stream).
+//
+// The shepherd owns ONLY the manager lane (dave 2026-10-18): ticket lifecycle,
+// arming, sequencing, failure classification, remediation orchestration. It
+// never edits code and never files code-work. Any workflow/engine/operator
+// defect is CLASSIFIED from castle evidence and commented on the ticket; the
+// code fix itself belongs to the engineering lane (arm card → develop job →
+// PR). The shepherd watches for the fix to land and re-arms the child.
+//
+// One reconcile round per step-pair: a deterministic snapshot/action script
+// decides and executes exactly ONE manager action, printing a machine token
+// (action=<name>) the switch routes on. Ambiguity (no signature, repeated
+// failure, gate violation) routes to the READ-ONLY guidance agent before any
+// escalation reaches a human. Every agent step is contract-typed; the
+// shepherd executes only the deterministic subset of a guidance verdict.
+//
+// Round budget (var.round_budget): when spent, the loop terminates with a
+// full-pass summary as the run output (no in-run extension — fast shakeout
+// feedback; relaunch is a fresh `criteria apply`). A cycle-end is a SUCCESS
+// ending: parked children carry their state on the board.
+
+workflow {
+    name             = "arc_shepherd_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "init_root"
+    target_state     = "cycle_complete"
+
+    policy {
+        max_total_steps = 600
+    }
+}
+
+// ── Variables ────────────────────────────────────────────────────────────────
+
+variable "kanboard_url" {
+    description = "Kanboard JSON-RPC endpoint reachable from this host (jsonrpc.php, subpath included)."
+    type        = string
+    secret      = true
+}
+
+variable "kanboard_app_token" {
+    description = "Kanboard APP token; HTTP basic auth user 'jsonrpc'."
+    type        = string
+    secret      = true
+}
+
+variable "github_token" {
+    description = "gh token for the guidance agent's read-only context (never granted writes by policy)."
+    type        = string
+    secret      = true
+}
+
+variable "provider_base_url" {
+    description = "OpenAI-compatible provider base URL for the guidance agent (e.g. the served ollama v1 endpoint)."
+    type        = string
+    default     = "http://192.168.17.116:11434/v1"
+}
+
+variable "run_root" {
+    description = "Absolute working root for shepherd scratch (state files, evidence bundles). Must be OUTSIDE any repository."
+    type        = string
+    default     = "/tmp/arc_shepherd"
+}
+
+variable "arc_manifest" {
+    description = "ABSOLUTE path of the arc manifest JSON (children, order, per-child pins: repo tag, expected author handcaught, done signal, deps). Authored by the orchestrator lane; the shepherd only reads it."
+    type        = string
+}
+
+variable "dry_run" {
+    description = "Shakeout mode: decide + wait only — confirm_action refuses arm/refire/merge/park (mutation actions) — loop still exercises board/PR/CR/classification reads and the full control flow."
+    type        = bool
+    default     = false
+}
+
+variable "round_budget" {
+    description = "Maximum reconcile rounds before the cycle ends with a summary (house round-bound doctrine)."
+    type        = number
+    default     = 96
+}
+
+variable "poll_pause_seconds" {
+    description = "Wait between rounds (seconds). Default 300 = 5m steady-state heartbeat cadence."
+    type        = string
+    default     = "300"
+}
+
+variable "castle_url" {
+    description = "Castle base URL for event reads during classification (ServerService ListRunEvents)."
+    type        = string
+    default     = "http://10.43.233.98:8080"
+}
+
+variable "merge_actor" {
+    description = "The ONLY gh identity allowed to merge gate-cleared child PRs."
+    type        = string
+    default     = "brokenbot"
+}
+
+variable "developer_actor" {
+    description = "The gh identity that MUST author every child PR (develop-run identity, pinned per the merge-gate ruling)."
+    type        = string
+    default     = "handcaught"
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// Round counter as a STRING (house round-bound doctrine): incremented by the
+// shell step, its STDOUT token (exact trimmatch) routed by a switch. When the
+// budget is spent a branch-manager-style coordinator (deterministic shell
+// here) re-verifies actual state and the loop terminates with a summary.
+data "internal" "round" {
+    type  = string
+    value = "0"
+}
+
+// Last action executed (machine token), for the summary + repeat-failure
+// detection.
+data "internal" "last_action" {
+    type  = string
+    value = "start"
+}
+
+// Consecutive rounds that produced NO state change (deadlock detector).
+data "internal" "stall_count" {
+    type  = string
+    value = "0"
+}
+
+// Typed verdict + material bundle from the latest guidance consult.
+data "internal" "guidance_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "guidance_rationale" {
+    type  = string
+    value = ""
+}
+
+data "internal" "guidance_actions" {
+    type  = string
+    value = ""
+}
+
+// The ambiguous-event material the shepherd gathered before consulting.
+// The rendered consult bundle text (embedded into the guidance prompt — the
+// agent has no tools; the material must come to it).
+data "internal" "guidance_bundle" {
+    type  = string
+    value = ""
+}
+
+data "internal" "ambiguity_material" {
+    type  = string
+    value = ""
+}
+
+// The summary written at cycle end (also the run output).
+data "internal" "cycle_summary" {
+    type  = string
+    value = ""
+}
+
+// ── Environments + adapters ──────────────────────────────────────────────────
+
+// Deterministic manager work happens in the run root: state files, evidence
+// bundles, castle/kanboard/gh/kubectl calls. No repo checkouts live here.
+environment "shell" "ops" {
+    working_directory = var.run_root
+}
+
+adapter "shell" "ops" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.ops
+    secrets {
+        KB_URL   = var.kanboard_url
+        KB_TOKEN = var.kanboard_app_token
+    }
+}
+
+// The guidance agent: READ-ONLY consult (dave 2026-10-18). It receives a
+// material bundle (castle event tails, ticket bodies/comments, manifest
+// entries, ADR/spec excerpts) prepared by the shepherd scripts in
+// <run_root>/consult/, reviews specs/ADRs/state for correctness and safety,
+// and returns a TYPED verdict (verdict_class/rationale/actions). It has no
+// execution tools: allow_tools = [] — the shell adapter's tool channels are
+// not offered. It changes nothing; the shepherd executes only the
+// deterministic subset of its recommended actions and keeps decision
+// authority over anything policy-level.
+adapter "copilot" "guidance" {
+    // KB-263/KB-216 (typed outcome contracts + payload lane) exist only in
+    // main — no published ghcr tag carries them (v0.5.15/16 verified
+    // ancestor-checked 2026-10-18). Local dogfood pins the HEAD build
+    // published to the LAN registry as v0.5.63 (LAN-only dev build ABOVE the
+    // fleet line; swap to a signed release tag when contract support ships).
+    source      = "localhost:5000/criteria-adapter-copilot"
+    version     = "v0.5.63"
+    environment = shell.ops
+    secrets {
+        GITHUB_TOKEN = var.github_token
+        GH_TOKEN     = var.github_token
+    }
+    config {
+        model             = "glm-5.3-flash:cloud"
+        max_turns         = 6
+        system_prompt     = file("./agents/guidance.md")
+        provider_base_url = var.provider_base_url
+        working_directory = var.run_root
+    }
+}
+
+// ── Subworkflow: guidance consult ────────────────────────────────────────────
+// Hosted in-tree as a plain step sequence (no remote hosting needed: local
+// run + host CLI bind). Kept as its own step family, not a subworkflow tree:
+// the guidance agent is the ONLY agent step in this tree and it must stay
+// read-only (allow_tools absent = no tools offered to a local CLI bind that
+// can execute).
+
+// ── The cycle ────────────────────────────────────────────────────────────────
+
+// Round 0 hand-off: initialize the scratch root (idempotent; the run root is
+// wiped of round state, never of evidence bundles).
+step "init_root" {
+    target     = adapter.shell.ops
+    input {
+        command = templatefile("./scripts/init_root.sh.tftpl", {
+            run_root     = var.run_root
+            arc_manifest = var.arc_manifest
+        })
+    }
+    outcome "success" { next = step.round_open }
+    outcome "failure" { next = state.failed }
+}
+
+// Round open: bump the counter, snapshot the arc (board + PRs + CRs + castle
+// events), and DECIDE the next action. decide_action.sh executes exactly ONE
+// manager action and prints its machine token; the full JSON detail lands in
+// <run_root>/round_action.json (typed, jq-assembled — never interpolated).
+step "round_open" {
+    max_visits = 400
+    target     = adapter.shell.ops
+    timeout    = "600s"
+    input {
+        command = templatefile("./scripts/decide_action.sh.tftpl", {
+            run_root          = var.run_root
+            kb_lib            = file("./scripts/kb_lib.sh.tftpl")
+            castle_last_run   = file("./scripts/castle_last_run.sh.tftpl")
+            classify_events   = file("./scripts/classify_events.sh.tftpl")
+            pr_gate           = file("./scripts/pr_gate.sh.tftpl")
+            castle_url        = var.castle_url
+            arc_manifest      = var.arc_manifest
+            merge_actor       = var.merge_actor
+            developer_actor   = var.developer_actor
+            round             = data.internal.round.value
+            last_action       = data.internal.last_action.value
+            stall_count       = data.internal.stall_count.value
+            dry_run           = var.dry_run
+        })
+    }
+    outcome "success" {
+        next = switch.route_action
+        write {
+            target = data.internal.last_action.value
+            // stdout carries ONLY the machine token (exact trimmatch)
+            value = output.stdout
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "round_open failed: ${output.stderr}"
+        }
+    }
+}
+
+// Route the decided action.
+switch "route_action" {
+    match {
+        condition = data.internal.last_action.value == "wait"
+        next      = step.round_close
+    }
+    match {
+        condition = data.internal.last_action.value == "budget_exhausted"
+        next      = step.write_cycle_summary
+    }
+    match {
+        condition = data.internal.last_action.value == "ambiguous"
+        next      = step.prepare_consult
+    }
+    default { next = step.confirm_action }
+}
+
+// Every real action (arm/refire/gate-check/merge/close/classify) posts its
+// evidence to the ticket AND the castle heartbeat line already carries it;
+// confirm_action re-reads round_action.json and asserts the action's claimed
+// post-state (board read-back / PR state / CR phase). A confirm mismatch is
+// itself an ambiguity → consult, not a silent continue.
+step "confirm_action" {
+    max_visits = 4
+    target     = adapter.shell.ops
+    timeout    = "300s"
+    input {
+        command = templatefile("./scripts/confirm_action.sh.tftpl", {
+            dry_run      = var.dry_run
+            run_root     = var.run_root
+        })
+    }
+    outcome "success" {
+        next = step.round_close
+        write {
+            target = data.internal.last_action.value
+            value  = output.stdout
+        }
+    }
+    outcome "stall" {
+        next = step.prepare_consult
+        write {
+            target = data.internal.ambiguity_material.value
+            value  = "confirm mismatch: ${output.stderr}"
+        }
+    }
+    outcome "failure" {
+        next = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "confirm_action failed: ${output.stderr}"
+        }
+    }
+}
+
+// ── Guidance consult (read-only) ─────────────────────────────────────────────
+
+// prepare_consult: assemble the material bundle (castle event tail, ticket
+// body/comments, manifest entry, relevant ADR/spec excerpts the scripts pin)
+// into <run_root>/consult/bundle.md. Deterministic; no judgment here.
+step "prepare_consult" {
+    max_visits = 4
+    target     = adapter.shell.ops
+    timeout    = "300s"
+    input {
+        command = templatefile("./scripts/prepare_consult.sh.tftpl", {
+            run_root          = var.run_root
+            arc_manifest      = var.arc_manifest
+            castle_url        = var.castle_url
+            material          = data.internal.ambiguity_material.value != "" ? data.internal.ambiguity_material.value : format("stall: no actionable change across rounds; last=%s; manifest %s; decide log %s/round_action.json", data.internal.last_action.value, var.arc_manifest, var.run_root)
+        })
+    }
+    outcome "success" { next = step.load_bundle }
+    outcome "failure" {
+        next = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "prepare_consult failed: ${output.stderr}"
+        }
+    }
+}
+
+// load_bundle: cat the bundle into run state so the agent prompt can embed it
+// (guidance is tool-less BY RULING; the material travels to the agent).
+step "load_bundle" {
+    max_visits = 4
+    target     = adapter.shell.ops
+    input {
+        command = "cat ${var.run_root}/consult/bundle.md 2>/dev/null | head -c 60000"
+    }
+    outcome "success" {
+        next = step.ask_guidance
+        write {
+            target = data.internal.guidance_bundle.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" { next = step.ask_guidance }
+}
+
+// ask_guidance: the ONLY agent step. Read-only, contract-typed. The prompt is
+// routing-only (payload requirements ride the contract, never prompt prose).
+step "ask_guidance" {
+    target      = adapter.copilot.guidance
+    max_visits  = 2
+    allow_tools = []
+
+    input {
+        prompt = templatefile("./agents/consult.md.tftpl", {
+            bundle_text = data.internal.guidance_bundle.value
+        })
+    }
+
+    // The copilot adapter's declared handshake output schema is
+    // object({ outcome?, reason? }) — contract fields must SUBSET it, so the
+    // structured verdict rides `reason` as a JSON document (parsed by
+    // execute_guidance.sh via jq; schema = object({reason}) proves the lane).
+    outcome "verdict" {
+        schema = object({ reason = string })
+        next   = step.parse_verdict
+        write {
+            target = data.internal.guidance_rationale.value
+            // the WHOLE typed verdict rides as one JSON document
+            value  = output.reason
+        }
+    }
+    outcome "no_verdict" {
+        schema = object({ reason = string })
+        next   = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "guidance returned no_verdict: ${output.reason}"
+        }
+    }
+    outcome "failed" {
+        next = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "guidance agent failed"
+        }
+    }
+}
+
+// execute ONLY the deterministic subset of the guidance actions: the verdict
+// file lists allowed action tokens; execute_guidance.sh applies the ones in
+// the shepherd's allowed set (refire/re-park/comment/merge-hold) and refuses
+// anything else with an escalate token.
+step "execute_guidance" {
+    max_visits = 4
+    target     = adapter.shell.ops
+    timeout    = "600s"
+    input {
+        command = templatefile("./scripts/execute_guidance.sh.tftpl", {
+            run_root     = var.run_root
+            // whole verdict doc via base64 (quotes/braces in prose break raw interpolation)
+            verdict_doc_b64 = base64encode(data.internal.guidance_rationale.value)
+        })
+    }
+    outcome "success" {
+        next = step.round_close
+        write {
+            target = data.internal.last_action.value
+            value  = output.stdout
+        }
+    }
+    outcome "escalate" {
+        next   = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "guidance verdict outside shepherd authority: ${output.stderr}"
+        }
+    }
+    outcome "failure" {
+        next = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "execute_guidance failed: ${output.stderr}"
+        }
+    }
+}
+
+// The verdict doc carries verdict_class; a shell step parses it (typed on
+// stdout, trimmatch) so the tree routes on a machine token, not prose.
+step "parse_verdict" {
+    max_visits = 4
+    target     = adapter.shell.ops
+    input {
+        command = templatefile("./scripts/parse_verdict.sh.tftpl", {
+            // base64 keeps brace/quote/newline content out of the shell grammar
+            verdict_b64 = base64encode(data.internal.guidance_rationale.value)
+        })
+    }
+    outcome "success" {
+        next = switch.route_verdict_class
+        write {
+            target = data.internal.guidance_verdict.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" {
+        next   = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "guidance verdict unparseable: \"${data.internal.guidance_rationale.value}\""
+        }
+    }
+}
+
+// shell steps emit only success/failure over the wire: the verdict CLASS
+// rides stdout -> data.internal, and THIS switch (traversal node) routes on
+// the typed token.
+switch "route_verdict_class" {
+    match {
+        condition = data.internal.guidance_verdict.value == "execute"
+        next      = step.execute_guidance
+    }
+    match {
+        condition = data.internal.guidance_verdict.value == "escalate"
+        next      = state.escalate_stop
+    }
+    default { next = state.escalate_stop }
+}
+
+
+// ── Round close + budget ─────────────────────────────────────────────────────
+
+// round_close: bump the round counter; the STDOUT token is compared against
+// the budget by the switch below. ALSO updates the stall detector (no-op
+// rounds increment it; a stalled loop consults guidance before burning the
+// whole budget).
+step "round_close" {
+    max_visits = 400
+    target     = adapter.shell.ops
+    input {
+        command = templatefile("./scripts/round_close.sh.tftpl", {
+            run_root    = var.run_root
+            round       = data.internal.round.value
+            last_action = data.internal.last_action.value
+            stall_count = data.internal.stall_count.value
+            budget      = var.round_budget
+            pause_s     = var.poll_pause_seconds
+        })
+    }
+    outcome "success" {
+        next = switch.route_round
+        write {
+            target = data.internal.round.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" {
+        next = state.escalate_stop
+        write {
+            target = data.internal.cycle_summary.value
+            value  = "round_close failed: ${output.stderr}"
+        }
+    }
+}
+
+
+// The wait IS the heartbeat: its stdout (one state line) lands in the castle
+// event stream via stepLog + stepOutputCaptured. 300s steady; the script
+// itself sleeps.
+// Mirror the on-disk stall counter into run state (decide_action reads the
+// data.internal copy; shell-side reads are the file). One step, tiny.
+step "stall_mirror" {
+    max_visits = 400
+    target     = adapter.shell.ops
+    input {
+        command = "cat $(pwd)/stall_counter 2>/dev/null || echo 0"
+    }
+    outcome "success" {
+        next = step.heartbeat_wait
+        write {
+            target = data.internal.stall_count.value
+            // cat prints a trailing newline; keep the value numeric-clean
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" { next = step.heartbeat_wait }
+}
+
+step "heartbeat_wait" {
+    max_visits = 400
+    target     = adapter.shell.ops
+    timeout    = "700s"
+    input {
+        command = templatefile("./scripts/heartbeat_wait.sh.tftpl", {
+            run_root    = var.run_root
+            pause_s     = var.poll_pause_seconds
+            round       = data.internal.round.value
+            last_action = data.internal.last_action.value
+        })
+    }
+    outcome "success" { next = step.round_open }
+    outcome "failure" { next = state.escalate_stop }
+}
+
+switch "route_round" {
+    match {
+        // round_close echoes "budget_spent" when counter == budget
+        condition = data.internal.round.value == "budget_spent"
+        next      = step.write_cycle_summary
+    }
+    default { next = step.stall_mirror }
+}
+
+// write_cycle_summary: the ONLY summary lane. Assembles the full-pass state
+// (every child's last known position, open questions, stall counts) into the
+// run output AND <run_root>/cycle_summary.md. Terminal success: the cycle
+// did its job; parked children carry their state on the board.
+step "write_cycle_summary" {
+    target     = adapter.shell.ops
+    timeout    = "300s"
+    input {
+        command = templatefile("./scripts/write_cycle_summary.sh.tftpl", {
+            run_root     = var.run_root
+            arc_manifest = var.arc_manifest
+            round        = data.internal.round.value
+            last_action  = data.internal.last_action.value
+            stall_count  = data.internal.stall_count.value
+            guidance_verdict = data.internal.guidance_verdict.value
+        })
+    }
+    outcome "success" {
+        next   = state.cycle_complete
+        write {
+            target = data.internal.cycle_summary.value
+            value  = output.stdout
+        }
+    }
+    outcome "failure" {
+        next = state.escalate_stop
+    }
+}
+
+// ── Terminals ────────────────────────────────────────────────────────────────
+
+// escalate_stop: FAILURE ending. The escalation detail (cycle_summary carries
+// it) is what a human reads; no board mutation happens on this path.
+state "escalate_stop" {
+    terminal = true
+    success  = false
+}
+
+state "cycle_complete" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Output ───────────────────────────────────────────────────────────────────
+
+output "cycle_summary" {
+    value = data.internal.cycle_summary.value
+}
+
+output "last_round" {
+    value = data.internal.round.value
+}
+
+output "last_action" {
+    value = data.internal.last_action.value
+}
