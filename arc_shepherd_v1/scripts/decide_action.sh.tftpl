@@ -253,9 +253,25 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
         token wait
         exit 0
     fi
-    if ! printf '%s' "$tags" | grep -q 'k8s-run' && [ "$col" = "1" ]; then
+    if ! printf '%s' "$tags" | grep -q 'k8s-run' && [ "$col" = "1" ] || [ "$col" = "2" ] && ! printf '%s' "$tags" | grep -q 'k8s-run'; then
+        # PRE-ARM CR-FAMILY SWEEP (boot-gate shadow guard, dave 10-19): a terminal
+        # CriteriaRun row in this ticket's label family blocks every boot-gate
+        # decision for the family (KB-234 newest-wins lookup, cac4def). Before
+        # any arm decision, sweep terminal CR rows of the family; the arm then
+        # fires a boot the gate will pass.
+        TERM_CR=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
+            -n criteria-jobs -o json 2>/dev/null | jq -r --arg pre "kb-${tid}-" \
+            '[.items[] | select(.metadata.name | startswith($pre)) \
+              | select(.status.phase == "Succeeded" or .status.phase == "Failed" or .status.phase == "Completed")] \
+              | .[] | .metadata.name' 2>/dev/null || echo "")
+        if [ -n "$TERM_CR" ]; then
+            for row in $TERM_CR; do
+                KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl delete criteriarun \
+                    -n criteria-jobs "$row" >/dev/null 2>&1 || true
+            done
+        fi
         jq -n --arg a arm --arg tid "$tid" --arg repo "$entry_repo" \
-            '{action:$a,reason:"next per manifest",task_id:($tid|tonumber),repo:$repo}' > "$ACTION_FILE"
+            '{action:$a,reason:"next per manifest (terminal CR rows swept pre-arm)",task_id:($tid|tonumber),repo:$repo}' > "$ACTION_FILE"
         token arm
         exit 0
     fi
