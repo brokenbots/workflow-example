@@ -23,7 +23,7 @@ environment "remote" "review" {
 adapter "copilot" "triage_reviewer" {
     environment = remote.review
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.15"
+    version     = "0.5.17"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
         GH_TOKEN     = var.workflow_github_token

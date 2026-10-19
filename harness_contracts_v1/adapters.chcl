@@ -30,7 +30,7 @@ environment "remote" "probe_members" {
 // probes (C18b/D22) need the budget to exhaust deterministically.
 adapter "copilot" "main" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.15"
+    version     = "0.5.17"
     environment = remote.probe_members
     secrets {
         GITHUB_TOKEN = var.workflow_github_token

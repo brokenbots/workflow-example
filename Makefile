@@ -1,4 +1,4 @@
-.PHONY: build build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint lint-go apply-routes ci vuln-scan
+.PHONY: build build-criteria-k8s build-criteria-k8s-push images images-push deploy validate test lint lint-go apply-routes ci vuln-scan repin repin-check routes-sync
 
 # Workflow image (KB-281): the linear intake image-mode example image is
 # retired — this repo no longer builds or ships an image-mode workflow image.
@@ -102,7 +102,8 @@ ifneq ($(CONTAINER_TOOL),)
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif
 
-validate:
+# #303: the pin drift gate runs inside validate so CI catches stale pins pre-run.
+validate: repin-check
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
@@ -369,3 +370,13 @@ ci: validate
 		echo "SKIP validate-manifests: python3+pyyaml not installed on this runner (CI's validate-manifests job covers it)"; \
 	fi
 	@echo "ci: all legs green"
+
+# #303: deterministic release propagation — see releases.chcl.
+repin:
+	./scripts/repin.sh
+
+repin-check:
+	./scripts/repin.sh --check
+
+routes-sync:
+	./scripts/routes-sync.sh
