@@ -179,9 +179,14 @@ adapter "shell" "ops" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = shell.ops
+    config {
+        // sandbox PATH is reserved; pin the dirs the manager tools live in
+        command_path = "/usr/local/bin:/usr/bin:/bin"
+    }
     secrets {
-        KB_URL   = var.kanboard_url
-        KB_TOKEN = var.kanboard_app_token
+        KB_URL      = var.kanboard_url
+        KB_TOKEN    = var.kanboard_app_token
+        GH_TOKEN    = var.github_token
     }
 }
 

@@ -50,6 +50,7 @@ CE_EOF
 cat > "$LIB_DIR/pr_gate.sh" <<'PG_EOF'
 {{ .pr_gate }}
 PG_EOF
+chmod +x "$LIB_DIR/"*.sh 2>/dev/null || true
 ACTION_FILE="$RUN_ROOT/round_action.json"
 EVDIR="$RUN_ROOT/round_evidence"
 
