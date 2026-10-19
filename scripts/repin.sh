@@ -98,6 +98,15 @@ while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     tree_dir="$ROOT/$(dirname "$rel")"
     echo "repin: criteria adapter lock $tree_dir" >&2
-    criteria adapter lock "$tree_dir" || ST=$?
+    if command -v criteria >/dev/null 2>&1; then
+        criteria adapter lock "$tree_dir" || ST=$?
+    else
+        # house fallback: LAN criteria-base container, host uid for writable lockfiles
+        docker run --rm --user "$(id -u):$(id -g)" --entrypoint /bin/sh \
+            -e HOME=/tmp -e CRITERIA_HOME=/tmp/.criteria \
+            -v "$ROOT:$ROOT" -w "$ROOT" \
+            localhost:5000/criteria-base:v0.1-v0.5.56 \
+            criteria adapter lock "$tree_dir" || ST=$?
+    fi
 done < <(git -C "$ROOT" diff --name-only -- '*adapters.chcl')
 exit $ST
