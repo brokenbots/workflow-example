@@ -102,8 +102,10 @@ ifneq ($(CONTAINER_TOOL),)
 	kubectl -n criteria-jobs rollout status deploy/criteria-k8s-operator --timeout=120s
 endif
 
-# #303: the pin drift gate runs inside validate so CI catches stale pins pre-run.
-validate: repin-check
+# #303: one-shot pin validation inside validate — every consumer checked in a
+# single pass (adapters.chcl drift, lockfile lag, hardcoded CI/test refs, routes
+# CM alignment); no CI ping-pong on stale pins.
+validate: pincheck
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
@@ -377,6 +379,9 @@ repin:
 
 repin-check:
 	./scripts/repin.sh --check
+
+pincheck:
+	./scripts/pincheck.sh
 
 routes-sync:
 	./scripts/routes-sync.sh

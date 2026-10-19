@@ -23,12 +23,19 @@ routes = json.loads(doc["data"]["routes.json"])
 hits = 0
 for name, wf in routes["workflowLibrary"].items():
     url = wf.get("url")
-    if not url:
-        continue
-    new = re.sub(r"ref=[0-9a-f]{40}", f"ref={head}", url)
-    if new != url:
-        hits += 1
-        wf["url"] = new
+    if url:
+        new = re.sub(r"ref=[0-9a-f]{40}", f"ref={head}", url)
+        if new != url:
+            hits += 1
+            wf["url"] = new
+    # the CM carries a separate top-level `ref` key per entry (a second pin site:
+    # b9355ab/b2bc937 era). Align it too — an unaligned ref silently overrides
+    # the aligned url depending on which consumer reads which key (found live
+    # 2026-10-19: CM held url@HEAD + ref@b9355ab simultaneously).
+    if isinstance(wf.get("ref"), str) and re.fullmatch(r"[0-9a-f]{40}", wf["ref"]):
+        if wf["ref"] != head:
+            wf["ref"] = head
+            hits += 1
     imgs = wf.get("adapterImages") or {}
     if "shell" in imgs:
         imgs["shell"] = re.sub(r":[^:]*$", f":{peer_shell}", imgs["shell"]); hits += 1
@@ -44,13 +51,24 @@ print(json.dumps(doc))
 PYEOF
 
 if [ "$MODE" = "--check" ]; then
+    # compare ONLY the rendered routes.json payload (CM metadata churns by itself:
+    # resourceVersion/managedFields are not ours to pin)
     "$CMD" -n criteria-jobs get cm criteria-routes -o json > /tmp/routes_cur.json
-    if cmp -s /tmp/routes_cur.json /tmp/routes_new.json; then
+    cat > /tmp/routes_cmp.py <<'PYCHK'
+import json, sys
+cur = json.load(open("/tmp/routes_cur.json"))
+new = json.load(open("/tmp/routes_new.json"))
+live = json.loads(cur["data"]["routes.json"])
+mine = json.loads(new["data"]["routes.json"])
+same = (live.get("metadata", {}).get("renderedFrom") == mine.get("metadata", {}).get("renderedFrom")
+        and live["workflowLibrary"] == mine["workflowLibrary"])
+sys.exit(0 if same else 1)
+PYCHK
+    if python3 /tmp/routes_cmp.py; then
         echo "routes-sync --check: CM in sync with HEAD ($HEAD)"
         exit 0
     fi
     echo "routes-sync --check: CM DRIFTED from HEAD ($HEAD) — run 'make routes-sync'" >&2
-    diff <(python3 -m json.tool /tmp/routes_cur.json) <(python3 -m json.tool /tmp/routes_new.json) | head -40 >&2
     exit 1
 fi
 "$CMD" -n criteria-jobs apply -f /tmp/routes_new.json

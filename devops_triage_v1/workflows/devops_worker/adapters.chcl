@@ -15,7 +15,7 @@ adapter "copilot" "devops" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.17"
     secrets {
-        GITHUB_TOKEN = "env:DEVOPS_GITHUB_TOKEN"
+        GITHUB_TOKEN = var.workflow_github_token
     }
     config {
         model             = var.devops.model
