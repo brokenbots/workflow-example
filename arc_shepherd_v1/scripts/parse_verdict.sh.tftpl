@@ -1,0 +1,30 @@
+#!/bin/sh
+# parse_verdict.sh — route the guidance verdict on a typed machine token.
+# stdin/args: the verdict JSON document (rides the contract's reason field).
+# stdout: execute | escalate (exact trimmatch; the tree writes data.internal
+# from the OUTCOME, not the stdout). exit 1 = unparseable (failure arm).
+set -eu
+# the verdict doc arrives base64-encoded: braces/quotes/newlines never touch
+# the shell source (raw interpolation is an injection + parse defect)
+DOC=$(printf '%s' '{{ .verdict_b64 }}' | base64 -d)
+
+[ -n "$DOC" ] || { echo "empty verdict document" >&2; exit 1; }
+
+# the doc IS JSON? If not, fail — never route prose.
+CLS=$(printf '%s' "$DOC" | jq -r '.verdict_class // empty' 2>/dev/null) || {
+    echo "verdict doc is not JSON" >&2
+    exit 1
+}
+[ -n "$CLS" ] || { echo "verdict doc missing verdict_class" >&2; exit 1; }
+
+# validate action tokens exist for execute class (execute_guidance re-checks)
+# NOTE outcomes: this script prints execute|escalate as STDOUT; the ROUTED
+# outcomes live on the step (execute/escalate/failure). The shell adapter only
+# ever emits success/failure over the wire, so the tree switches on the
+# data.internal token after a capture write — this script's job is to
+# normalize the verdict class to a stdout token the confirm lane can compare.
+case "$CLS" in
+    execute)  printf 'execute' ;;
+    escalate) printf 'escalate' ;;
+    *) echo "unknown verdict_class: $CLS" >&2; exit 1 ;;
+esac

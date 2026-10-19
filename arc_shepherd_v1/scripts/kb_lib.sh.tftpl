@@ -1,0 +1,36 @@
+# kb_lib.sh — shared Kanboard RPC helpers (sourced by every shepherd script).
+# Same quirk set as the orchestrator's kb_rpc3.py, proven live 2026-10-18:
+#   - getTask/getTaskTags/getAllComments take ONLY task_id (adding project_id
+#     -> -32602 'Too many arguments')
+#   - updateTask wants {id, ...} NOT task_id ('Missing argument: id')
+#   - setTaskTags needs project_id + task_id + tags[] ALL THREE
+#   - moveTaskPosition needs project_id AND swimlane_id
+#   - bodies are base64-embedded, never raw-interpolated (parens/newlines)
+#   - no removeTaskTag: disarming = setTaskTags with the FULL surviving list
+# Auth: basic jsonrpc:<app token>. App token arrives as KB_TOKEN in the
+# adapter environment (injected through the secret channel, never echoed).
+
+kb_call() {
+    # kb_call METHOD PARAMS_JSON -> prints .result on stdout, rc 1 on RPC error
+    _kb_method="$1"; _kb_params="$2"
+    _kb_payload=$(jq -n --arg m "$_kb_method" --argjson p "$_kb_params" \
+        '{jsonrpc:"2.0",method:$m,params:$p,id:1}')
+    _kb_resp=$(curl -sS -m 30 -u "jsonrpc:${KB_TOKEN}" -H 'Content-Type: application/json' \
+        -X POST "${KB_URL}" -d "$_kb_payload")
+    if printf '%s' "$_kb_resp" | jq -e '.error' >/dev/null 2>&1; then
+        printf 'RPC ERROR %s: %s\n' "$_kb_method" "$(printf '%s' "$_kb_resp" | jq -c '.error')" >&2
+        return 1
+    fi
+    printf '%s' "$_kb_resp" | jq '.result'
+}
+
+kb_task()          { kb_call getTask        "{\"task_id\":$1}"; }
+kb_task_tags()     { kb_call getTaskTags    "{\"task_id\":$1}"; }
+kb_comments()      { kb_call getAllComments "{\"task_id\":$1}"; }
+kb_create_comment() {
+    # uid=1 is the shepherd's comment identity on this board
+    kb_call createComment "{\"task_id\":$1,\"user_id\":1,\"content\":$2}"
+}
+kb_update_task()   { kb_call updateTask "$1"; }   # body must carry id (NOT task_id)
+kb_move_task()     { kb_call moveTaskPosition "$1"; }  # project_id+swimlane_id+task_id+column_id+position
+kb_board_tasks()   { kb_call getAllTasks "{\"project_id\":1}"; }

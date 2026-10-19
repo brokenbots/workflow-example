@@ -1,0 +1,48 @@
+#!/bin/sh
+# write_cycle_summary.sh — the cycle-end deliverable (budget spent or manual
+# summary lane). Assembles the full-pass state as ONE stdout blob (the step
+# write captures it into data.internal.cycle_summary and the run output):
+# per-child last position, stalls, guidance consults, open questions.
+# Terminal success=true: the cycle did its job; parked children carry their
+# state on the board for the next relaunch.
+set -eu
+RUN_ROOT="{{ .run_root }}"
+MANIFEST="{{ .arc_manifest }}"
+ROUND="{{ .round }}"
+LAST="{{ .last_action }}"
+STALL="{{ .stall_count }}"
+GVERDICT="{{ .guidance_verdict }}"
+
+export KB_URL="${KB_URL:?KB_URL not in environment}"
+export KB_TOKEN="${KB_TOKEN:?KB_TOKEN not in environment}"
+
+# shellcheck source=kb_lib.sh.tftpl
+. "$RUN_ROOT/lib/kb_lib.sh"
+
+BOARD=$(kb_board_tasks 2>/dev/null || echo "[]")
+
+{
+    echo "CYCLE SUMMARY arc_shepherd_v1 — $(date -u +%FT%TZ) — rounds=$ROUND last=$LAST stall=$STALL guidance=${GVERDICT:-none}"
+    echo
+    echo "Per-child position (manifest order):"
+    jq -c '.children[] | select(.enabled != false)' "$MANIFEST" | while read -r CH; do
+        TID=$(printf '%s' "$CH" | jq -r '.task_id')
+        TITLE=$(printf '%s' "$CH" | jq -r '.title // "?"')
+        ROW=$(printf '%s' "$BOARD" | jq -c --argjson id "$TID" '[.[] | select(.id == $id)][0] // null')
+        if [ "$ROW" = "null" ] || [ -z "$ROW" ]; then
+            echo "  #$TID $TITLE -> CLOSED"
+        else
+            COL=$(printf '%s' "$ROW" | jq -r '.column_id')
+            TAGS=$(kb_task_tags "$TID" 2>/dev/null | jq -r '[.[]] | join(",")' || echo "?")
+            echo "  #$TID $TITLE -> col=$COL tags=[$TAGS]"
+        fi
+    done
+    echo
+    echo "Guidance consults this cycle: $(grep -c 'verdict' "$RUN_ROOT/consult/bundle.md" 2>/dev/null || echo 0) bundle(s) prepared; last verdict=${GVERDICT:-none}"
+    echo
+    echo "Evidence dir: $RUN_ROOT/evidence (round_action.json = last decided action)."
+    echo "Relaunch: fresh 'criteria apply' resumes from board + manifest state."
+} | tee "$RUN_ROOT/final_summary.md"
+
+# stdout IS the summary (single blob)
+cat "$RUN_ROOT/final_summary.md"

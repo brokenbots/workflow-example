@@ -1,0 +1,6 @@
+#!/bin/sh
+# castle_last_run.sh CASTLE_URL CR_NAME -> runId of the latest run for that CR's workflow name (best effort)
+CASTLE="$1"; CR="$2"
+curl -sS -m 20 -X POST "$CASTLE/criteria.v1.ServerService/ListRuns" \
+    -H 'Content-Type: application/json' -d '{}' \
+  | jq -r --arg cr "$CR" '[.runs[] | select(.workflowName | contains($cr))][0].runId // empty'

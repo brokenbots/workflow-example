@@ -1,0 +1,30 @@
+#!/bin/sh
+# heartbeat_wait.sh — the steady-state pause AND the castle telemetry line.
+# stdout carries exactly ONE state line (it lands in the run's event stream):
+#   HB round=<n> last=<action> stall=<k> armed=<ids> wip=<ids> ready=<ids>
+# The board snapshot is re-read cheaply for the line; a fetch failure degrades
+# the line rather than failing the round (the next round reclassifies).
+set -eu
+RUN_ROOT="{{ .run_root }}"
+PAUSE_S="{{ .pause_s }}"
+ROUND="{{ .round }}"
+LAST="{{ .last_action }}"
+
+export KB_URL="${KB_URL:?KB_URL not in environment}"
+export KB_TOKEN="${KB_TOKEN:?KB_TOKEN not in environment}"
+
+# shellcheck source=kb_lib.sh.tftpl
+. "$RUN_ROOT/lib/kb_lib.sh"
+
+STATE_LINE=""
+if BOARD=$(kb_board_tasks 2>/dev/null); then
+    ARMED=$(printf '%s' "$BOARD" | jq -r '[.[].id] | length' 2>/dev/null || echo "?")
+    STATE_LINE="armed_count=$ARMED"
+else
+    STATE_LINE="board=unreachable"
+fi
+
+printf 'HB round=%s last=%s stall=%s %s' "$ROUND" "$LAST" "$(cat "$RUN_ROOT/stall_counter" 2>/dev/null || echo 0)" "$STATE_LINE"
+
+sleep "$PAUSE_S"
+exit 0
