@@ -1,0 +1,1611 @@
+{
+  "name": "kanboard_triage_v1",
+  "initial_state": "fetch_ticket",
+  "target_state": "ready_for_development",
+  "policy": {
+    "MaxTotalSteps": 60,
+    "MaxStepRetries": 0,
+    "MaxToolDepth": 8,
+    "MaxToolCalls": 100,
+    "MaxVisitsWarnThreshold": 200
+  },
+  "adapters": [
+    {
+      "type": "shell",
+      "name": "triage",
+      "on_crash": "fail",
+      "config_keys": null,
+      "environment": "remote.triage",
+      "source": "ghcr.io/brokenbots/criteria-adapter-shell",
+      "pinned_digest": "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+    }
+  ],
+  "steps": [
+    {
+      "name": "fetch_ticket",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "need_assistance"
+        },
+        {
+          "name": "success",
+          "next": "check_internal_label"
+        }
+      ]
+    },
+    {
+      "name": "check_internal_label",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_triage_failed"
+        },
+        {
+          "name": "success",
+          "next": "route_internal_label"
+        }
+      ]
+    },
+    {
+      "name": "write_confirmed_workstream",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_triage_failed"
+        },
+        {
+          "name": "success",
+          "next": "set_confirmed_bug_label"
+        }
+      ]
+    },
+    {
+      "name": "set_confirmed_bug_label",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_triage_failed"
+        },
+        {
+          "name": "success",
+          "next": "rearm_k8s_run"
+        }
+      ]
+    },
+    {
+      "name": "write_bug_report",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_triage_failed"
+        },
+        {
+          "name": "success",
+          "next": "run_qa_triage"
+        }
+      ]
+    },
+    {
+      "name": "run_qa_triage",
+      "subworkflow": "qa_triage",
+      "input_keys": null,
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "route_qa_result"
+        },
+        {
+          "name": "success",
+          "next": "route_qa_result"
+        }
+      ]
+    },
+    {
+      "name": "run_review_output",
+      "subworkflow": "review_output",
+      "input_keys": null,
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_triage_failed"
+        },
+        {
+          "name": "success",
+          "next": "route_review"
+        }
+      ]
+    },
+    {
+      "name": "comment_triage_failed",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "set_review_state"
+        },
+        {
+          "name": "success",
+          "next": "set_review_state"
+        }
+      ]
+    },
+    {
+      "name": "comment_invalid",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "set_review_state"
+        },
+        {
+          "name": "success",
+          "next": "set_review_state"
+        }
+      ]
+    },
+    {
+      "name": "comment_needs_human",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "set_review_state"
+        },
+        {
+          "name": "success",
+          "next": "set_review_state"
+        }
+      ]
+    },
+    {
+      "name": "comment_ready_move_failed",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "set_review_state"
+        },
+        {
+          "name": "success",
+          "next": "set_review_state"
+        }
+      ]
+    },
+    {
+      "name": "set_review_state",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "need_assistance"
+        },
+        {
+          "name": "success",
+          "next": "need_assistance"
+        }
+      ]
+    },
+    {
+      "name": "rearm_k8s_run",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_rearm_failed"
+        },
+        {
+          "name": "success",
+          "next": "set_ready_state"
+        }
+      ]
+    },
+    {
+      "name": "comment_rearm_failed",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "set_review_state"
+        },
+        {
+          "name": "success",
+          "next": "set_review_state"
+        }
+      ]
+    },
+    {
+      "name": "set_ready_state",
+      "adapter": "shell.triage",
+      "input_keys": [
+        "command"
+      ],
+      "allow_tools": null,
+      "outcomes": [
+        {
+          "name": "failure",
+          "next": "comment_ready_move_failed"
+        },
+        {
+          "name": "success",
+          "next": "ready_for_development"
+        }
+      ]
+    }
+  ],
+  "states": [
+    {
+      "name": "need_assistance",
+      "terminal": true,
+      "success": false
+    },
+    {
+      "name": "ready_for_development",
+      "terminal": true,
+      "success": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "assistance_reason",
+      "type": "string"
+    }
+  ],
+  "switches": [
+    {
+      "name": "route_internal_label",
+      "conditions": [
+        {
+          "match": "data.internal.internal_reproduced.value",
+          "next": "write_confirmed_workstream"
+        }
+      ],
+      "default_next": "write_bug_report"
+    },
+    {
+      "name": "route_qa_result",
+      "conditions": [
+        {
+          "match": "data.internal.verdict.value == \"\"",
+          "next": "comment_triage_failed"
+        },
+        {
+          "match": "startswith(data.internal.verdict.value, \"needs_human_\") || data.internal.verdict.value == \"needs_design_decision\"",
+          "next": "comment_needs_human"
+        }
+      ],
+      "default_next": "run_review_output"
+    },
+    {
+      "name": "route_ready",
+      "conditions": [
+        {
+          "match": "data.internal.workstream_file.value != \"\"",
+          "next": "rearm_k8s_run"
+        }
+      ],
+      "default_next": "comment_needs_human"
+    },
+    {
+      "name": "route_review",
+      "conditions": [
+        {
+          "match": "data.internal.review_ruling.value == \"valid_run_handler\"",
+          "next": "route_ready"
+        },
+        {
+          "match": "data.internal.review_ruling.value == \"invalid_close\"",
+          "next": "comment_invalid"
+        },
+        {
+          "match": "data.internal.review_ruling.value == \"needs_human\"",
+          "next": "comment_needs_human"
+        }
+      ],
+      "default_next": "comment_triage_failed"
+    }
+  ],
+  "subworkflows": [
+    {
+      "name": "qa_triage",
+      "source_path": "/home/dave/Projects/workflow-example/qa_triage_v1",
+      "body": {
+        "name": "qa_triage_v1",
+        "initial_state": "read_report",
+        "target_state": "workstream_published",
+        "policy": {
+          "MaxTotalSteps": 150,
+          "MaxStepRetries": 0,
+          "MaxToolDepth": 8,
+          "MaxToolCalls": 100,
+          "MaxVisitsWarnThreshold": 200
+        },
+        "adapters": [
+          {
+            "type": "copilot",
+            "name": "investigator",
+            "on_crash": "fail",
+            "config_keys": [
+              "max_turns",
+              "model",
+              "provider_base_url",
+              "provider_wire_api",
+              "reasoning_effort",
+              "system_prompt",
+              "working_directory"
+            ],
+            "environment": "remote.scratch",
+            "source": "ghcr.io/brokenbots/criteria-adapter-copilot",
+            "pinned_digest": "sha256:d4400abc734ab4146440e9ab9ac1d22eea11ef38166895718b415f8dc46671ae"
+          },
+          {
+            "type": "copilot",
+            "name": "supervisor",
+            "on_crash": "fail",
+            "config_keys": [
+              "max_turns",
+              "model",
+              "provider_base_url",
+              "provider_wire_api",
+              "reasoning_effort",
+              "system_prompt",
+              "working_directory"
+            ],
+            "environment": "remote.scratch",
+            "source": "ghcr.io/brokenbots/criteria-adapter-copilot",
+            "pinned_digest": "sha256:d4400abc734ab4146440e9ab9ac1d22eea11ef38166895718b415f8dc46671ae"
+          },
+          {
+            "type": "shell",
+            "name": "repo",
+            "on_crash": "fail",
+            "config_keys": null,
+            "environment": "remote.primary",
+            "source": "ghcr.io/brokenbots/criteria-adapter-shell",
+            "pinned_digest": "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+          }
+        ],
+        "steps": [
+          {
+            "name": "read_report",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "prepare_workspace"
+              }
+            ]
+          },
+          {
+            "name": "prepare_workspace",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "resolve_main_ref"
+              }
+            ]
+          },
+          {
+            "name": "resolve_main_ref",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "resolve_stable_ref"
+              }
+            ]
+          },
+          {
+            "name": "resolve_stable_ref",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "record_refs"
+              }
+            ]
+          },
+          {
+            "name": "record_refs",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "setup_scratch_worktree"
+              }
+            ]
+          },
+          {
+            "name": "setup_scratch_worktree",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "check_approved_plan"
+              }
+            ]
+          },
+          {
+            "name": "check_approved_plan",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "route_after_plan_check"
+              }
+            ]
+          },
+          {
+            "name": "intake_review",
+            "adapter": "copilot.supervisor",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "actionable",
+                "next": "plan_repro"
+              },
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "insufficient",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "needs_human",
+                "next": "write_triage_report"
+              }
+            ]
+          },
+          {
+            "name": "plan_repro",
+            "adapter": "copilot.investigator",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "need_help",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "plan_ready",
+                "next": "review_plan"
+              }
+            ]
+          },
+          {
+            "name": "review_plan",
+            "adapter": "copilot.supervisor",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "plan_approved",
+                "next": "persist_approved_plan"
+              },
+              {
+                "name": "plan_reject",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "plan_revise",
+                "next": "plan_repro"
+              }
+            ]
+          },
+          {
+            "name": "persist_approved_plan",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "route_repro_start"
+              }
+            ]
+          },
+          {
+            "name": "run_repro_main",
+            "subworkflow": "repro_main",
+            "input_keys": null,
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "route_after_main"
+              },
+              {
+                "name": "success",
+                "next": "route_after_main"
+              }
+            ]
+          },
+          {
+            "name": "note_no_stable",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "aggregate_evidence"
+              }
+            ]
+          },
+          {
+            "name": "run_repro_stable",
+            "subworkflow": "repro_stable",
+            "input_keys": null,
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "aggregate_evidence"
+              },
+              {
+                "name": "success",
+                "next": "aggregate_evidence"
+              }
+            ]
+          },
+          {
+            "name": "aggregate_evidence",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "assert_repo_clean"
+              }
+            ]
+          },
+          {
+            "name": "assert_repo_clean",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "success",
+                "next": "verdict"
+              }
+            ]
+          },
+          {
+            "name": "verdict",
+            "adapter": "copilot.supervisor",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "already_fixed",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "insufficient_evidence",
+                "next": "plan_repro"
+              },
+              {
+                "name": "needs_human",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "not_reproduced",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "regression",
+                "next": "draft_workstream"
+              },
+              {
+                "name": "reproduced",
+                "next": "draft_workstream"
+              }
+            ]
+          },
+          {
+            "name": "draft_workstream",
+            "adapter": "copilot.investigator",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "draft_ready",
+                "next": "approve_workstream"
+              },
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "need_help",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "needs_design",
+                "next": "write_triage_report"
+              }
+            ]
+          },
+          {
+            "name": "approve_workstream",
+            "adapter": "copilot.supervisor",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "approved",
+                "next": "publish_workstream"
+              },
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "reject",
+                "next": "write_triage_report"
+              },
+              {
+                "name": "revise",
+                "next": "draft_workstream"
+              }
+            ]
+          },
+          {
+            "name": "publish_workstream",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "write_triage_report"
+              }
+            ]
+          },
+          {
+            "name": "write_triage_report",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "success",
+                "next": "teardown"
+              }
+            ]
+          },
+          {
+            "name": "teardown",
+            "adapter": "shell.repo",
+            "input_keys": [
+              "command"
+            ],
+            "allow_tools": null,
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "route_final"
+              },
+              {
+                "name": "success",
+                "next": "route_final"
+              }
+            ]
+          }
+        ],
+        "states": [
+          {
+            "name": "closed_no_workstream",
+            "terminal": true,
+            "success": true
+          },
+          {
+            "name": "failed",
+            "terminal": true,
+            "success": false
+          },
+          {
+            "name": "needs_human",
+            "terminal": true,
+            "success": false
+          },
+          {
+            "name": "workstream_published",
+            "terminal": true,
+            "success": true
+          }
+        ],
+        "outputs": [
+          {
+            "name": "verdict",
+            "type": "string"
+          },
+          {
+            "name": "workstream_file",
+            "type": "string"
+          }
+        ],
+        "switches": [
+          {
+            "name": "route_after_main",
+            "conditions": [
+              {
+                "match": "var.test_refs == \"both\"",
+                "next": "route_stable_available"
+              }
+            ],
+            "default_next": "aggregate_evidence"
+          },
+          {
+            "name": "route_after_plan_check",
+            "conditions": [
+              {
+                "match": "data.internal.approved_plan_restored.value",
+                "next": "route_repro_start"
+              }
+            ],
+            "default_next": "intake_review"
+          },
+          {
+            "name": "route_final",
+            "conditions": [
+              {
+                "match": "data.internal.verdict.value == \"reproduced\" || data.internal.verdict.value == \"regression\"",
+                "next": "workstream_published"
+              },
+              {
+                "match": "startswith(data.internal.verdict.value, \"needs_human_\") || data.internal.verdict.value == \"needs_design_decision\"",
+                "next": "needs_human"
+              }
+            ],
+            "default_next": "closed_no_workstream"
+          },
+          {
+            "name": "route_repro_start",
+            "conditions": [
+              {
+                "match": "var.test_refs == \"stable\"",
+                "next": "route_stable_available"
+              }
+            ],
+            "default_next": "run_repro_main"
+          },
+          {
+            "name": "route_stable_available",
+            "conditions": [
+              {
+                "match": "data.internal.stable_tag.value == \"\"",
+                "next": "note_no_stable"
+              }
+            ],
+            "default_next": "run_repro_stable"
+          }
+        ],
+        "subworkflows": [
+          {
+            "name": "repro_main",
+            "source_path": "/home/dave/Projects/workflow-example/qa_triage_v1/workflows/repro_runner",
+            "body": {
+              "name": "repro_runner",
+              "initial_state": "prepare_worktree",
+              "target_state": "done",
+              "policy": {
+                "MaxTotalSteps": 60,
+                "MaxStepRetries": 0,
+                "MaxToolDepth": 8,
+                "MaxToolCalls": 100,
+                "MaxVisitsWarnThreshold": 200
+              },
+              "adapters": [
+                {
+                  "type": "copilot",
+                  "name": "investigator",
+                  "on_crash": "fail",
+                  "config_keys": [
+                    "max_turns",
+                    "model",
+                    "provider_base_url",
+                    "provider_wire_api",
+                    "reasoning_effort",
+                    "system_prompt",
+                    "working_directory"
+                  ],
+                  "environment": "remote.worktree",
+                  "source": "ghcr.io/brokenbots/criteria-adapter-copilot",
+                  "pinned_digest": "sha256:d4400abc734ab4146440e9ab9ac1d22eea11ef38166895718b415f8dc46671ae"
+                },
+                {
+                  "type": "shell",
+                  "name": "repo",
+                  "on_crash": "fail",
+                  "config_keys": null,
+                  "environment": "remote.primary",
+                  "source": "ghcr.io/brokenbots/criteria-adapter-shell",
+                  "pinned_digest": "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+                },
+                {
+                  "type": "shell",
+                  "name": "wt",
+                  "on_crash": "fail",
+                  "config_keys": null,
+                  "environment": "remote.worktree",
+                  "source": "ghcr.io/brokenbots/criteria-adapter-shell",
+                  "pinned_digest": "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+                }
+              ],
+              "steps": [
+                {
+                  "name": "prepare_worktree",
+                  "adapter": "shell.repo",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "done"
+                    },
+                    {
+                      "name": "success",
+                      "next": "route_build"
+                    }
+                  ]
+                },
+                {
+                  "name": "build",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "mark_build_failed"
+                    },
+                    {
+                      "name": "success",
+                      "next": "route_baseline_tests"
+                    }
+                  ]
+                },
+                {
+                  "name": "mark_build_failed",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "done"
+                    },
+                    {
+                      "name": "success",
+                      "next": "done"
+                    }
+                  ]
+                },
+                {
+                  "name": "baseline_tests",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "route_provided_workflow"
+                    },
+                    {
+                      "name": "success",
+                      "next": "route_provided_workflow"
+                    }
+                  ]
+                },
+                {
+                  "name": "run_provided_workflow",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "execute_plan"
+                    },
+                    {
+                      "name": "success",
+                      "next": "execute_plan"
+                    }
+                  ]
+                },
+                {
+                  "name": "execute_plan",
+                  "adapter": "copilot.investigator",
+                  "input_keys": [
+                    "prompt"
+                  ],
+                  "allow_tools": [
+                    "*"
+                  ],
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "done"
+                    },
+                    {
+                      "name": "inconclusive",
+                      "next": "done"
+                    },
+                    {
+                      "name": "need_help",
+                      "next": "done"
+                    },
+                    {
+                      "name": "not_reproduced",
+                      "next": "done"
+                    },
+                    {
+                      "name": "reproduced",
+                      "next": "done"
+                    }
+                  ]
+                }
+              ],
+              "states": [
+                {
+                  "name": "done",
+                  "terminal": true,
+                  "success": true
+                }
+              ],
+              "outputs": [
+                {
+                  "name": "reproduced",
+                  "type": "string"
+                },
+                {
+                  "name": "baseline_health",
+                  "type": "string"
+                }
+              ],
+              "switches": [
+                {
+                  "name": "route_baseline_tests",
+                  "conditions": [
+                    {
+                      "match": "var.test_cmd == \"\"",
+                      "next": "route_provided_workflow"
+                    }
+                  ],
+                  "default_next": "baseline_tests"
+                },
+                {
+                  "name": "route_build",
+                  "conditions": [
+                    {
+                      "match": "var.build_cmd == \"\"",
+                      "next": "route_baseline_tests"
+                    }
+                  ],
+                  "default_next": "build"
+                },
+                {
+                  "name": "route_provided_workflow",
+                  "conditions": [
+                    {
+                      "match": "var.repro_workflow_dir == \"\"",
+                      "next": "execute_plan"
+                    }
+                  ],
+                  "default_next": "run_provided_workflow"
+                }
+              ],
+              "step_order": [
+                "prepare_worktree",
+                "build",
+                "mark_build_failed",
+                "baseline_tests",
+                "run_provided_workflow",
+                "execute_plan"
+              ],
+              "plugins_required": [
+                "copilot",
+                "shell"
+              ],
+              "metadata": {
+                "schema_version": 1
+              }
+            }
+          },
+          {
+            "name": "repro_stable",
+            "source_path": "/home/dave/Projects/workflow-example/qa_triage_v1/workflows/repro_runner",
+            "body": {
+              "name": "repro_runner",
+              "initial_state": "prepare_worktree",
+              "target_state": "done",
+              "policy": {
+                "MaxTotalSteps": 60,
+                "MaxStepRetries": 0,
+                "MaxToolDepth": 8,
+                "MaxToolCalls": 100,
+                "MaxVisitsWarnThreshold": 200
+              },
+              "adapters": [
+                {
+                  "type": "copilot",
+                  "name": "investigator",
+                  "on_crash": "fail",
+                  "config_keys": [
+                    "max_turns",
+                    "model",
+                    "provider_base_url",
+                    "provider_wire_api",
+                    "reasoning_effort",
+                    "system_prompt",
+                    "working_directory"
+                  ],
+                  "environment": "remote.worktree",
+                  "source": "ghcr.io/brokenbots/criteria-adapter-copilot",
+                  "pinned_digest": "sha256:d4400abc734ab4146440e9ab9ac1d22eea11ef38166895718b415f8dc46671ae"
+                },
+                {
+                  "type": "shell",
+                  "name": "repo",
+                  "on_crash": "fail",
+                  "config_keys": null,
+                  "environment": "remote.primary",
+                  "source": "ghcr.io/brokenbots/criteria-adapter-shell",
+                  "pinned_digest": "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+                },
+                {
+                  "type": "shell",
+                  "name": "wt",
+                  "on_crash": "fail",
+                  "config_keys": null,
+                  "environment": "remote.worktree",
+                  "source": "ghcr.io/brokenbots/criteria-adapter-shell",
+                  "pinned_digest": "sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41"
+                }
+              ],
+              "steps": [
+                {
+                  "name": "prepare_worktree",
+                  "adapter": "shell.repo",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "done"
+                    },
+                    {
+                      "name": "success",
+                      "next": "route_build"
+                    }
+                  ]
+                },
+                {
+                  "name": "build",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "mark_build_failed"
+                    },
+                    {
+                      "name": "success",
+                      "next": "route_baseline_tests"
+                    }
+                  ]
+                },
+                {
+                  "name": "mark_build_failed",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "done"
+                    },
+                    {
+                      "name": "success",
+                      "next": "done"
+                    }
+                  ]
+                },
+                {
+                  "name": "baseline_tests",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "route_provided_workflow"
+                    },
+                    {
+                      "name": "success",
+                      "next": "route_provided_workflow"
+                    }
+                  ]
+                },
+                {
+                  "name": "run_provided_workflow",
+                  "adapter": "shell.wt",
+                  "input_keys": [
+                    "command"
+                  ],
+                  "allow_tools": null,
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "execute_plan"
+                    },
+                    {
+                      "name": "success",
+                      "next": "execute_plan"
+                    }
+                  ]
+                },
+                {
+                  "name": "execute_plan",
+                  "adapter": "copilot.investigator",
+                  "input_keys": [
+                    "prompt"
+                  ],
+                  "allow_tools": [
+                    "*"
+                  ],
+                  "outcomes": [
+                    {
+                      "name": "failure",
+                      "next": "done"
+                    },
+                    {
+                      "name": "inconclusive",
+                      "next": "done"
+                    },
+                    {
+                      "name": "need_help",
+                      "next": "done"
+                    },
+                    {
+                      "name": "not_reproduced",
+                      "next": "done"
+                    },
+                    {
+                      "name": "reproduced",
+                      "next": "done"
+                    }
+                  ]
+                }
+              ],
+              "states": [
+                {
+                  "name": "done",
+                  "terminal": true,
+                  "success": true
+                }
+              ],
+              "outputs": [
+                {
+                  "name": "reproduced",
+                  "type": "string"
+                },
+                {
+                  "name": "baseline_health",
+                  "type": "string"
+                }
+              ],
+              "switches": [
+                {
+                  "name": "route_baseline_tests",
+                  "conditions": [
+                    {
+                      "match": "var.test_cmd == \"\"",
+                      "next": "route_provided_workflow"
+                    }
+                  ],
+                  "default_next": "baseline_tests"
+                },
+                {
+                  "name": "route_build",
+                  "conditions": [
+                    {
+                      "match": "var.build_cmd == \"\"",
+                      "next": "route_baseline_tests"
+                    }
+                  ],
+                  "default_next": "build"
+                },
+                {
+                  "name": "route_provided_workflow",
+                  "conditions": [
+                    {
+                      "match": "var.repro_workflow_dir == \"\"",
+                      "next": "execute_plan"
+                    }
+                  ],
+                  "default_next": "run_provided_workflow"
+                }
+              ],
+              "step_order": [
+                "prepare_worktree",
+                "build",
+                "mark_build_failed",
+                "baseline_tests",
+                "run_provided_workflow",
+                "execute_plan"
+              ],
+              "plugins_required": [
+                "copilot",
+                "shell"
+              ],
+              "metadata": {
+                "schema_version": 1
+              }
+            }
+          }
+        ],
+        "step_order": [
+          "read_report",
+          "prepare_workspace",
+          "resolve_main_ref",
+          "resolve_stable_ref",
+          "record_refs",
+          "setup_scratch_worktree",
+          "check_approved_plan",
+          "intake_review",
+          "plan_repro",
+          "review_plan",
+          "persist_approved_plan",
+          "run_repro_main",
+          "note_no_stable",
+          "run_repro_stable",
+          "aggregate_evidence",
+          "assert_repo_clean",
+          "verdict",
+          "draft_workstream",
+          "approve_workstream",
+          "publish_workstream",
+          "write_triage_report",
+          "teardown"
+        ],
+        "plugins_required": [
+          "copilot",
+          "shell"
+        ],
+        "metadata": {
+          "schema_version": 1
+        }
+      }
+    },
+    {
+      "name": "review_output",
+      "source_path": "/home/dave/Projects/workflow-example/review_triage_v1",
+      "body": {
+        "name": "review_triage_v1",
+        "initial_state": "review_qa_output",
+        "target_state": "review_complete",
+        "policy": {
+          "MaxTotalSteps": 60,
+          "MaxStepRetries": 0,
+          "MaxToolDepth": 8,
+          "MaxToolCalls": 100,
+          "MaxVisitsWarnThreshold": 200
+        },
+        "adapters": [
+          {
+            "type": "copilot",
+            "name": "triage_reviewer",
+            "on_crash": "fail",
+            "config_keys": [
+              "max_turns",
+              "model",
+              "provider_base_url",
+              "provider_wire_api",
+              "reasoning_effort",
+              "system_prompt",
+              "working_directory"
+            ],
+            "environment": "remote.review",
+            "source": "ghcr.io/brokenbots/criteria-adapter-copilot",
+            "pinned_digest": "sha256:d4400abc734ab4146440e9ab9ac1d22eea11ef38166895718b415f8dc46671ae"
+          }
+        ],
+        "steps": [
+          {
+            "name": "review_qa_output",
+            "adapter": "copilot.triage_reviewer",
+            "input_keys": [
+              "prompt"
+            ],
+            "allow_tools": [
+              "*"
+            ],
+            "outcomes": [
+              {
+                "name": "failure",
+                "next": "failed"
+              },
+              {
+                "name": "invalid_close",
+                "next": "review_complete"
+              },
+              {
+                "name": "needs_human",
+                "next": "review_complete"
+              },
+              {
+                "name": "valid_run_handler",
+                "next": "review_complete"
+              }
+            ]
+          }
+        ],
+        "states": [
+          {
+            "name": "failed",
+            "terminal": true,
+            "success": false
+          },
+          {
+            "name": "review_complete",
+            "terminal": true,
+            "success": true
+          }
+        ],
+        "outputs": [
+          {
+            "name": "ruling",
+            "type": "string"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          }
+        ],
+        "switches": [],
+        "step_order": [
+          "review_qa_output"
+        ],
+        "plugins_required": [
+          "copilot"
+        ],
+        "metadata": {
+          "schema_version": 1
+        }
+      }
+    }
+  ],
+  "step_order": [
+    "fetch_ticket",
+    "check_internal_label",
+    "write_confirmed_workstream",
+    "set_confirmed_bug_label",
+    "write_bug_report",
+    "run_qa_triage",
+    "run_review_output",
+    "comment_triage_failed",
+    "comment_invalid",
+    "comment_needs_human",
+    "comment_ready_move_failed",
+    "set_review_state",
+    "rearm_k8s_run",
+    "comment_rearm_failed",
+    "set_ready_state"
+  ],
+  "plugins_required": [
+    "shell"
+  ],
+  "metadata": {
+    "schema_version": 1
+  }
+}

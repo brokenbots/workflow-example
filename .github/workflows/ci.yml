@@ -80,8 +80,14 @@ jobs:
           CRITERIA_HOME: /home/runner/.local/criteria
         run: |
           mkdir -p "$CRITERIA_HOME/adapters"
-          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.5
-          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15
+          # #303: adapter versions come from releases.chcl (single source) — never
+          # hardcode pins here; a stale literal is exactly the drift class this
+          # gate exists to kill.
+          SHELL_V="$(sed -n 's/^shell *= *"\([^"]*\)".*/\1/p' releases.chcl)"
+          COPILOT_V="$(sed -n 's/^copilot *= *"\([^"]*\)".*/\1/p' releases.chcl)"
+          echo "pre-pulling shells:$SHELL_V copilot:$COPILOT_V (from releases.chcl)"
+          criteria adapter pull "ghcr.io/brokenbots/criteria-adapter-shell:${SHELL_V}"
+          criteria adapter pull "ghcr.io/brokenbots/criteria-adapter-copilot:${COPILOT_V}"
 
       # The copilot adapter's CLI server execs the `copilot` CLI from PATH
       # (run 39098317753: bind adapter "copilot.main" ... "failed to start
