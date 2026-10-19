@@ -214,19 +214,28 @@ require_equal \
 # The copilot pin is the live-proven QA/reviewer digest (copilot 0.5.15).
 # Pin it literally instead of comparing graph values to each other, which
 # would pass vacuously if compile ever emitted null for both.
-COPILOT_PIN="sha256:827e39ad040a24ad81251b802b1996a00195121ce2c97b7b6ba62d558d581773"
+# #303: the expected copilot digest is DERIVED, not hardcoded: resolve the
+# manifest version from releases.chcl to its digest via the local lockfile
+# (review_triage_v1/.criteria.lock.hcl pins copilot = manifest 0.5.17). The
+# three adapters must pin THAT digest — a stale hand pin regresses here.
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+COPILOT_PIN="$(awk '/adapter "copilot"/,/}/' "$(cd "$(dirname "$0")/../.." && pwd)/review_triage_v1/.criteria.lock.hcl" | grep -m1 -oE 'sha256:[0-9a-f]+' | head -1)"
+if [ -z "$COPILOT_PIN" ]; then
+    echo "FAIL: could not derive the copilot digest from review_triage_v1 lockfile" >&2
+    exit 1
+fi
 require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "review_triage_v1") | .body.adapters[] | select(.name == "triage_reviewer") | .pinned_digest' "$GRAPH")" \
     "$COPILOT_PIN" \
-    "reviewer copilot pins the live-proven 827e39ad digest"
+    "reviewer copilot pins the releases.chcl-resolved published digest (0.5.17)"
 require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "qa_triage_v1") | .body.adapters[] | select(.name == "investigator") | .pinned_digest' "$GRAPH")" \
     "$COPILOT_PIN" \
-    "qa_triage_v1 investigator pins the same live-proven digest"
+    "qa_triage_v1 investigator pins the same manifest digest"
 require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "qa_triage_v1") | .body.adapters[] | select(.name == "supervisor") | .pinned_digest' "$GRAPH")" \
     "$COPILOT_PIN" \
-    "qa_triage_v1 supervisor pins the same live-proven digest"
+    "qa_triage_v1 supervisor pins the same manifest digest"
 
 # The rewired decision surface: route_review must map the reviewer's ruling
 # tokens onto exactly the lanes the inline reviewer step routed onto (KB-284
