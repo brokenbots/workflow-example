@@ -160,6 +160,12 @@ jobs:
       - name: Run harness_contracts_v1 standalone regression test (KB-277)
         env:
           SUITE_DEBUG: "1"
+          # CI runners are markedly slower than the LAN dev box (per-fixture
+          # engine + stub-provider spin-up); 150s starved F1/F2 (observed 10-19:
+          # exit 124 across the board). 600s per fixture / 1500s for the F9
+          # shipped chain keeps the assertions identical, just unhurried.
+          SUITE_TIMEOUT: "600"
+          SUITE_TIMEOUT_FULL: "1500"
         run: |
           set -o pipefail
           bash harness_contracts_v1/tests/test_contracts_standalone.sh \
