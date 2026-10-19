@@ -149,7 +149,14 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                 ;;
             "Succeeded"|"Failed"|"Completed")
                 # terminal CR -> classify from castle events
-                rid=$("$LIB_DIR/castle_last_run.sh" "$CASTLE" "$cr_nm" 2>/dev/null || echo "")
+                # CR yaml = authority: capture name + stamp + tree name once per terminal CR
+                KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
+                    -n criteria-jobs "$cr_nm" -o yaml > "$RUN_ROOT/evidence/r$ROUND-cr.yaml"
+                CR_STAMP=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
+                    -n criteria-jobs "$cr_nm" -o jsonpath='{.metadata.creationTimestamp}')
+                CR_TREE=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
+                    -n criteria-jobs "$cr_nm" -o jsonpath='{.spec.workflow.name}')
+                rid=$("$LIB_DIR/castle_last_run.sh" "$CASTLE" "$CR_TREE" "$CR_STAMP" 2>/dev/null || echo "")
                 sig=$("$LIB_DIR/classify_events.sh" "$CASTLE" "$rid" 2>/dev/null || echo "unreadable")
                 case "$sig" in
                     awaiting_human)
@@ -166,8 +173,7 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                         exit 0
                         ;;
                     transient_infra)
-                        cp "$RUN_ROOT/evidence/$cr_nm.yaml" "$RUN_ROOT/last.yaml" 2>/dev/null || \
-                            KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun -n criteria-jobs "$cr_nm" -o yaml > "$RUN_ROOT/last.yaml"
+                        cp "$RUN_ROOT/evidence/r$ROUND-cr.yaml" "$RUN_ROOT/last.yaml" 2>/dev/null
                         jq -n --arg a refire --arg r "transient infra on $cr_nm ($rid): $sig" \
                             --arg tid "$tid" --arg crn "$cr_nm" --arg rid "$rid" \
                             --arg yaml "$RUN_ROOT/last.yaml" \

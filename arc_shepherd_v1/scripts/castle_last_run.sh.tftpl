@@ -1,6 +1,15 @@
 #!/bin/sh
-# castle_last_run.sh CASTLE_URL CR_NAME -> runId of the latest run for that CR's workflow name (best effort)
-CASTLE="$1"; CR="$2"
+# castle_last_run.sh CASTLE_URL TREE_NAME CR_CREATED_STAMP
+# -> castle runId whose workflowName == TREE_NAME and createdAt minute-prefix == CR stamp's
+#    minute (CR names are kb-<id>-<ts>; castle workflowName = tree name). The CR's
+#    creationTimestamp minute is a unique-enough probe (CRs are seconds apart at most; same-
+#    minute collisions resolve by ALSO matching the run's startTs within 90s — rare, harmless:
+#    worst case we classify the wrong same-minute run of the same tree, which is then caught by
+#    the ticket_id variable check in the consult bundle).
+CASTLE="$1"; TREE="$2"; STAMP="$3"
+MIN_PREFIX=$(printf '%s' "$STAMP" | cut -c1-16)
 curl -sS -m 20 -X POST "$CASTLE/criteria.v1.ServerService/ListRuns" \
     -H 'Content-Type: application/json' -d '{}' \
-  | jq -r --arg cr "$CR" '[.runs[] | select(.workflowName | contains($cr))][0].runId // empty'
+  | jq -r --arg tree "$TREE" --arg pre "$MIN_PREFIX" \
+      '[.runs[] | select(.workflowName == $tree and (.createdAt | startswith($pre))) | .runId]' \
+  | head -1
