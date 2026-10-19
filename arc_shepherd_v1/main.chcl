@@ -201,7 +201,7 @@ adapter "copilot" "guidance" {
     // published to the LAN registry as v0.5.63 (LAN-only dev build ABOVE the
     // fleet line; swap to a signed release tag when contract support ships).
     source      = "localhost:5000/criteria-adapter-copilot"
-    version     = "v0.5.63"
+    version     = "v0.5.64"
     environment = shell.ops
     secrets {
         GITHUB_TOKEN = var.github_token

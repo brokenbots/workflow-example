@@ -1,8 +1,8 @@
 schema_version = 1
 adapter "copilot" "guidance" {
-  reference            = "localhost:5000/criteria-adapter-copilot:v0.5.63"
-  version              = "v0.5.63"
-  resolved_digest      = "sha256:8d63566d1d25821edd7d7a68be72d69d5a06d3deb96a9e9a11221bdb46bfe2fb"
+  reference            = "localhost:5000/criteria-adapter-copilot:v0.5.64"
+  version              = "v0.5.64"
+  resolved_digest      = "sha256:56618338d724cb8052585efd8f9483035acd551e86f2f6d176e5c98917f09982"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
