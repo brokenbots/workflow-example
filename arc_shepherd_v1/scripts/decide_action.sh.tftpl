@@ -209,10 +209,11 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
     pr_json=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" "kb-${tid}" 2>"$RUN_ROOT/pr.err" || echo "")
     if [ -n "$pr_json" ] && printf '%s' "$pr_json" | jq -e . >/dev/null 2>&1; then
         pr_state=$(printf '%s' "$pr_json" | jq -r '.state // "none"')
+        if [ "$pr_state" = "none" ]; then pr_json=""; fi   # no own PR exists -> fall through to arm
         pr_author=$(printf '%s' "$pr_json" | jq -r '.author // ""')
         pr_checks=$(printf '%s' "$pr_json" | jq -r '.gate // "none"')
         pr_url=$(printf '%s' "$pr_json" | jq -r '.url // ""')
-        if [ "$pr_author" != "$entry_author" ] && [ "$pr_author" != "none" ]; then
+        if [ "$pr_state" != "none" ] && [ "$pr_author" != "$entry_author" ] && [ "$pr_author" != "none" ]; then
             jq -n --arg a ambiguous --arg tid "$tid" \
                 --arg r "gate violation: PR author '$pr_author' != expected '$entry_author' on $entry_repo" \
                 --arg pa "$pr_author" \
