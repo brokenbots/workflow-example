@@ -1,15 +1,25 @@
 #!/bin/sh
-# classify_events.sh CASTLE_URL RUN_ID -> one of:
-#   transient_infra | tree_defect | engine_defect | operator_defect | unclear
-# Deterministic signature greps over the run's event tail (stepOutcome errors,
-# runCompleted). A run with NO stepOutcome error and finalState done/succeeded
-# = clean (prints "clean").
+# classify_events.sh — deterministic first pass; verdict + ticket handling ride guidance.
+# CASTLE_URL RUN_ID -> printed event digest for consult + exit token:
+#   transient_infra | tree_defect | engine_defect | operator_defect |
+#   clean | awaiting_human | unreadable
+# ATRIAGE awaiting_human exit (success=true) is NOT a defect: it's the
+# triage tree's designed human-gate terminal — the shepherd's ticket-handling
+# doctrine (guidance.md) decides re-arm/park from the CARD CLASS.
 CASTLE="$1"; RID="$2"
 [ -n "$RID" ] || { echo "unreadable"; exit 0; }
 EV=$(curl -sS -m 20 -X POST "$CASTLE/criteria.v1.ServerService/ListRunEvents" \
     -H 'Content-Type: application/json' -d "{\"runId\":\"$RID\"}")
 [ -n "$EV" ] || { echo "unreadable"; exit 0; }
-# pull every stepOutcome error string + the runCompleted line
 ERRS=$(printf '%s' "$EV" | jq -r '[.events[] | .stepOutcome | select(.error != null and .error != "") | .error] | join("\n---\n")')
-FINAL=$(printf '%s' "$EV" | jq -r '(.events[] | select(.runCompleted != null) | .runCompleted) // empty')
-printf '%s\n==FINAL==\n%s\n' "$ERRS" "$FINAL"
+FINAL_STATE=$(printf '%s' "$EV" | jq -r '.events[] | select(.runCompleted != null) | .runCompleted.finalState // empty' | head -1)
+FINAL_OK=$(printf '%s' "$EV" | jq -r '.events[] | select(.runCompleted != null) | (.runCompleted.success // false)' | head -1)
+if [ "$FINAL_STATE" = "awaiting_human" ] && [ "$FINAL_OK" = "true" ]; then
+    echo "awaiting_human"
+    exit 0
+fi
+if [ -z "$FINAL_STATE" ] && [ -z "$ERRS" ]; then
+    echo "unreadable"
+    exit 0
+fi
+printf '%s\n==FINAL==\n%s\n' "$ERRS" "$FINAL_STATE"

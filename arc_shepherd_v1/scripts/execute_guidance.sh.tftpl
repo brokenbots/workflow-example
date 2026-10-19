@@ -19,7 +19,7 @@ VERDICT_CLASS=$(printf '%s' "$VERDICT_DOC" | jq -r '.verdict_class // "unknown"'
 ACTIONS_JSON=$(printf '%s' "$VERDICT_DOC" | jq -c '.actions // []' 2>/dev/null || echo "[]")
 RATIONALE=$(printf '%s' "$VERDICT_DOC" | jq -r '.rationale // ""' 2>/dev/null || echo "")
 
-ALLOWED="refire_cr park_ticket comment_ticket hold_merge watch_fix"
+ALLOWED="refire_cr park_ticket rearm_ticket set_ticket_tags comment_ticket hold_merge file_defect_card move_ticket watch_fix approve_pr"
 
 # shellcheck source=kb_lib.sh.tftpl
 . "$RUN_ROOT/lib/kb_lib.sh"
@@ -71,6 +71,48 @@ while : ; do
 
 rationale: $GUID" '$c')" >/dev/null
             APPLIED="comment_ticket"
+            ;;
+        approve_pr)
+            PR=$(printf '%s' "$ROW" | jq -r '.args.pr_url // ""')
+            [ -n "$PR" ] || { echo "approve_pr missing pr_url" >&2; exit 2; }
+            jq -n --arg a wait --arg r "approve_pr recorded: $PR (shepherd gate re-verified at merge time)" \
+                '{action:$a,reason:$r}' > "$RUN_ROOT/round_action.json"
+            APPLIED="wait"
+            ;;
+        rearm_ticket)
+            TASK=$(printf '%s' "$ROW" | jq -r '.args.task_id // 0')
+            NOTE=$(printf '%s' "$ROW" | jq -r '.args.note // "carrier re-arm"')
+            [ "$TASK" = "0" ] && { echo "rearm_ticket missing task_id" >&2; exit 2; }
+            SURVIVING=$(kb_task_tags "$TASK" | jq -c '[.[]]')
+            HAS=$(printf '%s' "$SURVIVING" | jq -r 'any(. == "k8s-run")')
+            [ "$HAS" != "true" ] && SURVIVING=$(printf '%s' "$SURVIVING" | jq -c '. + ["k8s-run"]')
+            kb_call setTaskTags "{\"project_id\":1,\"task_id\":$TASK,\"tags\":$SURVIVING}" >/dev/null
+            kb_move_task "{\"project_id\":1,\"swimlane_id\":1,\"task_id\":$TASK,\"column_id\":2,\"position\":1}" >/dev/null
+            kb_create_comment "$TASK" "$(jq -n --arg c "[shepherd re-arm] $NOTE -- false-park handling per ticket-handling doctrine (dave 10-19)" '$c')" >/dev/null
+            APPLIED="rearm_ticket"
+            ;;
+        set_ticket_tags)
+            TASK=$(printf '%s' "$ROW" | jq -r '.args.task_id // 0')
+            TAGS=$(printf '%s' "$ROW" | jq -c '.args.tags // []')
+            [ "$TASK" = "0" ] && { echo "set_ticket_tags missing task_id" >&2; exit 2; }
+            kb_call setTaskTags "{\"project_id\":1,\"task_id\":$TASK,\"tags\":$TAGS}" >/dev/null
+            APPLIED="set_ticket_tags"
+            ;;
+        move_ticket)
+            TASK=$(printf '%s' "$ROW" | jq -r '.args.task_id // 0')
+            COL=$(printf '%s' "$ROW" | jq -r '.args.column // 0')
+            [ "$TASK" = "0" ] || [ "$COL" = "0" ] && { echo "move_ticket missing args" >&2; exit 2; }
+            kb_move_task "{\"project_id\":1,\"swimlane_id\":1,\"task_id\":$TASK,\"column_id\":$COL,\"position\":1}" >/dev/null
+            APPLIED="move_ticket"
+            ;;
+        file_defect_card)
+            REPO=$(printf '%s' "$ROW" | jq -r '.args.repo // ""')
+            TITLE=$(printf '%s' "$ROW" | jq -r '.args.title // ""')
+            BODY=$(printf '%s' "$ROW" | jq -r '.args.body // ""')
+            [ -n "$REPO" ] && [ -n "$TITLE" ] || { echo "file_defect_card missing repo/title" >&2; exit 2; }
+            NEWID=$(kb_call createTask "{\"project_id\":1,\"title\":$TITLE,\"description\":$BODY,\"tags\":[\"repo:$REPO\",\"criteria\"]}" | jq -r '.')
+            kb_create_comment "$NEWID" "$(jq -n --arg c "[shepherd] defect card filed from arc consult; ONE develop try authorized (dave 10-19)" '$c')" >/dev/null
+            APPLIED="file_defect_card"
             ;;
         hold_merge)
             PR=$(printf '%s' "$ROW" | jq -r '.args.pr_url // ""')

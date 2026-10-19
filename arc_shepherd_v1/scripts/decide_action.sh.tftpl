@@ -151,6 +151,19 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                 rid=$("$LIB_DIR/castle_last_run.sh" "$CASTLE" "$cr_nm" 2>/dev/null || echo "")
                 sig=$("$LIB_DIR/classify_events.sh" "$CASTLE" "$rid" 2>/dev/null || echo "unreadable")
                 case "$sig" in
+                    awaiting_human)
+                        # triage's designed human-gate exit — NOT a defect. The
+                        # ticket-handling doctrine decides: guidance reads the
+                        # card class (from the manifest entry + body excerpt in
+                        # the consult bundle) and either rearm_ticket (false
+                        # park, carrier class) or escalates (bug class).
+                        jq -n --arg a ambiguous --arg tid "$tid" --arg crn "$cr_nm" \
+                            --arg rid "$rid" --arg sig "$sig" \
+                            --arg r "triage awaiting_human on $cr_nm ($rid): ticket-handling decision (carrier re-arm vs bug escalation)" \
+                            '{action:$a,reason:$r,task_id:($tid|tonumber),cr:$crn,run_id:$rid,signature:$sig}' > "$ACTION_FILE"
+                        token ambiguous
+                        exit 0
+                        ;;
                     transient_infra)
                         cp "$RUN_ROOT/evidence/$cr_nm.yaml" "$RUN_ROOT/last.yaml" 2>/dev/null || \
                             KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun -n criteria-jobs "$cr_nm" -o yaml > "$RUN_ROOT/last.yaml"
