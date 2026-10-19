@@ -70,6 +70,21 @@ mkdir -p "$RUN_ROOT/consult"
     echo "stall_counter=$(cat "$RUN_ROOT/stall_counter" 2>/dev/null || echo 0)"
     echo '```'
     echo
+    # FEATUTE PRECONDITION (a)+(b) evidence: the target repo HEAD + the card's
+    # target artifact lines the guidance agent can verify against
+    echo "## Target repo state (manifest entry: repo)"
+    echo '```'
+    M_REPO=$(cat "$RUN_ROOT/entry.json" 2>/dev/null | jq -r '.repo // empty' 2>/dev/null)
+    [ -n "$M_REPO" ] || M_REPO=$(jq -r '.children[0].repo // empty' "$SHEP_MANIFEST" 2>/dev/null)
+    if [ -n "$M_REPO" ]; then
+        echo "repo: $M_REPO (HEAD + key paths, via gh api — read-only)"
+        gh api "repos/$M_REPO/commits/HEAD" --jq '{sha: .sha[0:10], msg: .commit.message}' 2>/dev/null | head -6 || echo "(gh api failed)"
+    else
+        echo "(no repo resolved for this card)"
+    fi
+    echo '```'
+    echo
+
     # pinned doctrine excerpts (checked into the tree; the consult must see
     # the rulings that bound its authority)
     if [ -r "$RUN_ROOT/lib/doctrine.md" ]; then

@@ -11,5 +11,5 @@ MIN_PREFIX=$(printf '%s' "$STAMP" | cut -c1-16)
 curl -sS -m 20 -X POST "$CASTLE/criteria.v1.ServerService/ListRuns" \
     -H 'Content-Type: application/json' -d '{}' \
   | jq -r --arg tree "$TREE" --arg pre "$MIN_PREFIX" \
-      '[.runs[] | select(.workflowName == $tree and (.createdAt | startswith($pre))) | .runId]' \
+      '([.runs[] | select(.workflowName == $tree and (.createdAt | startswith($pre))) | .runId] | .[0]) // empty' \
   | head -1

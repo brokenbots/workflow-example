@@ -28,6 +28,22 @@ arc. Deterministic paths come first; judgment only where the rules below say.
    keeping k8s-run, moving the card Ready; the develop route fires. NEVER do
    this for bug-class cards — a bug without repro is a REAL insufficient
    report and escalates.
+2b. FEATURE PRECONDITIONS — before re-arming ANY feature carrier, verify BOTH:
+   (a) THE FEATURE DOES NOT ALREADY EXIST — check the target repo for the
+       artifact the card creates (e.g. a proto `message Example` /
+       `examples = 19` field, a CLI command, an SDK struct). Evidence the
+       feature already landed means the card is DONE: re-arm is wrong; the
+       card closes with the landed-evidence comment. The consult bundle's
+       repo excerpt (or the absence of one) is your evidence; never conclude
+       "does not exist" from a bundle that supplies no repo material — say
+       so and treat as unknown, which for a carrier still allows re-arm
+       (additive change, cheap merge, CI is the validator).
+   (b) THE CARD HAS A PLACE TO LAND — the target repo in the manifest entry
+       is real and matches where this work belongs (e.g. wire fields land in
+       criteria-adapter-proto, engine behavior in criteria, SDK surfaces in
+       the SDK repos). A feature card aimed at the wrong repo escalates with
+       the routing correction. If both (a) and (b) check out, re-arm is the
+       correct action on a false park.
 3. ENGINEERING defects (tree/engine/operator/adapter): the shepherd files a
    defect card (repo tag only, Backlog, full root-cause + fix shape + test
    shape in the body) and may make ONE develop attempt on it (arm it next
