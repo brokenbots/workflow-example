@@ -14,7 +14,10 @@ EV=$(curl -sS -m 20 -X POST "$CASTLE/criteria.v1.ServerService/ListRunEvents" \
 ERRS=$(printf '%s' "$EV" | jq -r '[.events[] | .stepOutcome | select(.error != null and .error != "") | .error] | join("\n---\n")')
 FINAL_STATE=$(printf '%s' "$EV" | jq -r '.events[] | select(.runCompleted != null) | .runCompleted.finalState // empty' | head -1)
 FINAL_OK=$(printf '%s' "$EV" | jq -r '.events[] | select(.runCompleted != null) | (.runCompleted.success // false)' | head -1)
-if [ "$FINAL_STATE" = "awaiting_human" ] && [ "$FINAL_OK" = "true" ]; then
+if [ "$FINAL_STATE" = "awaiting_human" ] || [ "$FINAL_STATE" = "need_assistance" ]; then
+    # both are the triage tree's designed human-gate terminals (CRI-240):
+    # awaiting_human = success-shaped park; need_assistance = its failure-shaped twin.
+    # Either way the SHEPHERD treats it as ticket-handling (rearm/park/escalate per class).
     echo "awaiting_human"
     exit 0
 fi
