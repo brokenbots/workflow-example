@@ -206,7 +206,7 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
     fi
 
     # ── open PR for this child? ─────────────────────────────────────────────
-    pr_json=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" 2>"$RUN_ROOT/pr.err" || echo "")
+    pr_json=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" "kb-${tid}" 2>"$RUN_ROOT/pr.err" || echo "")
     if [ -n "$pr_json" ] && printf '%s' "$pr_json" | jq -e . >/dev/null 2>&1; then
         pr_state=$(printf '%s' "$pr_json" | jq -r '.state // "none"')
         pr_author=$(printf '%s' "$pr_json" | jq -r '.author // ""')

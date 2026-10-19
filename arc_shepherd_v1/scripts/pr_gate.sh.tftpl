@@ -1,9 +1,11 @@
 #!/bin/sh
-# pr_gate.sh REPO DEV_ACTOR -> JSON {state,author,url,gate} for the newest open
-# PR on the arc branch naming convention (develop runs open PRs from KB-<id>
-# branches); gate = green | wait | red | none. Deterministic gh reads only.
-REPO="$1"; DEV_ACTOR="$2"
-PR_JSON=$(gh pr list --repo "$REPO" --state open --limit 5 --json number,author,url,headRefName,mergeable,mergeStateStatus 2>/dev/null)
+# pr_gate.sh REPO DEV_ACTOR [TICKET_PREFIX] -> JSON {state,author,url,gate} for
+# the ticket's OWN open PR (branch naming convention kb-<id>-* from develop runs); other open
+# PRs (dependabot, unrelated work) never gate this child's lane. Deterministic gh reads only.
+REPO="$1"; DEV_ACTOR="$2"; TICKET_PREFIX="${3:-}"
+PR_JSON=$(gh pr list --repo "$REPO" --state open --limit 20 --json number,author,url,headRefName,mergeable,mergeStateStatus 2>/dev/null \
+  | jq -c --arg pre "$TICKET_PREFIX" \
+      'if $pre == "" then . else [.[] | select(.headRefName | ascii_downcase | startswith($pre))] end')
 [ -n "$PR_JSON" ] || { echo "{}"; exit 0; }
 PR=$(printf '%s' "$PR_JSON" | jq -c 'sort_by(.number) | reverse | .[0] // empty')
 [ -n "$PR" ] || { echo "{}"; exit 0; }
