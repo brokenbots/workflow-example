@@ -154,8 +154,11 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                     -n criteria-jobs "$cr_nm" -o yaml > "$RUN_ROOT/evidence/r$ROUND-cr.yaml"
                 CR_STAMP=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
                     -n criteria-jobs "$cr_nm" -o jsonpath='{.metadata.creationTimestamp}')
-                CR_TREE=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
-                    -n criteria-jobs "$cr_nm" -o jsonpath='{.spec.workflow.name}')
+                # the tree name lives in the URL ("//<tree>?ref="), NOT in .name
+                # (which is the route slug, e.g. kanboard-triage-url)
+                CR_URL=$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
+                    -n criteria-jobs "$cr_nm" -o jsonpath='{.spec.workflow.url}')
+                CR_TREE=$(printf '%s' "$CR_URL" | sed -E 's#.*//([^/?]+).*#\1#')
                 rid=$("$LIB_DIR/castle_last_run.sh" "$CASTLE" "$CR_TREE" "$CR_STAMP" 2>/dev/null || echo "")
                 sig=$("$LIB_DIR/classify_events.sh" "$CASTLE" "$rid" 2>/dev/null || echo "unreadable")
                 case "$sig" in
