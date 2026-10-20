@@ -123,7 +123,7 @@ close_card)
     fi
     TID=$(jq -r '.task_id' "$ACTION_FILE")
     # disarm (k8s-run off), move Done, close - full-list setTaskTags semantics
-    "$LIB_DIR/kb_lib.sh" disarm_and_close "$TID" > "$RUN_ROOT/close_card.log" 2>&1 || {
+    disarm_and_close "$TID" > "$RUN_ROOT/close_card.log" 2>&1 || {
         echo "disarm_and_close failed: $(tail -1 "$RUN_ROOT/close_card.log")" >&2
         exit 2
     }
