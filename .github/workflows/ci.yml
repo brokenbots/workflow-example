@@ -158,6 +158,11 @@ jobs:
       # that skipped would prove nothing, so the run must show the
       # all-shapes-observed banner from actual observations.
       - name: Run harness_contracts_v1 standalone regression test (KB-277)
+        # 10-19: the fixtures hang (not merely slow) in CI — 48m with fixtures
+        # that complete in seconds on LAN. Job-level timeout bounds the damage
+        # while the hang is root-caused (KB-305 candidate); do not raise this
+        # blindly, the suite is NOT meant to take tens of minutes.
+        timeout-minutes: 10
         env:
           SUITE_DEBUG: "1"
           # CI runners are markedly slower than the LAN dev box (per-fixture
