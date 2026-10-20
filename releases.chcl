@@ -1,0 +1,25 @@
+# releases.chcl — THE single source for every propagated pin (dave 2026-10-19, #303).
+#
+# Adapter repos release as before (tag -> CI publish). Consuming this repo:
+#   1. bump the version literal here (ONE commit),
+#   2. `make repin` rewrites every adapters.chcl version for that adapter,
+#   3. `make repin-check` (also inside `make validate`) fails on ANY version
+#      literal not equal to the manifest value — stragglers cannot exist,
+#   4. `make routes-sync` re-renders the criteria-routes CM url pins from the
+#      current HEAD + peer images from the peer_image_tags block.
+#
+# NEVER hand-edit a version in a tree adapters.chcl again. This file is data,
+# read by scripts/repin.sh + scripts/repin_check.sh — it is HCL-shaped so the
+# same file stays diff-friendly and greppable, and deliberately NOT a workflow
+# (nothing in criteria compiles it).
+
+copilot = "0.5.17" # KB-263 typed verdict payloads + KB-216 + KB-260 (published 10-16)
+shell   = "0.5.5"  # identical to main as of 10-18 (KB-283)
+
+# criteria-base peer adapter image tags in the routes CM adapterImages blocks.
+peer_shell_tag   = "k8s-0.5.56-1"
+peer_copilot_tag = "k8s-0.5.56-1"
+
+# Every workflowLibrary url pin in the routes CM resolves to THIS sha
+# ("head" = git rev-parse HEAD at render time).
+tree_ref = "head"

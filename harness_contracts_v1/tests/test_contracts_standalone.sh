@@ -72,11 +72,16 @@ pin_installed() {
     # found match into a spurious failure — drain the stream instead.
     "$CRITERIA" adapter list --installed 2>/dev/null | grep "$refdig" >/dev/null
 }
-if [ -z "$SKIP" ] && ! pin_installed 0.5.15; then
-    SKIP="pinned copilot adapter 0.5.15 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15')"
+# #303: derive expected versions from releases.chcl (repo root) — hardcoded
+# literals here went stale on the first repin and silently dropped the gate.
+RELEASES="$TREE_ROOT/../releases.chcl"
+COPILOT_V="$(sed -n 's/^copilot *= *"\([^"]*\)".*/\1/p' "$RELEASES" 2>/dev/null)"
+SHELL_V="$(sed -n 's/^shell *= *"\([^"]*\)".*/\1/p' "$RELEASES" 2>/dev/null)"
+if [ -z "$SKIP" ] && [ -n "$COPILOT_V" ] && ! pin_installed "$COPILOT_V"; then
+    SKIP="pinned copilot adapter $COPILOT_V not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:$COPILOT_V')"
 fi
-if [ -z "$SKIP" ] && ! pin_installed 0.5.5; then
-    SKIP="pinned shell adapter 0.5.5 not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.5')"
+if [ -z "$SKIP" ] && [ -n "$SHELL_V" ] && ! pin_installed "$SHELL_V"; then
+    SKIP="pinned shell adapter $SHELL_V not cached ('criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:$SHELL_V')"
 fi
 if [ -n "$SKIP" ]; then
     echo "SKIP: harness_contracts_v1 standalone suite: $SKIP" >&2
