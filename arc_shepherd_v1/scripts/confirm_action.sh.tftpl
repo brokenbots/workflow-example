@@ -90,20 +90,20 @@ merge)
         echo "merge identity mismatch: active gh=$WHO, policy=$ACTOR" >&2
         exit 2
     fi
-    # re-verify the FULL gate immediately before merge (external state check)
+    # re-verify the FULL gate immediately before merge (external state check).
+    # ONE gh call, raw; the verdict math happens in plain jq against a locally
+    # bound shape (gh pr view/gh api differ in --arg support; keep it deterministic):
     PR_AUTHOR=$(gh pr view "$NUM" --repo "$REPO" --json author --jq .author.login)
-    ROLL=$(gh pr view "$NUM" --repo "$REPO" --json statusCheckRollup,latestReviews,author \
-        --jq '{checks: [.statusCheckRollup[].status], reviews: [.latestReviews[] | {author: .author.login, state: .state}], author: .author.login}')
-    # approved = an APPROVED review from an identity other than the PR author
-    # (gh pr view has no --arg; do the comparison with a plain jq -n binding)
+    ROLL=$(gh pr view "$NUM" --repo "$REPO" --json statusCheckRollup,latestReviews)
+    # rollup entries carry REST shape: status=COMPLETED, conclusion=SUCCESS
+    ALLDONE=$(printf '%s' "$ROLL" | jq -r \
+        '[.statusCheckRollup[] | .conclusion] | (length > 0) and (all(. == "SUCCESS"))')
     APPROVED=$(printf '%s' "$ROLL" | jq -r --arg author "$PR_AUTHOR" \
-        '[.reviews[] | select(.author != $author and .state == "APPROVED")] | length > 0')
-    # rollup status is COMPLETED (REST shape) with conclusion SUCCESS — check
-    # conclusion, not status (pr_gate's own rollup logic maps these the same way)
-    ALLDONE=$(printf '%s' "$ROLL" | jq -r '[.checks[] | .conclusion] | (length > 0) and (all(. == "SUCCESS"))')
-    APPROVED=$(printf '%s' "$ROLL" | jq -r '.approved > 0')
+        '[.latestReviews[] | select(.author.login != $author and .state == "APPROVED")] | length > 0')
+    printf '%s' "$ROLL" > "$RUN_ROOT/merge_gate_rollup.json"
     if [ "$ALLDONE" != "true" ] || [ "$APPROVED" != "true" ]; then
-        echo "gate regressed before merge: $ROLL" >&2
+        printf '%s' "$ROLL" > "$RUN_ROOT/merge_gate_blocked.json"
+        echo "gate regressed before merge: alldone=$ALLDONE approved=$APPROVED" >&2
         exit 2
     fi
     gh pr merge "$NUM" --repo "$REPO" --squash --admin=false >&2 || { echo "merge command failed" >&2; exit 2; }
