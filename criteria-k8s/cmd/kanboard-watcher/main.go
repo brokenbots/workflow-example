@@ -35,9 +35,11 @@ import (
 // Board column names the watcher moves tasks between as runs progress.
 // They are the Kanboard analogue of the Linear watcher's automation labels
 // (criteria-automation / criteria-dirty) plus the states the workflows set:
-// a live run parks the task in workColumnName, a failed run parks it in
-// reviewColumnName for a human, a succeeded dev-class run moves it to
-// doneColumnName. A succeeded triage-class run is the middle of the chain,
+// a run in flight leaves the card's column untouched (KB-302: park-only
+// mechanics — the watcher fires runs from the route trigger columns and
+// parks failed runs in reviewColumnName for a human; it owns no other
+// mutation), a succeeded dev-class run moves it to doneColumnName. A
+// succeeded triage-class run is the middle of the chain,
 // not its end: the triage workflow's re-arm path moves the ticket into the
 // develop route's trigger column and the watcher leaves that move in place
 // (KB-9). A dev-class success is judged by the workflow verdict stamped on
@@ -50,7 +52,6 @@ const (
 	defaultPollInterval = 60 * time.Second
 	defaultPollTimeout  = 5 * time.Minute
 	defaultHealthAddr   = ":8081"
-	workColumnName      = "Work in progress"
 	reviewColumnName    = "Review"
 	doneColumnName      = "Done"
 
@@ -81,6 +82,10 @@ const (
 func isHumanHandoffFinalState(finalState string) bool {
 	return finalState == finalStateNeedAssistance || finalState == finalStateAwaitingHuman
 }
+
+// nowUnix is the run-name timestamp seam; tests override it so two runs
+// fired within the same second can carry distinct names.
+var nowUnix = func() int64 { return time.Now().Unix() }
 
 var (
 	namespace         = flag.String("namespace", getenv("NAMESPACE", "criteria-jobs"), "Namespace to watch and create CriteriaRuns in")
@@ -286,7 +291,16 @@ type watcher struct {
 	// triage run handing off to the dev run (KB-9) — and the second settle
 	// must still reconcile. In-memory only.
 	lastRuns map[string]runPhases
-	log      logr.Logger
+	// lastCards records, per ticket, the Kanboard column id seen at the
+	// previous poll, so the firing loop fires on ENTRY into a trigger
+	// column, not on residency (KB-302). With park-only reconciliation a
+	// settled run leaves the card parked on the trigger column it fired
+	// from (no verdict → abstain); without this memo every later poll
+	// would re-fire it — the exact refire churn KB-302 parks. The card
+	// moving columns again — including the shepherd's re-arm move back to
+	// a trigger column — is what earns a fire. In-memory only.
+	lastCards map[string]int
+	log       logr.Logger
 }
 
 func (w *watcher) run(ctx context.Context) error {
@@ -526,9 +540,25 @@ func (w *watcher) poll(ctx context.Context) error {
 			delete(w.lastRuns, ticketID)
 		}
 	}
+	for ticketID := range w.lastCards {
+		if _, ok := runs[ticketID]; !ok {
+			delete(w.lastCards, ticketID)
+		}
+	}
 
 	for _, task := range tasks {
 		ticketID := task.Identifier()
+		// KB-302 entry memo: record the card's column every poll, before
+		// anything route-related, so the refire gate below compares against
+		// the true previous column (a card parked in Review by a failure
+		// and re-armed back to a trigger column counts as an entry). The
+		// task copy is already post-reconciliation: reconcileTaskColumn's
+		// moves are reflected in this id.
+		prevCardCol, cardKnown := w.lastCards[ticketID]
+		if w.lastCards == nil {
+			w.lastCards = make(map[string]int)
+		}
+		w.lastCards[ticketID] = task.ColumnID
 		// Trigger tag gates cluster compute (analogue of the k8s-run label).
 		if w.triggerTag != "" && !slices.Contains(task.Tags, w.triggerTag) {
 			continue
@@ -591,6 +621,18 @@ func (w *watcher) poll(ctx context.Context) error {
 		}
 		if ph, ok := runs[ticketID]; ok && ph.active {
 			w.log.V(1).Info("run already active", "ticket", ticketID)
+			continue
+		}
+		// KB-302: fire on entry into the trigger column, not residency. With
+		// park-only reconciliation a settled run with no observable verdict
+		// leaves the card parked on the trigger column; firing on residency
+		// would re-fire it every poll until a verdict lands. A refire
+		// therefore needs the card to change columns again — the shepherd's
+		// re-arm move is the refire decision (KB-302 ownership), and a
+		// first-sighting of a card counts as entry.
+		if cardKnown && prevCardCol == task.ColumnID {
+			w.log.V(1).Info("skipping task: card has not entered this column since the last poll",
+				"ticket", ticketID, "column", task.ColumnName)
 			continue
 		}
 		run := w.buildCriteriaRun(ctx, task, repoURL, sel)
@@ -684,6 +726,9 @@ func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, err
 		if g.latest.Spec.Workflow != nil {
 			ph.latestClass = g.latest.Spec.Workflow.Class
 		}
+		if ph.latestPhase == criteriav1.PhaseFailed {
+			ph.failureReason = failedRunReason(&g.latest)
+		}
 		out[ticket] = ph
 	}
 	return out, nil
@@ -716,16 +761,23 @@ type runPhases struct {
 	latestFinalState string
 	latestClass      string
 	anyRun           bool
+	// failureReason is the latest run's failure explanation, filled only
+	// when the run read Failed (KB-302): specific controller verdict
+	// conditions first, then the workflow verdict, else "no reason
+	// recorded". The Review-park comment is built from it exactly once.
+	failureReason string
 }
 
 // reconcileTaskColumn moves the Kanboard task between board columns as its
 // latest run progresses — the Kanboard analogue of the Linear watcher's
 // automation labels:
-//   - run in flight        -> task to the work column
+//   - run in flight        -> column untouched: wait (KB-302 park-only —
+//     nothing mutates the card while the run runs)
 //   - dev run Succeeded    -> task per the workflow verdict; the Done move
 //     requires PR evidence too (KB-23, KB-50)
 //   - triage run Succeeded -> column untouched (KB-9)
-//   - run Failed           -> task to the review column (human)
+//   - run Failed           -> task to the review column (human), with one
+//     accurate failure comment posted exactly once, gated on the move
 //
 // A triage-class success is the middle of the triage -> develop chain, not
 // its end: the triage workflow's re-arm path (rearm_k8s_run +
@@ -769,6 +821,18 @@ type runPhases struct {
 // later poll and re-fires this reconcile, and a Done stamp predating a
 // failure verdict is still repaired by the branch above. Any other terminal
 // value is left untouched until the watcher learns it.
+//
+// KB-302 park-only mechanics: the watcher's column ownership reduces to the
+// route trigger columns (fire), Review (failed park) and Done (verified
+// success). Pending/Running/unknown-phase observations mutate nothing — the
+// old default moved the task into the work column on every in-flight poll,
+// but the work column matches no route trigger, so the move bought nothing
+// and clobbered whatever bookkeeping the card carried mid-flight. A Failed
+// run parks the card in Review exactly once — the "already there" gate
+// makes the park idempotent — and posts a single failure comment at that
+// move, built from the run's most specific failure explanation
+// (failedRunReason). The comment fires only at the move, so one failure
+// never leaves more than one watcher comment on the card.
 //
 // reconcileTaskColumn returns the task's new Kanboard column id and whether
 // the column changed. The caller updates its in-memory task copy so the
@@ -828,9 +892,17 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 			return task.ColumnID, false
 		}
 	case criteriav1.PhaseFailed:
+		// KB-302: the Failed park is the one mutation a failure earns the
+		// card — into Review, once, with one accurate comment. There is no
+		// automated refire behind this move: Review matches no route trigger
+		// column, and refire decisions belong to the shepherd.
 		target = reviewColumnName
 	default:
-		target = workColumnName
+		// KB-302: park-only. A run in flight (Pending, Running, or the
+		// phases this watcher predates) means wait — the watcher fires runs
+		// from the route trigger columns and owns the failure park, not
+		// in-flight card moves.
+		return task.ColumnID, false
 	}
 	if target == "" || target == task.ColumnName {
 		return task.ColumnID, false
@@ -841,7 +913,56 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 		return task.ColumnID, false
 	}
 	w.log.Info("moved task column", "ticket", task.Identifier(), "from", task.ColumnName, "to", target)
+	if ph.latestPhase == criteriav1.PhaseFailed && target == reviewColumnName {
+		w.postFailureParkComment(ctx, task, ph)
+	}
 	return newCol, true
+}
+
+// failedRunReason picks the failed run's most specific failure explanation
+// for the Review-park comment (KB-302). Specific controller verdict
+// conditions win, in fixed precedence so the choice stays deterministic
+// (StallWatchdog > BaseImageMismatch > ConfigRenderDrift — see
+// api/v1/criteriarun_types.go; their truthy Message is the explanation);
+// otherwise the run's workflow verdict ("failed" / "need_assistance");
+// otherwise "no reason recorded" — a comment is always posted, and a run
+// that explains nothing says so instead of staying silent. Only the
+// controller's own condition messages are consumed; card content from
+// Kanboard comments is never echoed back (it could carry anything).
+func failedRunReason(run *criteriav1.CriteriaRun) string {
+	for _, condType := range []string{
+		criteriav1.ConditionStallWatchdog,
+		criteriav1.ConditionBaseImageMismatch,
+		criteriav1.ConditionConfigRenderDrift,
+	} {
+		for i := range run.Status.Conditions {
+			c := &run.Status.Conditions[i]
+			if c.Type == condType && c.Status == metav1.ConditionTrue && strings.TrimSpace(c.Message) != "" {
+				return c.Message
+			}
+		}
+	}
+	if run.Status.FinalState != "" {
+		return fmt.Sprintf("workflow terminal %q", run.Status.FinalState)
+	}
+	return "no reason recorded"
+}
+
+// postFailureParkComment posts the single failure explanation on the ticket
+// when the watcher parks it in Review over a Failed run (KB-302). It fires
+// only at the Review move, so the card gets exactly one watcher comment per
+// failure. Best-effort like the pin warning: a failed comment post is
+// logged for the scrape, never propagated — the park already happened and
+// must not be undone by a comment failure (the card may still carry the
+// workflow's own failure bookkeeping comment).
+func (w *watcher) postFailureParkComment(ctx context.Context, task kanboard.Task, ph runPhases) {
+	body := fmt.Sprintf("criteria-kanboard-watcher: run %s failed: %s",
+		ph.latestRun, ph.failureReason)
+	if err := w.kb.AddComment(ctx, task.ID, body); err != nil {
+		w.log.Error(err, "posting failure-park comment on ticket", "ticket", task.Identifier(), "run", ph.latestRun)
+		return
+	}
+	w.log.Info("posted failure-park comment on ticket", "ticket", task.Identifier(), "run", ph.latestRun)
 }
 
 // buildCriteriaRun stamps a CriteriaRun for a Kanboard task. TicketID is
@@ -851,7 +972,7 @@ func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, p
 // spec.configRef carries its resourceVersion when it exists.
 func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
 	ticketID := task.Identifier()
-	name := fmt.Sprintf("%s-%d", strings.ToLower(ticketID), time.Now().Unix())
+	name := fmt.Sprintf("%s-%d", strings.ToLower(ticketID), nowUnix())
 	spec := criteriav1.CriteriaRunSpec{
 		TicketID:         ticketID,
 		RepoURL:          repoURL,

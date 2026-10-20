@@ -364,6 +364,23 @@ type CriteriaRunStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// Condition types the controller stamps into CriteriaRun.Status.Conditions
+// when it fails a run. They are part of the run's published surface — the
+// watchers read them to explain a failed run to the ticket's card (KB-302)
+// — so the names live here, next to the type they annotate, instead of
+// being duplicated in the watcher.
+const (
+	// ConditionStallWatchdog is stamped when the stall watchdog fails a
+	// run for no step progress on the castle event stream (KB-24).
+	ConditionStallWatchdog = "StallWatchdog"
+	// ConditionBaseImageMismatch is stamped when a run fails on a
+	// runner-image mismatch against the cluster's rolling image (CRI-264).
+	ConditionBaseImageMismatch = "BaseImageMismatch"
+	// ConditionConfigRenderDrift is stamped when a run fails on a config
+	// ConfigMap pin mismatch (KB-103).
+	ConditionConfigRenderDrift = "ConfigRenderDrift"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=cri;crun,scope=Namespaced

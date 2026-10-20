@@ -23,8 +23,10 @@ import (
 // ConditionBaseImageMismatch is the CriteriaRun condition type and the
 // metav1.Condition reason stamped when a run is failed on a runner-image
 // mismatch (CRI-264). The ticket names the reason explicitly, so the
-// condition type mirrors it.
-const ConditionBaseImageMismatch = "BaseImageMismatch"
+// condition type mirrors it. The name is published in api/v1 (the
+// watchers read it off the run's status); this alias keeps the package's
+// own references stable.
+const ConditionBaseImageMismatch = criteriav1.ConditionBaseImageMismatch
 
 // OperatorEnvProbe resolves operator env values as the cluster currently
 // declares them. The reconciling pod's own process env goes stale while the

@@ -22,8 +22,10 @@ import (
 
 // ConditionStallWatchdog is the CriteriaRun condition type and the
 // metav1.Condition reason stamped when the stall watchdog fails a run for
-// no step progress (KB-24).
-const ConditionStallWatchdog = "StallWatchdog"
+// no step progress (KB-24). The name is published in api/v1 (the watchers
+// read it off the run's status); this alias keeps the package's own
+// references stable.
+const ConditionStallWatchdog = criteriav1.ConditionStallWatchdog
 
 // applyStallWatchdog stamps the run's last step progress onto the pending
 // status update and reports whether the run must be failed for stalling

@@ -26,8 +26,10 @@ import (
 
 // ConditionConfigRenderDrift is the CriteriaRun condition type and the
 // metav1.Condition reason stamped when a run is failed on a config
-// ConfigMap pin mismatch (KB-103).
-const ConditionConfigRenderDrift = "ConfigRenderDrift"
+// ConfigMap pin mismatch (KB-103). The name is published in api/v1 (the
+// watchers read it off the run's status); this alias keeps the package's
+// own references stable.
+const ConditionConfigRenderDrift = criteriav1.ConditionConfigRenderDrift
 
 // renderRunConfig renders the run's per-repo config the way KB-103
 // prescribes and hands the rendered values to the child-Job builders:
