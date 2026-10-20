@@ -93,8 +93,11 @@ merge)
     # re-verify the FULL gate immediately before merge (external state check)
     PR_AUTHOR=$(gh pr view "$NUM" --repo "$REPO" --json author --jq .author.login)
     ROLL=$(gh pr view "$NUM" --repo "$REPO" --json statusCheckRollup,latestReviews,author \
-        --arg author "$PR_AUTHOR" \
-        --jq '{checks: [.statusCheckRollup[].status], approved: ([.latestReviews[] | select(.author.login != $author) | select(.state=="APPROVED")] | length), author: $author}')
+        --jq '{checks: [.statusCheckRollup[].status], reviews: [.latestReviews[] | {author: .author.login, state: .state}], author: .author.login}')
+    # approved = an APPROVED review from an identity other than the PR author
+    # (gh pr view has no --arg; do the comparison with a plain jq -n binding)
+    APPROVED=$(printf '%s' "$ROLL" | jq -r --arg author "$PR_AUTHOR" \
+        '[.reviews[] | select(.author != $author and .state == "APPROVED")] | length > 0')
     ALLDONE=$(printf '%s' "$ROLL" | jq -r '[.checks[] | select(. != "SUCCESS")] | length == 0')
     APPROVED=$(printf '%s' "$ROLL" | jq -r '.approved > 0')
     if [ "$ALLDONE" != "true" ] || [ "$APPROVED" != "true" ]; then
