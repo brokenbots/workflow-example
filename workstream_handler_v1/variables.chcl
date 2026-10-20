@@ -146,3 +146,11 @@ variable "reviewer_github_token" {
     type   = string
     secret = true
 }
+
+// #305-class: hard ceiling on no_work reviewer cycles (the coordinator found
+// nothing to do N consecutive times — the loop is failing to post/deliberate,
+// not waiting on real work). Exhaustion routes to branch_manager_final_say.
+variable "max_reviewer_no_work_cycles" {
+    type    = number
+    default = 5
+}

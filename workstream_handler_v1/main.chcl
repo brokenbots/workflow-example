@@ -46,6 +46,17 @@ data "internal" "validate_rounds" {
     value = "0"
 }
 
+// #305-class fix (dave 10-20: 'stuck in a loop wasting resources'): no_work
+// reviewer cycles are UNBOUNDED — the KB-265 counter only counts needs_work
+// pair-programming passes, so a reviewer whose POST fails deterministically
+// (the empty-body 422 class) cycles forever. Every no_work pass increments;
+// reaching var.max_reviewer_no_work_cycles routes to the branch manager's
+// final-say step (converge or fail loud) instead of re-entering the reviewer.
+data "internal" "reviewer_no_work_rounds" {
+    type  = string
+    value = "0"
+}
+
 data "internal" "developer_feedback" {
     type  = string
     value = ""
@@ -949,7 +960,11 @@ step "triage_pr_feedback" {
     }
     outcome "no_work" {
         schema = object({ reason = string })
-        next = step.push_and_respond
+        write {
+            target = data.internal.reviewer_no_work_rounds.value
+            value  = data.internal.reviewer_no_work_rounds.value + 1
+        }
+        next = switch.route_no_work_cycle
     }
     outcome "failed" {
         schema = object({ reason = string })
@@ -978,6 +993,19 @@ step "triage_pr_feedback" {
             value  = output.reason
         }
     }
+}
+
+// #305-class bound: a no_work reviewer cycle found nothing to do; if that
+// repeats past the ceiling the loop is malfunctioning (e.g. the review POST
+// failing deterministically), not waiting on work — route to the branch
+// manager's final-say step (converge or fail loud, KB-265 semantics) instead
+// of re-entering the reviewer unbounded.
+switch "route_no_work_cycle" {
+    match {
+        condition = data.internal.reviewer_no_work_rounds.value > var.max_reviewer_no_work_cycles
+        next      = step.branch_manager_final_say
+    }
+    default { next = step.push_and_respond }
 }
 
 // KB-265: branch manager has the FINAL SAY on convergence. Reached when the
