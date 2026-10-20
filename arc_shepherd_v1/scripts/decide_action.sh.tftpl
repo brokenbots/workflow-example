@@ -150,6 +150,25 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                 exit 0
                 ;;
             "Succeeded"|"Failed"|"Completed")
+                # ── OWN-PR-FIRST override (dave 10-19, point 3): a terminal CR
+                # whose ticket's OWN PR is open with green checks is a
+                # DELIVERED-AND-WAITING-ON-GATE child, not a failure to
+                # classify. The PR gate (below) is the actionable lane; the
+                # dead CR is history. Jump straight to the PR branch.
+                pr_precheck=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" "kb-${tid}" 2>/dev/null || echo '{}')
+                pc_state=$(printf '%s' "$pr_precheck" | jq -r '.state // "none"')
+                pc_gate=$(printf '%s' "$pr_precheck" | jq -r '.gate // "none"')
+                if [ "$pc_state" = "open" ] && [ "$pc_gate" != "green" ]; then
+                    # own PR open but pending/none checks: deliverable exists, the
+                    # gate is what is pending — idle calmly (progress wait), the CR
+                    # death is history either way.
+                    jq -n --arg a wait_live --arg r "own PR pending (gate $pc_gate) despite $cr_nm terminal — PR gates the lane" \
+                        '{action:$a,reason:$r}' > "$ACTION_FILE"
+                    token wait_live
+                    exit 0
+                fi
+                # own PR green (approved or not): fall through — the PR branch
+                # below drives merge (approved) or the red/pending ladder.
                 # terminal CR -> classify from castle events
                 # CR yaml = authority: capture name + stamp + tree name once per terminal CR
                 KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \

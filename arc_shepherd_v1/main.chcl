@@ -200,13 +200,12 @@ adapter "shell" "ops" {
 // deterministic subset of its recommended actions and keeps decision
 // authority over anything policy-level.
 adapter "copilot" "guidance" {
-    // KB-263/KB-216 (typed outcome contracts + payload lane) exist only in
-    // main — no published ghcr tag carries them (v0.5.15/16 verified
-    // ancestor-checked 2026-10-18). Local dogfood pins the HEAD build
-    // published to the LAN registry as v0.5.63 (LAN-only dev build ABOVE the
-    // fleet line; swap to a signed release tag when contract support ships).
-    source      = "localhost:5000/criteria-adapter-copilot"
-    version     = "v0.5.64"
+    // #303: typed-verdict contract (KB-263/216) ships in published v0.5.17
+    // (11bb02a merged before the v0.5.16/17 tags; verified ancestor-checked
+    // 2026-10-19). The LAN dev pins (v0.5.63/64) are retired — the shepherd
+    // consumes the SAME manifest-managed release as every other tree.
+    source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version     = "0.5.17"
     environment = shell.ops
     secrets {
         GITHUB_TOKEN = var.github_token
