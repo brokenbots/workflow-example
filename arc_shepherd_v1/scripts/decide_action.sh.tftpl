@@ -159,6 +159,16 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                 # NO own PR do we classify the corpse.
                 pr_precheck=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" "kb-${tid}" 2>/dev/null || echo '{}')
                 pc_state=$(printf '%s' "$pr_precheck" | jq -r '.state // "none"')
+                if [ "$pc_state" = "merged" ]; then
+                    # OWN PR MERGED (post-merge reconciliation): the child's work
+                    # landed — close the card (Done + close) and clear k8s-run.
+                    jq -n --arg a close_card --arg tid "$tid" \
+                        --arg pr "$(printf '%s' "$pr_precheck" | jq -r '.url')" \
+                        --arg r "own PR merged: reconcile card (Done + close + disarm)" \
+                        '{action:$a,reason:$r,task_id:($tid|tonumber),pr:$pr}' > "$ACTION_FILE"
+                    token close_card
+                    exit 0
+                fi
                 if [ "$pc_state" != "none" ] && [ "$pc_state" != "closed" ]; then
                     pc_gate=$(printf '%s' "$pr_precheck" | jq -r '.gate // "none"')
                     pc_url=$(printf '%s' "$pr_precheck" | jq -r '.url // ""')

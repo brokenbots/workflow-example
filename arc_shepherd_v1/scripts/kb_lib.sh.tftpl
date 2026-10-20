@@ -34,3 +34,15 @@ kb_create_comment() {
 kb_update_task()   { kb_call updateTask "$1"; }   # body must carry id (NOT task_id)
 kb_move_task()     { kb_call moveTaskPosition "$1"; }  # project_id+swimlane_id+task_id+column_id+position
 kb_board_tasks()   { kb_call getAllTasks "{\"project_id\":1}"; }
+# disarm_and_close TASK_ID: strip k8s-run (full-list setTaskTags), move Done, close.
+# External state verified after: done cards stay is_active=1 until closeTask (archive gotcha).
+disarm_and_close() {
+    tid="$1"
+    # current tags as a JSON array of names
+    tags_obj="$(kb_task_tags "$tid" | jq -c '.' 2>/dev/null || echo '{}')"
+    keep_json="$(printf '%s' "$tags_obj" | jq -c '[.[] | select(. != "k8s-run")]')"
+    kb_call setTaskTags "{\"project_id\":1,\"task_id\":$tid,\"tags\":$keep_json}" >/dev/null
+    kb_move_task "{\"project_id\":1,\"swimlane_id\":1,\"task_id\":$tid,\"column_id\":4,\"position\":1}" >/dev/null
+    kb_call closeTask "{\"task_id\":$tid}" >/dev/null
+    kb_task "$tid" | jq -c '{column_id, is_active}'
+}

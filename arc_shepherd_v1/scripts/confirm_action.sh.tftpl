@@ -111,7 +111,25 @@ merge)
     printf 'merge'
     ;;
 
-arm)
+close_card)
+    # post-merge reconciliation: re-verify externally that the PR is REALLY merged
+    PR=$(jq -r '.pr' "$ACTION_FILE")
+    REPO=$(printf '%s' "$PR" | sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#')
+    NUM=$(printf '%s' "$PR" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+    STATE=$(gh pr view "$NUM" --repo "$REPO" --json state --jq .state)
+    if [ "$STATE" != "MERGED" ]; then
+        echo "close_card gate: PR $NUM state=$STATE (expected MERGED)" >&2
+        exit 2
+    fi
+    TID=$(jq -r '.task_id' "$ACTION_FILE")
+    # disarm (k8s-run off), move Done, close - full-list setTaskTags semantics
+    "$LIB_DIR/kb_lib.sh" disarm_and_close "$TID" > "$RUN_ROOT/close_card.log" 2>&1 || {
+        echo "disarm_and_close failed: $(tail -1 "$RUN_ROOT/close_card.log")" >&2
+        exit 2
+    }
+    jq -n --arg pr "$PR" --arg tid "$TID" '{pr:$pr,task_id:($tid|tonumber),closed:true}' > "$CONFIRM"
+    printf 'close_card'
+    ;;
     # arm = full armed tag set via setTaskTags (full-list semantics) + move Ready.
     # Author pin is verified BEFORE arming: the child has no PR yet, so the pin
     # is an assertion on the manifest entry (develop runs open PRs as the
