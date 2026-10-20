@@ -747,3 +747,172 @@ func TestBuildPerScopePeerPodStagingDeterministic(t *testing.T) {
 		first.Spec.InitContainers[0].Name, first.Spec.InitContainers[1].Name,
 	}, "init containers are declared in the sorted hosted-kind order")
 }
+
+// --- KB-306: digest staging (the lockfile digest stages the binaries) ---
+
+// digestStageMembers returns one member per kind whose digest and artifact
+// repo are pullable: the provision-events shape once the controller enriches
+// the members from the compiled workflow graph's lockfile source (the live
+// kb-291 shape: digest present, image_reference the bare repo).
+func digestStageMembers() []events.LifecycleEvent {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	copilot := groupMember("review", "copilot", "scope-a", "ci")
+	copilot.Digest = digest
+	copilot.ImageReference = "ghcr.io/brokenbots/criteria-adapter-copilot"
+	shell := groupMember("intake", "shell", "scope-a", "ci")
+	shell.Digest = digest
+	shell.ImageReference = "ghcr.io/brokenbots/criteria-adapter-shell"
+	return []events.LifecycleEvent{copilot, shell}
+}
+
+// TestBuildPerScopePeerPodSingleKindStagesByDigest pins the KB-306
+// headliner: a SINGLE-kind pod whose member carries a pullable pin stages
+// its binary at the lockfile digest with a pull-<kind> init container —
+// the image-baked binary demoted to fallback, the staged-binaries volume
+// no longer multi-kind-only, and the _BINARY override pointing at the
+// digest-addressed staged copy.
+func TestBuildPerScopePeerPodSingleKindStagesByDigest(t *testing.T) {
+	member := groupMember("intake", "shell", "scope-a", "ci")
+	member.Digest = "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	member.ImageReference = "ghcr.io/brokenbots/criteria-adapter-shell"
+
+	pod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, pod)
+
+	require.Len(t, pod.Spec.Containers, 1)
+	require.Len(t, pod.Spec.InitContainers, 1)
+	ic := pod.Spec.InitContainers[0]
+	assert.Equal(t, "pull-shell", ic.Name, "the digest lane names its init containers pull-<kind>")
+
+	// The init container runs the peer image the POD resolved (the engine
+	// baked criteria binary) and scripts the three-lane stage: runner
+	// cache, digest pull, image-baked fallback.
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:"+jobbuilder.DefaultAdapterTag, ic.Image,
+		"the staging init container runs the kind's resolved peer image")
+	require.Len(t, ic.Command, 3)
+	assert.Equal(t, "/bin/sh", ic.Command[0])
+	assert.Equal(t, "-ec", ic.Command[1])
+	script := ic.Command[2]
+	assert.Contains(t, script, "ghcr.io/brokenbots/criteria-adapter-shell@sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		"the script pulls the artifact at the LOCKFILE digest")
+	assert.Contains(t, script, "PEER STAGE DOWNGRADE", "the image-baked fallback says so loudly")
+	assert.Contains(t, script, "/usr/local/share/criteria-peer-adapters/.shell.staged-digest",
+		"the staged-digest marker (kind/digest/source/staged fields) lands in the stage dir for post-boot verification")
+	assert.Contains(t, script, "CRITERIA_HOME='/data/criteria'",
+		"an image-mode run's fast path reads the legacy data-volume runner cache (groupTestRun carries no workflow source)")
+	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
+	mount := peerBinMount(t, ic.Name, ic.VolumeMounts)
+	assert.False(t, mount.ReadOnly, "init containers stage INTO the emptyDir")
+	require.NotNil(t, ic.SecurityContext, "init containers inherit the restricted container security context")
+
+	assert.True(t, hasVolume(pod.Spec.Volumes, jobbuilder.PerScopePeerBinVolumeName),
+		"a digest-staged single-kind pod declares the stage volume")
+	env := containerEnvMap(pod.Spec.Containers[0])
+	mount = peerBinMount(t, pod.Spec.Containers[0].Name, pod.Spec.Containers[0].VolumeMounts)
+	assert.True(t, mount.ReadOnly, "the peer container only reads the staged binaries")
+	assert.Equal(t, jobbuilder.PerScopePeerBinVolumePath+"/criteria-adapter-shell",
+		env["CRITERIA_ADAPTER_SHELL_INTAKE_BINARY"],
+		"the _BINARY override points at the digest-addressed staged copy, not the image-baked path")
+	assert.Equal(t, member.Digest, env["CRITERIA_ADAPTER_SHELL_INTAKE_DIGEST"],
+		"the digest pin contract is unchanged (KB-242)")
+}
+
+// TestBuildPerScopePeerPodDigestStageUsesSourceModeRunnerCacheHome pins the
+// fast-path home derivation at the builder level: a source-mode run (the
+// criteria-base/develop shape, spec.workflowSource set) stages from the
+// per-run CRITERIA_HOME the source-mode runner itself populates — the same
+// predicate that pins the runner container's env — while an image-mode run
+// keeps the legacy /data/criteria home.
+func TestBuildPerScopePeerPodDigestStageUsesSourceModeRunnerCacheHome(t *testing.T) {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	member := groupMember("intake", "shell", "scope-a", "ci")
+	member.Digest = digest
+	member.ImageReference = "ghcr.io/brokenbots/criteria-adapter-shell"
+
+	sourceRun := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-306-src", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-306-SRC",
+			WorkflowSource: &criteriav1.RunWorkflowSource{
+				Type: "url",
+				URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1",
+			},
+		},
+	}
+	sourcePod := jobbuilder.BuildPerScopePeerPod(sourceRun, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, sourcePod)
+	require.Len(t, sourcePod.Spec.InitContainers, 1)
+	assert.Equal(t, "pull-shell", sourcePod.Spec.InitContainers[0].Name)
+	sourceScript := sourcePod.Spec.InitContainers[0].Command[2]
+	assert.Contains(t, sourceScript, "CRITERIA_HOME='/data/criteria-home/cri-306-src'",
+		"the source-mode fast path reads the per-run cache the source-mode runner populates (sourceCriteriaHome(JobName))")
+	assert.NotContains(t, sourceScript, "CRITERIA_HOME='/data/criteria'",
+		"the image-mode home must not survive into a source-mode staging script")
+
+	imagePod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, imagePod)
+	imageScript := imagePod.Spec.InitContainers[0].Command[2]
+	assert.Contains(t, imageScript, "CRITERIA_HOME='/data/criteria'",
+		"the image-mode fast path reads the legacy data-volume cache")
+	assert.NotContains(t, imageScript, "/data/criteria-home/cri-306-src",
+		"the per-run home must not survive into an image-mode staging script")
+}
+
+// TestBuildPerScopePeerPodSingleKindDigestStageWireShapeDeliveryAgnostic:
+// the digest-stage contract holds for wire-shaped single-member pods too,
+// and the runner-cache lane mounts no data volume when the delivery shape
+// omits one.
+func TestBuildPerScopePeerPodSingleKindDigestStageWireShape(t *testing.T) {
+	member := wireGroupMember("intake", "shell", "scope-a", "ci")
+	member.Digest = "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	member.ImageReference = "ghcr.io/brokenbots/criteria-adapter-shell"
+
+	pod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, pod)
+	require.Len(t, pod.Spec.InitContainers, 1)
+	assert.Equal(t, "pull-shell", pod.Spec.InitContainers[0].Name)
+	for _, m := range pod.Spec.InitContainers[0].VolumeMounts {
+		assert.NotEqual(t, "data", m.Name,
+			"wire-shaped pods mount no data volume, so the runner-cache lane is off and the pull lane serves")
+	}
+	assert.True(t, hasVolume(pod.Spec.Volumes, jobbuilder.PerScopePeerBinVolumeName))
+}
+
+// TestBuildPerScopePeerPodDigestAndImageLanesMix pins the lane split: a
+// kind with a pullable pin stages by digest (pull-<kind>), a kind without
+// one keeps the KB-214 image-stage lane (copy-<kind>), both in the same
+// sorted init sequence, and the _BINARY overrides point at the right shape
+// per kind.
+func TestBuildPerScopePeerPodDigestAndImageLanesMix(t *testing.T) {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	// copilot: no pullable pin (image lane). shell: pullable pin (digest
+	// lane). Reversed input exercises the sort.
+	copilot := groupMember("review", "copilot", "scope-a", "ci")
+	shell := groupMember("intake", "shell", "scope-a", "ci")
+	shell.Digest = digest
+	shell.ImageReference = "ghcr.io/brokenbots/criteria-adapter-shell"
+
+	pod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{shell, copilot}, "10.0.0.10")
+	require.NotNil(t, pod)
+	require.Len(t, pod.Spec.InitContainers, 2)
+	assert.Equal(t, "copy-copilot", pod.Spec.InitContainers[0].Name,
+		"the no-pin kind keeps the image-stage lane (sorted kinds: copilot < shell)")
+	assert.Equal(t, []string{"/bin/cp", "/usr/local/bin/criteria-adapter-copilot",
+		jobbuilder.PerScopePeerBinVolumePath + "/criteria-adapter-copilot"}, pod.Spec.InitContainers[0].Command)
+	assert.Equal(t, "pull-shell", pod.Spec.InitContainers[1].Name)
+	assert.Contains(t, pod.Spec.InitContainers[1].Command[2], "ghcr.io/brokenbots/criteria-adapter-shell@"+digest)
+
+	env := containerEnvMap(pod.Spec.Containers[0])
+	assert.Contains(t, env["CRITERIA_ADAPTER_COPILOT_REVIEW_BINARY"], jobbuilder.PerScopePeerBinVolumePath+"/criteria-adapter-copilot",
+		"a multi-kind pod points EVERY kind at its staged copy (copilot stages from its image)")
+	assert.Contains(t, env["CRITERIA_ADAPTER_SHELL_INTAKE_BINARY"], jobbuilder.PerScopePeerBinVolumePath+"/criteria-adapter-shell",
+		"shell points at its digest-staged copy")
+	assert.Equal(t, digest, env["CRITERIA_ADAPTER_SHELL_INTAKE_DIGEST"])
+	assert.Equal(t, jobbuilder.PerScopePeerBinVolumePath+"/criteria-adapter-shell", env["CRITERIA_ADAPTER_SHELL_INTAKE_BINARY"],
+		"the digest lane points at the staged copy")
+}

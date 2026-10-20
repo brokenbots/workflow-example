@@ -1,14 +1,21 @@
-// Adapter image resolution for the jobbuilder (CRI-214 M14). The workflow's
-// lockfile pins the adapter images and publishes the resolved reference on
-// provision_wanted events (engine commit 4079d836); the operator no longer
-// invents per-kind images. Per-scope adapter pods resolve in order:
+// Adapter image resolution for the jobbuilder (CRI-214 M14, precedence
+// flipped by KB-306). The workflow's lockfile pins the adapter images and
+// publishes the resolved reference on provision_wanted events (engine
+// commit 4079d836); the operator no longer invents per-kind images.
+// Per-scope adapter pods resolve in order:
 //
-//  1. the workflow object's adapterImages override (the routes ConfigMap's
-//     per-workflow setting, same surface as volumes/secrets/env),
-//  2. the event's image_reference — only when the event carries the
+//  1. the event's image_reference — only when the event carries the
 //     lockfile digest, so only digest-verified references are consumed
 //     (the trust posture is unchanged: the digest still travels to the
 //     adapter and the engine-side verifier gates every session open),
+//     and only when the reference itself is pin-qualified (a tag or a
+//     digest suffix): a bare repository name is a plugin-ADAPTER artifact
+//     source, not a container image, and must never resolve a pod image,
+//  2. the workflow object's adapterImages override (the routes ConfigMap's
+//     per-workflow setting, same surface as volumes/secrets/env) — an
+//     OPTIONAL override from KB-306 on: without one every pod follows the
+//     lockfile, so a baked image pin can never silently diverge from the
+//     tree's pin (the two-sources-of-version-truth ruling),
 //  3. the operator's configured registry/tag defaults.
 //
 // Peer-scope pods (KB-214) resolve through the same order but land on a
@@ -25,6 +32,7 @@ package jobbuilder
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 )
@@ -52,6 +60,12 @@ const (
 // (legacy adapter Jobs and pre-image_reference engines), which falls
 // through to the configured defaults.
 func resolveAdapterImage(plan *workflowPlan, scope events.LifecycleEvent, kind string, defaults Defaults) string {
+	// KB-306: the digest-verified event lane leads. The lockfile digest on
+	// the provision event is the tree's version authority; the ConfigMap
+	// override is an optional escape hatch beneath it, not the primary pin.
+	if scope.Digest != "" && pinnedImageReference(scope.ImageReference) {
+		return scope.ImageReference
+	}
 	if ref := plan.adapterImageOverride(kind); ref != "" {
 		return ref
 	}
@@ -59,9 +73,6 @@ func resolveAdapterImage(plan *workflowPlan, scope events.LifecycleEvent, kind s
 	// a digest-verified pin is the trust boundary the engine-side verifier
 	// enforces when the session opens. A reference without a digest is
 	// unverified and must not displace the configured defaults.
-	if scope.Digest != "" && scope.ImageReference != "" {
-		return scope.ImageReference
-	}
 	return defaultAdapterImage(kind, defaults)
 }
 
@@ -79,11 +90,11 @@ func defaultAdapterImage(kind string, defaults Defaults) string {
 // with a peer-shaped default: the -peer repo's ENTRYPOINT is `criteria
 // peer`, so the legacy-named default must not backstop a peer pod.
 func resolvePeerAdapterImage(plan *workflowPlan, scope events.LifecycleEvent, kind string, defaults Defaults) string {
+	if scope.Digest != "" && pinnedImageReference(scope.ImageReference) {
+		return scope.ImageReference
+	}
 	if ref := plan.adapterImageOverride(kind); ref != "" {
 		return ref
-	}
-	if scope.Digest != "" && scope.ImageReference != "" {
-		return scope.ImageReference
 	}
 	return defaultPeerAdapterImage(kind, defaults)
 }
@@ -96,4 +107,26 @@ func defaultPeerAdapterImage(kind string, defaults Defaults) string {
 	registry := firstNonEmpty(defaults.AdapterRegistry, DefaultAdapterRegistry)
 	tag := firstNonEmpty(defaults.AdapterTag, DefaultAdapterTag)
 	return fmt.Sprintf("%s/criteria-adapter-%s-peer:%s", registry, kind, tag)
+}
+
+// pinnedImageReference reports whether ref is a container-image reference
+// the digest-verified event lane may consume as a POD image: the reference
+// must already carry its own pin — a tag or a digest suffix. A bare
+// repository name is a plugin-adapter ARTIFACT source (the compiled
+// workflow graph publishes `source` exactly so — KB-253), not a container
+// image: docker pull cannot fetch a plugin artifact, so consuming a bare
+// source as a pod image would resolve an :latest pull of a repo that
+// carries no tags and wedge the pod in ImagePull. The graph's source
+// belongs to the artifact-staging lane instead (BuildPerScopePeerPod).
+func pinnedImageReference(ref string) bool {
+	if ref == "" {
+		return false
+	}
+	if at := strings.LastIndex(ref, "@"); at > strings.LastIndex(ref, "/") {
+		return true // digest suffix
+	}
+	// Tag suffix: a colon after the last slash. A registry port's colon
+	// sits before the last slash ("localhost:5000/repo"), so a bare
+	// repo-on-port stays unpinned.
+	return strings.Contains(ref[strings.LastIndex(ref, "/")+1:], ":")
 }

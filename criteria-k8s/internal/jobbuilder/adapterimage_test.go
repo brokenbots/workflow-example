@@ -21,24 +21,39 @@ func adapterImageDefaults() Defaults {
 	}
 }
 
-// CRI-214 M14: the resolution order is workflow-object override → event
-// image_reference (digest-verified) → configured registry/tag defaults.
-// These tests pin each branch and the interactions between them.
-func TestResolveAdapterImageOverrideWins(t *testing.T) {
+// CRI-214 M14, KB-306 flip: the resolution order is event image_reference
+// (digest-verified, pin-qualified) → workflow-object override → configured
+// registry/tag defaults. These tests pin each branch and the interactions
+// between them.
+func TestResolveAdapterImageDigestVerifiedReferenceWins(t *testing.T) {
+	// KB-306: the event's digest-verified reference is the version
+	// authority — it displaces the workflow override and the configured
+	// default.
 	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}
 	scope := events.LifecycleEvent{
 		Event:          events.EventProvisionWanted,
 		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
-		ImageReference: "localhost:5000/criteria-adapter-shell:k8s-5",
+		ImageReference: "registry.example:5000/criteria-adapter-shell@sha256:abc",
 	}
 
 	img := resolveAdapterImage(plan, scope, "shell", adapterImageDefaults())
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", img,
-		"the workflow object's adapterImages override wins over both the event's image_reference and the defaults")
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:abc", img,
+		"a digest-verified image_reference outranks the workflow override and the configured defaults")
+}
 
-	// The override is per-kind: copilot has no override entry, so a zero
-	// event (no digest, no reference) falls through to the configured
-	// defaults.
+func TestResolveAdapterImageOverrideWinsWithoutEventPin(t *testing.T) {
+	// The override is per-kind and now applies whenever the event lane
+	// cannot verify its reference (no digest, or a bare/absent reference):
+	// it is the optional escape hatch beneath the lockfile, not the primary
+	// pin (KB-306).
+	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}
+
+	// A zero event (no digest, no reference) falls through to the override,
+	// then to the configured defaults.
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", resolveAdapterImage(plan, events.LifecycleEvent{}, "shell", adapterImageDefaults()))
+
+	// copilot has no override entry, so the zero event falls all the way
+	// through to the configured defaults.
 	assert.Equal(t, "registry.example:5000/criteria-adapter-copilot:k8s-9", resolveAdapterImage(plan, events.LifecycleEvent{}, "copilot", adapterImageDefaults()))
 }
 
@@ -57,8 +72,11 @@ func TestResolveAdapterImageUsesDigestVerifiedImageReference(t *testing.T) {
 }
 
 func TestResolveAdapterImageWithoutDigestIgnoresImageReference(t *testing.T) {
-	// Pre-M14 engines emit no image_reference; a reference without a
-	// digest is unverified and must not displace the configured defaults.
+	// Engines before the image_reference emission publish no digest; a
+	// reference without a digest is unverified and must not displace the
+	// configured defaults — whatever its pin shape. Combined with the
+	// KB-306 flip this is also the guard against a bare repository name
+	// (a plugin-ADAPTER artifact source) masquerading as a pod image.
 	scope := events.LifecycleEvent{
 		Event:          events.EventProvisionWanted,
 		ImageReference: "evil-registry.example/criteria-adapter-shell:latest",
@@ -70,6 +88,33 @@ func TestResolveAdapterImageWithoutDigestIgnoresImageReference(t *testing.T) {
 
 	// The zero event (no digest, no reference) resolves from the defaults.
 	assert.Equal(t, "registry.example:5000/criteria-adapter-shell:k8s-9", resolveAdapterImage(nil, events.LifecycleEvent{}, "shell", adapterImageDefaults()))
+}
+
+func TestResolveAdapterImageBareArtifactSourceIsNotAPodImage(t *testing.T) {
+	// KB-253 graph members carry the plugin-ADAPTER artifact source as
+	// ImageReference (a bare repo name) alongside their digest. Repo@digest
+	// of a plugin artifact cannot run as a container image (docker pull
+	// cannot fetch a plugin artifact), so the digest-verified lane must
+	// reject the bare shape and fall through — never resolve an :latest
+	// pull (or a repo@digest pull) of an artifact repo as a pod image.
+	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		ImageReference: "registry.example:5000/criteria-adapter-shell",
+	}
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", resolveAdapterImage(plan, scope, "shell", adapterImageDefaults()),
+		"a bare artifact source is not pin-qualified; the override is the pod image")
+
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell:k8s-9", resolveAdapterImage(nil, scope, "shell", adapterImageDefaults()),
+		"without an override a bare artifact source falls through to the defaults")
+
+	assert.False(t, pinnedImageReference("registry.example:5000/criteria-adapter-shell"))
+	assert.False(t, pinnedImageReference("localhost:5000/repo"), "a registry port is not a tag")
+	assert.True(t, pinnedImageReference("registry.example:5000/criteria-adapter-shell:k8s-3"))
+	assert.True(t, pinnedImageReference("registry.example:5000/criteria-adapter-shell@sha256:abc"))
+	assert.True(t, pinnedImageReference("localhost:5000/repo@sha256:abc"))
+	assert.False(t, pinnedImageReference(""))
 }
 
 func TestResolveAdapterImageDefaultsFromConfiguredRegistryAndTag(t *testing.T) {
@@ -88,8 +133,8 @@ func TestResolveAdapterImageDefaultsFromConfiguredRegistryAndTag(t *testing.T) {
 }
 
 // CRI-214 M14: BuildPerScopeAdapterPod consumes the whole resolution order,
-// not just the defaults branch — the workflow object's override wins and an
-// unverified reference must not leak into the pod.
+// not just the defaults branch — the (now leading) digest-verified event
+// lane wins and an unverified reference must not leak into the pod.
 func TestBuildPerScopeAdapterPodResolvesImageReference(t *testing.T) {
 	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
 
@@ -109,16 +154,18 @@ func TestBuildPerScopeAdapterPodResolvesImageReference(t *testing.T) {
 		assert.Equal(t, "registry.example:5000/criteria-adapter-shell:k8s-5", pod.Spec.Containers[0].Image)
 	})
 
-	t.Run("workflow override wins over verified reference", func(t *testing.T) {
+	t.Run("workflow override wins when the event lane cannot verify", func(t *testing.T) {
 		run := perScopeAdapterTestRun()
 		run.Spec.Workflow = &criteriav1.RunWorkflow{AdapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}
+		// The event carries no digest, so the reference is unverified and
+		// the override applies (a digest-verified reference would have
+		// outranked it — tested above and in the peer builder's pin).
 		scope := events.LifecycleEvent{
 			Event:          events.EventProvisionWanted,
 			RunID:          "CRI-42",
 			ScopeID:        "root",
 			AdapterName:    "intake",
 			AdapterType:    "shell",
-			Digest:         digest,
 			ImageReference: "registry.example:5000/criteria-adapter-shell:k8s-5",
 		}
 
@@ -161,17 +208,29 @@ func TestResolvePeerAdapterImageDefaultsToPeerRepo(t *testing.T) {
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-9", tagOnly)
 }
 
-func TestResolvePeerAdapterImageOverrideWins(t *testing.T) {
+func TestResolvePeerAdapterImageDigestVerifiedReferenceWins(t *testing.T) {
+	// KB-306: the digest-verified event lane leads the override lane.
 	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}}
 	scope := events.LifecycleEvent{
 		Event:          events.EventProvisionWanted,
 		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
-		ImageReference: "localhost:5000/criteria-adapter-shell-peer:k8s-5",
+		ImageReference: "registry.example:5000/criteria-adapter-shell@sha256:abc",
 	}
 
 	img := resolvePeerAdapterImage(plan, scope, "shell", adapterImageDefaults())
-	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4", img,
-		"the workflow object's adapterImages override wins over the event reference and the peer default")
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:abc", img,
+		"a digest-verified image_reference outranks the workflow override")
+}
+
+func TestResolvePeerAdapterImageOverrideWinsWithoutEventPin(t *testing.T) {
+	// The override applies whenever the event lane cannot verify its
+	// reference (no digest, bare/absent reference): it is the optional
+	// escape hatch beneath the lockfile pin (KB-306).
+	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}}
+
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4",
+		resolvePeerAdapterImage(plan, events.LifecycleEvent{}, "shell", adapterImageDefaults()),
+		"the workflow object's adapterImages override wins when the event carries no digest")
 }
 
 func TestResolvePeerAdapterImageUsesDigestVerifiedReference(t *testing.T) {
@@ -249,8 +308,15 @@ func TestBuildPerScopePeerPodResolvesPeerImage(t *testing.T) {
 	got = mkPod(peerImageTestRun(nil), []events.LifecycleEvent{unverified})
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-5", got.Image)
 
-	// The workflow override beats the verified reference.
+	// The digest-verified reference outranks the workflow override (KB-306
+	// flip; the override survives only when the event lane cannot verify).
 	got = mkPod(peerImageTestRun(map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}),
 		[]events.LifecycleEvent{verified})
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:abc", got.Image)
+
+	// An override still resolves the pod when the event lane cannot verify
+	// (no digest on the event → the reference is unverified).
+	got = mkPod(peerImageTestRun(map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}),
+		[]events.LifecycleEvent{unverified})
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4", got.Image)
 }
