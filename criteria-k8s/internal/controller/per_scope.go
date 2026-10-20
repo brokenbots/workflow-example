@@ -161,6 +161,25 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 				existing[localAdapterKind(m)+"."+m.AdapterName] = struct{}{}
 			}
 			graphDefs := graphs[key.environment]
+			// KB-306: a provisioned member carries the lockfile digest but
+			// (live engines) no image_reference — the digest lane needs the
+			// artifact repo too, so the compiled graph's lockfile source
+			// fills it in. The event's digest stays the runtime authority
+			// (the pull is addressed BY it); the graph only contributes the
+			// location. A member without a digest pulls nothing: the graph
+			// alone cannot make it digest-verified.
+			for i := range group.members {
+				m := &group.members[i]
+				if m.Digest == "" || m.ImageReference != "" {
+					continue
+				}
+				for _, def := range graphDefs {
+					if def.Source != "" && def.Type == localAdapterKind(*m) && def.Name == m.AdapterName {
+						m.ImageReference = def.Source
+						break
+					}
+				}
+			}
 			for _, def := range graphDefs {
 				defKey := def.Type + "." + def.Name
 				if _, ok := existing[defKey]; ok {

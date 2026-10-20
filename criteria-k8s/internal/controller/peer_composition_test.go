@@ -85,3 +85,64 @@ func TestReconcilePerScopeAdaptersGraphlessKeepsProvisionShape(t *testing.T) {
 	require.Len(t, pods, 1)
 	assert.ElementsMatch(t, []string{"copilot.coordinator"}, podManifestDefinitions(pods[0]))
 }
+
+// TestReconcilePerScopeAdaptersGraphSourceFeedsDigestStaging pins the
+// KB-306 controller arm: a provisioned member (digest present,
+// image_reference empty — the live kb-291 shape) is enriched with the
+// compiled graph's lockfile source, and the built peer pod's init
+// container therefore stages the binary by DIGEST pull — pull-<kind>, not
+// the KB-214 copy-<kind> image stage — while the digest pin env still
+// carries the event's own digest.
+func TestReconcilePerScopeAdaptersGraphSourceFeedsDigestStaging(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
+
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	prov := groupProvision("coordinator", "copilot", "scope-a", "remote/worktree")
+	prov.Digest = digest
+	graphs := graphsPayload(t, []map[string]any{
+		{"type": "copilot", "name": "coordinator", "environment": "remote.worktree",
+			"source": "ghcr.io/brokenbots/criteria-adapter-copilot", "pinned_digest": digest},
+	})
+
+	active, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{prov}, graphs, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, active, "the provision must be active")
+	pods := listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1)
+
+	require.Len(t, pods[0].Spec.InitContainers, 1)
+	ic := pods[0].Spec.InitContainers[0]
+	assert.Equal(t, "pull-copilot", ic.Name,
+		"the enriched member's pullable pin stages the binary by digest, not the image stage")
+	assert.Contains(t, ic.Command[2], "ghcr.io/brokenbots/criteria-adapter-copilot@"+digest,
+		"the staging script pulls the graph-published artifact repo at the event's lockfile digest")
+
+	assert.Equal(t, digest, containerEnvValue(pods[0].Spec.Containers[0], "CRITERIA_ADAPTER_COPILOT_COORDINATOR_DIGEST"),
+		"the digest pin still carries the EVENT's digest (the runtime authority)")
+	assert.Equal(t, "/usr/local/share/criteria-peer-adapters/criteria-adapter-copilot",
+		containerEnvValue(pods[0].Spec.Containers[0], "CRITERIA_ADAPTER_COPILOT_COORDINATOR_BINARY"),
+		"the binary override points at the digest-staged copy")
+}
+
+// TestReconcilePerScopeAdaptersGraphlessDigestLeavesImageSupplied pins the
+// enrichment guard: without graphs the member stays reference-less — no
+// pullable pin, no digest lane — so the single-kind pod keeps the KB-214
+// image-supplied shape (no staging machinery, in-image binary override).
+func TestReconcilePerScopeAdaptersGraphlessDigestLeavesImageSupplied(t *testing.T) {
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
+
+	prov := groupProvision("coordinator", "copilot", "scope-a", "remote/worktree")
+	prov.Digest = "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	_, err := r.reconcilePerScopeAdapters(context.Background(), run, "", []events.LifecycleEvent{prov}, nil, logr.Discard())
+	require.NoError(t, err)
+	pods := listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1)
+
+	assert.Empty(t, pods[0].Spec.InitContainers,
+		"no graph source means no pullable pin: a single-kind pod stays image-supplied with no staging machinery")
+	assert.Equal(t, "/usr/local/bin/criteria-adapter-copilot",
+		containerEnvValue(pods[0].Spec.Containers[0], "CRITERIA_ADAPTER_COPILOT_COORDINATOR_BINARY"),
+		"the binary override points at the image's conventional install path")
+}
