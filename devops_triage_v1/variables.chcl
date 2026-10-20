@@ -211,3 +211,10 @@ variable "devops" {
         }
     }
 }
+
+// #303-era fix: engine requires secret bindings to reference declared secret
+// variables ("env:..." literals are no longer accepted in adapter secrets).
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

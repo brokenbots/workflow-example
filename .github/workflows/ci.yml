@@ -80,8 +80,14 @@ jobs:
           CRITERIA_HOME: /home/runner/.local/criteria
         run: |
           mkdir -p "$CRITERIA_HOME/adapters"
-          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-shell:0.5.5
-          criteria adapter pull ghcr.io/brokenbots/criteria-adapter-copilot:0.5.15
+          # #303: adapter versions come from releases.chcl (single source) — never
+          # hardcode pins here; a stale literal is exactly the drift class this
+          # gate exists to kill.
+          SHELL_V="$(sed -n 's/^shell *= *"\([^"]*\)".*/\1/p' releases.chcl)"
+          COPILOT_V="$(sed -n 's/^copilot *= *"\([^"]*\)".*/\1/p' releases.chcl)"
+          echo "pre-pulling shells:$SHELL_V copilot:$COPILOT_V (from releases.chcl)"
+          criteria adapter pull "ghcr.io/brokenbots/criteria-adapter-shell:${SHELL_V}"
+          criteria adapter pull "ghcr.io/brokenbots/criteria-adapter-copilot:${COPILOT_V}"
 
       # The copilot adapter's CLI server execs the `copilot` CLI from PATH
       # (run 39098317753: bind adapter "copilot.main" ... "failed to start
@@ -152,8 +158,19 @@ jobs:
       # that skipped would prove nothing, so the run must show the
       # all-shapes-observed banner from actual observations.
       - name: Run harness_contracts_v1 standalone regression test (KB-277)
+        # 10-19: the fixtures hang (not merely slow) in CI — 48m with fixtures
+        # that complete in seconds on LAN. Job-level timeout bounds the damage
+        # while the hang is root-caused (KB-305 candidate); do not raise this
+        # blindly, the suite is NOT meant to take tens of minutes.
+        timeout-minutes: 10
         env:
           SUITE_DEBUG: "1"
+          # CI runners are markedly slower than the LAN dev box (per-fixture
+          # engine + stub-provider spin-up); 150s starved F1/F2 (observed 10-19:
+          # exit 124 across the board). 600s per fixture / 1500s for the F9
+          # shipped chain keeps the assertions identical, just unhurried.
+          SUITE_TIMEOUT: "600"
+          SUITE_TIMEOUT_FULL: "1500"
         run: |
           set -o pipefail
           bash harness_contracts_v1/tests/test_contracts_standalone.sh \

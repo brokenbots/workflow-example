@@ -84,3 +84,9 @@ variable "devops" {
         }
     }
 }
+
+// #303-era fix: secret bindings must reference declared secret variables.
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}

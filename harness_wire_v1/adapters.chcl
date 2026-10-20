@@ -46,7 +46,7 @@ environment "remote" "probe_copilot" {
 // A1, digest pin A2) and the redial at run end (clean-exit respawn A5).
 adapter "shell" "probe_a" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.4"
+    version     = "0.5.5"
     environment = remote.probe_shell
 }
 
@@ -56,7 +56,7 @@ adapter "shell" "probe_a" {
 // the environment pod.
 adapter "shell" "probe_b" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.4"
+    version     = "0.5.5"
     environment = remote.probe_shell
 }
 
@@ -68,7 +68,7 @@ adapter "shell" "probe_b" {
 adapter "copilot" "boot_member" {
     environment = remote.probe_copilot
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.15"
+    version     = "0.5.17"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
     }

@@ -116,6 +116,7 @@ subworkflow "devops_worker" {
         ci_gate_cmd   = var.ci_gate_cmd
         max_visits    = var.max_worker_visits
         devops        = var.devops
+        workflow_github_token = var.workflow_github_token
     }
 }
 
