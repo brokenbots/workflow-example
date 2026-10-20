@@ -98,7 +98,9 @@ merge)
     # (gh pr view has no --arg; do the comparison with a plain jq -n binding)
     APPROVED=$(printf '%s' "$ROLL" | jq -r --arg author "$PR_AUTHOR" \
         '[.reviews[] | select(.author != $author and .state == "APPROVED")] | length > 0')
-    ALLDONE=$(printf '%s' "$ROLL" | jq -r '[.checks[] | select(. != "SUCCESS")] | length == 0')
+    # rollup status is COMPLETED (REST shape) with conclusion SUCCESS — check
+    # conclusion, not status (pr_gate's own rollup logic maps these the same way)
+    ALLDONE=$(printf '%s' "$ROLL" | jq -r '[.checks[] | .conclusion] | (length > 0) and (all(. == "SUCCESS"))')
     APPROVED=$(printf '%s' "$ROLL" | jq -r '.approved > 0')
     if [ "$ALLDONE" != "true" ] || [ "$APPROVED" != "true" ]; then
         echo "gate regressed before merge: $ROLL" >&2
