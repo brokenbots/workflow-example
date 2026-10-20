@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"net/http"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
@@ -70,6 +70,13 @@ var (
 	// reachable while a wedged session that emits only heartbeats trips the
 	// watchdog. 0 disables the watchdog.
 	stallWindow = flag.Duration("stall-window", getDuration("CRITERIA_STALL_WINDOW", 30*time.Minute), "Fail a run whose castle stream shows no step progress for this long (KB-24; 0 disables)")
+	// KB-302: the terminal run's child-job deletion is deferred behind a
+	// pending runner restart so the kubelet cannot orphan a fresh agent
+	// container through background garbage collection. This window bounds
+	// the deferral: past it the reap is forced even with the restart still
+	// pending, so a never-settling pod cannot wedge terminal cleanup. 0
+	// disables the force and defers until the runner pod settles.
+	terminalReapForceAfter = flag.Duration("terminal-reap-force-after", getDuration("TERMINAL_REAP_FORCE_AFTER", controller.DefaultTerminalReapForceAfter), "Force a terminal run's deferred child-job deletion this long after the deferral (KB-302; 0 disables the force)")
 	// CRI-144: reap adapter pods and legacy adapter Jobs whose owning
 	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
@@ -175,9 +182,13 @@ func main() {
 			LegacySecretVolumes: *legacySecretVolumes,
 		},
 		Queue: queue,
-		// KB-24: the stall watchdog fails a Running run whose castle stream
-		// stops showing step progress, so the watcher can refire it.
-		StallWindow: *stallWindow,
+		// KB-302: the stall watchdog fails wedged Running runs — the run
+		// parks with its failure reason; recovery decisions belong to the
+		// shepherd (arc_shepherd_v1), with Job backoff covering
+		// in-container transients. The watcher neither refires nor
+		// reparks a failed run.
+		StallWindow:            *stallWindow,
+		TerminalReapForceAfter: *terminalReapForceAfter,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error(err, "setting up CriteriaRun reconciler")

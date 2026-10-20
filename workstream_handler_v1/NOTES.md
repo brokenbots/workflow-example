@@ -22,11 +22,11 @@ adapter returns a malformed tool-call or missing `submit_outcome`.
 - Once a valid `approve` or `changes_requested` outcome is returned, the repair
   context is cleared.
 
-## Pins (as of 2026-10-18, release wave: KB-287 repin shell 0.5.4 -> 0.5.5; base wave: criteria v0.5.44 @ 3bf70c84)
+## Pins (as of 2026-10-20, release wave: KB-302 repin copilot 0.5.15 -> 0.5.17 (KB-263/KB-216/KB-260, published 10-16); KB-287 repin shell 0.5.4 -> 0.5.5; base wave: criteria v0.5.44 @ 3bf70c84)
 
 | adapter | source | version | lock digest | notes |
 |---|---|---|---|---|
-| copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.15` | `sha256:827e39ad040a24ad81251b802b1996a00195121ce2c97b7b6ba62d558d581773` | multi-arch, signed. Used for every agent role: developer, coordinator, branch-repair, pair-loop reviewer, PR reviewer. |
+| copilot      | `ghcr.io/brokenbots/criteria-adapter-copilot`      | `0.5.17` | `sha256:d4400abc734ab4146440e9ab9ac1d22eea11ef38166895718b415f8dc46671ae` | multi-arch, signed. Used for every agent role: developer, coordinator, branch-repair, pair-loop reviewer, PR reviewer. |
 | shell        | `ghcr.io/brokenbots/criteria-adapter-shell`        | `0.5.5`  | `sha256:41288ce9ce5d3d46841f40b85208c6208c596f36993a898c23002acfa9100a41` | multi-arch, keyless-signed. |
 
 All agent roles now run on the copilot adapter; the `claude-agent` adapter is

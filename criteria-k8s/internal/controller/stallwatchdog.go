@@ -22,8 +22,10 @@ import (
 
 // ConditionStallWatchdog is the CriteriaRun condition type and the
 // metav1.Condition reason stamped when the stall watchdog fails a run for
-// no step progress (KB-24).
-const ConditionStallWatchdog = "StallWatchdog"
+// no step progress (KB-24). The name is published in api/v1 (the watchers
+// read it off the run's status); this alias keeps the package's own
+// references stable.
+const ConditionStallWatchdog = criteriav1.ConditionStallWatchdog
 
 // applyStallWatchdog stamps the run's last step progress onto the pending
 // status update and reports whether the run must be failed for stalling
@@ -88,8 +90,11 @@ func (r *CriteriaRunReconciler) applyStallWatchdog(run *criteriav1.CriteriaRun, 
 // failBaseImageMismatch (CRI-264): the child Jobs are deleted so the wedged
 // runner stops occupying its admission slot, per-scope adapter pods are
 // deleted so they do not outlive the runner's shim, the run is marked
-// Failed with the StallWatchdog condition, and the queue slot is released:
-// the watcher refires the run. Castle records no terminal for such a run
+// Failed with the StallWatchdog condition, and the queue slot is released.
+// The run parks failed: the watcher's only downstream act is parking the
+// card in Review with this reason (KB-302 park-only mechanics) — no
+// automated path refires a failed run, refire decisions belong to the
+// shepherd (arc_shepherd_v1). Castle records no terminal for such a run
 // (the engine is gone), so the controller also stops polling castle for a
 // terminal on it (stallWatchdogFired).
 func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (ctrl.Result, error) {
@@ -120,7 +125,7 @@ func markStallWatchdog(update *criteriav1.CriteriaRun, generation int64, lastPro
 		Type:   ConditionStallWatchdog,
 		Status: metav1.ConditionTrue,
 		Reason: ConditionStallWatchdog,
-		Message: fmt.Sprintf("no step progress for %s (last step event %s); the run is failed so the watcher can refire it (KB-24)",
+		Message: fmt.Sprintf("no step progress for %s (last step event %s); the run is parked failed — refire decisions belong to the shepherd (KB-24, KB-302)",
 			window.String(), lastProgress.UTC().Format(time.RFC3339)),
 		ObservedGeneration: generation,
 	})

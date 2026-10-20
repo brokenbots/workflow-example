@@ -20,7 +20,7 @@ bad()  { echo "pincheck FAIL: $*" >&2; FAILED=$((FAILED+1)); }
 # -- engine selection: host criteria if present, else the LAN container binary
 CRIT="$(command -v criteria || true)"
 CRIT_ARGS=()
-if [ -n "$CRITERIA_BIN" ]; then CRIT="$CRITERIA_BIN"; fi
+if [ -n "${CRITERIA_BIN:-}" ]; then CRIT="$CRITERIA_BIN"; fi
 run_crit() {
     # runs `criteria ...` with a 0.5.56 engine; container fallback keeps the lock
     # contract identical to CI.

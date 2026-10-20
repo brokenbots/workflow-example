@@ -208,9 +208,15 @@ const testRoutesJSON = `{
   },
   "routes": [
     {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]},
-    {"name": "kb-develop", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Review"]}
+    {"name": "kb-develop", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Ready"]}
   ]
 }`
+
+// The routes fixture mirrors the live criteria-routes CM shape: trigger
+// columns are Backlog (triage) and Ready (develop) only — Review matches no
+// route, so a card parked in Review over a failure is never re-fired by a
+// poll (KB-302: the refire decision belongs to the shepherd, via a card
+// move).
 
 // chainRoutesJSON mirrors the live criteria-routes split for Kanboard
 // (k8s/examples/routes-configmap.yaml): the triage route fires a
@@ -742,16 +748,19 @@ func TestColumnReconciliationOnPhaseChange(t *testing.T) {
 	require.Len(t, tw.runs(t), 1)
 	runName := tw.runs(t)[0].Name
 
-	// Running: task moves to Work in progress.
+	// Running: park-only — the watcher mutates nothing while the run runs
+	// (KB-302). The task stays in the trigger column that fired it; there
+	// is no in-flight move and no comment to scrape.
 	tw.setRunPhase(t, "KB-13", criteriav1.PhaseRunning)
 	tw.pollOnce(t)
-	assert.Equal(t, 7, tw.kbS.taskColumn(13), "running run moves task to work column")
+	assert.Equal(t, 5, tw.kbS.taskColumn(13), "an in-flight run leaves the task in its trigger column (KB-302 park-only)")
+	assert.Empty(t, tw.kbS.commentBodiesOn(13), "an in-flight run posts no comments")
 
 	// Succeeded: the verdict is not observable yet, so the watcher abstains
 	// (KB-50) — the Completed pod phase alone is not a succeeded workflow.
 	tw.setRunPhase(t, "KB-13", criteriav1.PhaseSucceeded)
 	tw.pollOnce(t)
-	assert.Equal(t, 7, tw.kbS.taskColumn(13), "a Succeeded phase without a workflow verdict does not stamp Done")
+	assert.Equal(t, 5, tw.kbS.taskColumn(13), "a Succeeded phase without a workflow verdict does not stamp Done")
 
 	// handler_complete stamps Done: since the KB-49 route guard the
 	// workflow itself refuses a handler success with an empty pr_url, so
@@ -772,6 +781,13 @@ func TestFailedRunMovesTaskToReview(t *testing.T) {
 	tw.pollOnce(t)
 
 	assert.Equal(t, 6, tw.kbS.taskColumn(14), "failed run moves task to Review")
+	// KB-302: the Review park carries exactly one failure comment, built
+	// from the run's name; the run carries neither a condition nor a
+	// verdict, so the reason is the explicit no-reason marker.
+	bodies := tw.kbS.commentBodiesOn(14)
+	require.Len(t, bodies, 1, "the Review park posts exactly one failure comment")
+	assert.Contains(t, bodies[0], "criteria-kanboard-watcher: run kb-14-", "the comment names the failed run")
+	assert.Contains(t, bodies[0], "failed: no reason recorded", "an unexplained run says so")
 }
 
 // TestTriageRouteStampsTriageClass pins the fixture contract the KB-9
@@ -864,9 +880,11 @@ func TestTriageSucceededThenDevelopSucceedsStampsDone(t *testing.T) {
 	}
 	require.NotEmpty(t, devName, "the watcher-created run is the develop run")
 
-	// Next poll: the develop run is in flight; the ticket parks in the work column.
+	// Next poll: the develop run is in flight; park-only (KB-302) — the
+	// ticket stays in Ready until the develop run settles, and the live
+	// run still blocks a duplicate fire.
 	tw.pollOnce(t)
-	assert.Equal(t, 7, tw.kbS.taskColumn(21), "live develop run parks the ticket in the work column")
+	assert.Equal(t, 9, tw.kbS.taskColumn(21), "an in-flight develop run leaves the ticket in its trigger column (KB-302)")
 	assert.Len(t, tw.runs(t), 2, "no duplicate run while the develop run is live")
 
 	// The develop run settles: without a verdict the watcher abstains
@@ -875,7 +893,7 @@ func TestTriageSucceededThenDevelopSucceedsStampsDone(t *testing.T) {
 	// verdict IS the PR evidence (KB-101 removed Status.PRNumber).
 	tw.setRunPhaseByName(t, devName, criteriav1.PhaseSucceeded)
 	tw.pollOnce(t)
-	assert.Equal(t, 7, tw.kbS.taskColumn(21), "a Completed pod alone does not stamp Done (KB-50)")
+	assert.Equal(t, 9, tw.kbS.taskColumn(21), "a Completed pod alone does not stamp Done (KB-50)")
 
 	tw.setRunFinalStateByName(t, devName, "handler_complete")
 	tw.pollOnce(t)
@@ -943,7 +961,8 @@ func TestPodCompletedWorkflowFailureNoPRDoesNotReconcileDone(t *testing.T) {
 }
 
 // A failed triage-class run still parks the ticket in Review for a human —
-// the triage guard only changes the success path.
+// the triage guard only changes the success path. Same KB-302 park shape:
+// one move, one comment naming the run.
 func TestFailedTriageRunMovesTaskToReview(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(23, 7, "k8s-run", "internal-reproduced") // Work in progress
@@ -952,6 +971,151 @@ func TestFailedTriageRunMovesTaskToReview(t *testing.T) {
 	tw.pollOnce(t)
 
 	assert.Equal(t, 6, tw.kbS.taskColumn(23), "failed triage run moves task to Review")
+	bodies := tw.kbS.commentBodiesOn(23)
+	require.Len(t, bodies, 1, "the triage failure parks with exactly one comment")
+	assert.Equal(t,
+		"criteria-kanboard-watcher: run kb-23-0000000001 failed: no reason recorded", bodies[0])
+}
+
+// KB-302: the failure comment is part of the park and fires exactly once —
+// only at the Failed -> Review move. A later poll (even one forced to
+// reconcile again, even re-seen Failed) must not re-move or re-comment:
+// Review matches no route, and the refire decision belongs to the shepherd.
+func TestFailedRunFailureCommentIsPostedExactlyOnce(t *testing.T) {
+	tw := newTestWatcher(t, testRoutesJSON)
+	tw.kbS.addTask(34, 5, "k8s-run")
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+	tw.setRunPhaseByName(t, tw.runs(t)[0].Name, criteriav1.PhaseFailed)
+
+	tw.pollOnce(t)
+	assert.Equal(t, 6, tw.kbS.taskColumn(34), "failed run parks the card in Review")
+	require.Len(t, tw.kbS.commentBodiesOn(34), 1, "the park posts its single comment")
+
+	// Force the reconcile again: forget the change-detection gate. The card
+	// already sits in Review, so the "already there" gate must hold the
+	// park: no second move, no second comment.
+	tw.w.lastRuns = map[string]runPhases{}
+	tw.pollOnce(t)
+	assert.Equal(t, 6, tw.kbS.taskColumn(34), "the Review park never re-moves")
+	require.Len(t, tw.kbS.commentBodiesOn(34), 1, "the failure comment is never re-posted")
+}
+
+// KB-302: the failure comment's reason prefers the run's most specific
+// failure explanation — controller verdict conditions first (fixed
+// precedence: StallWatchdog > BaseImageMismatch > ConfigRenderDrift), then
+// the workflow verdict, then the explicit no-reason marker.
+func TestFailedRunCommentReasonPrecedence(t *testing.T) {
+	newPolledFailed := func(t *testing.T) *testWatcher {
+		tw := newTestWatcher(t, testRoutesJSON)
+		tw.kbS.addTask(35, 5, "k8s-run")
+		tw.pollOnce(t)
+		require.Len(t, tw.runs(t), 1)
+		tw.setRunPhaseByName(t, tw.runs(t)[0].Name, criteriav1.PhaseFailed)
+		return tw
+	}
+	body := func(tw *testWatcher) string {
+		bodies := tw.kbS.commentBodiesOn(35)
+		require.Len(t, bodies, 1)
+		return bodies[0]
+	}
+
+	t.Run("no data says no reason recorded", func(t *testing.T) {
+		tw := newPolledFailed(t)
+		tw.pollOnce(t)
+		assert.Contains(t, body(tw), "failed: no reason recorded")
+	})
+	t.Run("workflow verdict wins over no reason", func(t *testing.T) {
+		tw := newPolledFailed(t)
+		tw.setRunFinalStateByName(t, tw.runs(t)[0].Name, "failed")
+		tw.pollOnce(t)
+		assert.Contains(t, body(tw), `failed: workflow terminal "failed"`)
+	})
+	t.Run("truthy verdict condition wins over the workflow verdict", func(t *testing.T) {
+		tw := newPolledFailed(t)
+		tw.setRunFinalStateByName(t, tw.runs(t)[0].Name, "failed")
+		tw.setRunConditionByName(t, tw.runs(t)[0].Name, metav1.ConditionTrue,
+			criteriav1.ConditionStallWatchdog, "no step progress in 30m")
+		tw.pollOnce(t)
+		assert.Contains(t, body(tw), "failed: no step progress in 30m")
+	})
+	t.Run("non-truthy conditions are ignored", func(t *testing.T) {
+		tw := newPolledFailed(t)
+		tw.setRunFinalStateByName(t, tw.runs(t)[0].Name, "failed")
+		tw.setRunConditionByName(t, tw.runs(t)[0].Name, metav1.ConditionFalse,
+			criteriav1.ConditionBaseImageMismatch, "stale message from an earlier settle")
+		tw.pollOnce(t)
+		assert.Contains(t, body(tw), `failed: workflow terminal "failed"`)
+		assert.NotContains(t, body(tw), "stale message")
+	})
+	t.Run("BaseImageMismatch outranks ConfigRenderDrift", func(t *testing.T) {
+		tw := newPolledFailed(t)
+		tw.setRunConditionByName(t, tw.runs(t)[0].Name, metav1.ConditionTrue,
+			criteriav1.ConditionConfigRenderDrift, "drift-message")
+		tw.setRunConditionByName(t, tw.runs(t)[0].Name, metav1.ConditionTrue,
+			criteriav1.ConditionBaseImageMismatch, "base-image-message")
+		tw.pollOnce(t)
+		assert.Contains(t, body(tw), "failed: base-image-message")
+		assert.NotContains(t, body(tw), "drift-message")
+	})
+	t.Run("StallWatchdog outranks BaseImageMismatch", func(t *testing.T) {
+		tw := newPolledFailed(t)
+		tw.setRunConditionByName(t, tw.runs(t)[0].Name, metav1.ConditionTrue,
+			criteriav1.ConditionBaseImageMismatch, "base-image-message")
+		tw.setRunConditionByName(t, tw.runs(t)[0].Name, metav1.ConditionTrue,
+			criteriav1.ConditionStallWatchdog, "stall-message")
+		tw.pollOnce(t)
+		assert.Contains(t, body(tw), "failed: stall-message")
+		assert.NotContains(t, body(tw), "base-image-message")
+	})
+}
+
+// KB-302: the verdict-driven repair move (a Done stamp predating a failed
+// or need_assistance verdict) posts no watcher comment — the workflow's own
+// failure bookkeeping already explained the failure; only the Failed-phase
+// park comments.
+func TestVerdictRepairMoveDoesNotComment(t *testing.T) {
+	tw := newTestWatcher(t, chainRoutesJSON)
+	tw.kbS.addTask(36, 8, "k8s-run", "internal-reproduced") // Done: stamped before the verdict landed
+	tw.addRun(t, "kb-36-0000000001", "KB-36", criteriav1.RunClassDev, criteriav1.PhaseSucceeded)
+	tw.setRunFinalStateByName(t, "kb-36-0000000001", "failed")
+
+	tw.pollOnce(t)
+
+	assert.Equal(t, 6, tw.kbS.taskColumn(36),
+		"a Done stamp predating the failed verdict is repaired into Review")
+	assert.Empty(t, tw.kbS.commentBodiesOn(36),
+		"the verdict repair move posts no watcher comment")
+}
+
+// KB-302: a card parked in Review by a failure can be re-armed by moving it
+// back to a trigger column — the column change is the entry the firing loop
+// fires on, and residency in the trigger column after a settled run fires
+// nothing (an empty-verdict settle must not churn runs forever).
+func TestRefireFiresOnColumnEntryNotResidency(t *testing.T) {
+	defer func(orig func() int64) { nowUnix = orig }(nowUnix)
+	fired := 0
+	nowUnix = func() int64 { fired++; return int64(1_700_000_000 + fired) }
+
+	tw := newTestWatcher(t, testRoutesJSON)
+	tw.kbS.addTask(37, 5, "k8s-run")
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1)
+	// Settle with no verdict: park-only leaves the card on Backlog — the
+	// KB-50 abstain.
+	tw.setRunPhaseByName(t, tw.runs(t)[0].Name, criteriav1.PhaseSucceeded)
+	tw.pollOnce(t)
+	assert.Equal(t, 5, tw.kbS.taskColumn(37), "park-only leaves the settled card on its trigger column")
+	assert.Len(t, tw.runs(t), 1, "residency does not re-fire")
+
+	// The shepherd's re-arm move: card back through Review, into Backlog —
+	// the column change is the entry, and the trigger fires again.
+	tw.kbS.setTaskColumn(37, 6)
+	tw.pollOnce(t)
+	assert.Len(t, tw.runs(t), 1, "Review matches no route")
+	tw.kbS.setTaskColumn(37, 5)
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 2, "re-entry into Backlog refires (the shepherd's refire decision)")
 }
 
 // setRunFinalStateByName stamps the workflow verdict (Status.FinalState,
@@ -961,6 +1125,35 @@ func (tw *testWatcher) setRunFinalStateByName(t *testing.T, name, finalState str
 	t.Helper()
 	run := tw.runByName(t, name)
 	run.Status.FinalState = finalState
+	require.NoError(t, tw.client.Status().Update(context.Background(), run))
+}
+
+// setRunConditionByName stamps (or updates) one status condition on a
+// pre-created run — the way the controller leaves its failure verdicts
+// (StallWatchdog / BaseImageMismatch / ConfigRenderDrift) on the run the
+// watcher reads the failure reason from (KB-302).
+func (tw *testWatcher) setRunConditionByName(t *testing.T, name string, status metav1.ConditionStatus, condType, message string) {
+	t.Helper()
+	run := tw.runByName(t, name)
+	idx := -1
+	for i := range run.Status.Conditions {
+		if run.Status.Conditions[i].Type == condType {
+			idx = i
+			break
+		}
+	}
+	cond := metav1.Condition{
+		Type:               condType,
+		Status:             status,
+		Reason:             condType,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	}
+	if idx == -1 {
+		run.Status.Conditions = append(run.Status.Conditions, cond)
+	} else {
+		run.Status.Conditions[idx] = cond
+	}
 	require.NoError(t, tw.client.Status().Update(context.Background(), run))
 }
 

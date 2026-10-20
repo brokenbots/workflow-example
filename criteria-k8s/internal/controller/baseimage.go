@@ -23,8 +23,10 @@ import (
 // ConditionBaseImageMismatch is the CriteriaRun condition type and the
 // metav1.Condition reason stamped when a run is failed on a runner-image
 // mismatch (CRI-264). The ticket names the reason explicitly, so the
-// condition type mirrors it.
-const ConditionBaseImageMismatch = "BaseImageMismatch"
+// condition type mirrors it. The name is published in api/v1 (the
+// watchers read it off the run's status); this alias keeps the package's
+// own references stable.
+const ConditionBaseImageMismatch = criteriav1.ConditionBaseImageMismatch
 
 // OperatorEnvProbe resolves operator env values as the cluster currently
 // declares them. The reconciling pod's own process env goes stale while the
@@ -132,8 +134,10 @@ func runnerImageMismatch(status *criteriav1.CriteriaRunStatus, runnerJob *batchv
 // backoff until BackoffLimitExceeded (the 30-90m churn the ticket
 // documents). The child Jobs are deleted so nothing keeps running on an
 // image the cluster no longer declares, the run is marked Failed with a
-// BaseImageMismatch condition, and the queue slot is released: the watcher
-// refires the run on the current image once the rollout settles.
+// BaseImageMismatch condition, and the queue slot is released. The run
+// parks failed: no automated path refires it — refire decisions belong to
+// the shepherd (KB-302) — and a later run is admitted on whatever image
+// the operator then resolves.
 func (r *CriteriaRunReconciler) failBaseImageMismatch(ctx context.Context, run *criteriav1.CriteriaRun, pinned, current string, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("failing CriteriaRun on runner-image mismatch", "pinned", pinned, "current", current)
 	if err := r.deleteChildJobs(ctx, run); err != nil {
@@ -166,7 +170,7 @@ func markBaseImageMismatch(update *criteriav1.CriteriaRun, generation int64, pin
 		Type:               ConditionBaseImageMismatch,
 		Status:             metav1.ConditionTrue,
 		Reason:             ConditionBaseImageMismatch,
-		Message:            fmt.Sprintf("runner image pinned as %q at admission but the operator now resolves %q; the run is failed so the watcher can refire on the current image (CRI-264)", pinned, current),
+		Message:            fmt.Sprintf("runner image pinned as %q at admission but the operator now resolves %q; the run is parked failed — refire decisions belong to the shepherd (CRI-264, KB-302)", pinned, current),
 		ObservedGeneration: generation,
 	})
 }
@@ -186,12 +190,42 @@ func (r *CriteriaRunReconciler) deleteChildJobs(ctx context.Context, run *criter
 // reconcile pass. Background propagation takes the Job off the API
 // immediately and drops its pods with it; already-gone Jobs are tolerated,
 // so a terminal run without child Jobs is a no-op reconcile.
-func (r *CriteriaRunReconciler) deleteTerminalChildJobs(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) error {
+//
+// The KB-302 restart guard defers the delete while the runner pod can still
+// start another container attempt — deleting mid-restart lets the kubelet
+// orphan a fresh agent container through background garbage collection, and
+// that corpse registers with castle. When the guard defers, this returns
+// (true, nil) with the TerminalCleanup condition stamped (or reports a
+// force-reap when the deferral outlived the force window); a forced reap
+// proceeds below and stamps nothing. On a completed reap the condition is
+// cleared, so the deferral state never outlives the deferral.
+func (r *CriteriaRunReconciler) deleteTerminalChildJobs(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (bool, error) {
+	if pending, reason := r.runnerRestartPending(ctx, run, logger); pending {
+		deferral, force, err := r.markTerminalCleanupDeferred(ctx, run, reason)
+		if err != nil {
+			return true, err
+		}
+		if force {
+			logger.Info("forced terminal cleanup past the runner-restart guard window; reaping child Jobs with the restart still pending",
+				"CriteriaRun", run.Name, "forcedAfter", r.TerminalReapForceAfter,
+				"deferredSince", deferral.LastTransitionTime.Time, "reason", reason)
+		} else {
+			logger.Info("deferring terminal child-job deletion: runner restart is pending",
+				"CriteriaRun", run.Name, "reason", reason, "requeueAfter", terminalReapRequeueInterval)
+			return true, nil
+		}
+	}
 	deleted, err := r.deleteJobs(ctx, run, metav1.DeletePropagationBackground)
 	for _, name := range deleted {
 		logger.Info("deleting child Job of terminal CriteriaRun", "CriteriaRun", run.Name, "job", name)
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	if err := r.clearTerminalCleanup(ctx, run); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // deleteJobs deletes the child Jobs the job builders would reconcile for run

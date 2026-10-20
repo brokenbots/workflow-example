@@ -4,8 +4,8 @@
 // reconcile passes only re-verify the pin. A ConfigMap replaced under an
 // admitted run fails it fast with a ConfigRenderDrift condition (the
 // workflowSource ref-pin fail-closed symmetry, CRI-226) — patches never
-// silently switch an in-flight or parked run's config; the watcher refires
-// the run on the current pin instead.
+// silently switch an in-flight or parked run's config; a drifted run
+// parks failed and the shepherd owns any refire decision (KB-302).
 package controller
 
 import (
@@ -26,8 +26,10 @@ import (
 
 // ConditionConfigRenderDrift is the CriteriaRun condition type and the
 // metav1.Condition reason stamped when a run is failed on a config
-// ConfigMap pin mismatch (KB-103).
-const ConditionConfigRenderDrift = "ConfigRenderDrift"
+// ConfigMap pin mismatch (KB-103). The name is published in api/v1 (the
+// watchers read it off the run's status); this alias keeps the package's
+// own references stable.
+const ConditionConfigRenderDrift = criteriav1.ConditionConfigRenderDrift
 
 // renderRunConfig renders the run's per-repo config the way KB-103
 // prescribes and hands the rendered values to the child-Job builders:
@@ -139,8 +141,9 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 // from under it (KB-103): child Jobs (and per-scope adapter pods) are torn
 // down so nothing keeps executing against a config the cluster no longer
 // declares at the pinned version, the run is marked Failed with the
-// ConfigRenderDrift condition, and the queue slot is released so the
-// watcher refires on the current pin. Mirrors failBaseImageMismatch.
+// ConfigRenderDrift condition, and the queue slot is released. The run
+// parks failed — no automated refire; refire decisions belong to the
+// shepherd (KB-302). Mirrors failBaseImageMismatch.
 func (r *CriteriaRunReconciler) failConfigRenderDrift(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, detail string, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("failing CriteriaRun on config render drift", "criteriarun", run.Name, "detail", detail)
 	if err := r.deleteChildJobs(ctx, run); err != nil {
@@ -157,7 +160,7 @@ func (r *CriteriaRunReconciler) failConfigRenderDrift(ctx context.Context, run *
 		Type:               ConditionConfigRenderDrift,
 		Status:             metav1.ConditionTrue,
 		Reason:             ConditionConfigRenderDrift,
-		Message:            fmt.Sprintf("%s; the run is failed so the watcher can refire on the current ConfigMap (KB-103)", detail),
+		Message:            fmt.Sprintf("%s; the run is parked failed — refire decisions belong to the shepherd (KB-103, KB-302)", detail),
 		ObservedGeneration: run.Generation,
 	})
 	update.Status.Phase = criteriav1.PhaseFailed

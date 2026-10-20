@@ -253,32 +253,30 @@ run_fixture f1_valid f1_valid
 expect_rc_zero F1
 expect_event F1 StepOutcome
 expect_run_green F1
-# The lane-discriminated projection observation: the record is written from
-# data.internal (run state) — it must carry the one lane the engine projects
-# (top-level reason) VERBATIM, and must NOT carry the payload lane text (the
-# engine drops payload body fields — the pinned projection gap). Exact
-# content, not a whole-log grep: a broken projection (empty output.reason) or
-# a payload-text projection fails both checks.
+# The typed-lane projection observation (0.5.17 semantics, KB-305 re-proof):
+# the record is written from data.internal (run state) — it must carry the
+# schema-validated payload reason VERBATIM (the engine projects the validated
+# payload lane's reason into output.reason). Exact content, not a whole-log
+# grep: a broken projection (empty output.reason) fails the content check.
 C14_REC="$PROOT/contracts_probe_records/c14_reason_record"
-if grep -qxF 'c14_reason=C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record' "$C14_REC" 2>/dev/null; then
-    ok "F1 c14_reason record carries the projected reason-lane text exactly (run-state projection observed)"
+if grep -qxF 'c14_reason=C14 payload lane projected: the schema-validated payload reason is the submission surface under 0.5.17 typed lanes, and its characters flow verbatim through output.reason into the c14_reason run-state record' "$C14_REC" 2>/dev/null; then
+    ok "F1 c14_reason record carries the projected payload-lane reason exactly (run-state projection observed)"
 else
     fail "F1: c14_reason record missing or does not carry the projected lane text exactly"
-fi
-if ! grep -qF 'C14 payload lane:' "$C14_REC" 2>/dev/null; then
-    ok "F1 payload lane text absent from run state (projection gap pinned: payload fields dropped)"
-else
-    fail F1: the payload lane text leaked into the projected run state
 fi
 
 # ── F2: C15/C16/D19 — repair loop, no commit, engineered rejection green ────
 
 run_fixture f2_reject_echo f2_reject
 expect_rc_zero F2
-if [ "$(kind_count "$EV" outcome.payload_invalid)" = "2" ]; then
-    ok "F2 repair loop bounded: exactly 2 payload_invalid rejections then success"
+# 0.5.17 wiring: the wrong-FIELD-SET rejection is payload_invalid (schema
+# validation); the wrong-LANE rejection is a silent in-turn ToolResult
+# (declared-params guard, no event). The repair loop's boundness is proven by
+# the single payload_invalid AND the single committed outcome below.
+if [ "$(kind_count "$EV" outcome.payload_invalid)" = "1" ]; then
+    ok "F2 repair loop bounded: 1 payload_invalid (schema rejection) + 1 silent wrong-lane rejection, then success"
 else
-    fail "F2: expected exactly 2 payload_invalid repair-loop rejections, saw $(kind_count "$EV" outcome.payload_invalid)"
+    fail "F2: expected exactly 1 payload_invalid repair-loop rejection (0.5.17: wrong-lane rejects silently), saw $(kind_count "$EV" outcome.payload_invalid)"
 fi
 expect_run_green F2 echo_done
 
@@ -289,8 +287,8 @@ expect_run_green F2 echo_done
 # Exactly one commit exists per chain node: the engine emits one StepOutcome
 # per committed step, so a rejected submission that committed would surface
 # a second StepOutcome for the step. (Record content is carried by the
-# dual-lane submit: the payload satisfies the schema and the identical
-# top-level reason is what the engine projects into output.reason.)
+# typed payload lane: the schema-validated payload reason is what the engine
+# projects into output.reason — 0.5.17 semantics.)
 D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 if [ -f "$D19_REC" ]; then
     ok "F2 d19 verdict record written to run-state files"
@@ -629,10 +627,12 @@ if has_ev 'outcome_uncontracted'; then
 else
     ok "F9 uncontracted contrast step accepted the reason lane"
 fi
-if [ "$(kind_count "$EV" outcome.payload_invalid)" = "3" ]; then
-    ok "F9 payload rejection count bounded (2 repair-loop rejections + 1 empty comment)"
+# 0.5.17: contract_reject emits 1 payload_invalid (wrong-field-set; the
+# wrong-lane rejection is silent) and contract_comment emits 1 (empty comment).
+if [ "$(kind_count "$EV" outcome.payload_invalid)" = "2" ]; then
+    ok "F9 payload rejection count bounded (1 schema rejection + 1 empty comment)"
 else
-    fail "F9: expected exactly 3 payload_invalid rejections, saw $(kind_count "$EV" outcome.payload_invalid)"
+    fail "F9: expected exactly 2 payload_invalid rejections, saw $(kind_count "$EV" outcome.payload_invalid)"
 fi
 if [ "$(kind_count "$EV" comment_missing)" = "1" ]; then
     ok "F9 empty-comment loud rejection observed once (comment_missing)"
@@ -678,8 +678,8 @@ D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 C17_REC="$PROOT/contracts_probe_records/c17_comment_record"
 # C16 on the shipped chain, same rule as F2: exactly one outcome event per
 # non-unmapped step, the d19 record equals the final engineered reason
-# alone, and no rejected probe string reached run state (dual-lane submits
-# carry the top-level reason through the projection; rejected payloads never
+# alone, and no rejected probe string reached run state (typed-lane submits
+# carry the payload reason through the projection; rejected payloads never
 # commit). 7 StepOutcome events = 5 finalize commits + the budget-exhausted
 # contract_budget failure + the echo_verdict success; the unmapped loud
 # terminal emits StepOutcomeInvalid (never a committed StepOutcome).
@@ -688,13 +688,12 @@ if [ "$(count_type "$EV" StepOutcome)" = "7" ]; then
 else
     fail "F9: expected exactly 7 StepOutcome events across the chain, saw $(count_type "$EV" StepOutcome)"
 fi
-# C14 projection observed on the shipped chain too: the c14 record must carry
-# the projected reason-lane text exactly and never the payload lane text.
-if grep -qxF 'c14_reason=C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record' "$C14_REC" 2>/dev/null \
-    && ! grep -qF 'C14 payload lane:' "$C14_REC" 2>/dev/null; then
-    ok "F9 c14 record carries the projected lane verbatim, payload lane absent (projection pin)"
+# C14 projection observed on the shipped chain too: the c14 record carries the
+# schema-validated payload reason verbatim (typed-lane projection).
+if grep -qxF 'c14_reason=C14 payload lane projected: the schema-validated payload reason is the submission surface under 0.5.17 typed lanes, and its characters flow verbatim through output.reason into the c14_reason run-state record' "$C14_REC" 2>/dev/null; then
+    ok "F9 c14 record carries the projected payload-lane reason verbatim (typed-lane projection pin)"
 else
-    fail "F9: shipped-chain c14 record content wrong (projection gap assertion)"
+    fail "F9: shipped-chain c14 record content wrong (projection assertion)"
 fi
 if grep -qF 'D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason' "$D19_REC" 2>/dev/null \
     && ! grep -qF 'wrong field set on purpose' "$D19_REC" 2>/dev/null \

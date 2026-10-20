@@ -295,7 +295,7 @@ type CriteriaRunStatus struct {
 	// provenance, the same reason status.baseImage is stamped. ConfigMap
 	// patches never touch in-flight runs: the run keeps executing config X
 	// (a pin mismatch instead fails it with a ConfigRenderDrift
-	// condition); refires pick up the patch. Nil with no configRef means
+	// condition); a later run picks up the patch. Nil with no configRef means
 	// the run behaves exactly as before KB-103.
 	ConfigRender *RunConfigRender `json:"configRender,omitempty"`
 
@@ -363,6 +363,23 @@ type CriteriaRunStatus struct {
 	// Conditions are optional status conditions for the run.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
+
+// Condition types the controller stamps into CriteriaRun.Status.Conditions
+// when it fails a run. They are part of the run's published surface — the
+// watchers read them to explain a failed run to the ticket's card (KB-302)
+// — so the names live here, next to the type they annotate, instead of
+// being duplicated in the watcher.
+const (
+	// ConditionStallWatchdog is stamped when the stall watchdog fails a
+	// run for no step progress on the castle event stream (KB-24).
+	ConditionStallWatchdog = "StallWatchdog"
+	// ConditionBaseImageMismatch is stamped when a run fails on a
+	// runner-image mismatch against the cluster's rolling image (CRI-264).
+	ConditionBaseImageMismatch = "BaseImageMismatch"
+	// ConditionConfigRenderDrift is stamped when a run fails on a config
+	// ConfigMap pin mismatch (KB-103).
+	ConditionConfigRenderDrift = "ConfigRenderDrift"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
