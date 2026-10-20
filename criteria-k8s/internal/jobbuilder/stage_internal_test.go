@@ -10,11 +10,37 @@ import (
 	"strings"
 	"testing"
 
+	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const stageTestDigest = "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+
+// stageTestRun builds the run peerStageScript derives the runner cache
+// home from: source=false renders the image-mode home, source=true the
+// per-run source-mode home (JobName falls back to run.Name).
+func stageTestRun(source bool) *criteriav1.CriteriaRun {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-306", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "CRI-306"},
+	}
+	if source {
+		run.Spec.WorkflowSource = &criteriav1.RunWorkflowSource{
+			Type: "url",
+			URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1",
+		}
+	}
+	return run
+}
+
+func stageTestStage() adapterStage {
+	return adapterStage{
+		kind:    "shell",
+		pullRef: "ghcr.io/brokenbots/criteria-adapter-shell@" + stageTestDigest,
+	}
+}
 
 func TestDigestPullRefDerivesDigestAddressedReference(t *testing.T) {
 	member := events.LifecycleEvent{
@@ -121,14 +147,11 @@ func TestAdapterStagesImageLaneWhenNoPullablePin(t *testing.T) {
 
 // TestPeerStageScriptContractPinsShellShape pins the staged script's
 // structure: quoted values (validated upstream), the runner-cache fast
-// path, the sigstore-verified digest pull, and the loud image-baked
-// downgrade fallback.
+// path (under the image-mode run's home), the sigstore-verified digest
+// pull, and the loud image-baked downgrade fallback whose marker honestly
+// refuses to claim a staged digest.
 func TestPeerStageScriptContractPinsShellShape(t *testing.T) {
-	stage := adapterStage{
-		kind:    "shell",
-		pullRef: "ghcr.io/brokenbots/criteria-adapter-shell@" + stageTestDigest,
-	}
-	script := peerStageScript(stage)
+	script := peerStageScript(stageTestRun(false), stageTestStage())
 
 	for _, want := range []string{
 		"set -eu",
@@ -144,13 +167,67 @@ func TestPeerStageScriptContractPinsShellShape(t *testing.T) {
 		"staged_from=runner-cache",
 		"staged_from=pull",
 		"source=image-baked",
-		"kind=%s", // the runtime-filled marker line, literal
-		"CRITERIA_HOME='" + runnerCriteriaHomeOnData + "'",
+		"staged_digest=unknown",
+		"kind=%s",          // the runtime-filled marker line, literal
+		"staged_sha256=%s", // resolved from the content-addressed blob basename
+		"CRITERIA_HOME='" + imageRunnerCriteriaHomeOnData + "'",
 		"CRITERIA_HOME='" + peerStageContainerCache + "'",
 	} {
 		assert.Contains(t, script, want)
 	}
 	assert.NotContains(t, script, ";rm", "no unguarded shell metacharacter reaches the script")
+	assert.NotContains(t, script, "staged_sha256="+stageTestDigest,
+		"no lane may claim the requested (index) digest as the staged file's hash")
+}
+
+// TestPeerStageScriptUsesPerModeRunnerCacheHome pins the fast-path cache
+// home derivation: source-mode runs (every develop run since eae0181) read
+// the runner's sigstore-verified cache under /data/criteria-home/<job>,
+// image-mode runs stay on the legacy /data/criteria — the same predicate
+// the runner containers' CRITERIA_HOME env slices use.
+func TestPeerStageScriptUsesPerModeRunnerCacheHome(t *testing.T) {
+	sourceScript := peerStageScript(stageTestRun(true), stageTestStage())
+	sourceHome := sourceCriteriaHome("cri-306")
+	assert.Equal(t, "/data/criteria-home/cri-306", sourceHome,
+		"JobName falls back to run.Name, so the per-run home is derived from it")
+	assert.Contains(t, sourceScript, "CRITERIA_HOME='"+sourceHome+"'",
+		"the source-mode fast path reads the per-run cache the source-mode runner populates")
+	assert.NotContains(t, sourceScript, imageRunnerCriteriaHomeOnData+"'",
+		"the image-mode home must not survive into a source-mode script")
+
+	imageScript := peerStageScript(stageTestRun(false), stageTestStage())
+	assert.Contains(t, imageScript, "CRITERIA_HOME='"+imageRunnerCriteriaHomeOnData+"'",
+		"the image-mode fast path reads the legacy data-volume cache")
+	assert.NotContains(t, imageScript, sourceCriteriaHome("cri-306"),
+		"the per-run home must not survive into an image-mode script")
+}
+
+// TestPeerStageImageFallbackScriptMarkerHonesty pins the degraded stage's
+// marker: the image-baked binary carries no lockfile digest, so the marker
+// records staged_digest=unknown and never asserts the requested pin (or
+// any hash) as what was staged.
+func TestPeerStageImageFallbackScriptMarkerHonesty(t *testing.T) {
+	script := peerStageImageFallbackScript("shell")
+	for _, want := range []string{
+		"cp -- \"$image_bin\" \"$staged\"",
+		"PEER STAGE DOWNGRADE",
+		"source=image-baked",
+		"staged_digest=unknown",
+		peerStageMarkerPath("shell"),
+		peerBinBinaryPath("shell"),
+	} {
+		assert.Contains(t, script, want)
+	}
+	assert.NotContains(t, script, "digest="+stageTestDigest,
+		"the fallback marker must not carry the lockfile digest it did not stage")
+	assert.NotContains(t, script, "staged_sha256",
+		"the fallback marker must not claim any staged hash")
+
+	// The peerStageScript guard degrades to this exact script when the
+	// pullRef loses its digest suffix (unreachable via digestPullRef).
+	guardScript := peerStageScript(stageTestRun(false), adapterStage{kind: "shell", pullRef: "ghcr.io/brokenbots/criteria-adapter-shell"})
+	assert.Equal(t, script, guardScript,
+		"a malformed pullRef renders the honest image-baked fallback, not a script that pulls an empty digest")
 }
 
 func requireStages(t *testing.T, got []adapterStage, want []adapterStage) {

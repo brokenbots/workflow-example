@@ -236,8 +236,10 @@ func BuildPerScopePeerPod(run *criteriav1.CriteriaRun, defaults Defaults, scopeI
 			// The sequential per-kind init containers are the binary-staging
 			// mechanism staged below (empty member set is defended above),
 			// digest-addressed per KB-306; single-kind pods without a
-			// pullable pin stay image-supplied.
-			InitContainers: peerBinCopyContainers(plan, defaults, includeData, members),
+			// pullable pin stay image-supplied. The staging fast path reads
+			// the runner's shared OCI cache from the same per-mode home the
+			// runner container itself pins (runnerStageCriteriaHome).
+			InitContainers: peerBinCopyContainers(run, plan, defaults, includeData, members),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot: boolPtr(true),
 				RunAsUser:    int64Ptr(10001),
@@ -502,13 +504,30 @@ const PerScopePeerBinVolumePath = "/usr/local/share/criteria-peer-adapters"
 // (images/Dockerfile.peer: /usr/local/bin/criteria-adapter-<ADAPTER_NAME>).
 const engineImageAdapterBinaryPath = "/usr/local/bin/criteria-adapter-"
 
-// runnerCriteriaHomeOnData is where the runner container pins CRITERIA_HOME
-// on the shared data volume (peerAdapterMounts mounts /data for every
-// data-carrying provider; the runner's engine writes its run state —
-// including the OCI artifact cache its workflow boot populated and
-// sigstore-verified — under <volume>/criteria; the CRITERIA_HOME env in
-// the runner container's env slice pins this exact path).
-const runnerCriteriaHomeOnData = "/data/criteria"
+// imageRunnerCriteriaHomeOnData is where an IMAGE-mode runner container
+// pins CRITERIA_HOME on the shared data volume (peerAdapterMounts mounts
+// /data for every data-carrying provider; the runner's engine writes its
+// run state — including the OCI artifact cache its workflow boot populated
+// and sigstore-verified — under <volume>/criteria; the CRITERIA_HOME env in
+// the image-mode runner container's env slice pins this exact path). This
+// value only ever applies to image-mode runs (the frozen pre-eae0181
+// workflow image); source-mode runs pin a per-run home.
+const imageRunnerCriteriaHomeOnData = "/data/criteria"
+
+// runnerStageCriteriaHome resolves the runner cache home the staging fast
+// path reads, derived the SAME way the runner container's own CRITERIA_HOME
+// is selected (buildSourceRunnerJob vs the image-mode runner env slice):
+// source-mode runners (spec.workflowSource set — every criteria-base /
+// develop run since eae0181) keep their sigstore-verified artifact cache
+// under /data/criteria-home/<job> (sourceCriteriaHome), image-mode runners
+// stay on /data/criteria. Gating on the same WorkflowSource predicate the
+// env slices use cannot make the two paths drift when a mode's home moves.
+func runnerStageCriteriaHome(run *criteriav1.CriteriaRun) string {
+	if run.Spec.WorkflowSource != nil {
+		return sourceCriteriaHome(JobName(run))
+	}
+	return imageRunnerCriteriaHomeOnData
+}
 
 // peerStageContainerCache is the staging init container's own writable
 // CRITERIA_HOME: digest pulls that miss the runner's shared cache land in
@@ -525,9 +544,24 @@ func peerBinBinaryPath(kind string) string {
 
 // peerStageMarkerPath renders the path of one hosted kind's staged-digest
 // marker inside the stage dir. The dot keeps the engine's binary scan
-// (criteria-adapter-*) away from the marker; the file records
-// kind/digest/source for post-boot verification, source=image-baked
-// marking the availability-over-trust downgrade (KB-306).
+// (criteria-adapter-*) away from the marker; the file records the staging
+// provenance for post-boot verification fields:
+//
+//	kind=<kind>                the staged adapter kind
+//	digest=<sha256:...>        the REQUESTED lockfile pin the lanes targeted
+//	                           (not a claim about the staged file's content)
+//	source=<runner-cache|pull|image-baked>
+//	staged_sha256=<hash>       runner-cache/pull lanes only: the sha256 of
+//	                           the staged binary — the basename of the
+//	                           content-addressed OCI blob `criteria adapter
+//	                           where <digest>` resolved (resolving that
+//	                           blob and copying it IS the verification; no
+//	                           cross-system equality is asserted against
+//	                           the multi-platform index digest)
+//	staged_digest=unknown      image-baked lane only: the baked binary is
+//	                           unrelated to the lockfile pin, so no staged
+//	                           digest is claimed (KB-306 source=image-baked
+//	                           marks the availability-over-trust downgrade)
 func peerStageMarkerPath(kind string) string {
 	return filepath.Join(PerScopePeerBinVolumePath, "."+kind+".staged-digest")
 }
@@ -685,12 +719,35 @@ func safeShellToken(s string, extra string) bool {
 // peerStageScript renders one hosted kind's staging script (the digest
 // lane). Every interpolated value (kind, digest, pull ref) is validated by
 // digestPullRef before it reaches here; the script tries, in order:
-// the runner's shared, sigstore-verified artifact cache (read-only data
-// mount), an explicit `criteria adapter pull <repo>@<digest>` into the init
-// container's own cache, and finally the image-baked binary with a loud
-// PEER STAGE DOWNGRADE — availability over digest trust, per KB-306.
-func peerStageScript(stage adapterStage) string {
-	kind, digest := stage.kind, strings.SplitN(stage.pullRef, "@", 2)[1]
+// the runner's shared, sigstore-verified artifact cache under the run's
+// own CRITERIA_HOME (read-only data mount; the home is runnerStageCriteriaHome
+// — per-run for source-mode, /data/criteria for image-mode), an explicit
+// `criteria adapter pull <repo>@<digest>` into the init container's own
+// cache, and finally the image-baked binary with a loud PEER STAGE
+// DOWNGRADE — availability over digest trust, per KB-306.
+//
+// Credentials: the digest lane assumes the artifact registry is
+// anonymously readable (verified empirically: `criteria adapter pull
+// ghcr.io/brokenbots/criteria-adapter-shell@sha256:d9f306c2…` succeeds
+// without any docker config and still verifies the sigstore keyless
+// signer). The staging init container carries no registry credentials —
+// the peer pod has no pull-credential lane — so a PRIVATE artifact
+// registry would fail the pull lane and degrade every staged kind to
+// image-baked; adding that credential lane is a prerequisite for private
+// registries, not part of this mechanism.
+func peerStageScript(run *criteriav1.CriteriaRun, stage adapterStage) string {
+	var digest string
+	if refParts := strings.SplitN(stage.pullRef, "@", 2); len(refParts) == 2 {
+		digest = refParts[1]
+	}
+	if !validArtifactDigest(digest) {
+		// Unreachable through the builders: only digestPullRef constructs
+		// pullRef and it always emits "<repo>@<sha256:...>". Guarded anyway
+		// so contract drift degrades to the honest image-baked stage below
+		// instead of rendering a pull ref the script cannot use.
+		return peerStageImageFallbackScript(stage.kind)
+	}
+	runnerCacheHome := runnerStageCriteriaHome(run)
 	return fmt.Sprintf(`set -eu
 kind=%s
 digest=%s
@@ -718,17 +775,42 @@ elif stage_by_pull; then
 else
     cp -- "$image_bin" "$staged"
     echo "PEER STAGE DOWNGRADE: kind=$kind staged the image-baked binary; digest pull of $pull_ref failed (no runner-cache hit, failure above) - availability over digest trust" >&2
-    printf 'kind=%%s\ndigest=%%s\nsource=image-baked\n' "$kind" "$digest" > "$marker"
+    printf 'kind=%%s\ndigest=%%s\nsource=image-baked\nstaged_digest=unknown\n' "$kind" "$digest" > "$marker"
     exit 0
 fi
-printf 'kind=%%s\ndigest=%%s\nsource=%%s\n' "$kind" "$digest" "$staged_from" > "$marker"
-echo "peer-stage: kind=$kind digest=$digest source=$staged_from"
+printf 'kind=%%s\ndigest=%%s\nsource=%%s\nstaged_sha256=%%s\n' "$kind" "$digest" "$staged_from" "${where##*/}" > "$marker"
+echo "peer-stage: kind=$kind digest=$digest source=$staged_from staged_sha256=${where##*/}"
 `,
-		shellQuote(kind), shellQuote(digest), shellQuote(stage.pullRef),
-		shellQuote(PerScopePeerBinVolumePath), shellQuote(peerBinBinaryPath(kind)),
-		shellQuote(peerStageMarkerPath(kind)), shellQuote(engineImageAdapterBinaryPath+kind),
-		shellQuote(runnerCriteriaHomeOnData),
+		shellQuote(stage.kind), shellQuote(digest), shellQuote(stage.pullRef),
+		shellQuote(PerScopePeerBinVolumePath), shellQuote(peerBinBinaryPath(stage.kind)),
+		shellQuote(peerStageMarkerPath(stage.kind)), shellQuote(engineImageAdapterBinaryPath+stage.kind),
+		shellQuote(runnerCacheHome),
 		shellQuote(peerStageContainerCache), shellQuote(peerStageContainerCache),
+	)
+}
+
+// peerStageImageFallbackScript renders the degraded-only staging script:
+// copy the image-baked binary, record honestly that it carries NO lockfile
+// digest (staged_digest=unknown), and say so loudly. Only reached through
+// peerStageScript's pullRef guard — the builders never stage this shape —
+// and kept as a full script so the marker can never claim a digest the
+// staged binary does not carry.
+func peerStageImageFallbackScript(kind string) string {
+	return fmt.Sprintf(`set -eu
+kind=%s
+stage_dir=%s
+staged=%s
+marker=%s
+image_bin=%s
+
+cp -- "$image_bin" "$staged"
+echo "PEER STAGE DOWNGRADE: kind=$kind staged the image-baked binary (no pullable pin resolved for the stage) - availability over digest trust" >&2
+printf 'kind=%%s\nsource=image-baked\nstaged_digest=unknown\n' "$kind" > "$marker"
+echo "peer-stage: kind=$kind source=image-baked staged_digest=unknown"
+`,
+		shellQuote(kind), shellQuote(PerScopePeerBinVolumePath),
+		shellQuote(peerBinBinaryPath(kind)), shellQuote(peerStageMarkerPath(kind)),
+		shellQuote(engineImageAdapterBinaryPath+kind),
 	)
 }
 
@@ -828,7 +910,7 @@ func peerAdapterKinds(members []events.LifecycleEvent) []string {
 // engine's fail-closed boot validation — except the digest pull fallback,
 // which boots degraded on purpose (KB-306: availability over trust) and
 // narrates the downgrade.
-func peerBinCopyContainers(plan *workflowPlan, defaults Defaults, includeData bool, members []events.LifecycleEvent) []corev1.Container {
+func peerBinCopyContainers(run *criteriav1.CriteriaRun, plan *workflowPlan, defaults Defaults, includeData bool, members []events.LifecycleEvent) []corev1.Container {
 	stages := adapterStages(members)
 	if !stagesAdapterBinaries(stages) {
 		return nil
@@ -864,7 +946,7 @@ func peerBinCopyContainers(plan *workflowPlan, defaults Defaults, includeData bo
 			peerBinBinaryPath(stage.kind),
 		}
 		if stage.digestStaged() && safeStagedKind(stage.kind) {
-			name, command = "pull", []string{"/bin/sh", "-ec", peerStageScript(stage)}
+			name, command = "pull", []string{"/bin/sh", "-ec", peerStageScript(run, stage)}
 		}
 		containers = append(containers, corev1.Container{
 			Name:            peerBinInitContainerName(name, stage.kind),

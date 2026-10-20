@@ -798,9 +798,9 @@ func TestBuildPerScopePeerPodSingleKindStagesByDigest(t *testing.T) {
 		"the script pulls the artifact at the LOCKFILE digest")
 	assert.Contains(t, script, "PEER STAGE DOWNGRADE", "the image-baked fallback says so loudly")
 	assert.Contains(t, script, "/usr/local/share/criteria-peer-adapters/.shell.staged-digest",
-		"the staged-digest marker (kind/digest/source) lands in the stage dir for post-boot verification")
+		"the staged-digest marker (kind/digest/source/staged fields) lands in the stage dir for post-boot verification")
 	assert.Contains(t, script, "CRITERIA_HOME='/data/criteria'",
-		"the runner's sigstore-verified OCI cache is the fast path")
+		"an image-mode run's fast path reads the legacy data-volume runner cache (groupTestRun carries no workflow source)")
 	assert.Equal(t, corev1.PullIfNotPresent, ic.ImagePullPolicy)
 	mount := peerBinMount(t, ic.Name, ic.VolumeMounts)
 	assert.False(t, mount.ReadOnly, "init containers stage INTO the emptyDir")
@@ -816,6 +816,49 @@ func TestBuildPerScopePeerPodSingleKindStagesByDigest(t *testing.T) {
 		"the _BINARY override points at the digest-addressed staged copy, not the image-baked path")
 	assert.Equal(t, member.Digest, env["CRITERIA_ADAPTER_SHELL_INTAKE_DIGEST"],
 		"the digest pin contract is unchanged (KB-242)")
+}
+
+// TestBuildPerScopePeerPodDigestStageUsesSourceModeRunnerCacheHome pins the
+// fast-path home derivation at the builder level: a source-mode run (the
+// criteria-base/develop shape, spec.workflowSource set) stages from the
+// per-run CRITERIA_HOME the source-mode runner itself populates — the same
+// predicate that pins the runner container's env — while an image-mode run
+// keeps the legacy /data/criteria home.
+func TestBuildPerScopePeerPodDigestStageUsesSourceModeRunnerCacheHome(t *testing.T) {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	member := groupMember("intake", "shell", "scope-a", "ci")
+	member.Digest = digest
+	member.ImageReference = "ghcr.io/brokenbots/criteria-adapter-shell"
+
+	sourceRun := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-306-src", Namespace: "criteria-jobs", UID: "run-uid"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-306-SRC",
+			WorkflowSource: &criteriav1.RunWorkflowSource{
+				Type: "url",
+				URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1",
+			},
+		},
+	}
+	sourcePod := jobbuilder.BuildPerScopePeerPod(sourceRun, jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, sourcePod)
+	require.Len(t, sourcePod.Spec.InitContainers, 1)
+	assert.Equal(t, "pull-shell", sourcePod.Spec.InitContainers[0].Name)
+	sourceScript := sourcePod.Spec.InitContainers[0].Command[2]
+	assert.Contains(t, sourceScript, "CRITERIA_HOME='/data/criteria-home/cri-306-src'",
+		"the source-mode fast path reads the per-run cache the source-mode runner populates (sourceCriteriaHome(JobName))")
+	assert.NotContains(t, sourceScript, "CRITERIA_HOME='/data/criteria'",
+		"the image-mode home must not survive into a source-mode staging script")
+
+	imagePod := jobbuilder.BuildPerScopePeerPod(groupTestRun(), jobbuilder.Defaults{}, "scope-a", "ci",
+		[]events.LifecycleEvent{member}, "10.0.0.10")
+	require.NotNil(t, imagePod)
+	imageScript := imagePod.Spec.InitContainers[0].Command[2]
+	assert.Contains(t, imageScript, "CRITERIA_HOME='/data/criteria'",
+		"the image-mode fast path reads the legacy data-volume cache")
+	assert.NotContains(t, imageScript, "/data/criteria-home/cri-306-src",
+		"the per-run home must not survive into an image-mode staging script")
 }
 
 // TestBuildPerScopePeerPodSingleKindDigestStageWireShapeDeliveryAgnostic:
