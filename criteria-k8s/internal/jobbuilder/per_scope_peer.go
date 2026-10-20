@@ -539,7 +539,7 @@ const peerStageContainerCache = "/tmp/criteria-adapter-stage-cache"
 // binary. The staged name keeps the engine's conventional install spelling,
 // so the staged dir stays scannable by the engine's directory fallback too.
 func peerBinBinaryPath(kind string) string {
-	return filepath.Join(PerScopePeerBinVolumePath, "criteria-adapter-"+kind)
+	return peerBinBinaryPathIn(PerScopePeerBinVolumePath, kind)
 }
 
 // peerStageMarkerPath renders the path of one hosted kind's staged-digest
@@ -563,7 +563,7 @@ func peerBinBinaryPath(kind string) string {
 //	                           digest is claimed (KB-306 source=image-baked
 //	                           marks the availability-over-trust downgrade)
 func peerStageMarkerPath(kind string) string {
-	return filepath.Join(PerScopePeerBinVolumePath, "."+kind+".staged-digest")
+	return peerStageMarkerPathIn(PerScopePeerBinVolumePath, kind)
 }
 
 // adapterStage is one hosted kind's binary-staging decision (KB-306): a
@@ -716,15 +716,44 @@ func safeShellToken(s string, extra string) bool {
 	return true
 }
 
+// stageScriptPaths parameterizes where the staging script points: the
+// production builders always render with the canonical constants, and
+// behavior tests override every destination so the REAL script runs
+// against t.TempDir()-owned paths.
+type stageScriptPaths struct {
+	stageDir   string // empty: PerScopePeerBinVolumePath
+	runnerHome string // empty: runnerStageCriteriaHome(run)
+	pullHome   string // empty: peerStageContainerCache
+	imageBin   string // empty: engineImageAdapterBinaryPath+kind
+}
+
 // peerStageScript renders one hosted kind's staging script (the digest
-// lane). Every interpolated value (kind, digest, pull ref) is validated by
-// digestPullRef before it reaches here; the script tries, in order:
+// lane) at the canonical production paths.
+func peerStageScript(run *criteriav1.CriteriaRun, stage adapterStage) string {
+	return stageScriptWithPaths(run, stage, stageScriptPaths{})
+}
+
+// stageScriptWithPaths renders the staging script at the given paths (see
+// stageScriptPaths). Every interpolated value (kind, digest, pull ref) is
+// validated by digestPullRef before it reaches here; the script tries, in
+// order:
 // the runner's shared, sigstore-verified artifact cache under the run's
 // own CRITERIA_HOME (read-only data mount; the home is runnerStageCriteriaHome
 // — per-run for source-mode, /data/criteria for image-mode), an explicit
 // `criteria adapter pull <repo>@<digest>` into the init container's own
 // cache, and finally the image-baked binary with a loud PEER STAGE
 // DOWNGRADE — availability over digest trust, per KB-306.
+//
+// Every lane's final step chmods the staged copy 0755: `criteria adapter
+// where` resolves to the READ-ONLY, content-addressed OCI blob
+// ($CRITERIA_HOME/cache/oci/blobs/sha256/<hex>, mode 0444), and `cp --`
+// preserves that mode — the engine execs CRITERIA_ADAPTER_<KIND>_BINARY
+// and never repairs it, so an unstaged-mode copy would leave every pod
+// whose member carries a digest unable to boot (exec: 126 EACCES) with cp
+// having exited 0 and the fallback never reached. A failing chmod fails
+// its lane (the && chain), routing the runner-cache lane to the pull lane
+// and the pull lane to the loud image-baked fallback; a failing chmod on
+// the fallback lane itself fails the init container under set -e.
 //
 // Credentials: the digest lane assumes the artifact registry is
 // anonymously readable (verified empirically: `criteria adapter pull
@@ -735,7 +764,7 @@ func safeShellToken(s string, extra string) bool {
 // registry would fail the pull lane and degrade every staged kind to
 // image-baked; adding that credential lane is a prerequisite for private
 // registries, not part of this mechanism.
-func peerStageScript(run *criteriav1.CriteriaRun, stage adapterStage) string {
+func stageScriptWithPaths(run *criteriav1.CriteriaRun, stage adapterStage, paths stageScriptPaths) string {
 	var digest string
 	if refParts := strings.SplitN(stage.pullRef, "@", 2); len(refParts) == 2 {
 		digest = refParts[1]
@@ -745,7 +774,7 @@ func peerStageScript(run *criteriav1.CriteriaRun, stage adapterStage) string {
 		// pullRef and it always emits "<repo>@<sha256:...>". Guarded anyway
 		// so contract drift degrades to the honest image-baked stage below
 		// instead of rendering a pull ref the script cannot use.
-		return peerStageImageFallbackScript(stage.kind)
+		return peerStageImageFallbackScript(stage.kind, paths)
 	}
 	runnerCacheHome := runnerStageCriteriaHome(run)
 	return fmt.Sprintf(`set -eu
@@ -759,12 +788,13 @@ image_bin=%s
 criteria=$(command -v criteria 2>/dev/null || echo /usr/local/bin/criteria)
 
 stage_from_runner_cache() {
-    where=$(CRITERIA_HOME=%s "$criteria" adapter where "$digest" 2>/dev/null) && cp -- "$where" "$staged"
+    where=$(CRITERIA_HOME=%s "$criteria" adapter where "$digest" 2>/dev/null) && cp -- "$where" "$staged" && chmod 0755 "$staged"
 }
 stage_by_pull() {
     CRITERIA_HOME=%s "$criteria" adapter pull "$pull_ref" &&
         where=$(CRITERIA_HOME=%s "$criteria" adapter where "$digest") &&
-        cp -- "$where" "$staged"
+        cp -- "$where" "$staged" &&
+        chmod 0755 "$staged"
 }
 
 staged_from=runner-cache
@@ -773,7 +803,7 @@ if stage_from_runner_cache; then
 elif stage_by_pull; then
     staged_from=pull
 else
-    cp -- "$image_bin" "$staged"
+    cp -- "$image_bin" "$staged" && chmod 0755 "$staged"
     echo "PEER STAGE DOWNGRADE: kind=$kind staged the image-baked binary; digest pull of $pull_ref failed (no runner-cache hit, failure above) - availability over digest trust" >&2
     printf 'kind=%%s\ndigest=%%s\nsource=image-baked\nstaged_digest=unknown\n' "$kind" "$digest" > "$marker"
     exit 0
@@ -782,20 +812,45 @@ printf 'kind=%%s\ndigest=%%s\nsource=%%s\nstaged_sha256=%%s\n' "$kind" "$digest"
 echo "peer-stage: kind=$kind digest=$digest source=$staged_from staged_sha256=${where##*/}"
 `,
 		shellQuote(stage.kind), shellQuote(digest), shellQuote(stage.pullRef),
-		shellQuote(PerScopePeerBinVolumePath), shellQuote(peerBinBinaryPath(stage.kind)),
-		shellQuote(peerStageMarkerPath(stage.kind)), shellQuote(engineImageAdapterBinaryPath+stage.kind),
-		shellQuote(runnerCacheHome),
-		shellQuote(peerStageContainerCache), shellQuote(peerStageContainerCache),
+		shellQuote(orDefaultPath(paths.stageDir, PerScopePeerBinVolumePath)),
+		shellQuote(peerBinBinaryPathIn(orDefaultPath(paths.stageDir, PerScopePeerBinVolumePath), stage.kind)),
+		shellQuote(peerStageMarkerPathIn(orDefaultPath(paths.stageDir, PerScopePeerBinVolumePath), stage.kind)),
+		shellQuote(orDefaultPath(paths.imageBin, engineImageAdapterBinaryPath+stage.kind)),
+		shellQuote(orDefaultPath(paths.runnerHome, runnerCacheHome)),
+		shellQuote(orDefaultPath(paths.pullHome, peerStageContainerCache)), shellQuote(orDefaultPath(paths.pullHome, peerStageContainerCache)),
 	)
+}
+
+// orDefaultPath resolves a stageScriptPaths override: empty means the
+// production constant.
+func orDefaultPath(override, def string) string {
+	if override == "" {
+		return def
+	}
+	return override
+}
+
+// peerBinBinaryPathIn renders the staged binary path inside an arbitrary
+// stage dir (peerBinBinaryPath pins the production stage dir).
+func peerBinBinaryPathIn(stageDir, kind string) string {
+	return filepath.Join(stageDir, "criteria-adapter-"+kind)
+}
+
+// peerStageMarkerPathIn renders the staged-digest marker path inside an
+// arbitrary stage dir (peerStageMarkerPath pins the production stage dir).
+func peerStageMarkerPathIn(stageDir, kind string) string {
+	return filepath.Join(stageDir, "."+kind+".staged-digest")
 }
 
 // peerStageImageFallbackScript renders the degraded-only staging script:
 // copy the image-baked binary, record honestly that it carries NO lockfile
 // digest (staged_digest=unknown), and say so loudly. Only reached through
-// peerStageScript's pullRef guard — the builders never stage this shape —
-// and kept as a full script so the marker can never claim a digest the
-// staged binary does not carry.
-func peerStageImageFallbackScript(kind string) string {
+// stageScriptWithPaths' pullRef guard — the builders never stage this
+// shape — and kept as a full script so the marker can never claim a digest
+// the staged binary does not carry. paths.stageDir/imageBin are the
+// production constants unless a behavior test overrides them.
+func peerStageImageFallbackScript(kind string, paths stageScriptPaths) string {
+	stageDir := orDefaultPath(paths.stageDir, PerScopePeerBinVolumePath)
 	return fmt.Sprintf(`set -eu
 kind=%s
 stage_dir=%s
@@ -803,14 +858,14 @@ staged=%s
 marker=%s
 image_bin=%s
 
-cp -- "$image_bin" "$staged"
+cp -- "$image_bin" "$staged" && chmod 0755 "$staged"
 echo "PEER STAGE DOWNGRADE: kind=$kind staged the image-baked binary (no pullable pin resolved for the stage) - availability over digest trust" >&2
 printf 'kind=%%s\nsource=image-baked\nstaged_digest=unknown\n' "$kind" > "$marker"
 echo "peer-stage: kind=$kind source=image-baked staged_digest=unknown"
 `,
-		shellQuote(kind), shellQuote(PerScopePeerBinVolumePath),
-		shellQuote(peerBinBinaryPath(kind)), shellQuote(peerStageMarkerPath(kind)),
-		shellQuote(engineImageAdapterBinaryPath+kind),
+		shellQuote(kind), shellQuote(stageDir),
+		shellQuote(peerBinBinaryPathIn(stageDir, kind)), shellQuote(peerStageMarkerPathIn(stageDir, kind)),
+		shellQuote(orDefaultPath(paths.imageBin, engineImageAdapterBinaryPath+kind)),
 	)
 }
 

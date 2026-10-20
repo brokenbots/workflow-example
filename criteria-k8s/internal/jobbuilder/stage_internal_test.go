@@ -207,9 +207,9 @@ func TestPeerStageScriptUsesPerModeRunnerCacheHome(t *testing.T) {
 // records staged_digest=unknown and never asserts the requested pin (or
 // any hash) as what was staged.
 func TestPeerStageImageFallbackScriptMarkerHonesty(t *testing.T) {
-	script := peerStageImageFallbackScript("shell")
+	script := peerStageImageFallbackScript("shell", stageScriptPaths{})
 	for _, want := range []string{
-		"cp -- \"$image_bin\" \"$staged\"",
+		"cp -- \"$image_bin\" \"$staged\" && chmod 0755 \"$staged\"",
 		"PEER STAGE DOWNGRADE",
 		"source=image-baked",
 		"staged_digest=unknown",
