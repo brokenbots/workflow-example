@@ -6,7 +6,7 @@
 #   3. `make repin-check` (also inside `make validate`) fails on ANY version
 #      literal not equal to the manifest value — stragglers cannot exist,
 #   4. `make routes-sync` re-renders the criteria-routes CM url pins from the
-#      current HEAD + peer images from the peer_image_tags block.
+#      current HEAD + peer images from the peer tag literals.
 #
 # NEVER hand-edit a version in a tree adapters.chcl again. This file is data,
 # read by scripts/repin.sh + scripts/repin_check.sh — it is HCL-shaped so the
@@ -17,8 +17,12 @@ copilot = "0.5.17" # KB-263 typed verdict payloads + KB-216 + KB-260 (published 
 shell   = "0.5.5"  # identical to main as of 10-18 (KB-283)
 
 # criteria-base peer adapter image tags in the routes CM adapterImages blocks.
-peer_shell_tag   = "k8s-0.5.56-1"
-peer_copilot_tag = "k8s-0.5.56-1"
+# KB-63: a peer rebuild pushes a NEW tag — k8s-0.5.56-2 (10-20) rebuilds BOTH
+# peers from criteria v0.5.56 + copilot 0.5.17 / shell 0.5.5 (ADAPTER_VERSION
+# build-args), which is what carries KB-263 contract mode INTO k8s runs (the
+# -1 wave predates it and silently dropped typed payloads — reason="" class).
+peer_shell_tag   = "k8s-0.5.56-2"
+peer_copilot_tag = "k8s-0.5.56-2"
 
 # Every workflowLibrary url pin in the routes CM resolves to THIS sha
 # ("head" = git rev-parse HEAD at render time).
