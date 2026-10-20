@@ -186,12 +186,42 @@ func (r *CriteriaRunReconciler) deleteChildJobs(ctx context.Context, run *criter
 // reconcile pass. Background propagation takes the Job off the API
 // immediately and drops its pods with it; already-gone Jobs are tolerated,
 // so a terminal run without child Jobs is a no-op reconcile.
-func (r *CriteriaRunReconciler) deleteTerminalChildJobs(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) error {
+//
+// The KB-302 restart guard defers the delete while the runner pod can still
+// start another container attempt — deleting mid-restart lets the kubelet
+// orphan a fresh agent container through background garbage collection, and
+// that corpse registers with castle. When the guard defers, this returns
+// (true, nil) with the TerminalCleanup condition stamped (or reports a
+// force-reap when the deferral outlived the force window); a forced reap
+// proceeds below and stamps nothing. On a completed reap the condition is
+// cleared, so the deferral state never outlives the deferral.
+func (r *CriteriaRunReconciler) deleteTerminalChildJobs(ctx context.Context, run *criteriav1.CriteriaRun, logger logr.Logger) (bool, error) {
+	if pending, reason := r.runnerRestartPending(ctx, run, logger); pending {
+		deferral, force, err := r.markTerminalCleanupDeferred(ctx, run, reason)
+		if err != nil {
+			return true, err
+		}
+		if force {
+			logger.Info("forced terminal cleanup past the runner-restart guard window; reaping child Jobs with the restart still pending",
+				"CriteriaRun", run.Name, "forcedAfter", r.TerminalReapForceAfter,
+				"deferredSince", deferral.LastTransitionTime.Time, "reason", reason)
+		} else {
+			logger.Info("deferring terminal child-job deletion: runner restart is pending",
+				"CriteriaRun", run.Name, "reason", reason, "requeueAfter", terminalReapRequeueInterval)
+			return true, nil
+		}
+	}
 	deleted, err := r.deleteJobs(ctx, run, metav1.DeletePropagationBackground)
 	for _, name := range deleted {
 		logger.Info("deleting child Job of terminal CriteriaRun", "CriteriaRun", run.Name, "job", name)
 	}
-	return err
+	if err != nil {
+		return false, err
+	}
+	if err := r.clearTerminalCleanup(ctx, run); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // deleteJobs deletes the child Jobs the job builders would reconcile for run

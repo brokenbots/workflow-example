@@ -62,9 +62,17 @@ type CriteriaRunReconciler struct {
 	Queue    *RunQueue
 	// StallWindow is the step-progress window of the stall watchdog
 	// (KB-24): a Running run whose castle stream shows no step progress for
-	// this long is failed with a StallWatchdog condition (CRITERIA_STALL_WINDOW,
-	// default 30m). Zero disables the watchdog.
+	// this long is failed with a StallWatchdog condition — the run parks in
+	// Review with its failure reason; refire decisions belong to the
+	// shepherd (arc_shepherd_v1), with Job backoff covering in-container
+	// transients (KB-302). Zero disables the watchdog.
 	StallWindow time.Duration
+	// TerminalReapForceAfter is the bounded window after which a terminal
+	// run's child-job deletion — deferred behind a pending runner restart
+	// (KB-302) — is forced past the guard so a never-settling runner pod
+	// cannot wedge the KB-275 terminal-cleanup guarantee. Zero disables the
+	// force: the reap then waits until the runner pod is actually settled.
+	TerminalReapForceAfter time.Duration
 	// PodState feeds per-scope adapter pod-state observations (KB-225) to
 	// castle over the adapter-event channel, so the engine's session-wait
 	// expiry names the observed pod phase (KB-70 PodStateProbe). Nil or
@@ -117,9 +125,16 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// view is the only source, so a freshly restarted operator (no
 		// in-memory state) enforces it here too. Already-gone Jobs make this
 		// a no-op, idempotent across resyncs. The adapter-pod sweep and the
-		// castle re-derivation below are independent of this cleanup.
-		if err := r.deleteTerminalChildJobs(ctx, &run, logger); err != nil {
+		// castle re-derivation below are independent of this cleanup. When
+		// the reap is deferred behind a pending runner restart (KB-302), the
+		// whole cleanup defers — adapters outlive a still-live shim by
+		// design — and the pass requeues on the short reap interval.
+		deferred, err := r.deleteTerminalChildJobs(ctx, &run, logger)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if deferred {
+			return ctrl.Result{RequeueAfter: terminalReapRequeueInterval}, nil
 		}
 		// Stale per-scope adapters of a terminal run: the engine releases
 		// every scope when the run ends, so any surviving adapter pod dials a
@@ -382,9 +397,15 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// some later status write reaches the persisted-terminal branch. A pass
 	// that provisioned a Job defers the reap to its next reconcile, where
 	// the terminal phase is persisted and the terminal branch deletes it.
+	// A reap deferred behind a pending runner restart (KB-302) requeues on
+	// the short reap interval here too.
 	if isTerminalPhase(phase) && !provisioned {
-		if err := r.deleteTerminalChildJobs(ctx, &run, logger); err != nil {
+		deferred, err := r.deleteTerminalChildJobs(ctx, &run, logger)
+		if err != nil {
 			return ctrl.Result{}, err
+		}
+		if deferred {
+			return ctrl.Result{RequeueAfter: terminalReapRequeueInterval}, nil
 		}
 	}
 
