@@ -5,12 +5,13 @@ The PREVIOUS steps declared payload schemas, and on them the top-level
 uncontracted shape — so the reason-form submission is ACCEPTED here. That
 contrast is the observation: contract activation is per-step, and the same
 shape that fails loudly on a contracted step is the plain accepted lane on an
-uncontracted one.
+uncontracted one. (Under 0.5.17 the uncontracted lane is outcome + reason
+ONLY: a comment or payload parameter on this step is a not-consumed
+rejection, so this probe sends neither.)
 
 Call the submit_outcome tool now, exactly once:
 
     outcome = "approved"
     reason  = "C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps"
-    comment = "C13 uncontracted reason lane"
 
 Do not call any tools.

@@ -7,7 +7,10 @@
 // transcribed verbatim so the CLI's conversation sees exactly what the
 // step prompts prescribe.
 //
-// Wire notes (proven against copilot adapter 0.5.15 over the local shim):
+// Wire notes (proven against copilot adapter 0.5.17 over the local shim;
+// KB-305 A/B re-proof 10-20 — 0.5.15 chains replay identical submissions
+// forever under 0.5.17 because the KB-263 wrong-lane guard rejects them
+// in-turn and a scripted stub cannot read the rejection):
 //   - a request body of {"x":1} is the adapter's health probe; answer {}.
 //   - conversation items arrive in `input`; a CLI auto-compaction request is
 //     a user item containing "Please create a detailed summary of the
@@ -16,23 +19,16 @@
 //   - a scripted reply is a function_call item (submit_outcome or a real
 //     tool). The adapter echoes tool results back into `input`, so fixture
 //     sequence position is tracked per-process by call counters.
-//
-// full_chain mode (the shipped main.chcl run) dispatches BY STEP MARKER
-// instead of a global counter: rejection retries and permission denials add
-// extra requests per step, so concatenated indices drift. Each step prompt
-// opens with a unique "KB-277 Cnn probe" marker; the stub takes the LAST
-// marker present in the serialized input (conversation history carries the
-// earlier steps' prompts) and counts requests per marker, resetting on step
-// change.
-//
-// Committed-tail rule (proven against the shipped chain): once a step's
-// submit_outcome call is COMMITTED ("recorded successfully" tool result),
-// the CLI's agentic loop calls the model one more time BEFORE the next
-// step's prompt is appended — the turn boundary is locked. Answering that
-// stray call with a submission would land it on the NEXT step's contracts
-// while its marker is still absent from the input, so any request whose
-// tail is a committed submit_outcome result is answered with plain text
-// (never another submission) and never advances the per-step counters.
+//   - KB-263 lanes: a step whose outcome declares a payload schema accepts
+//     ONLY the payload parameter (a top-level reason on that same submit is
+//     a wrong-lane rejection — never send one); a step with no schema accepts
+//     ONLY the reason parameter. The engine projects the VALIDATED lane's
+//     reason field into output.reason (proven live: payload-lane reason text
+//     flows to run state verbatim on engine 0.5.56/0.5.59).
+//   - after a COMMITTED finalize the CLI's agentic loop calls the model one
+//     more time before the next step's prompt lands: the committed-tail rule
+//     below answers that stray call with plain text so the per-step counters
+//     stay exact.
 import http from "node:http";
 
 const mode = process.env.STUB_MODE || "f1_valid";
@@ -59,38 +55,21 @@ const plain = (text) => ({
   content: [{ type: "output_text", text }],
 });
 
-// The engineered submission chains. Call order matches the fixed step
-// prompts, transcribed verbatim — including the prescribed comment
-// parameter on the probes whose prompts carry one (C14, C13, D21, the C17
-// empty-comment probe, and the C17 corrected-comment defect variant).
-//
-// NOTE ON THE DUAL-LANE SUBMITS (payload + identical top-level reason):
-// the engine projects ONLY the top-level reason field into the arm's output
-// (output.reason); payload fields are not projected (payload is not an
-// output key), so a payload-only submission leaves output.reason "" and the
-// echo_verdict records would render empty. The record-carrying submissions
-// therefore carry BOTH lanes with identical text. This does not weaken the
-// lane separation the fixtures prove: the wrong-lane probe (f2 item 2) is
-// reason-ONLY on a contracted step and is rejected loudly, and the C13
-// contrast (f5) proves the reason lane accepted exactly on the step that
-// declares no schema.
+// The engineered submission chains, rewritten 0.5.17-native (KB-305): every
+// contracted step submits the payload lane ONLY. The rejection probes keep
+// their 0.5.15-era WRONG shapes deliberately — they are the stimuli the
+// rejections exist for; the adapter rejects each in-turn and the stub's next
+// call serves the next item.
 const MODES = {
-  // C14: a schema-valid payload is accepted and routes the declared outcome.
-  // The submission carries BOTH lanes with DISTINCT content: the engine
-  // projects ONLY the top-level reason into the arm outputs (payload body
-  // fields are dropped — the pinned projection gap, filed back to the engine
-  // carrier), so the c14_reason record must carry the top-level lane content
-  // and must NOT carry the payload lane content — the lanes are discriminated,
-  // not echoed. Both texts avoid the lowercase character the engine's
-  // projection pipeline redacts (see the pinned defect on this row).
+  // C14: a schema-valid payload is accepted and routes the declared outcome;
+  // the payload reason is projected into output.reason and rides into the
+  // c14_reason run-state record verbatim.
   f1_valid: () => [
     submit({
       outcome: "approved",
-      reason:
-        "C14 projected outputs: the top-level reason lane is the one lane the engine projects — these characters flow verbatim through output.reason into the c14_reason run-state record",
       payload: {
         reason:
-          "C14 payload lane: schema-valid payload body — the pinned engine projection gap drops payload body fields, they never surface in the arm outputs",
+          "C14 payload lane projected: the schema-validated payload reason is the submission surface under 0.5.17 typed lanes, and its characters flow verbatim through output.reason into the c14_reason run-state record",
       },
       comment: "C14 valid payload accepted",
     }),
@@ -98,9 +77,7 @@ const MODES = {
 
   // C15/C16/D19: wrong-field-set and wrong-lane rejections (nothing
   // committed), then the schema-valid engineered rejection routes the
-  // declared green lane. The final submission carries both lanes (payload
-  // valid and identical top-level reason) so the engine projects the D19
-  // reason into the verdict record sink.
+  // declared green lane.
   f2_reject: () => [
     submit({ outcome: "rejected", payload: { verdict: "wrong field set on purpose" } }),
     submit({
@@ -109,8 +86,6 @@ const MODES = {
     }),
     submit({
       outcome: "rejected",
-      reason:
-        "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
       payload: {
         reason:
           "D19 engineered rejection routed green: wrong-field-set and wrong-lane shapes were rejected loudly by the payload contract, then the declared rejected lane carried this verbatim reason",
@@ -120,8 +95,6 @@ const MODES = {
 
   // C17: empty adapter comment rejected loudly on the require_comment arm,
   // then the probe observation routes the green exit (the `observed` arm).
-  // The observed submission carries both lanes so the c17_comment record
-  // renders the observation text.
   f3_comment: () => [
     submit({
       outcome: "approved",
@@ -132,8 +105,6 @@ const MODES = {
     }),
     submit({
       outcome: "observed",
-      reason:
-        "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
       payload: {
         reason:
           "C17 observed: the empty adapter comment on the require_comment arm was rejected loudly by the payload contract (payload_invalid, comment_missing)",
@@ -145,8 +116,9 @@ const MODES = {
   // require_comment arm. The adapter-side check accepts it but the adapter
   // drops the comment before the FinalizeOutcome RPC, so the engine-side
   // require_comment check sees an empty comment and the step fails LOUD with
-  // missing_comment (asserted by the fixture as the documented 0.5.15 defect
-  // shape; KB-249 retires require_comment in v0.6.0).
+  // missing_comment (asserted by the fixture as the documented defect shape;
+  // KB-249 retires require_comment in v0.6.0) — re-verified live on 0.5.17
+  // (KB-305 re-proof): the shape is UNCHANGED from 0.5.15.
   f3b_comment_defect: () => [
     submit({
       outcome: "approved",
@@ -179,7 +151,6 @@ const MODES = {
     submit({
       outcome: "approved",
       reason: "C13 uncontracted lane: the reason-form submission is accepted on a step with no declared schema — the same top-level reason shape is rejected loudly on all contracted steps",
-      comment: "C13 uncontracted reason lane",
     }),
   ],
 
@@ -232,8 +203,6 @@ const MODES = {
     tool("view", { path: "main.chcl" }),
     submit({
       outcome: "approved",
-      reason:
-        "D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering",
       payload: {
         reason:
           "D21 recovered denial keeps success: the trailing-* band granted the shell tool call first-match-wins (pattern s* echoed in the permission.granted event), the read tool call was denied with a permission.denied event naming the tool, and the step still finalized approved after recovering",
