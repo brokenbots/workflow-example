@@ -130,6 +130,7 @@ close_card)
     jq -n --arg pr "$PR" --arg tid "$TID" '{pr:$pr,task_id:($tid|tonumber),closed:true}' > "$CONFIRM"
     printf 'close_card'
     ;;
+arm)
     # arm = full armed tag set via setTaskTags (full-list semantics) + move Ready.
     # Author pin is verified BEFORE arming: the child has no PR yet, so the pin
     # is an assertion on the manifest entry (develop runs open PRs as the
