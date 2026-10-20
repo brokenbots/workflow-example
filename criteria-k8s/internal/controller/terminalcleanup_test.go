@@ -154,7 +154,7 @@ func TestReconcileTerminalRunWithoutChildJobsIsNoOp(t *testing.T) {
 		},
 		Spec: criteriav1.CriteriaRunSpec{TicketID: "KB-275"},
 		Status: criteriav1.CriteriaRunStatus{
-			Phase:                 criteriav1.PhaseSucceeded,
+			Phase:                  criteriav1.PhaseSucceeded,
 			CastleTerminalObserved: true,
 		},
 	}

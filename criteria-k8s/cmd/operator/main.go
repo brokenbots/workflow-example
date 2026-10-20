@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"net/http"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
