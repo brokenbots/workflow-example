@@ -151,25 +151,40 @@ for tid in $(jq -r '.children[] | select(.enabled != false) | .task_id' "$MANIFE
                 ;;
             "Succeeded"|"Failed"|"Completed")
                 # ── OWN-PR-FIRST override (dave 10-19, point 3): a terminal CR
-                # whose ticket's OWN PR is open with green checks is a
-                # DELIVERED-AND-WAITING-ON-GATE child, not a failure to
-                # classify. The PR gate (below) is the actionable lane; the
-                # dead CR is history. Jump straight to the PR branch.
+                # whose ticket's OWN PR is open is DELIVERED-AND-WAITING-ON-GATE,
+                # not a failure to classify — the dead CR is history and the PR
+                # branch is the actionable lane. Reproduce the PR-branch verdicts
+                # here (green -> merge; pending -> wait_live; red -> consult) and
+                # skip CR classification entirely for those; only when there is
+                # NO own PR do we classify the corpse.
                 pr_precheck=$("$LIB_DIR/pr_gate.sh" "$entry_repo" "$DEV_ACTOR" "kb-${tid}" 2>/dev/null || echo '{}')
                 pc_state=$(printf '%s' "$pr_precheck" | jq -r '.state // "none"')
-                pc_gate=$(printf '%s' "$pr_precheck" | jq -r '.gate // "none"')
-                if [ "$pc_state" = "open" ] && [ "$pc_gate" != "green" ]; then
-                    # own PR open but pending/none checks: deliverable exists, the
-                    # gate is what is pending — idle calmly (progress wait), the CR
-                    # death is history either way.
-                    jq -n --arg a wait_live --arg r "own PR pending (gate $pc_gate) despite $cr_nm terminal — PR gates the lane" \
-                        '{action:$a,reason:$r}' > "$ACTION_FILE"
-                    token wait_live
+                if [ "$pc_state" != "none" ] && [ "$pc_state" != "closed" ]; then
+                    pc_gate=$(printf '%s' "$pr_precheck" | jq -r '.gate // "none"')
+                    pc_url=$(printf '%s' "$pr_precheck" | jq -r '.url // ""')
+                    pc_author=$(printf '%s' "$pr_precheck" | jq -r '.author // ""')
+                    if [ "$pc_gate" = "green" ]; then
+                        jq -n --arg a merge --arg tid "$tid" --arg pr "$pc_url" --arg actor "$MERGE_ACTOR" \
+                            --arg r "own PR green despite $cr_nm terminal: deliverable exists, merge it" \
+                            '{action:$a,reason:$r,task_id:($tid|tonumber),pr:$pr,actor:$actor}' > "$ACTION_FILE"
+                        token merge
+                        exit 0
+                    fi
+                    if [ "$pc_gate" = "wait" ]; then
+                        jq -n --arg a wait_live --arg r "own PR checks pending ($pc_url) despite $cr_nm terminal — PR gates the lane" \
+                            '{action:$a,reason:$r}' > "$ACTION_FILE"
+                        token wait_live
+                        exit 0
+                    fi
+                    # red/unverified PR on a dead CR: ambiguous (consult carries
+                    # both the PR and the corpse evidence)
+                    jq -n --arg a ambiguous --arg tid "$tid" \
+                        --arg r "own PR checks $pc_gate on $pc_url with $cr_nm terminal (PR author $pc_author): needs classification" \
+                        '{action:$a,reason:$r,task_id:($tid|tonumber)}' > "$ACTION_FILE"
+                    token ambiguous
                     exit 0
                 fi
-                # own PR green (approved or not): fall through — the PR branch
-                # below drives merge (approved) or the red/pending ladder.
-                # terminal CR -> classify from castle events
+                # terminal CR with NO own PR -> classify from castle events
                 # CR yaml = authority: capture name + stamp + tree name once per terminal CR
                 KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl get criteriarun \
                     -n criteria-jobs "$cr_nm" -o yaml > "$RUN_ROOT/evidence/r$ROUND-cr.yaml"
