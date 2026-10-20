@@ -134,8 +134,10 @@ func runnerImageMismatch(status *criteriav1.CriteriaRunStatus, runnerJob *batchv
 // backoff until BackoffLimitExceeded (the 30-90m churn the ticket
 // documents). The child Jobs are deleted so nothing keeps running on an
 // image the cluster no longer declares, the run is marked Failed with a
-// BaseImageMismatch condition, and the queue slot is released: the watcher
-// refires the run on the current image once the rollout settles.
+// BaseImageMismatch condition, and the queue slot is released. The run
+// parks failed: no automated path refires it — refire decisions belong to
+// the shepherd (KB-302) — and a later run is admitted on whatever image
+// the operator then resolves.
 func (r *CriteriaRunReconciler) failBaseImageMismatch(ctx context.Context, run *criteriav1.CriteriaRun, pinned, current string, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("failing CriteriaRun on runner-image mismatch", "pinned", pinned, "current", current)
 	if err := r.deleteChildJobs(ctx, run); err != nil {
@@ -168,7 +170,7 @@ func markBaseImageMismatch(update *criteriav1.CriteriaRun, generation int64, pin
 		Type:               ConditionBaseImageMismatch,
 		Status:             metav1.ConditionTrue,
 		Reason:             ConditionBaseImageMismatch,
-		Message:            fmt.Sprintf("runner image pinned as %q at admission but the operator now resolves %q; the run is failed so the watcher can refire on the current image (CRI-264)", pinned, current),
+		Message:            fmt.Sprintf("runner image pinned as %q at admission but the operator now resolves %q; the run is parked failed — refire decisions belong to the shepherd (CRI-264, KB-302)", pinned, current),
 		ObservedGeneration: generation,
 	})
 }

@@ -295,7 +295,7 @@ type CriteriaRunStatus struct {
 	// provenance, the same reason status.baseImage is stamped. ConfigMap
 	// patches never touch in-flight runs: the run keeps executing config X
 	// (a pin mismatch instead fails it with a ConfigRenderDrift
-	// condition); refires pick up the patch. Nil with no configRef means
+	// condition); a later run picks up the patch. Nil with no configRef means
 	// the run behaves exactly as before KB-103.
 	ConfigRender *RunConfigRender `json:"configRender,omitempty"`
 
