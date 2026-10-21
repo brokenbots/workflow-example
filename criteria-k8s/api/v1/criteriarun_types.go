@@ -368,6 +368,18 @@ type CriteriaRunStatus struct {
 	// forever).
 	LastStepProgress *metav1.Time `json:"lastStepProgress,omitempty"`
 
+	// TerminalAt is the time the run went terminal (KB-309): stamped once,
+	// when the phase first lands on a terminal value, before the status
+	// write that carries the terminal phase. The stamp prefers the castle
+	// terminal envelope's own timestamp (the truthful terminal time, stable
+	// across reconciles and operator restarts) and falls back to the
+	// reconcile clock when neither the envelope nor the run record carries
+	// an ended-at. It is the retention sweep's aging clock: a terminal run
+	// is only eligible for deletion once this is set and older than the
+	// retention window; an unstamped terminal run (legacy, or archived-out
+	// of band) is never a deletion candidate.
+	TerminalAt *metav1.Time `json:"terminalAt,omitempty"`
+
 	// ObservedGeneration tracks the last reconciled generation of the resource.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
@@ -581,6 +593,11 @@ func (in *CriteriaRunStatus) DeepCopyInto(out *CriteriaRunStatus) {
 	*out = *in
 	if in.LastStepProgress != nil {
 		in, out := &in.LastStepProgress, &out.LastStepProgress
+		*out = new(metav1.Time)
+		**out = **in
+	}
+	if in.TerminalAt != nil {
+		in, out := &in.TerminalAt, &out.TerminalAt
 		*out = new(metav1.Time)
 		**out = **in
 	}

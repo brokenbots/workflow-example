@@ -168,6 +168,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				}
 			}
 		}
+		// The retention sweep ages the run off status.terminalAt: pin the
+		// clock on the status write that carries the terminal phase —
+		// preferring the castle terminal envelope's own timestamp, so the
+		// KB-314 backlog of already-terminal runs ages truthfully.
+		stampTerminalAt(update, obs)
 		if !statusEqual(&run.Status, &update.Status) {
 			if err := r.Status().Update(ctx, update); err != nil {
 				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
@@ -416,6 +421,10 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.failRunStalled(ctx, &run, update, obs, logger)
 	}
 
+	// Pin the terminal clock on the transition (KB-309) so the write below
+	// persists it with the terminal phase: the sweep cannot age a run it
+	// cannot date.
+	stampTerminalAt(update, obs)
 	if !statusEqual(&run.Status, &update.Status) {
 		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
 		if err := r.Status().Update(ctx, update); err != nil {
