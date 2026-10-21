@@ -683,7 +683,7 @@ func (in *RunWorkflow) DeepCopyInto(out *RunWorkflow) {
 	if in.Interface != nil {
 		in, out := &in.Interface, &out.Interface
 		*out = new(RunWorkflowInterface)
-		**out = **in
+		(*in).DeepCopyInto(*out)
 	}
 }
 

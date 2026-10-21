@@ -393,9 +393,9 @@ func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 // from parapet/node_modules/.bin. If this test fails, the shipped example
 // drifted back toward the ambient-node npm gate and live/tree diverged
 // (ConfigRenderDrift): re-sync both, don't ship the drift.
-// KB-310: the develop tree's interface declares ci_gate_cmd as its only
-// config slot, so the entry carries no buildCmd/testCmd keys — unknown
-// slots reject fail-closed.
+// KB-310: the develop tree's interface declares base_branch and
+// ci_gate_cmd as its config slots, so the entry carries no buildCmd/testCmd
+// keys — unknown slots reject fail-closed.
 func TestShippedExampleCastleGatePinsNode20ParapetSuite(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
@@ -1016,12 +1016,15 @@ func TestValidateWorkflowInterfaceShape(t *testing.T) {
 		"bad adapter":   func(i *WorkflowInterface) { i.Adapters = []string{"sh ll"} },
 		"dup adapter":   func(i *WorkflowInterface) { i.Adapters = []string{"shell", "shell"} },
 		"relative path": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "workspace" },
-		"bad kind":      func(i *WorkflowInterface) { i.Mounts[0].Kind = "hostPath" },
-		"dup mount":     func(i *WorkflowInterface) { i.Mounts = append(i.Mounts, i.Mounts[0]) },
-		"lower env":     func(i *WorkflowInterface) { i.SecretEnv = []string{"workflow_token"} },
-		"dup env":       func(i *WorkflowInterface) { i.Env = []string{"A", "A"} },
-		"dup secret":    func(i *WorkflowInterface) { i.SecretEnv = []string{"A", "A"} },
-		"bad slot":      func(i *WorkflowInterface) { i.ConfigSlots[0].Slot = "CiGateCmd" },
+		// KB-310: byte-exact mount paths — interface_validate.mjs rejects
+		// a trailing slash and the routes validator must agree with it.
+		"trailing slash": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/home/criteria/workspace/" },
+		"bad kind":       func(i *WorkflowInterface) { i.Mounts[0].Kind = "hostPath" },
+		"dup mount":      func(i *WorkflowInterface) { i.Mounts = append(i.Mounts, i.Mounts[0]) },
+		"lower env":      func(i *WorkflowInterface) { i.SecretEnv = []string{"workflow_token"} },
+		"dup env":        func(i *WorkflowInterface) { i.Env = []string{"A", "A"} },
+		"dup secret":     func(i *WorkflowInterface) { i.SecretEnv = []string{"A", "A"} },
+		"bad slot":       func(i *WorkflowInterface) { i.ConfigSlots[0].Slot = "CiGateCmd" },
 		"dup slot": func(i *WorkflowInterface) {
 			i.ConfigSlots = append(i.ConfigSlots, i.ConfigSlots[0])
 		},

@@ -53,9 +53,9 @@ func interfaceBindingApplies(run *criteriav1.CriteriaRun) bool {
 //     interface mount must be satisfied by a binding volume;
 //   - every interface-required secret env lane must resolve from the
 //     binding's secrets env maps, and every env key the binding's secrets
-//     carry must be declared by the interface (volume-level env maps are
-//     operator plumbing CRITERIA_* and exempt; a secret with an empty env
-//     map contributes no keys — the CSI file-mount lane);
+//     carry must be declared by the interface (volume-level env maps on
+//     volumes are operator plumbing and exempt; a secret with an empty
+//     env map contributes no keys — the CSI file-mount lane);
 //   - every binding env key must be declared by the interface. A
 //     secret-lane name delivered as a plain env key is an unknown slot:
 //     credentials ride secret lanes, never workflow env.

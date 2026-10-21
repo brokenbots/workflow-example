@@ -504,7 +504,9 @@ const (
 
 var (
 	interfaceNameRe = mustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
-	interfacePathRe = mustCompile(`^/.+$`)
+	// Trailing slash is rejected to match scripts/interface_validate.mjs
+	// (byte-exact mount paths, no trailing-slash normalization).
+	interfacePathRe = mustCompile(`^/.+[^/]$`)
 	interfaceEnvRe  = mustCompile(`^[A-Z][A-Z0-9_]*$`)
 	interfaceVarRe  = mustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	interfaceSlotRe = mustCompile(`^[a-z][a-zA-Z0-9_]*$`)
@@ -543,7 +545,7 @@ func validateInterface(iface *WorkflowInterface) error {
 		}
 		seenMounts[m.Name] = true
 		if !interfacePathRe.MatchString(m.MountPath) {
-			return fmt.Errorf("mounts[%d] (%s): mountPath %q must be an absolute path", i, m.Name, m.MountPath)
+			return fmt.Errorf("mounts[%d] (%s): mountPath %q must be an absolute path without trailing slash", i, m.Name, m.MountPath)
 		}
 		if m.Kind != "pvc" && m.Kind != "tmp" {
 			return fmt.Errorf("mounts[%d] (%s): kind %q must be pvc or tmp", i, m.Name, m.Kind)
