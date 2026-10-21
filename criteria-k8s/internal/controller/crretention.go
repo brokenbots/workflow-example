@@ -25,10 +25,13 @@ package controller
 // Deletion cascades the child Jobs and Pods via the run's ownerReferences
 // (kubectl-style k8s GC plus the reconcile's finalize, which explicitly
 // deletes the runner/adapter Jobs under the finalizer). The sweep then
-// verifies nothing was left ownerless: any Job or Pod in the managed
-// namespace carrying a CriteriaRun ownerReference whose UID has no matching
-// CriteriaRun is deleted as well — UID equality only, so recycled names
-// never adopt the dead owner's objects, mirroring the adapter sweep.
+// verifies nothing was left ownerless: a Job or Pod whose CriteriaRun owner
+// is unrecoverable (no same-name run, and no trace in the pass's snapshot)
+// is deleted as well; the delete decision re-reads the owner from the API
+// at delete time, so a run admitted after the pass's snapshot is proven
+// live by its Get and its children are never touched — UID equality only,
+// so recycled names never adopt the dead owner's objects, mirroring the
+// adapter sweep.
 //
 // Deletion is opt-in per namespace (the allowlist from
 // --cr-retention-namespaces): a namespace must be listed for anything to be
@@ -119,7 +122,10 @@ type CRRetentionSweeper struct {
 }
 
 // NewCRRetentionSweeper builds the retention sweep from flag/env inputs.
-// Whitespace in the allowlist is trimmed; empty entries are dropped.
+// Whitespace in the allowlist is trimmed; empty entries are dropped. A
+// non-positive interval is clamped to the 1h default so flag/env input
+// (--retention-interval=0 is a disabled-sweep idiom elsewhere) can never
+// panic time.NewTicker in the sweep goroutine.
 func NewCRRetentionSweeper(cl client.Client, namespace string, retention time.Duration, keepLast int, namespaces []string, interval time.Duration) *CRRetentionSweeper {
 	allowlist := map[string]struct{}{}
 	for _, ns := range namespaces {
@@ -129,6 +135,9 @@ func NewCRRetentionSweeper(cl client.Client, namespace string, retention time.Du
 	}
 	if keepLast < 0 {
 		keepLast = 0
+	}
+	if interval <= 0 {
+		interval = time.Hour
 	}
 	return &CRRetentionSweeper{
 		Client:    cl,
@@ -287,7 +296,16 @@ func (s *CRRetentionSweeper) sweep(ctx context.Context, logger logr.Logger) {
 		"orphanJobsDeleted", stats.orphanJobs, "orphanPodsDeleted", stats.orphanPods)
 }
 
-func (s *CRRetentionSweeper) sweepOrphans(ctx context.Context, logger logr.Logger, liveUIDs map[types.UID]struct{}, stats *crRetentionStats) {
+// sweepOrphans reaps Jobs and Pods whose CriteriaRun ownerReference points
+// at a run that no longer exists, so "deleted 100 runs ⇒ zero ownerless
+// Jobs/Pods" holds even when a finalize was skipped or a CR was
+// force-deleted out of band. The delete decision re-reads the owning run
+// from the API at delete time (the AdapterSweeper race pattern): a run
+// admitted after the pass's snapshot — or any owner a stale snapshot cannot
+// see — is proven live by its Get, never treated as orphaned. The snapshot
+// UIDs are only the grace signal for runs deleted in this same pass (their
+// children may not be gone yet; the next pass reaps whatever leaked).
+func (s *CRRetentionSweeper) sweepOrphans(ctx context.Context, logger logr.Logger, snapshot map[types.UID]struct{}, stats *crRetentionStats) {
 	var jobs batchv1.JobList
 	if err := s.Client.List(ctx, &jobs, client.InNamespace(s.Namespace)); err != nil {
 		logger.Error(err, "listing Jobs for retention orphan verify")
@@ -295,16 +313,14 @@ func (s *CRRetentionSweeper) sweepOrphans(ctx context.Context, logger logr.Logge
 	}
 	for i := range jobs.Items {
 		job := &jobs.Items[i]
-		ref := criteriaRunOwnerRefOf(job)
-		if ref == nil || isCRUIDLive(liveUIDs, ref.UID) {
-			continue
+		if s.orphanVerify(ctx, criteriaRunOwnerRefOf(job), snapshot) {
+			if err := s.Client.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "deleting orphaned child Job", "job", job.Name)
+				continue
+			}
+			stats.orphanJobs++
+			logger.Info("deleted orphaned child Job", "job", job.Name, "run", criteriaRunOwnerRefOf(job).Name)
 		}
-		if err := s.Client.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "deleting orphaned child Job", "job", job.Name)
-			continue
-		}
-		stats.orphanJobs++
-		logger.Info("deleted orphaned child Job", "job", job.Name, "run", ref.Name)
 	}
 
 	var pods corev1.PodList
@@ -314,17 +330,37 @@ func (s *CRRetentionSweeper) sweepOrphans(ctx context.Context, logger logr.Logge
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		ref := criteriaRunOwnerRefOf(pod)
-		if ref == nil || isCRUIDLive(liveUIDs, ref.UID) {
-			continue
+		if s.orphanVerify(ctx, criteriaRunOwnerRefOf(pod), snapshot) {
+			if err := s.Client.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "deleting orphaned child Pod", "pod", pod.Name)
+				continue
+			}
+			stats.orphanPods++
+			logger.Info("deleted orphaned child Pod", "pod", pod.Name, "run", criteriaRunOwnerRefOf(pod).Name)
 		}
-		if err := s.Client.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "deleting orphaned child Pod", "pod", pod.Name)
-			continue
-		}
-		stats.orphanPods++
-		logger.Info("deleted orphaned child Pod", "pod", pod.Name, "run", ref.Name)
 	}
+}
+
+// orphanVerify decides whether the object's CriteriaRun owner is genuinely
+// gone. A same-name run with a matching UID is live (the Get is
+// authoritative even when the owner is missing from the pass's pre-delete
+// snapshot); a UID in the snapshot is a run this pass just deleted (grace);
+// everything else — an unresolvable name, a recycled name under a dead UID,
+// or a UID absent both from the namespace and the snapshot — is orphaned.
+// No match and no snapshot trace with a read error is kept (fail-safe).
+func (s *CRRetentionSweeper) orphanVerify(ctx context.Context, ref *metav1.OwnerReference, snapshot map[types.UID]struct{}) bool {
+	if ref == nil {
+		return false
+	}
+	var owner criteriav1.CriteriaRun
+	err := s.Client.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: ref.Name}, &owner)
+	if err == nil {
+		return owner.UID != ref.UID // a recycled name under a dead UID
+	}
+	if !apierrors.IsNotFound(err) {
+		return false
+	}
+	return !isCRUIDLive(snapshot, ref.UID)
 }
 
 // isCRUIDLive matches on UID — the identity that survives name recycling.

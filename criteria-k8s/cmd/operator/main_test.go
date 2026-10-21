@@ -222,19 +222,20 @@ func TestGetInt(t *testing.T) {
 	})
 }
 
-func TestGetCsv(t *testing.T) {
-	t.Run("env splits on commas", func(t *testing.T) {
-		t.Setenv("CR_RETENTION_NAMESPACES", "criteria-jobs, review-jobs")
-		assert.Equal(t, []string{"criteria-jobs", " review-jobs"}, getCsv("CR_RETENTION_NAMESPACES", nil))
+// The retention allowlist rides the --cr-retention-namespaces flag value
+// (whose default resolves the CR_RETENTION_NAMESPACES env var at flag
+// declaration): parseCsv's contract is what main feeds the sweeper
+// constructor, so a trimmed/emptied allowlist comes out the same on either
+// input path.
+func TestParseCsv(t *testing.T) {
+	t.Run("flag value splits on commas and trims", func(t *testing.T) {
+		assert.Equal(t, []string{"criteria-jobs", "review-jobs"}, parseCsv("criteria-jobs, review-jobs"))
 	})
-	t.Run("unset falls back", func(t *testing.T) {
-		os.Unsetenv("CR_RETENTION_NAMESPACES")
-		assert.Equal(t, []string{"criteria-jobs"}, getCsv("CR_RETENTION_NAMESPACES", []string{"criteria-jobs"}))
+	t.Run("blank and whitespace entries are dropped", func(t *testing.T) {
+		assert.Equal(t, []string{"criteria-jobs"}, parseCsv(" criteria-jobs ,, "))
 	})
-	t.Run("empty env splits to a blank entry the constructor drops", func(t *testing.T) {
-		t.Setenv("CR_RETENTION_NAMESPACES", ",")
-		got := getCsv("CR_RETENTION_NAMESPACES", []string{"criteria-jobs"})
-		assert.Equal(t, []string{"", ""}, got)
+	t.Run("empty value parses empty (sweep inert)", func(t *testing.T) {
+		assert.Empty(t, parseCsv(""))
 	})
 }
 

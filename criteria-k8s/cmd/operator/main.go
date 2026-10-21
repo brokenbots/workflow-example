@@ -279,10 +279,14 @@ func main() {
 	// KB-309: archived terminal CriteriaRun retention. The constructor
 	// sanitizes the allowlist (trims, drops blanks), so the enable decision
 	// rides the sanitized set: deletion needs a window AND at least one
-	// opted-in namespace (empty allowlist keeps the sweep inert). Uses the
-	// DIRECT client so deletion never acts on a stale view of which runs
-	// exist, and shares the manager's lifecycle.
-	retentionNamespaces := getCsv("CR_RETENTION_NAMESPACES", nil)
+	// opted-in namespace (empty allowlist keeps the sweep inert). The
+	// flag's default already resolves the env var (CR_RETENTION_NAMESPACES),
+	// so the flag value is the single source here — reading the env a
+	// second time would silently ignore the flag. The operator manages a
+	// single namespace, so only its allowlist entry matters; other entries
+	// are inert. Uses the DIRECT client so deletion never acts on a stale
+	// view of which runs exist, and shares the manager's lifecycle.
+	retentionNamespaces := parseCsv(*crRetentionNamespaces)
 	crRetentionSweeper := controller.NewCRRetentionSweeper(directClient, *namespaceFlag, time.Duration(*crRetentionDays)*24*time.Hour, *crRetentionKeepLast, retentionNamespaces, *sweepInterval)
 	if *crRetentionDays > 0 && len(crRetentionSweeper.Allowlist) > 0 {
 		go crRetentionSweeper.Run(ctx)
@@ -407,14 +411,17 @@ func getInt(key string, fallback int) int {
 	return fallback
 }
 
-// getCsv splits a comma-separated env value into raw entries; the consumer
-// (the retain constructor) trims entries and drops blanks. An unset env var
-// falls back to the provided default.
-func getCsv(key string, fallback []string) []string {
-	if v := os.Getenv(key); v != "" {
-		return strings.Split(v, ",")
+// parseCsv splits a comma-separated allowlist into its non-blank entries
+// (trimmed). The CR retention flag's default resolves the env var, so the
+// flag value is the single input to this.
+func parseCsv(v string) []string {
+	var out []string
+	for _, entry := range strings.Split(v, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			out = append(out, entry)
+		}
 	}
-	return fallback
+	return out
 }
 
 // runArchiveBackfill runs the KB-314 one-shot backfill of the operator's

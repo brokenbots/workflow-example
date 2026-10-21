@@ -117,7 +117,8 @@ func TestCRRetentionDeletesAgedArchivedTerminalRun(t *testing.T) {
 
 func TestCRRetentionKeepsRunInsideRetentionWindow(t *testing.T) {
 	run := retentionRun("cri-900", "uid-cri-900", "CRI-900")
-	run.Status.TerminalAt = &metav1.Time{Time: time.Now().Add(-2 * 24 * time.Hour)}
+	stamped := metav1.NewTime(time.Now().Add(-2 * 24 * time.Hour))
+	run.Status.TerminalAt = &stamped
 	cl := newSweepClient(t, run)
 
 	sweepBaseline(t, cl)
@@ -125,6 +126,7 @@ func TestCRRetentionKeepsRunInsideRetentionWindow(t *testing.T) {
 	fetched, err := listRun(t, cl, "cri-900")
 	require.NoError(t, err)
 	assert.Equal(t, "handler_complete", fetched.Status.FinalState)
+	assert.Equal(t, stamped.Time.Unix(), fetched.Status.TerminalAt.Time.Unix(), "an in-window run's terminal clock survives the sweep untouched")
 }
 
 func TestCRRetentionNeverDeletesParkedRuns(t *testing.T) {
@@ -466,6 +468,18 @@ func TestNewCRRetentionSweeperTrimsAllowlist(t *testing.T) {
 	assert.Len(t, s.Allowlist, 2, "blank entries are dropped")
 }
 
+// A non-positive interval must never reach time.NewTicker (it panics): the
+// flag/environment accepts --retention-interval=0, a disabled-sweep idiom
+// the sibling sweeps treat as benign, so the constructor clamps it.
+func TestNewCRRetentionSweeperClampsNonPositiveInterval(t *testing.T) {
+	for _, interval := range []time.Duration{0, -1 * time.Second} {
+		s := NewCRRetentionSweeper(nil, "default", crRetentionWindow, 3, []string{"default"}, interval)
+		assert.Equal(t, time.Hour, s.Interval, "interval %s must clamp to the 1h default", interval)
+	}
+	s := NewCRRetentionSweeper(nil, "default", crRetentionWindow, 3, []string{"default"}, 15*time.Minute)
+	assert.Equal(t, 15*time.Minute, s.Interval, "a positive interval is kept")
+}
+
 func TestCRRetentionNeverTouchesOtherNamespaces(t *testing.T) {
 	// Children owned by a dead run but living in another namespace are a
 	// different sweep's jurisdiction: the retention sweep is strictly
@@ -541,4 +555,54 @@ func TestCRRetentionBulkDeletionLeavesZeroOwnerlessChildren(t *testing.T) {
 	for i := 0; i < count; i++ {
 		assertGone(t, cl, fmt.Sprintf("cri-bulk-%03d", i))
 	}
+}
+
+// The verify's delete decision re-reads the owning run from the API at
+// delete time: a run admitted after the pass's snapshot (absent from the
+// set handed to the verify) is proven live by its Get, so its children are
+// never treated as orphaned while it is in flight. Only a genuinely
+// unrecoverable owner — no same-name run and no snapshot trace — is reaped.
+func TestOrphanVerifyKeepsOwnersTheSnapshotMisses(t *testing.T) {
+	run := newSweepTestRun("cri-midpass", "uid-midpass")
+	runJob := adapterJob("cri-midpass-runner", "default", run.Name)
+	withCriteriaRunOwnerRef(runJob, "cri-midpass", string(run.UID), true)
+	runPod := adapterPod("cri-midpass-adapter", "default", run.Name)
+	withCriteriaRunOwnerRef(runPod, "cri-midpass", string(run.UID), true)
+	orphan := adapterJob("cri-orphaned-runner", "default", "cri-orphan")
+	withCriteriaRunOwnerRef(orphan, "cri-orphan", "uid-orphan", true)
+	cl := newSweepClient(t, run, runJob, runPod, orphan)
+
+	s := retentionSweeper(cl)
+	stats := &crRetentionStats{}
+	s.sweepOrphans(context.Background(), logr.Discard(), map[types.UID]struct{}{}, stats)
+
+	if _, err := getSweptJob(t, cl, "default", "cri-midpass-runner"); err != nil {
+		t.Fatal("a live run's child Job must survive the verify even when the owner is missing from the pass snapshot")
+	}
+	if _, err := getSweptPod(t, cl, "default", "cri-midpass-adapter"); err != nil {
+		t.Fatal("a live run's child Pod must survive the verify even when the owner is missing from the pass snapshot")
+	}
+	if _, err := getSweptJob(t, cl, "default", "cri-orphaned-runner"); err == nil {
+		t.Fatal("a child whose owning run does not exist at all must still be reaped")
+	}
+	assert.Equal(t, 1, stats.orphanJobs, "only the unrecoverable owner's Job is reaped")
+	assert.Equal(t, 0, stats.orphanPods, "the live run's Pod is not reaped")
+}
+
+// A same-name run with a DIFFERENT uid is a recycled name, not the owner:
+// its existence must not keep the dead owner's children alive.
+func TestOrphanVerifyRejectsRecycledNameOwners(t *testing.T) {
+	recycled := retentionRun("cri-144", "uid-new-144", "CRI-144")
+	orphan := adapterJob("adp-cri-144-1", "default", "cri-144")
+	withCriteriaRunOwnerRef(orphan, "cri-144", "uid-gone-144", true)
+	cl := newSweepClient(t, recycled, orphan)
+
+	s := retentionSweeper(cl)
+	stats := &crRetentionStats{}
+	s.sweepOrphans(context.Background(), logr.Discard(), map[types.UID]struct{}{}, stats)
+
+	if _, err := getSweptJob(t, cl, "default", "adp-cri-144-1"); err == nil {
+		t.Fatal("a recycled name under a dead UID must not adopt the dead owner's children")
+	}
+	assert.Equal(t, 1, stats.orphanJobs)
 }
