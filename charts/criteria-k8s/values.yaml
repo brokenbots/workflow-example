@@ -74,6 +74,13 @@ operator:
   # API for run/adapter lifecycle instead of reading events.ndjson off the
   # data PVC. Empty disables observation (Job conditions only).
   castleAddr: http://castle:8080
+  # Name of the Secret holding castle's criteria token (key "token") —
+  # required for the KB-314 run-archive leg: castle rejects anonymous
+  # ArchiveRun calls, so an address without this token disables run
+  # archiving entirely (the operator logs it loudly at startup and the
+  # backfill mode refuses to claim coverage). Empty keeps the archive leg
+  # off; observation reads stay anonymous either way (dev posture).
+  castleTokenSecret: ""
   # kubernetes.io/arch nodeSelector value stamped on child Job/pod templates
   # (runner + per-scope adapters): the arch of the nodes workflow pods
   # schedule on. A cluster property — set it to arm64 for an arm64 cluster.

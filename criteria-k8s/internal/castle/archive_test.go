@@ -195,6 +195,23 @@ func TestArchiveRunRefusesTokenlessClient(t *testing.T) {
 	assert.Equal(t, 0, handler.keyCount(), "no record may be written without a token")
 }
 
+// A tokenless client is a fully Disabled lane (R1): the terminal gate
+// treats address-without-token like a missing archiver — it skips, terminal
+// cleanup proceeds — instead of putting the controller into an unsatisfiable
+// requeue loop; the direct ArchiveRun call refuses loudly regardless.
+func TestArchiveLaneRequiresAddrAndToken(t *testing.T) {
+	addrOnly := NewRunArchiveClient(RunArchiverConfig{Addr: "http://castle:8080", Token: ""}, nil)
+	assert.True(t, addrOnly.Disabled(), "address without a token is a disabled archive lane")
+	_, err := addrOnly.ArchiveRun(context.Background(),
+		archiveRequest(&castlev1.ArchiveRecord{RunId: "run-1"}))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "CASTLE_TOKEN")
+
+	bothSet := NewRunArchiveClient(RunArchiverConfig{Addr: "http://castle:8080", Token: "tok"}, nil)
+	assert.False(t, bothSet.Disabled())
+	assert.True(t, (*RunArchiveClient)(nil).Disabled(), "nil receiver stays Disabled")
+}
+
 // A disabled archive leg (no castle address) is Disabled and its calls
 // refuse; the controller gate skips it instead of retrying forever.
 func TestArchiveRunDisabledWithoutAddr(t *testing.T) {

@@ -54,9 +54,15 @@ func isRunBackedRecord(record *castlev1.ArchiveRecord) bool {
 // abort this pass's cleanup.
 func (r *CriteriaRunReconciler) ensureTerminalArchived(ctx context.Context, run *criteriav1.CriteriaRun, obs *castle.Observation, logger logr.Logger) error {
 	if r.RunArchiver == nil || r.RunArchiver.Disabled() {
-		// Archive leg off (no archiver configured): the gate skips,
-		// matching the pre-archive-leg behavior. A configured archiver
-		// without its token still fails below (fail-closed on the lane).
+		// Archive lane not configured — no archiver wired, or the lane is
+		// missing its castle address or its criteria token (castle rejects
+		// anonymous archive writes, so either half missing would turn every
+		// attempt into a permanent failure and wedge terminal cleanup; see
+		// castle.RunArchiveClient.Disabled). The gate therefore skips and
+		// terminal cleanup proceeds, the way it did before the archive leg
+		// existed. The operator process logs the half-configured lane
+		// loudly at startup, and the backfill mode refuses to claim
+		// coverage over it.
 		return nil
 	}
 	if run.Status.ArchiveID != "" && !run.Status.ArchivePending {

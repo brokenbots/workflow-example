@@ -78,8 +78,13 @@ type RunArchiver interface {
 	// ListRunArchives pages stored archives; the backfill's coverage check
 	// walks it (and wire tests round-trip through it).
 	ListRunArchives(ctx context.Context, req *connect.Request[castlev1.ListRunArchivesRequest]) (*connect.Response[castlev1.ListRunArchivesResponse], error)
-	// Disabled reports that the archive leg is off (no castle address), so
-	// the controller's terminal gate skips instead of retrying forever.
+	// Disabled reports that the archive lane is not fully configured —
+	// castle address AND criteria token are both required (an unauthenti-
+	// cated archive write is rejected server-side, so either half missing
+	// turns every archive attempt into a permanent failure the gate cannot
+	// satisfy). Disabled makes the controller's terminal gate skip instead
+	// of wedging terminal cleanup on requeues that can never succeed; the
+	// operator process logs the misconfigured lane loudly at startup.
 	Disabled() bool
 }
 
@@ -92,10 +97,12 @@ type RunArchiverConfig struct {
 // RunArchiveClient archives terminal run records into castle. It rides the
 // same token lane as the podstate feed (X-Criteria-Token with the Bearer
 // mirror), never anonymous: an unauthenticated archive write is rejected
-// server-side, and this client refuses to even attempt one when no token is
-// configured, so a token-less rollout fails loudly (the gate stamps
-// TerminalArchivePending and requeues) instead of surfacing a server
-// PermissionDenied that can be misread as an authorization policy decision.
+// server-side, and this client refuses to even attempt one regardless. The
+// lane is only considered configured with address AND token (Disabled):
+// either half missing reads as "archive leg off" — the controller's
+// terminal gate skips and terminal cleanup proceeds — while the
+// address-without-token variant stays loud at operator startup and the
+// backfill mode refuses to claim coverage over it.
 type RunArchiveClient struct {
 	addr       string
 	token      string
@@ -118,11 +125,16 @@ func NewRunArchiveClient(cfg RunArchiverConfig, httpClient *http.Client) *RunArc
 	return &RunArchiveClient{addr: cfg.Addr, token: cfg.Token, httpClient: httpClient}
 }
 
-// Disabled reports that no castle address is configured; the archiver is a
-// no-op and the controller's terminal gate skips (pre-castle-archival
-// deploys keep reconciling).
+// Disabled reports that the archive lane is not fully configured: BOTH the
+// castle address and the criteria token must be set. A tokenless client (or
+// a tokenless address) would fail every archive write server-side, turning
+// the terminal gate into a permanent requeue loop with terminal cleanup
+// wedged — so the lane is considered off instead, and the gate skips the
+// way it does without an archiver at all. The operator process logs this
+// configuration loudly at startup (see cmd/operator/main.go); the backfill
+// mode fails closed on it.
 func (a *RunArchiveClient) Disabled() bool {
-	return a == nil || a.addr == ""
+	return a == nil || a.addr == "" || a.token == ""
 }
 
 func (a *RunArchiveClient) archiveServiceClient() castlev1connect.RunArchiveServiceClient {
@@ -130,9 +142,13 @@ func (a *RunArchiveClient) archiveServiceClient() castlev1connect.RunArchiveServ
 }
 
 func (a *RunArchiveClient) ArchiveRun(ctx context.Context, req *connect.Request[castlev1.ArchiveRunRequest]) (*connect.Response[castlev1.ArchiveRunResponse], error) {
-	if a.Disabled() {
+	if a.addr == "" {
 		return nil, errors.New("castle run archive is disabled (no castle address configured)")
 	}
+	// Defense in depth for direct callers: a fully-disabled client is
+	// rejected above, and a constructed client without its token — however
+	// that happened — must still refuse an anonymous archive write here
+	// rather than put one on the wire.
 	if a.token == "" {
 		return nil, errors.New("castle run archive requires a criteria token (CASTLE_TOKEN): refusing an anonymous archive write")
 	}
@@ -141,7 +157,7 @@ func (a *RunArchiveClient) ArchiveRun(ctx context.Context, req *connect.Request[
 }
 
 func (a *RunArchiveClient) ListRunArchives(ctx context.Context, req *connect.Request[castlev1.ListRunArchivesRequest]) (*connect.Response[castlev1.ListRunArchivesResponse], error) {
-	if a.Disabled() {
+	if a.addr == "" {
 		return nil, errors.New("castle run archive is disabled (no castle address configured)")
 	}
 	return a.archiveServiceClient().ListRunArchives(ctx, req)

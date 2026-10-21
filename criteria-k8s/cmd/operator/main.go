@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -120,11 +121,20 @@ func main() {
 	}
 
 	// The archive lane rides the same token as run observation (KB-314):
-	// castle's interceptor rejects anonymous ArchiveRun calls, so a
-	// tokenless lane leaves the archive leg off (the reconciler then skips
-	// it instead of wedging terminal reaping) and the backfill mode fails
-	// closed instead of pretending coverage.
+	// castle's interceptor rejects anonymous ArchiveRun calls, so the lane
+	// is only configured with address AND token — either half missing
+	// disables the archive leg (the reconciler's gate then skips and
+	// terminal cleanup proceeds; it never wedges terminal reaping) and the
+	// backfill mode fails closed instead of pretending coverage. The
+	// address-without-token variant is logged loudly here so a rollout
+	// forgetting the token cannot silently leave every terminal run
+	// unarchived.
 	castleArchiver := castle.NewRunArchiveClient(castle.RunArchiverConfig{Addr: *castleAddr, Token: castleToken}, nil)
+	if *castleAddr != "" && castleToken == "" {
+		logger.Error(errors.New("CASTLE_TOKEN is not set while --castle-addr is"),
+			"run-archive lane disabled: castle address is set but no criteria token is wired, so terminal CriteriaRuns will NOT be archived into castle (wire the token via CASTLE_TOKEN — the chart's operator.castleTokenSecret — before relying on run archives)",
+			"castleAddr", *castleAddr)
+	}
 
 	// KB-314 backfill mode: one-shot archive of the operator's terminal
 	// CriteriaRun backlog, then exit. Run on demand (an operator image
