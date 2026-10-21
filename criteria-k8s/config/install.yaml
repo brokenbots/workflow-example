@@ -336,6 +336,19 @@ spec:
                     terminal outcome (the run record's terminal status
                     and/or RunCompleted/RunFailed envelopes). Gates terminal
                     requeue completion.
+                archiveId:
+                  type: string
+                  description: >-
+                    Castle run-archive id ("run-archive/<key>") this run's
+                    terminal record was stored under, stamped by the
+                    terminal archive gate before reaping and finalizer
+                    removal. Empty on a terminal run means not yet archived.
+                archivePending:
+                  type: boolean
+                  description: >-
+                    Set when the terminal archive gate has not landed the
+                    run's castle archive record (TerminalArchivePending
+                    condition carries the reason/message).
                 finalState:
                   type: string
                   description: >-
