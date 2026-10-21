@@ -103,10 +103,17 @@ type RunArchiveClient struct {
 }
 
 // NewRunArchiveClient builds the archive client. A nil httpClient gets the
-// cleartext h2c transport, matching the rest of the castle lane.
+// cleartext h2c transport, matching the rest of the castle lane; a
+// configured token rides it on the standard criteria lane (mirroring the
+// observation client — a checked-but-never-sent token would surface as a
+// server PermissionDenied the gate would retry forever, so the lane is
+// attached here, not left to the caller).
 func NewRunArchiveClient(cfg RunArchiverConfig, httpClient *http.Client) *RunArchiveClient {
 	if httpClient == nil {
 		httpClient = newClearTextH2CClient()
+	}
+	if cfg.Token != "" {
+		httpClient = &http.Client{Transport: &tokenTransport{base: httpClient.Transport, token: cfg.Token}}
 	}
 	return &RunArchiveClient{addr: cfg.Addr, token: cfg.Token, httpClient: httpClient}
 }
