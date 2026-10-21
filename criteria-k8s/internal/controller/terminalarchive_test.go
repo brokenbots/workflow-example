@@ -9,6 +9,7 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -240,6 +241,149 @@ func TestTerminalGateArchivesBeforeChildJobReap(t *testing.T) {
 	assert.Equal(t, "test-1.2.3", stored.GetOperatorVersion())
 }
 
+// The archived record is the permanent evidence for a deleted CR: its body
+// must carry the full contract — identity, workflow provenance (name, ref,
+// tree digest), the KB-103 config provenance, the workflow verdict, the
+// terminal phase, failure reason, step summary in stream order, the run's
+// conditions (minus the gate's own bookkeeping), lifecycle counts and
+// timestamps. A regression dropping any of these fails here.
+func TestTerminalGateArchivesFullRecordBody(t *testing.T) {
+	run := terminalArchivableRun("cri-42", "cr-uid-10", "Failed", "castle-run-1")
+	run.Spec.Workflow = &criteriav1.RunWorkflow{
+		Name: "triage", Type: "image", Ref: "refs/heads/main",
+	}
+	run.Spec.ConfigRef = &criteriav1.CriteriaRunConfigRef{Name: "cri-config", ResourceVersion: "555"}
+	run.Status.FinalState = "failed"
+	run.Status.Conditions = []metav1.Condition{
+		{Type: controller.ConditionTerminalCleanup, Status: metav1.ConditionTrue, Reason: controller.ConditionTerminalCleanup, LastTransitionTime: metav1.NewTime(time.Now())},
+		{Type: controller.ConditionBaseImageMismatch, Status: metav1.ConditionFalse, Reason: controller.ConditionBaseImageMismatch, LastTransitionTime: metav1.NewTime(time.Now())},
+		{Type: criteriav1.ConditionTerminalArchivePending, Status: metav1.ConditionTrue, Reason: "test", LastTransitionTime: metav1.NewTime(time.Now())},
+	}
+	job := terminalRunnerJob("cri-42")
+	start, end := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC), time.Date(2026, 10, 20, 9, 3, 0, 0, time.UTC)
+	harness := newGateHarness(t, run, job)
+	harness.castle.observation = &castle.Observation{
+		RunID: "castle-run-1",
+		RunRecord: &castle.RunRecord{
+			WorkflowName: "enriched-name", // CR-side name wins; the enrichment only fills gaps
+			WorkflowHash: "tree-digest-abc",
+			StartedAt:    start,
+		},
+		Terminal: &castle.Terminal{
+			Success: false, FinalState: "failed",
+			Reason: "runner exited 1", At: end,
+		},
+		Steps: []castle.StepRecord{{Name: "compile", Outcome: "ok"}, {Name: "unit-tests", Outcome: "failed"}},
+	}
+	archiver := harness.archiver
+
+	_, err := harness.reconcile(t, run)
+	require.NoError(t, err)
+
+	stored := archiver.record("castle-run-1")
+	require.NotNil(t, stored, "the gate archived the run-keyed record")
+	assert.Equal(t, int32(1), stored.GetSchemaVersion())
+	assert.Equal(t, "castle-run-1", stored.GetRunId())
+	assert.Empty(t, stored.GetArchiveKey(), "run-keyed records carry no archive key")
+	assert.Equal(t, "CRI-42", stored.GetTicket())
+	assert.Equal(t, "https://github.com/brokenbots/workflow-example.git", stored.GetRepo())
+	assert.Equal(t, "cri-42", stored.GetJobName())
+	assert.Equal(t, "triage", stored.GetWorkflowName(), "the CR-side workflow name is authoritative")
+	assert.Equal(t, "refs/heads/main", stored.GetWorkflowRef())
+	assert.Equal(t, "tree-digest-abc", stored.GetTreeDigest(), "the tree digest comes from the castle run record")
+	assert.Equal(t, "cri-config@555", stored.GetProjectConfigmapChecksum(), "the KB-103 config pin is recorded as name@rv")
+	assert.Empty(t, stored.GetBindingConfigmapChecksum(), "bindings are pinned digests, not configmaps — the gap stays empty, not invented")
+	assert.Equal(t, "Failed", stored.GetFinalPhase())
+	assert.Equal(t, "test-1.2.3", stored.GetOperatorVersion())
+	assert.Equal(t, "runner exited 1", stored.GetFailureReason(), "a failed run's verdict reason is the failure_reason")
+	assert.Equal(t, castle.TerminalCleanupDeferred, stored.GetTerminalCleanup(), "the TerminalCleanup-True condition mirrors deferred")
+
+	// Steps: the visited-step summary in stream order with outcomes.
+	require.Len(t, stored.GetSteps(), 2)
+	assert.Equal(t, "compile", stored.GetSteps()[0].GetName())
+	assert.Equal(t, "ok", stored.GetSteps()[0].GetOutcome())
+	assert.Equal(t, "unit-tests", stored.GetSteps()[1].GetName())
+	assert.Equal(t, "failed", stored.GetSteps()[1].GetOutcome())
+
+	// Conditions: the run's own conditions survive (including non-True
+	// ones), the gate's bookkeeping condition is excluded, and the workflow
+	// verdict ride-along is present.
+	var byType = map[string]*castlev1.ArchiveCondition{}
+	for _, cond := range stored.GetConditions() {
+		byType[cond.GetType()] = cond
+	}
+	assert.NotContains(t, byType, criteriav1.ConditionTerminalArchivePending, "gate bookkeeping is not run evidence")
+	require.Contains(t, byType, controller.ConditionTerminalCleanup)
+	assert.Equal(t, "True", byType[controller.ConditionTerminalCleanup].GetStatus())
+	require.Contains(t, byType, controller.ConditionBaseImageMismatch)
+	assert.Equal(t, "False", byType[controller.ConditionBaseImageMismatch].GetStatus())
+	require.Contains(t, byType, "FinalState", "the workflow verdict is carried in the conditions list")
+	assert.Equal(t, "failed", byType["FinalState"].GetReason())
+	assert.Equal(t, "workflow final state: failed", byType["FinalState"].GetMessage())
+
+	// Timestamps and counts.
+	assert.Equal(t, castle.RFC3339ArchiveTime(start), stored.GetStartedAt())
+	assert.Equal(t, castle.RFC3339ArchiveTime(end), stored.GetEndedAt())
+	assert.Equal(t, int32(0), stored.GetRestarts(), "no pods recorded restarts")
+	assert.Equal(t, int32(0), stored.GetBackoffEvictions(), "nothing counts evictions today")
+}
+
+// The workflow verdict rides the record conditions from status.finalState
+// (the authoritative carrier, KB-23); the castle terminal envelope backs it
+// up only when the CR field is empty, and neither source invents one.
+//
+// Subtlety the tests pin down: a fresh castle terminal observation re-stamps
+// status.finalState from the envelope in the SAME pass it archives (the
+// poller's KB-23 write), so an envelope verdict legitimately overrides a
+// stale CR verdict when both are visible; a run archived without the
+// envelope (castle silent, backfill of a pre-KB-23 stamped verdict) keeps
+// its CR-side verdict.
+func TestTerminalGateRecordVerdictSources(t *testing.T) {
+	for name, tc := range map[string]struct {
+		crVerdict       string
+		terminal        *castle.Terminal
+		wantReason      string
+		wantNoCondition bool
+	}{
+		"envelope stamp overrides a stale CR verdict in the terminal pass": {crVerdict: "need_assistance", terminal: &castle.Terminal{Success: true, FinalState: "handler_complete"}, wantReason: "handler_complete"},
+		"CR verdict survives when no envelope final state is visible":      {crVerdict: "need_assistance", wantReason: "need_assistance"},
+		"envelope verdict backs up empty CR":                               {terminal: &castle.Terminal{Success: true, FinalState: "handler_complete"}, wantReason: "handler_complete"},
+		"both empty invent no verdict":                                     {wantNoCondition: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := terminalArchivableRun("cri-42", "cr-uid-11", "Succeeded", "castle-run-1")
+			run.Status.FinalState = tc.crVerdict
+			job := terminalRunnerJob("cri-42")
+			harness := newGateHarness(t, run, job)
+			harness.castle.observation = &castle.Observation{RunID: "castle-run-1", Terminal: tc.terminal}
+
+			_, err := harness.reconcile(t, run)
+			require.NoError(t, err)
+
+			stored := archiverRecord(t, harness.archiver, "castle-run-1")
+			require.NotNil(t, stored)
+			byType := map[string]*castlev1.ArchiveCondition{}
+			for _, cond := range stored.GetConditions() {
+				byType[cond.GetType()] = cond
+			}
+			if tc.wantNoCondition {
+				assert.NotContains(t, byType, "FinalState")
+				assert.Empty(t, stored.GetFailureReason(), "a succeeded run carries no failure reason")
+				return
+			}
+			require.Contains(t, byType, "FinalState")
+			assert.Equal(t, tc.wantReason, byType["FinalState"].GetReason())
+		})
+	}
+}
+
+func archiverRecord(t *testing.T, archiver *fakeArchiver, key string) *castlev1.ArchiveRecord {
+	t.Helper()
+	archiver.calls.Lock()
+	defer archiver.calls.Unlock()
+	return archiver.calls.records[key]
+}
+
 // When the archive write leg fails, the pass requeues (returned error) with
 // TerminalArchivePending stamped, and NOTHING is reaped: the job — and the
 // evidence — survives until the archive lands. A later pass with a healthy
@@ -433,6 +577,90 @@ func TestBackfillRunArchivesCountsLegFailure(t *testing.T) {
 	missing, err := controller.CountMissingRunArchives(context.Background(), cl, "default")
 	require.NoError(t, err)
 	assert.Equal(t, 2, missing, "coverage stays short; the caller must exit non-zero")
+}
+
+// twoPageLister forces the BackfillRunArchives walk through the
+// client.Continue paging path: the first CriteriaRunList response carries
+// only page1 with a continue token, the second delivers page2 with the
+// token cleared. Non-CriteriaRun lists (the child Job reap, coverage
+// counts) delegate to the embedded client.
+type twoPageLister struct {
+	client.Client
+	page2 []criteriav1.CriteriaRun
+	calls int
+}
+
+func (c *twoPageLister) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	crl, ok := list.(*criteriav1.CriteriaRunList)
+	if !ok {
+		return c.Client.List(ctx, list, opts...)
+	}
+	c.calls++
+	if c.calls > 2 {
+		return fmt.Errorf("unexpected third page fetch: the walk must stop when the continue token clears")
+	}
+	if c.calls == 1 {
+		var all criteriav1.CriteriaRunList
+		if err := c.Client.List(ctx, &all, optsWithoutContinue(opts)...); err != nil {
+			return err
+		}
+		c.page2 = all.Items[1:]
+		crl.Items = all.Items[:1]
+		crl.ListMeta.Continue = "cursor-2"
+		return nil
+	}
+	crl.Items = c.page2
+	crl.ListMeta.Continue = ""
+	return nil
+}
+
+func optsWithoutContinue(opts []client.ListOption) []client.ListOption {
+	kept := opts[:0]
+	for _, opt := range opts {
+		if opt == client.Continue("") {
+			// The walk passes Continue("") on the first call; the fake
+			// lister never honors continue tokens, so drop it.
+			continue
+		}
+		kept = append(kept, opt)
+	}
+	return kept
+}
+
+// The 435-CR backfill rides k8s list paging: runs from every page are
+// archived, the continue token drives (and clears) the walk, and the
+// coverage count converges to zero.
+func TestBackfillWalksAllListPages(t *testing.T) {
+	stamped := func(name, uid string) *criteriav1.CriteriaRun {
+		run := terminalArchivableRun(name, uid, "Failed", "")
+		run.Status.ArchiveID = castle.RunArchiveID(castle.CRUIDArchiveKey(uid))
+		return run
+	}
+	page1Run := terminalArchivableRun("cri-40", "cr-uid-40", "Succeeded", "castle-run-40")
+	page2Run := terminalArchivableRun("cri-41", "cr-uid-41", "Failed", "")
+
+	base := newSchemeAndClient(t, stamped("cri-42", "cr-uid-42"), page1Run, page2Run)
+	lister := &twoPageLister{Client: base}
+	archiver := newFakeArchiver()
+
+	res, err := controller.BackfillRunArchives(context.Background(), lister, archiver, nil, "default", "test-1.2.3", logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 2, lister.calls, "the walk stops when the page-2 continue token clears")
+	assert.Equal(t, 3, res.TerminalRuns, "terminal runs are counted across every page")
+	assert.Equal(t, 1, res.AlreadyArchived)
+	assert.Equal(t, 2, res.Archived, "page-2 runs are archived like page-1 ones")
+	assert.Equal(t, 0, res.Failed)
+
+	require.NotNil(t, archiver.record(castle.CRUIDArchiveKey("cr-uid-41")), "the second-page run's record landed")
+	require.NotNil(t, archiver.record("castle-run-40"))
+
+	var archived41 criteriav1.CriteriaRun
+	require.NoError(t, lister.Get(context.Background(), client.ObjectKeyFromObject(page2Run), &archived41))
+	assert.NotEmpty(t, archived41.Status.ArchiveID, "the second-page run is status-stamped")
+
+	missing, err := controller.CountMissingRunArchives(context.Background(), base, "default")
+	require.NoError(t, err)
+	assert.Equal(t, 0, missing, "coverage converges after the paged walk")
 }
 
 var (

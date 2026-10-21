@@ -351,11 +351,17 @@ func getBool(key string, fallback bool) bool {
 // coverage: it exits non-zero when any terminal run remains unarchived, so
 // the caller (a Job over the operator image, an engineer's exec) re-runs
 // it — archive stamps make re-runs skip completed work.
+// newBackfillKubeClient is the kube client constructor the backfill mode
+// uses; tests replace it to inject a fake client.
+var newBackfillKubeClient = func(cfg *rest.Config, scheme *runtime.Scheme) (client.Client, error) {
+	return client.New(cfg, client.Options{Scheme: scheme})
+}
+
 func runArchiveBackfill(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme, archiver castle.RunArchiver, addr, token, namespace, operatorVersion string, logger logr.Logger) error {
 	if archiver == nil || archiver.Disabled() {
 		return fmt.Errorf("run-archive backfill requires --castle-addr and CASTLE_TOKEN: archiving nothing and exiting clean would falsely claim coverage")
 	}
-	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	directClient, err := newBackfillKubeClient(cfg, scheme)
 	if err != nil {
 		return fmt.Errorf("building the backfill client: %w", err)
 	}

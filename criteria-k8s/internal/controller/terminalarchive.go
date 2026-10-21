@@ -134,7 +134,10 @@ func (r *CriteriaRunReconciler) buildTerminalArchiveRecord(ctx context.Context, 
 		workflowRef = run.Spec.WorkflowSource.Ref
 	}
 	if obs.RunRecord != nil {
-		if obs.RunRecord.WorkflowName != "" {
+		// The CR spec is authoritative for what the operator resolved;
+		// castle's run record only fills gaps (and is the sole source of
+		// the tree digest, which has no CR-side field at all).
+		if workflowName == "" && obs.RunRecord.WorkflowName != "" {
 			workflowName = obs.RunRecord.WorkflowName
 		}
 		treeDigest = obs.RunRecord.WorkflowHash
