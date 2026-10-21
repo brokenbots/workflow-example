@@ -755,7 +755,7 @@ data:
             "apiVersion": "criteria.brokenbots.dev/v1",
             "kind": "WorkflowInterface",
             "workflow": "harness_composition_v1",
-            "description": "Harness composition canary (copilot+shell parallel composition). Mounts and secret lanes mirror the shipped harness-composition-url binding.",
+            "description": "Harness composition canary (copilot+shell parallel composition). Mounts mirror the shipped harness-composition-url binding; declares no secret lanes.",
             "adapters": [
               "copilot",
               "shell"
@@ -777,9 +777,7 @@ data:
                 "kind": "tmp"
               }
             ],
-            "secretEnv": [
-              "WORKFLOW_GITHUB_TOKEN"
-            ],
+            "secretEnv": [],
             "env": [],
             "configSlots": []
           }
@@ -903,7 +901,7 @@ data:
             "apiVersion": "criteria.brokenbots.dev/v1",
             "kind": "WorkflowInterface",
             "workflow": "harness_fleet_smoke_v1",
-            "description": "Harness fleet-smoke canary (shell-only fleet sweep). Mounts and secret lanes mirror the shipped harness-fleet-smoke-url binding.",
+            "description": "Harness fleet-smoke canary (shell-only fleet sweep). Mounts mirror the shipped harness-fleet-smoke-url binding; declares no secret lanes.",
             "adapters": [
               "shell"
             ],
@@ -924,9 +922,7 @@ data:
                 "kind": "tmp"
               }
             ],
-            "secretEnv": [
-              "WORKFLOW_GITHUB_TOKEN"
-            ],
+            "secretEnv": [],
             "env": [],
             "configSlots": []
           }

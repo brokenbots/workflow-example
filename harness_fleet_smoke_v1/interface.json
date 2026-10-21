@@ -2,10 +2,10 @@
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "WorkflowInterface",
   "workflow": "harness_fleet_smoke_v1",
-  "description": "Harness fleet-smoke canary (shell-only fleet sweep). Mounts and secret lanes mirror the shipped harness-fleet-smoke-url binding.",
+  "description": "Harness fleet-smoke canary (shell-only fleet sweep). Mounts mirror the shipped harness-fleet-smoke-url binding; declares no secret lanes.",
   "adapters": ["shell"],
   "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
-  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "secretEnv": [],
   "env": [],
   "configSlots": []
 }

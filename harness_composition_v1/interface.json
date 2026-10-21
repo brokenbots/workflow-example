@@ -2,10 +2,10 @@
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "WorkflowInterface",
   "workflow": "harness_composition_v1",
-  "description": "Harness composition canary (copilot+shell parallel composition). Mounts and secret lanes mirror the shipped harness-composition-url binding.",
+  "description": "Harness composition canary (copilot+shell parallel composition). Mounts mirror the shipped harness-composition-url binding; declares no secret lanes.",
   "adapters": ["copilot","shell"],
   "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
-  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "secretEnv": [],
   "env": [],
   "configSlots": []
 }
