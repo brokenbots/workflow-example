@@ -242,8 +242,15 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// KB-310: a run carrying a stamped workflow interface validates its
 	// project binding against the tree's declared contract — required
 	// adapter kinds, mount paths, secret env lanes, env names — before any
-	// job creation or admission slot is taken. A mismatch refuses the run
-	// with the gap named; failure messages name both sides.
+	// job creation or admission slot is taken. A url workflow authored
+	// without a stamped interface is refused closed first: there is no
+	// declaration the binding could be validated against, and skipping the
+	// gate would fall through to the baked-image path with an unstated
+	// binding. A mismatch refuses the run with the gap named; failure
+	// messages name both sides.
+	if message, gap := interfaceBindingGap(&run); gap {
+		return r.refuseInterfaceBindingMismatch(ctx, &run, message, logger)
+	}
 	if interfaceBindingApplies(&run) {
 		if err := validateInterfaceBinding(&run); err != nil {
 			return r.refuseInterfaceBindingMismatch(ctx, &run, err.Error(), logger)

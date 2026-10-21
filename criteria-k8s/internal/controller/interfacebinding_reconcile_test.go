@@ -137,6 +137,70 @@ func TestReconcileRefusesInterfaceBindingMismatch(t *testing.T) {
 	}
 }
 
+// TestReconcileRefusesUrlWorkflowWithoutStampedInterface drives the
+// fail-open fix (KB-310): a url CR authored directly against the API with
+// no stamped interface is refused closed at admission — nothing Job-wise,
+// no manifest, and the refusal names the binding and the addressed tree.
+func TestReconcileRefusesUrlWorkflowWithoutStampedInterface(t *testing.T) {
+	r, run, recorder, cl := interfaceBindingFixture(t, func(spec *criteriav1.CriteriaRunSpec) {
+		spec.Workflow.Interface = nil
+	})
+	ctx := context.Background()
+
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var refused criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(run), &refused))
+	assert.Equal(t, criteriav1.PhaseFailed, refused.Status.Phase)
+	cond := condByType(t, refused, criteriav1.ConditionInterfaceBindingMismatch)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	for _, want := range []string{"no stamped interface", "kanboard_develop_v1", "criteria-develop", "KB-310"} {
+		assert.Contains(t, cond.Message, want, "the refusal names the gap and both sides")
+	}
+	assert.Empty(t, jobNamesForRun(t, cl, "cri-310"), "no Job may be created for the refused run")
+	assert.Nil(t, refused.Status.LaunchManifest, "a refused run stamps no launch manifest")
+
+	select {
+	case ev := <-recorder.Events:
+		assert.Contains(t, ev, "Warning")
+		assert.Contains(t, ev, "InterfaceBindingMismatch")
+		assert.Contains(t, ev, "no stamped interface")
+	default:
+		t.Fatal("expected an interface-binding-mismatch refusal event")
+	}
+}
+
+// TestReconcileImageWorkflowWithoutInterfaceKeepsCarveout pins the other
+// arm of the fail-open fix (KB-310): a type=image run with a nil interface
+// remains the pre-KB-310 carve-out and reconciles exactly as before — no
+// refusal condition, no interface validation, and no launch manifest.
+func TestReconcileImageWorkflowWithoutInterfaceKeepsCarveout(t *testing.T) {
+	r, run, _, cl := interfaceBindingFixture(t, func(spec *criteriav1.CriteriaRunSpec) {
+		spec.Workflow.Interface = nil
+		spec.Workflow.Type = "image"
+		spec.Workflow.Image = "localhost:5000/criteria:dev"
+		spec.Workflow.URL = ""
+		spec.Workflow.Ref = ""
+	})
+	ctx := context.Background()
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, jobNamesForRun(t, cl, "cri-310"),
+		"the carved-out image-mode run admits without an interface")
+	var admitted criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(run), &admitted))
+	assert.Nil(t, admitted.Status.LaunchManifest,
+		"runs without a stamped interface carry no launch manifest")
+	for _, c := range admitted.Status.Conditions {
+		assert.NotEqual(t, criteriav1.ConditionInterfaceBindingMismatch, c.Type,
+			"no interface-binding refusal on the carved-out image-mode arm")
+	}
+}
+
 // TestReconcileStampsLaunchManifest admits a satisfying binding and records
 // the launch manifest on the run status: workflow ref+digest, interface and
 // binding checksums, operator version, resolved lanes.

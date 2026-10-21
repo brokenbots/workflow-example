@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 )
 
 func discardLogger() logr.Logger { return logr.Discard() }
@@ -159,15 +160,57 @@ func testRun() *criteriav1.CriteriaRun {
 func TestInterfaceBindingApplies(t *testing.T) {
 	assert.False(t, interfaceBindingApplies(&criteriav1.CriteriaRun{}),
 		"a workflow-less run keeps the legacy image-mode path")
-	wfless := testRun()
-	wfless.Spec.Workflow.Interface = nil
-	assert.False(t, interfaceBindingApplies(wfless),
-		"a workflow without a stamped interface is the pre-KB-310 legacy carve-out")
+	imageRun := testRun()
+	imageRun.Spec.Workflow.Interface = nil
+	imageRun.Spec.Workflow.Type = routes.TypeImage
+	imageRun.Spec.Workflow.URL = ""
+	assert.False(t, interfaceBindingApplies(imageRun),
+		"interface-nil type=image stays the pre-KB-310 image-mode carve-out")
+	urlNil := testRun()
+	urlNil.Spec.Workflow.Interface = nil
+	assert.False(t, interfaceBindingApplies(urlNil),
+		"an interface-nil url workflow never enters validateInterfaceBinding — interfaceBindingGap must refuse it first")
 	assert.True(t, interfaceBindingApplies(func() *criteriav1.CriteriaRun {
 		run := testRun()
 		run.Spec.Workflow.Interface = testInterface()
 		return run
 	}()), "a workflow with a stamped interface is admissible under the gate")
+}
+
+// TestInterfaceBindingGap drives the fail-open fix (KB-310): a url CR
+// authored directly against the API with no stamped interface carries a
+// named gap admission refuses closed — only type=image legitimately skips
+// validation, and a stamped interface or no workflow is no gap at all.
+func TestInterfaceBindingGap(t *testing.T) {
+	urlNil := testRun()
+	urlNil.Spec.Workflow.Interface = nil
+	message, gap := interfaceBindingGap(urlNil)
+	require.True(t, gap, "an interface-nil url workflow is the fail-open hole; admission must refuse it")
+	for _, want := range []string{
+		"no stamped interface",
+		"criteria-develop",
+		"kanboard_develop_v1",
+		"url git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1",
+		"refused before job creation",
+		"KB-310",
+	} {
+		assert.Contains(t, message, want, "the gap message names the binding, the addressed tree, and the failure mode")
+	}
+
+	imageNil := testRun()
+	imageNil.Spec.Workflow.Interface = nil
+	imageNil.Spec.Workflow.Type = routes.TypeImage
+	imageNil.Spec.Workflow.URL = ""
+	_, gap = interfaceBindingGap(imageNil)
+	assert.False(t, gap, "interface-nil type=image is the pre-KB-310 carve-out, not a gap")
+
+	stamped := testRun()
+	stamped.Spec.Workflow.Interface = testInterface()
+	_, gap = interfaceBindingGap(stamped)
+	assert.False(t, gap, "a stamped interface is the validation arm, not a gap")
+
+	_, gap = interfaceBindingGap(&criteriav1.CriteriaRun{})
+	assert.False(t, gap, "a workflow-less run keeps the legacy path")
 }
 
 func TestValidateInterfaceBinding(t *testing.T) {

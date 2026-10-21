@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -28,16 +29,51 @@ import (
 	logr "github.com/go-logr/logr"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 )
 
+// routesWorkflowTreeRe extracts the tree segment a url-mode workflow url
+// addresses (the same .git//<tree> segment the routes CM url carries, so a
+// refusal names the tree even when the run is missing its interface — the
+// declared workflow is nil there).
+var routesWorkflowTreeRe = regexp.MustCompile(`\.git//([A-Za-z0-9_-]+)`)
+
 // interfaceBindingApplies reports whether admission must validate the
-// run's binding against its stamped interface (KB-310). Runs without a
-// stamped workflow and workflows without a stamped interface — the
-// pre-KB-310 image-mode path and any binding authored before interfaces
-// exist — are the legacy carve-out and skip validation entirely.
+// run's project binding against its stamped interface (KB-310): any
+// workflow that carries an interface. The interface-less carve-out is
+// narrowed to the pre-KB-310 image-mode path (interface-nil type=image
+// runs: no tree contract exists to validate against, and KB-280 F36 keeps
+// image mode declared-secret-free). A type=url workflow with a nil
+// interface is NOT carved out — interfaceBindingGap refuses it closed
+// first, so a binding authored directly against the API rather than
+// through the routes watcher cannot skip validation and silently fall
+// through to the baked-image path.
 func interfaceBindingApplies(run *criteriav1.CriteriaRun) bool {
 	wf := run.Spec.Workflow
 	return wf != nil && wf.Interface != nil
+}
+
+// interfaceBindingGap reports whether a run must be refused because it
+// declares a workflow type that requires a machine-readable interface yet
+// carries none (KB-310, fail closed): there is no tree declaration for its
+// project binding, and skipping validation would re-create the fail-open
+// unknown-slot path — an unstated binding falls through to the baked-image
+// path validated by nothing. Interface-less url workflows are rejected by
+// the routes CM parse (routes.validateWorkflow), so a CR reaching
+// admission with this gap bypassed the routes watcher; the refusal names
+// the binding and the tree segment the workflow url addresses. Only
+// type=image with a nil interface skips validation entirely.
+func interfaceBindingGap(run *criteriav1.CriteriaRun) (string, bool) {
+	wf := run.Spec.Workflow
+	if wf == nil || wf.Interface != nil || wf.Type == routes.TypeImage {
+		return "", false
+	}
+	var tree string
+	if m := routesWorkflowTreeRe.FindStringSubmatch(wf.URL); m != nil {
+		tree = m[1]
+	}
+	return fmt.Sprintf("workflow %q is type %q (url %s) but carries no stamped interface: admission cannot validate the binding against a tree declaration the run does not have, addressed tree %q, so the run is refused before job creation instead of falling through to the baked-image path with an unstated binding; stamp the tree's interface.json onto spec.workflow.interface and re-fire (KB-310)",
+		wf.Name, wf.Type, wf.URL, tree), true
 }
 
 // validateInterfaceBinding compares a run's project binding (spec.workflow:
@@ -237,8 +273,14 @@ func listOrNone(names []string) string {
 // queue; the project CM or the tree must change before a re-fire admits.
 func (r *CriteriaRunReconciler) refuseInterfaceBindingMismatch(ctx context.Context, run *criteriav1.CriteriaRun, message string, logger logr.Logger) (ctrl.Result, error) {
 	wf := run.Spec.Workflow
-	logger.Info("refusing to admit CriteriaRun: binding does not satisfy the workflow interface (KB-310)",
-		"workflow", wf.Name, "tree", wf.Interface.Workflow, "ticket", run.Spec.TicketID, "mismatch", message)
+	// The tree exists on mismatched-interface refusals; the interface-less
+	// gap refusal (interfaceBindingGap) has nil, so it omits the field
+	// rather than nil-deref — the gap message carries the addressed tree.
+	attrs := []any{"workflow", wf.Name, "ticket", run.Spec.TicketID, "mismatch", message}
+	if wf.Interface != nil {
+		attrs = append(attrs, "tree", wf.Interface.Workflow)
+	}
+	logger.Info("refusing to admit CriteriaRun: binding does not satisfy the workflow interface (KB-310)", attrs...)
 	update := run.DeepCopy()
 	update.Status.Phase = criteriav1.PhaseFailed
 	upsertCondition(update, metav1.Condition{
