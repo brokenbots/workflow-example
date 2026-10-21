@@ -504,8 +504,8 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 	if wf.Class != ClassTriage {
 		t.Errorf("cleanup workflow class = %q, want %q (CRI-242 read-only admission)", wf.Class, ClassTriage)
 	}
-	if len(wf.Volumes) != 3 || len(wf.Secrets) != 2 {
-		t.Errorf("ticket-cleanup-url = %+v, want 3 volumes and 2 secrets (linear-api-key + github-tokens: the entrypoint requires WORKFLOW_GITHUB_TOKEN)", wf)
+	if len(wf.Volumes) != 2 || len(wf.Secrets) != 2 {
+		t.Errorf("ticket-cleanup-url = %+v, want 2 volumes (data + repo — scratch is not declared by the tree interface, KB-310) and 2 secrets (linear-api-key + the github-tokens CSI mount: the entrypoint's repo-clone requires the token surface, the cleanup pass itself does not consume its env)", wf)
 	}
 	for _, s := range wf.Secrets {
 		if s.Name == "linear-api-key" && s.MountPath != "/home/criteria/linear-secrets" {
@@ -1009,30 +1009,30 @@ func TestValidateWorkflowInterfaceShape(t *testing.T) {
 		}
 	}
 	for label, mutate := range map[string]func(*WorkflowInterface){
-		"apiVersion":    func(i *WorkflowInterface) { i.APIVersion = "v9" },
-		"kind":          func(i *WorkflowInterface) { i.Kind = "Workflow" },
-		"empty tree":    func(i *WorkflowInterface) { i.Workflow = "" },
-		"bad tree":      func(i *WorkflowInterface) { i.Workflow = "1bad name" },
+		"apiVersion": func(i *WorkflowInterface) { i.APIVersion = "v9" },
+		"kind":       func(i *WorkflowInterface) { i.Kind = "Workflow" },
+		"empty tree": func(i *WorkflowInterface) { i.Workflow = "" },
+		"bad tree":   func(i *WorkflowInterface) { i.Workflow = "1bad name" },
 		// KB-310 finding 5: the name grammar is one definition across the
 		// go/js/shell/schema copies — the previously-divergent inputs
 		// (leading digit, dot) must reject here too.
 		"leading digit tree": func(i *WorkflowInterface) { i.Workflow = "0valid_name" },
 		"dotted tree":        func(i *WorkflowInterface) { i.Workflow = "valid.dotted" },
-		"bad adapter":   func(i *WorkflowInterface) { i.Adapters = []string{"sh ll"} },
-		"dup adapter":   func(i *WorkflowInterface) { i.Adapters = []string{"shell", "shell"} },
-		"relative path": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "workspace" },
+		"bad adapter":        func(i *WorkflowInterface) { i.Adapters = []string{"sh ll"} },
+		"dup adapter":        func(i *WorkflowInterface) { i.Adapters = []string{"shell", "shell"} },
+		"relative path":      func(i *WorkflowInterface) { i.Mounts[0].MountPath = "workspace" },
 		// KB-310: byte-exact mount paths — interface_validate.mjs rejects
 		// a trailing slash and the routes validator must agree with it.
 		"trailing slash": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/home/criteria/workspace/" },
 		// KB-310 finding 5: single-segment "/a" has no parent container
 		// path — `^/.+[^/]$` demands two segments, so both must reject.
 		"single-segment path": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/a" },
-		"bad kind":       func(i *WorkflowInterface) { i.Mounts[0].Kind = "hostPath" },
-		"dup mount":      func(i *WorkflowInterface) { i.Mounts = append(i.Mounts, i.Mounts[0]) },
-		"lower env":      func(i *WorkflowInterface) { i.SecretEnv = []string{"workflow_token"} },
-		"dup env":        func(i *WorkflowInterface) { i.Env = []string{"A", "A"} },
-		"dup secret":     func(i *WorkflowInterface) { i.SecretEnv = []string{"A", "A"} },
-		"bad slot":       func(i *WorkflowInterface) { i.ConfigSlots[0].Slot = "CiGateCmd" },
+		"bad kind":            func(i *WorkflowInterface) { i.Mounts[0].Kind = "hostPath" },
+		"dup mount":           func(i *WorkflowInterface) { i.Mounts = append(i.Mounts, i.Mounts[0]) },
+		"lower env":           func(i *WorkflowInterface) { i.SecretEnv = []string{"workflow_token"} },
+		"dup env":             func(i *WorkflowInterface) { i.Env = []string{"A", "A"} },
+		"dup secret":          func(i *WorkflowInterface) { i.SecretEnv = []string{"A", "A"} },
+		"bad slot":            func(i *WorkflowInterface) { i.ConfigSlots[0].Slot = "CiGateCmd" },
 		"dup slot": func(i *WorkflowInterface) {
 			i.ConfigSlots = append(i.ConfigSlots, i.ConfigSlots[0])
 		},
