@@ -97,7 +97,22 @@ func (r *CriteriaRunReconciler) applyStallWatchdog(run *criteriav1.CriteriaRun, 
 // shepherd (arc_shepherd_v1). Castle records no terminal for such a run
 // (the engine is gone), so the controller also stops polling castle for a
 // terminal on it (stallWatchdogFired).
-func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (ctrl.Result, error) {
+func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, obs *castle.Observation, logger logr.Logger) (ctrl.Result, error) {
+	// The failed phase and watchdog condition persist before anything is
+	// deleted (the archive gate below builds its record from `update`, and
+	// the gate's own stamps take a fresh re-read, so the writes cannot
+	// collide on resourceVersion).
+	if err := r.Status().Update(ctx, update); err != nil {
+		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on step-progress stall: %w", err)
+	}
+	// KB-314: the run is terminal — its castle archive record lands BEFORE
+	// the runner evidence (child Jobs and their pods) is destroyed. A failed
+	// archive fails this pass with the TerminalArchivePending condition;
+	// the persisted failed status then waits, unarchived, like any other
+	// terminal run and the next pass archives through the terminal branch.
+	if err := r.ensureTerminalArchived(ctx, update, obs, logger); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -107,9 +122,6 @@ func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteri
 		if err := r.deleteRunAdapterPods(ctx, run, logger); err != nil {
 			return ctrl.Result{}, err
 		}
-	}
-	if err := r.Status().Update(ctx, update); err != nil {
-		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on step-progress stall: %w", err)
 	}
 	// Release the queue slot so the next queued run is admitted (CRI-291:
 	// it is picked up by its own requeue, not a nested reconcile).

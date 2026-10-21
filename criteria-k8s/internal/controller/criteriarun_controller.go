@@ -78,6 +78,16 @@ type CriteriaRunReconciler struct {
 	// expiry names the observed pod phase (KB-70 PodStateProbe). Nil or
 	// disabled turns the feed off.
 	PodState *castle.PodStateFeed
+	// RunArchiver stores terminal run records in castle's run archive
+	// (KB-314): the terminal gate archives before child-job reaping and
+	// finalizer removal, stamps the archive id into status, and requeues
+	// with the TerminalArchivePending condition while the record is not
+	// stored. Nil or disabled leaves the archive leg off.
+	RunArchiver castle.RunArchiver
+	// OperatorVersion is the archive record's operator_version provenance
+	// (the running operator's version). Empty resolution falls to a "dev"
+	// fallback in the record builder.
+	OperatorVersion string
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -120,16 +130,60 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if isTerminalPhase(run.Status.Phase) {
 		r.Queue.Release(&run)
 
+		// The KB-314 archive gate wants the freshest terminal state BEFORE
+		// any local evidence is reaped, so the castle re-derivation moved
+		// ahead of the child-job cleanup (both used to sit after it): the
+		// re-derived outcome feeds the archive record (final phase,
+		// failure reason, step summary, timestamps), and the archive gate
+		// below must land its record before the reap deletes anything.
+		update := run.DeepCopy()
+		var obs *castle.Observation
+		if r.Castle == nil || r.Castle.Disabled() {
+			obs = &castle.Observation{}
+		} else {
+			var obsErr error
+			obs, obsErr = r.observeCastle(ctx, &run, update, logger)
+			if obsErr != nil {
+				if errors.Is(obsErr, castle.ErrRunNotFound) {
+					// Conclusive: the runner Job is terminal, so the agent
+					// that registers from the runner pod can never appear
+					// and castle will never record this run (e.g. one that
+					// predates castle's dual-write). The archive gate still
+					// runs — keying falls back to the CR-derived cr-uid
+					// key — but the terminal-completion polling stops
+					// instead of looping on discovery errors every
+					// interval.
+					logger.Info("stopping castle observation for Job-terminal CriteriaRun: the runner agent can no longer register with castle", "error", obsErr)
+					obs = &castle.Observation{}
+				} else {
+					logger.Error(obsErr, "observing castle terminal for Job-terminal CriteriaRun")
+					return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
+				}
+			}
+		}
+		if !statusEqual(&run.Status, &update.Status) {
+			if err := r.Status().Update(ctx, update); err != nil {
+				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
+			}
+		}
+		// Terminal archive gate (KB-314): the run's castle archive record
+		// must exist before anything local is reaped — a failed archive
+		// stamps TerminalArchivePending and aborts the pass (backoff
+		// requeue).
+		if err := r.ensureTerminalArchived(ctx, update, obs, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		// Terminal-cleanup guarantee (KB-275): a run with a terminal resolved
 		// view never keeps child Jobs, on EVERY reconcile pass — the resolved
 		// view is the only source, so a freshly restarted operator (no
 		// in-memory state) enforces it here too. Already-gone Jobs make this
 		// a no-op, idempotent across resyncs. The adapter-pod sweep and the
-		// castle re-derivation below are independent of this cleanup. When
-		// the reap is deferred behind a pending runner restart (KB-302), the
-		// whole cleanup defers — adapters outlive a still-live shim by
-		// design — and the pass requeues on the short reap interval.
-		deferred, err := r.deleteTerminalChildJobs(ctx, &run, logger)
+		// archive gate above are independent of this cleanup. When the reap
+		// is deferred behind a pending runner restart (KB-302), the whole
+		// cleanup defers — adapters outlive a still-live shim by design —
+		// and the pass requeues on the short reap interval.
+		deferred, err := r.deleteTerminalChildJobs(ctx, update, logger)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -141,40 +195,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// deregistered shim forever ("scope ... is not registered" every 2s)
 		// — exactly the loop observed across CRI-130..142 for runs whose
 		// runner job crash-looped to deletion. Delete them on every terminal
-		// pass; the castle re-derivation below is independent of this
-		// cleanup.
-		if run.Spec.PerScopeSessions {
-			if err := r.deleteRunAdapterPods(ctx, &run, logger); err != nil {
+		// pass.
+		if update.Spec.PerScopeSessions {
+			if err := r.deleteRunAdapterPods(ctx, update, logger); err != nil {
 				logger.Error(err, "deleting stale per-scope adapter pods of terminal CriteriaRun")
 				return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
-			}
-		}
-		if r.Castle == nil || r.Castle.Disabled() {
-			return ctrl.Result{}, nil
-		}
-		// Re-derive the terminal outcome from castle on every terminal pass,
-		// even when the marker is already recorded: a stamp from an earlier
-		// operator pod (or from an earlier terminal envelope) can disagree
-		// with the run's final castle outcome, so the recorded phase is
-		// reconciled against the castle run record and run events instead of
-		// being trusted blindly.
-		update := run.DeepCopy()
-		if _, err := r.observeCastle(ctx, &run, update, logger); err != nil {
-			if errors.Is(err, castle.ErrRunNotFound) {
-				// Conclusive: the runner Job is terminal, so the agent that
-				// registers from the runner pod can never appear and castle
-				// will never record a terminal for this run (e.g. a run that
-				// predates castle's dual-write). Stop polling instead of
-				// looping on discovery errors every interval.
-				logger.Info("stopping castle observation for Job-terminal CriteriaRun: the runner agent can no longer register with castle", "error", err)
-				return ctrl.Result{}, nil
-			}
-			logger.Error(err, "observing castle terminal for Job-terminal CriteriaRun")
-			return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
-		}
-		if !statusEqual(&run.Status, &update.Status) {
-			if err := r.Status().Update(ctx, update); err != nil {
-				return ctrl.Result{}, fmt.Errorf("updating terminal status: %w", err)
 			}
 		}
 		// A watchdog-failed run's engine is gone: castle will never record a
@@ -378,7 +403,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// progress is the engine's deliberate choice there, and failing the run
 	// would tear down exactly the pods pause must hold.
 	if obsErr == nil && obs.RunID != "" && !castleRunStatusIdle(obs.RunStatus) && r.applyStallWatchdog(&run, update, obs, logger) {
-		return r.failRunStalled(ctx, &run, update, logger)
+		return r.failRunStalled(ctx, &run, update, obs, logger)
 	}
 
 	if !statusEqual(&run.Status, &update.Status) {
@@ -400,6 +425,16 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// A reap deferred behind a pending runner restart (KB-302) requeues on
 	// the short reap interval here too.
 	if isTerminalPhase(phase) && !provisioned {
+		// KB-314: the terminal archive gate comes before the reap here too —
+		// a Job-watched terminal transition archives its record first (the
+		// pass's observation, when one was derivable, enriches it).
+		var archObs *castle.Observation
+		if obsErr == nil {
+			archObs = obs
+		}
+		if err := r.ensureTerminalArchived(ctx, update, archObs, logger); err != nil {
+			return ctrl.Result{}, err
+		}
 		deferred, err := r.deleteTerminalChildJobs(ctx, &run, logger)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -685,6 +720,17 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 	// can be admitted; it is picked up by its own requeue, not a nested
 	// reconcile (CRI-291).
 	r.Queue.Release(run)
+
+	// KB-314: archive before the run disappears. A CR with a deletion
+	// timestamp and no castle archive record would otherwise be deleted
+	// alongside its evidence — unarchived and unreproducible. When the
+	// archive write leg is down, the gate stamps TerminalArchivePending and
+	// this pass fails WITHOUT removing the finalizer, so the CR (and the
+	// data the record needs) survives until the record lands. Runs already
+	// carrying an archive id pass straight through.
+	if err := r.ensureTerminalArchived(ctx, run, nil, logger); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err
