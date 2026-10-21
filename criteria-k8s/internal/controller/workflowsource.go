@@ -74,6 +74,35 @@ func (r *CriteriaRunReconciler) refuseMissingWorkflowSource(ctx context.Context,
 	message := fmt.Sprintf("workflow %q is type %q but spec.workflowSource is absent: the url contract says the URL is the workflow source, so there is no source to fetch and the run is refused instead of falling back to the baked workflow image; declare spec.workflowSource (or a type=%q workflow) and re-fire (KB-6)", wf.Name, wf.Type, routes.TypeImage)
 	logger.Info("refusing to admit CriteriaRun: url-type workflow without spec.workflowSource",
 		"workflow", wf.Name, "ticket", run.Spec.TicketID)
+	// The failed phase and refusal condition persist before anything is
+	// deleted (KB-314): the run is terminal the moment this write lands, so
+	// its castle archive record must exist BEFORE any pre-gate runner
+	// evidence (the child Jobs and their pods) is destroyed. A failed
+	// archive fails this pass with the TerminalArchivePending condition and
+	// the persisted failed status waits unarchived like any other terminal
+	// run.
+	update := run.DeepCopy()
+	update.Status.Phase = criteriav1.PhaseFailed
+	upsertCondition(update, metav1.Condition{
+		Type:               ConditionWorkflowSourceMissing,
+		Status:             metav1.ConditionTrue,
+		Reason:             ConditionWorkflowSourceMissing,
+		Message:            message,
+		ObservedGeneration: run.Generation,
+	})
+	if err := r.Status().Update(ctx, update); err != nil {
+		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on missing workflowSource: %w", err)
+	}
+	// Release any admission slot the run holds (it never enqueues on the
+	// gate's own pass, but a pre-gate operator may have admitted it) so the
+	// next queued run is admitted; it is picked up by its own requeue, not a
+	// nested reconcile (CRI-291). Releasing before the archive gate keeps a
+	// castle outage from stalling admission, like the pass that lands the
+	// terminal branch above.
+	r.Queue.Release(run)
+	if err := r.ensureTerminalArchived(ctx, update, nil, logger); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -84,25 +113,8 @@ func (r *CriteriaRunReconciler) refuseMissingWorkflowSource(ctx context.Context,
 			return ctrl.Result{}, err
 		}
 	}
-	update := run.DeepCopy()
-	update.Status.Phase = criteriav1.PhaseFailed
-	upsertCondition(update, metav1.Condition{
-		Type:               ConditionWorkflowSourceMissing,
-		Status:             metav1.ConditionTrue,
-		Reason:             ConditionWorkflowSourceMissing,
-		Message:            message,
-		ObservedGeneration: run.Generation,
-	})
 	if r.Recorder != nil {
 		r.Recorder.Event(run, corev1.EventTypeWarning, eventReasonWorkflowSourceMissing, message)
 	}
-	if err := r.Status().Update(ctx, update); err != nil {
-		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on missing workflowSource: %w", err)
-	}
-	// Release any admission slot the run holds (it never enqueues on the
-	// gate's own pass, but a pre-gate operator may have admitted it) so the
-	// next queued run is admitted; it is picked up by its own requeue, not a
-	// nested reconcile (CRI-291).
-	r.Queue.Release(run)
 	return ctrl.Result{}, nil
 }

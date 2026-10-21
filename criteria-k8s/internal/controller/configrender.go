@@ -146,16 +146,12 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 // shepherd (KB-302). Mirrors failBaseImageMismatch.
 func (r *CriteriaRunReconciler) failConfigRenderDrift(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, detail string, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("failing CriteriaRun on config render drift", "criteriarun", run.Name, "detail", detail)
-	if err := r.deleteChildJobs(ctx, run); err != nil {
-		return ctrl.Result{}, err
-	}
-	// Per-scope adapter pods dial the runner's shim; with the runner Job
-	// deleted the shim is going away, so the adapters must not outlive it.
-	if run.Spec.PerScopeSessions {
-		if err := r.deleteRunAdapterPods(ctx, run, logger); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	// The failed phase and drift condition persist before anything is
+	// deleted (KB-314): the run is terminal the moment this write lands, so
+	// its castle archive record must exist BEFORE the runner evidence (the
+	// child Jobs and their pods) is destroyed. A failed archive fails this
+	// pass with the TerminalArchivePending condition and the persisted
+	// failed status waits unarchived like any other terminal run.
 	upsertCondition(update, metav1.Condition{
 		Type:               ConditionConfigRenderDrift,
 		Status:             metav1.ConditionTrue,
@@ -167,8 +163,24 @@ func (r *CriteriaRunReconciler) failConfigRenderDrift(ctx context.Context, run *
 	if err := r.Status().Update(ctx, update); err != nil {
 		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on config render drift: %w", err)
 	}
-	// Release the queue slot so the next queued run is admitted.
+	// Release the queue slot so the next queued run is admitted (CRI-291:
+	// it is picked up by its own requeue, not a nested reconcile). Releasing
+	// before the archive gate keeps a castle outage from stalling admission,
+	// like the pass that lands the terminal branch above.
 	r.Queue.Release(run)
+	if err := r.ensureTerminalArchived(ctx, update, nil, logger); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.deleteChildJobs(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	// Per-scope adapter pods dial the runner's shim; with the runner Job
+	// deleted the shim is going away, so the adapters must not outlive it.
+	if run.Spec.PerScopeSessions {
+		if err := r.deleteRunAdapterPods(ctx, run, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{}, nil
 }
 

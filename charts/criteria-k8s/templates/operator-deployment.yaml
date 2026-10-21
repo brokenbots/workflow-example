@@ -72,10 +72,20 @@ spec:
             # the castle ServerService API instead of the PVC event file.
             # An empty address disables observation entirely. Reads are
             # anonymous against this stack's castle (dev mode runs with
-            # --allow-anon-reads); a pre-shared token can be added by
-            # patching CASTLE_TOKEN into the deployment env.
+            # --allow-anon-reads); the KB-314 run-archive lane additionally
+            # needs the criteria token — castle rejects anonymous archive
+            # writes, so with no token mounted the archive leg stays off
+            # (the operator logs this loudly at startup) and observation
+            # continues anonymously.
             - name: CASTLE_ADDR
               value: {{ .Values.operator.castleAddr | quote }}
+            {{- if .Values.operator.castleTokenSpc }}
+            # KB-314: the token file from the OpenBao CSI mount
+            # (operator.castleTokenSpc). CRI-250 keeps credential material
+            # out of env values — the chart delivers it as a mounted file.
+            - name: CASTLE_TOKEN_FILE
+              value: {{ printf "/var/run/secrets/criteria/castle/%s" .Values.openbao.castleTokenKey | quote }}
+            {{- end }}
             # Node arch for child Job/pod templates (runner + per-scope
             # adapters): a cluster property, not per-workflow state. Set
             # operator.jobArch=arm64 on an arm64 cluster.
@@ -96,10 +106,23 @@ spec:
             - name: criteria-data
               mountPath: /data
               readOnly: true
+            {{- if .Values.operator.castleTokenSpc }}
+            - name: castle-token
+              mountPath: /var/run/secrets/criteria/castle
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.operator.resources | nindent 12 }}
       volumes:
         - name: criteria-data
           persistentVolumeClaim:
             claimName: {{ .Values.pvc.data.name }}
+        {{- if .Values.operator.castleTokenSpc }}
+        - name: castle-token
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.operator.castleTokenSpc | quote }}
+        {{- end }}
 {{- end }}

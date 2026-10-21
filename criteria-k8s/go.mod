@@ -1,9 +1,10 @@
 module github.com/brokenbots/workflow-example/criteria-k8s
 
-go 1.26.9
+go 1.26.10
 
 require (
 	connectrpc.com/connect v1.21.0
+	github.com/brokenbots/castle/castle v0.0.0-20261020234026-80e08c432051
 	github.com/brokenbots/criteria/sdk v0.0.0-20261012210349-0ce237de2084
 	github.com/go-logr/logr v1.4.1
 	github.com/stretchr/testify v1.9.0
@@ -34,7 +35,7 @@ require (
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
-	github.com/google/uuid v1.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/imdario/mergo v0.3.6 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -52,7 +53,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
-	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
+	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/oauth2 v0.12.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect

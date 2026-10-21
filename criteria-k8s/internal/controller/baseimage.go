@@ -140,6 +140,26 @@ func runnerImageMismatch(status *criteriav1.CriteriaRunStatus, runnerJob *batchv
 // the operator then resolves.
 func (r *CriteriaRunReconciler) failBaseImageMismatch(ctx context.Context, run *criteriav1.CriteriaRun, pinned, current string, logger logr.Logger) (ctrl.Result, error) {
 	logger.Info("failing CriteriaRun on runner-image mismatch", "pinned", pinned, "current", current)
+	// The failed phase and mismatch condition persist before anything is
+	// deleted (KB-314): the run is terminal the moment this write lands, so
+	// its castle archive record must exist BEFORE the runner evidence (the
+	// child Jobs and their pods) is destroyed. A failed archive fails this
+	// pass with the TerminalArchivePending condition and the persisted
+	// failed status waits unarchived like any other terminal run.
+	update := run.DeepCopy()
+	update.Status.Phase = criteriav1.PhaseFailed
+	markBaseImageMismatch(update, run.Generation, pinned, current)
+	if err := r.Status().Update(ctx, update); err != nil {
+		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on base-image mismatch: %w", err)
+	}
+	// Release the queue slot so the next queued run is admitted (CRI-291: it
+	// is picked up by its own requeue, not a nested reconcile). Releasing
+	// before the archive gate keeps a castle outage from stalling admission,
+	// like the pass that lands the terminal branch above.
+	r.Queue.Release(run)
+	if err := r.ensureTerminalArchived(ctx, update, nil, logger); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,15 +170,6 @@ func (r *CriteriaRunReconciler) failBaseImageMismatch(ctx context.Context, run *
 			return ctrl.Result{}, err
 		}
 	}
-	update := run.DeepCopy()
-	update.Status.Phase = criteriav1.PhaseFailed
-	markBaseImageMismatch(update, run.Generation, pinned, current)
-	if err := r.Status().Update(ctx, update); err != nil {
-		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on base-image mismatch: %w", err)
-	}
-	// Release the queue slot so the next queued run is admitted (CRI-291: it
-	// is picked up by its own requeue, not a nested reconcile).
-	r.Queue.Release(run)
 	return ctrl.Result{}, nil
 }
 

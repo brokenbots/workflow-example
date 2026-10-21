@@ -1,6 +1,8 @@
 package castle
 
 import (
+	"time"
+
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -105,6 +107,7 @@ func terminalFromEnvelope(env *v1.Envelope) *Terminal {
 		return &Terminal{
 			Success:    completed.GetSuccess(),
 			FinalState: completed.GetFinalState(),
+			At:         envelopeTime(env),
 		}
 	case *v1.Envelope_RunFailed:
 		failed := payload.RunFailed
@@ -114,10 +117,19 @@ func terminalFromEnvelope(env *v1.Envelope) *Terminal {
 		return &Terminal{
 			Success: false,
 			Reason:  failed.GetReason(),
+			At:      envelopeTime(env),
 		}
 	default:
 		return nil
 	}
+}
+
+// envelopeTime converts the envelope's wire timestamp, tolerating nil.
+func envelopeTime(env *v1.Envelope) time.Time {
+	if ts := env.GetTs(); ts != nil {
+		return ts.AsTime()
+	}
+	return time.Time{}
 }
 
 // dataString returns the first non-empty string field among keys in a

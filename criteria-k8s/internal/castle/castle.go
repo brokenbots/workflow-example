@@ -12,17 +12,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"google.golang.org/protobuf/encoding/protojson"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	connect "connectrpc.com/connect"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
-	"time"
 )
 
 // Page budgets for castle reads. Package-level vars (not consts) so tests
@@ -80,6 +82,31 @@ type Terminal struct {
 	FinalState string
 	// Reason is the RunFailed reason, when the run failed.
 	Reason string
+	// At is the terminal event's timestamp: the terminal envelope's wire
+	// time, or the run record's ended_at on the record path. Zero when
+	// neither source carried a timestamp.
+	At time.Time
+}
+
+// StepRecord is one step outcome the castle event stream delivered
+// (Envelope.StepOutcome), in stream order — the archive record's step
+// summary input.
+type StepRecord struct {
+	Name    string
+	Outcome string
+}
+
+// RunRecord carries the castle run record's identity and verdict fields the
+// archive record reuses (GetRun enrichment). nil when the record could not
+// be read (then terminal/step sources are the envelope stream alone and the
+// archive record carries empty workflow fields).
+type RunRecord struct {
+	RunID         string
+	WorkflowName  string
+	WorkflowHash  string
+	FailureReason string
+	StartedAt     time.Time
+	EndedAt       time.Time
 }
 
 // Observation is what one Observe pass consumed for a CriteriaRun.
@@ -119,6 +146,15 @@ type Observation struct {
 	// the per-scope teardown, and both may return to "running" — Resume
 	// re-provisions from the provision-event stream alone.
 	RunStatus string
+	// RunRecord is the run record's identity/verdict enrichment from GetRun
+	// (workflow name, tree digest hash, failure reason, start/end times) —
+	// the archive record's run-attributed fields. nil when the record could
+	// not be read.
+	RunRecord *RunRecord
+	// Steps is the drained step outcome summary (Envelope.StepOutcome
+	// envelopes, stream order, capped at MaxArchiveSteps) — the archive
+	// record's step summary.
+	Steps []StepRecord
 }
 
 // RunSource is the controller-facing observation surface. *Client implements
@@ -150,6 +186,11 @@ type Client struct {
 	// (KB-24): the stall watchdog's baseline. Retained like cursors so a
 	// controller restart's full drain replay recomputes it from history.
 	progress map[string]time.Time
+	// steps tracks the drained step outcomes per run (stream order), the
+	// archive record's step summary; runRecords the GetRun identity
+	// enrichment from the newest observation.
+	steps      map[string][]StepRecord
+	runRecords map[string]*RunRecord
 }
 
 // New builds a castle observation client. A nil httpClient uses
@@ -162,14 +203,16 @@ func New(cfg Config, httpClient *http.Client) *Client {
 		httpClient = &http.Client{Transport: &tokenTransport{base: httpClient.Transport, token: cfg.Token}}
 	}
 	return &Client{
-		addr:      cfg.Addr,
-		runs:      v1connect.NewServerServiceClient(httpClient, cfg.Addr),
-		cursors:   map[string]uint64{},
-		scopes:    map[string]map[string]string{},
-		lifecycle: map[string][]events.LifecycleEvent{},
-		terminals: map[string]*Terminal{},
-		graphs:    map[string][]byte{},
-		progress:  map[string]time.Time{},
+		addr:       cfg.Addr,
+		runs:       v1connect.NewServerServiceClient(httpClient, cfg.Addr),
+		cursors:    map[string]uint64{},
+		scopes:     map[string]map[string]string{},
+		lifecycle:  map[string][]events.LifecycleEvent{},
+		terminals:  map[string]*Terminal{},
+		graphs:     map[string][]byte{},
+		progress:   map[string]time.Time{},
+		steps:      map[string][]StepRecord{},
+		runRecords: map[string]*RunRecord{},
 	}
 }
 
@@ -213,6 +256,7 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	obs.Terminal = terminal
 	obs.LastProgress = lastProgress
 	obs.WorkflowGraphs = c.graphs[runID]
+	obs.Steps = c.drainedSteps(runID)
 
 	// The run record is authoritative for its terminal status and pr_url:
 	// terminal envelopes carry neither, so enrich from GetRun (and fall back
@@ -221,7 +265,9 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	// final_state column, so no ticket/workflow state comes from here; the
 	// envelope path is the only FinalState source. The record's status also
 	// carries the operator pause/stop signals (CRI-208): it is surfaced in
-	// obs.RunStatus whenever the record could be read.
+	// obs.RunStatus whenever the record could be read. The identity fields
+	// (workflow name/hash, failure reason, start/end times) are captured
+	// into the retained RunRecord the archive leg reuses.
 	resp, err := c.runs.GetRun(ctx, connect.NewRequest(&v1.GetRunRequest{RunId: runID}))
 	if err != nil {
 		if terminal == nil {
@@ -230,6 +276,12 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 		// Keep the envelope terminal; the record enrichment is best-effort.
 	} else {
 		obs.RunStatus = resp.Msg.GetStatus()
+		record := runRecordFromGetRun(resp.Msg)
+		if record.RunID == "" {
+			record.RunID = runID
+		}
+		c.runRecords[runID] = record
+		obs.RunRecord = record
 		if t := terminalFromRun(resp.Msg); terminal == nil && t != nil {
 			obs.Terminal = t
 		}
@@ -433,6 +485,15 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 				terminal = t
 				c.terminals[runID] = t
 			}
+			if so := env.GetStepOutcome(); so != nil {
+				// Archive step summary: every delivered step outcome, in
+				// stream order, capped at the archive record's step ceiling
+				// (the ceilings are enforced again at record build).
+				steps := c.steps[runID]
+				if len(steps) < MaxArchiveSteps {
+					c.steps[runID] = append(steps, StepRecord{Name: so.GetStep(), Outcome: so.GetOutcome()})
+				}
+			}
 			if wg := env.GetWorkflowGraphs(); wg != nil {
 				// KB-253: hold the newest compiled-graphs payload (raw
 				// protojson) for the per-scope reconcile's manifest
@@ -468,6 +529,38 @@ func (c *Client) drain(ctx context.Context, runID string) (*Terminal, []events.L
 	out := make([]events.LifecycleEvent, len(history))
 	copy(out, history)
 	return terminal, out, lastProgress, nil
+}
+
+// drainedSteps snapshots the retained per-run step outcomes (stream order).
+func (c *Client) drainedSteps(runID string) []StepRecord {
+	steps := c.steps[runID]
+	out := make([]StepRecord, len(steps))
+	copy(out, steps)
+	return out
+}
+
+// runRecordFromGetRun extracts the identity/verdict fields the archive
+// record reuses from a GetRun response.
+func runRecordFromGetRun(run *v1.Run) *RunRecord {
+	if run == nil {
+		return nil
+	}
+	return &RunRecord{
+		RunID:         run.GetRunId(),
+		WorkflowName:  run.GetWorkflowName(),
+		WorkflowHash:  run.GetWorkflowHash(),
+		FailureReason: run.GetFailureReason(),
+		StartedAt:     timestampOrZero(run.GetStartedAt()),
+		EndedAt:       timestampOrZero(run.GetEndedAt()),
+	}
+}
+
+// timestampOrZero converts a proto timestamp, tolerating nil/zero.
+func timestampOrZero(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil {
+		return time.Time{}
+	}
+	return ts.AsTime()
 }
 
 // progressFromEnvelope reports whether an envelope is a step-progress event
@@ -618,6 +711,7 @@ func terminalFromRun(run *v1.Run) *Terminal {
 	return &Terminal{
 		Success: run.GetStatus() == runStatusSucceeded,
 		Reason:  run.GetFailureReason(),
+		At:      timestampOrZero(run.GetEndedAt()),
 	}
 }
 

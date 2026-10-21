@@ -44,6 +44,16 @@ spec:
             # the castle ServerService API instead of the PVC event file.
             - name: CASTLE_ADDR
               value: http://castle:8080
+            # KB-314 run-archive lane: castle rejects anonymous ArchiveRun
+            # calls, so the token below must resolve for archiving to be
+            # enabled (the secret is provisioned out of band as a boot
+            # prerequisite — with the address set and no token, the pod
+            # fails CreateContainerConfigError, keeping the gap loud).
+            - name: CASTLE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: castle-criteria-token
+                  key: token
           volumeMounts:
             - name: criteria-data
               mountPath: /data

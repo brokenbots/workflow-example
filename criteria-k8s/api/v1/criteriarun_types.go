@@ -325,6 +325,20 @@ type CriteriaRunStatus struct {
 	// completion is gated on this marker, not on that field.
 	CastleTerminalObserved bool `json:"castleTerminalObserved,omitempty"`
 
+	// ArchiveID is the castle run-archive id (castle's "run-archive/<key>"
+	// form) this run's terminal record was stored under, stamped by the
+	// terminal archive gate right before child-job reaping and finalizer
+	// removal. Non-empty means the record landed (or an identical record is
+	// already stored — the gate's idempotency check); empty on a terminal
+	// run means not yet archived, so the reaping and finalizer-removal legs
+	// must keep waiting.
+	ArchiveID string `json:"archiveId,omitempty"`
+
+	// ArchivePending marks the terminal archive gate's failure state: the
+	// TerminalArchivePending condition carries the same signal with a
+	// reason/message, this bool is the cheap watcher-facing flag.
+	ArchivePending bool `json:"archivePending,omitempty"`
+
 	// FinalState is the workflow's own verdict: the terminal state name the
 	// workflow ended in (RunCompleted.final_state), stamped from the castle
 	// terminal envelope. It is the only verdict carrier the phase can
@@ -379,6 +393,13 @@ const (
 	// ConditionConfigRenderDrift is stamped when a run fails on a config
 	// ConfigMap pin mismatch (KB-103).
 	ConditionConfigRenderDrift = "ConfigRenderDrift"
+
+	// ConditionTerminalArchivePending is stamped when the terminal archive
+	// gate could NOT store the run's castle archive record yet ("archival
+	// pending" on a terminal run — the run-archive write leg): the run is
+	// requeued with backoff so reaping and finalizer removal wait until a
+	// retry lands the record.
+	ConditionTerminalArchivePending = "TerminalArchivePending"
 )
 
 // +kubebuilder:object:root=true

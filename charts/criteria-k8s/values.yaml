@@ -74,6 +74,15 @@ operator:
   # API for run/adapter lifecycle instead of reading events.ndjson off the
   # data PVC. Empty disables observation (Job conditions only).
   castleAddr: http://castle:8080
+  # Castle run-archive token (KB-314) via OpenBao CSI — the ONLY chart
+  # posture for secret material (CRI-250: no templated Secrets). Set the
+  # name of the SecretProviderClass rendered into the namespace; the
+  # operator mounts it and reads the token file via CASTLE_TOKEN_FILE
+  # (openbao.castleTokenKey sets the file name). Empty keeps the archive
+  # leg off: castle rejects anonymous ArchiveRun calls, so the operator
+  # logs the gap loudly at startup and the backfill mode refuses to claim
+  # coverage. Observation reads stay anonymous either way (dev posture).
+  castleTokenSpc: ""
   # kubernetes.io/arch nodeSelector value stamped on child Job/pod templates
   # (runner + per-scope adapters): the arch of the nodes workflow pods
   # schedule on. A cluster property — set it to arm64 for an arm64 cluster.
@@ -149,6 +158,10 @@ openbao:
   provider: openbao
   roleName: criteria-jobs
   secretPath: criteria/data/linear
+  # KB-314: the castle criteria token lane (operator.castleTokenSpc renders
+  # a dedicated SecretProviderClass reading this path/key; the token file
+  # name inside the CSI mount equals castleTokenKey).
+  castleTokenKey: castle_criteria_token
 
 # Pod security context shared by the operator and castle pods (restricted
 # compliance: non-root, no escalation, RuntimeDefault seccomp).
