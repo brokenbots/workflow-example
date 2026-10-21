@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	v1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 )
 
 const (
@@ -114,6 +116,72 @@ type Workflow struct {
 	// operator stamps on this workflow's adapter pods, ahead of the event's
 	// image_reference and the configured registry/tag defaults.
 	AdapterImages map[string]string `json:"adapterImages,omitempty"`
+	// Interface is the workflow tree's machine-readable interface
+	// declaration (KB-310, ADR 307) embedded in the workflow object: the
+	// schema of record is k8s/workflow-interface.schema.json, and the
+	// routes schema mirror lives in k8s/routes.schema.json. Validate
+	// requires it for type=url (the shared-tree contract) and rejects it
+	// for type=image (the interface is the tree's, not the image's).
+	Interface *WorkflowInterface `json:"interface,omitempty"`
+}
+
+// WorkflowInterface is the workflow tree's machine-readable interface
+// declaration (KB-310, ADR 307): what a run needs from a project binding
+// (required adapter kinds, mount paths, secret env lanes, env names) and
+// the config slots the tree honors ("the declaration IS the supported
+// override surface"). The operator validates bindings against it before
+// job creation, fail closed.
+type WorkflowInterface struct {
+	// APIVersion is the declared apiVersion
+	// (criteria.brokenbots.dev/v1).
+	APIVersion string `json:"apiVersion"`
+	// Kind is the declared kind: always WorkflowInterface.
+	Kind string `json:"kind"`
+	// Workflow is the workflow tree name the declaration belongs to.
+	Workflow string `json:"workflow"`
+	// Description is the tree's one-line description of the contract.
+	Description string `json:"description,omitempty"`
+	// Adapters are the required adapter kinds.
+	Adapters []string `json:"adapters,omitempty"`
+	// Mounts are the required mount paths.
+	Mounts []WorkflowInterfaceMount `json:"mounts,omitempty"`
+	// SecretEnv are the required secret env lanes (environment variable
+	// names).
+	SecretEnv []string `json:"secretEnv,omitempty"`
+	// Env are the env names the tree reads on the workflow binding.
+	Env []string `json:"env,omitempty"`
+	// ConfigSlots are the config keys the tree honors.
+	ConfigSlots []WorkflowInterfaceConfigSlot `json:"configSlots,omitempty"`
+}
+
+// WorkflowInterfaceMount is one required mount path of an interface
+// declaration (KB-310).
+type WorkflowInterfaceMount struct {
+	// Name is the mount's logical name in the tree.
+	Name string `json:"name"`
+	// MountPath is the byte-exact container path the binding must satisfy.
+	MountPath string `json:"mountPath"`
+	// Kind is pvc (a bound claim) or tmp (an emptyDir scratch).
+	Kind string `json:"kind"`
+}
+
+// WorkflowInterfaceConfigSlot is one config slot of an interface
+// declaration (KB-310): a config key the tree honors, the tree variable it
+// lands in, and the step/agent that consumes it. Declared slots are
+// limited to the platform config key surface (buildCmd, testCmd, ciGateCmd,
+// baseBranch) with their canonical delivery variables — those are the keys
+// a project binding can carry through the KB-103 per-run config rendering.
+type WorkflowInterfaceConfigSlot struct {
+	// Slot is the config key name the binding may carry (camelCase,
+	// lowercase first letter). Must be one of the platform config keys
+	// (buildCmd, testCmd, ciGateCmd, baseBranch).
+	Slot string `json:"slot"`
+	// Variable is the tree variable the slot's value renders as.
+	Variable string `json:"variable"`
+	// Target is the step/agent within the tree that reads the variable.
+	Target string `json:"target"`
+	// Description describes the slot's purpose.
+	Description string `json:"description,omitempty"`
 }
 
 // Volume is a storage volume of kind pvc, nfs, tmp, or k8s-secret.
@@ -363,9 +431,24 @@ func validateWorkflow(name string, wf Workflow) error {
 			// content or a content pin.
 			return fmt.Errorf("type=image must not declare url or ref")
 		}
+		if wf.Interface != nil {
+			// The interface is the tree's, not the image's: image mode is
+			// the pre-KB-310 baked-tree path with no declared contract.
+			return fmt.Errorf("type=image must not declare interface")
+		}
 	case TypeURL:
 		if wf.URL == "" {
 			return fmt.Errorf("type=url requires a url")
+		}
+		// KB-310: every shared-tree url workflow carries the
+		// machine-readable interface the operator validates bindings
+		// against. Fail closed on its absence rather than admitting an
+		// undeclared contract.
+		if wf.Interface == nil {
+			return fmt.Errorf("type=url requires interface (KB-310)")
+		}
+		if err := validateInterface(wf.Interface); err != nil {
+			return fmt.Errorf("interface: %w", err)
 		}
 	default:
 		return fmt.Errorf("type must be %q or %q, got %q", TypeImage, TypeURL, wf.Type)
@@ -408,6 +491,117 @@ func validateWorkflow(name string, wf Workflow) error {
 		seenSecrets[s.Name] = true
 	}
 	return nil
+}
+
+// Interface declaration constants (KB-310): the declared apiVersion/kind
+// of a tree interface, mirroring k8s/workflow-interface.schema.json.
+const (
+	// InterfaceAPIVersion is the interface object's declared apiVersion.
+	InterfaceAPIVersion = "criteria.brokenbots.dev/v1"
+	// InterfaceKind is the interface object's declared kind.
+	InterfaceKind = "WorkflowInterface"
+)
+
+var (
+	interfaceNameRe = mustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
+	// Trailing slash is rejected to match scripts/interface_validate.mjs
+	// (byte-exact mount paths, no trailing-slash normalization).
+	interfacePathRe = mustCompile(`^/.+[^/]$`)
+	interfaceEnvRe  = mustCompile(`^[A-Z][A-Z0-9_]*$`)
+	interfaceVarRe  = mustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	interfaceSlotRe = mustCompile(`^[a-z][a-zA-Z0-9_]*$`)
+)
+
+// validateInterface enforces the shape constraints of
+// k8s/workflow-interface.schema.json on a tree's declared interface
+// (KB-310): the declared apiVersion/kind, the tree name, mount shapes
+// (pvc|tmp at an absolute, non-recursive path), env-name lanes, and
+// config-slot names. Uniqueness per name set holds like volumes/secrets.
+func validateInterface(iface *WorkflowInterface) error {
+	if iface.APIVersion != InterfaceAPIVersion {
+		return fmt.Errorf("apiVersion must be %q, got %q", InterfaceAPIVersion, iface.APIVersion)
+	}
+	if iface.Kind != InterfaceKind {
+		return fmt.Errorf("kind must be %q, got %q", InterfaceKind, iface.Kind)
+	}
+	if iface.Workflow == "" || !interfaceNameRe.MatchString(iface.Workflow) {
+		return fmt.Errorf("workflow (%q) is not a tree name", iface.Workflow)
+	}
+	for _, kind := range iface.Adapters {
+		if !interfaceNameRe.MatchString(kind) {
+			return fmt.Errorf("adapter kind %q is not a valid kind name", kind)
+		}
+	}
+	if hasDuplicate(iface.Adapters) {
+		return fmt.Errorf("adapter kinds are not unique")
+	}
+	seenMounts := make(map[string]bool, len(iface.Mounts))
+	for i, m := range iface.Mounts {
+		if !interfaceNameRe.MatchString(m.Name) {
+			return fmt.Errorf("mounts[%d]: name %q is not a mount name", i, m.Name)
+		}
+		if seenMounts[m.Name] {
+			return fmt.Errorf("mounts[%d] (%s): name is not unique", i, m.Name)
+		}
+		seenMounts[m.Name] = true
+		if !interfacePathRe.MatchString(m.MountPath) {
+			return fmt.Errorf("mounts[%d] (%s): mountPath %q must be an absolute path without trailing slash", i, m.Name, m.MountPath)
+		}
+		if m.Kind != "pvc" && m.Kind != "tmp" {
+			return fmt.Errorf("mounts[%d] (%s): kind %q must be pvc or tmp", i, m.Name, m.Kind)
+		}
+	}
+	if hasDuplicate(iface.SecretEnv) {
+		return fmt.Errorf("secretEnv lanes are not unique")
+	}
+	for _, name := range iface.SecretEnv {
+		if !interfaceEnvRe.MatchString(name) {
+			return fmt.Errorf("secretEnv %q is not an env name (UPPER_SNAKE)", name)
+		}
+	}
+	if hasDuplicate(iface.Env) {
+		return fmt.Errorf("env names are not unique")
+	}
+	for _, name := range iface.Env {
+		if !interfaceEnvRe.MatchString(name) {
+			return fmt.Errorf("env %q is not an env name (UPPER_SNAKE)", name)
+		}
+	}
+	seenSlots := make(map[string]bool, len(iface.ConfigSlots))
+	for i, s := range iface.ConfigSlots {
+		if !interfaceSlotRe.MatchString(s.Slot) {
+			return fmt.Errorf("configSlots[%d]: slot %q is not a slot name (lowercase-first)", i, s.Slot)
+		}
+		if seenSlots[s.Slot] {
+			return fmt.Errorf("configSlots[%d] (%s): slot is not unique", i, s.Slot)
+		}
+		seenSlots[s.Slot] = true
+		wantVar, ok := v1.KB310ConfigSlotVariables[s.Slot]
+		if !ok {
+			return fmt.Errorf("configSlots[%d] (%s): slot is not a platform config key (declare only buildCmd, testCmd, ciGateCmd, or baseBranch — the keys a project binding can carry, KB-310)", i, s.Slot)
+		}
+		if s.Variable != wantVar {
+			return fmt.Errorf("configSlots[%d] (%s): variable %q is not the slot's delivery variable %q (the KB-103 render delivers the value as the tree variable, KB-310)", i, s.Slot, s.Variable, wantVar)
+		}
+		if !interfaceVarRe.MatchString(s.Variable) {
+			return fmt.Errorf("configSlots[%d] (%s): variable %q is not a tree variable", i, s.Slot, s.Variable)
+		}
+		if s.Target == "" {
+			return fmt.Errorf("configSlots[%d] (%s): target is required", i, s.Slot)
+		}
+	}
+	return nil
+}
+
+func hasDuplicate(names []string) bool {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			return true
+		}
+		seen[name] = true
+	}
+	return false
 }
 
 // validateConfigEntry enforces the per-config constraints (KB-103): the

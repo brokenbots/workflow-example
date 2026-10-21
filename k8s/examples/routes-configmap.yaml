@@ -281,12 +281,6 @@ data:
               "kind": "pvc",
               "claim": "criteria-repo",
               "mountPath": "/repo"
-            },
-            {
-              "name": "scratch",
-              "kind": "tmp",
-              "mountPath": "/tmp/scratch",
-              "sizeLimit": "8Gi"
             }
           ],
           "secrets": [
@@ -301,16 +295,38 @@ data:
             {
               "name": "github-tokens",
               "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
-              }
+              "mountPath": "/home/criteria/secrets"
             }
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "ticket_cleanup_v1",
+            "description": "Ticket cleanup: single shell adapter over the Linear API under intake_root (LINEAR_API_KEY via the cleanup adapter secrets block). Mounts: data intake lane plus repo for the cleanup bookkeeping path. Declares no config slots: the tree is fully deterministic.",
+            "adapters": [
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              }
+            ],
+            "secretEnv": [
+              "LINEAR_API_KEY"
+            ],
+            "env": [],
+            "configSlots": []
           }
         },
         "kanboard-triage-url": {
@@ -350,8 +366,7 @@ data:
               "secretProviderClass": "copilot-spc",
               "mountPath": "/home/criteria/secrets",
               "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
               }
             },
             {
@@ -367,6 +382,53 @@ data:
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "kanboard_triage_v1",
+            "description": "Triage lane: investigator/supervisor tree plus locked qa_triage_v1/review_output subworkflows (copilot+shell). Mounts and secret lanes mirror the shipped kanboard-triage-url binding (no reviewer token: the tree declares no reviewer secret var). build_cmd/test_cmd drive the investigator repro checks.",
+            "adapters": [
+              "copilot",
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [
+              "KANBOARD_APP_TOKEN",
+              "KANBOARD_URL",
+              "WORKFLOW_GITHUB_TOKEN"
+            ],
+            "env": [],
+            "configSlots": [
+              {
+                "slot": "buildCmd",
+                "variable": "build_cmd",
+                "target": "qa_triage repro checks (build)",
+                "description": "Command the repro build leg runs against the fetched repo."
+              },
+              {
+                "slot": "testCmd",
+                "variable": "test_cmd",
+                "target": "qa_triage repro checks (test)",
+                "description": "Command the repro test leg runs against the fetched repo."
+              }
+            ]
           }
         },
         "kanboard-develop-url": {
@@ -422,12 +484,71 @@ data:
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "kanboard_develop_v1",
+            "description": "Develop lane: pair-programming tree plus its locked workstream_handler_v1 subworkflow (copilot+shell). Mounts and secret lanes mirror the shipped kanboard-develop-url binding. base_branch sets the PR fork/validate base (branch_manager, checkout and the PR comment commit range); ci_gate_cmd is the developer step CI gate.",
+            "adapters": [
+              "copilot",
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [
+              "KANBOARD_APP_TOKEN",
+              "KANBOARD_URL",
+              "WORKFLOW_GITHUB_TOKEN",
+              "REVIEWER_GITHUB_TOKEN"
+            ],
+            "env": [],
+            "configSlots": [
+              {
+                "slot": "baseBranch",
+                "variable": "base_branch",
+                "target": "branch_manager/checkout + PR base",
+                "description": "Branch the run forks from, validates against, and opens its PR against."
+              },
+              {
+                "slot": "ciGateCmd",
+                "variable": "ci_gate_cmd",
+                "target": "pair_programming_loop developer CI gate",
+                "description": "Command the developer step uses as its CI gate before review."
+              }
+            ]
           }
         },
         "decision-demo-url": {
           "type": "url",
           "url": "git::https://github.com/brokenbots/workflow-example.git//decision_demo_v1",
-          "namespace": "criteria-jobs"
+          "namespace": "criteria-jobs",
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "decision_demo_v1",
+            "description": "Decision demo: decision adapter is engine-internal (no adapter image, no storage, no secret lanes). Requires nothing beyond the binding itself.",
+            "adapters": [],
+            "mounts": [],
+            "secretEnv": [],
+            "env": [],
+            "configSlots": []
+          }
         },
         "harness-contracts-url": {
           "type": "url",
@@ -471,6 +592,38 @@ data:
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "harness_contracts_v1",
+            "description": "Harness contracts canary (copilot+shell). Mounts and secret lanes mirror the shipped harness-contracts-url binding; probe_root rides the data lane.",
+            "adapters": [
+              "copilot",
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [
+              "WORKFLOW_GITHUB_TOKEN"
+            ],
+            "env": [],
+            "configSlots": []
           }
         },
         "harness-wire-url": {
@@ -515,6 +668,38 @@ data:
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "harness_wire_v1",
+            "description": "Harness wire canary (copilot+shell). Mounts and secret lanes mirror the shipped harness-wire-url binding.",
+            "adapters": [
+              "copilot",
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [
+              "WORKFLOW_GITHUB_TOKEN"
+            ],
+            "env": [],
+            "configSlots": []
           }
         },
         "harness-composition-url": {
@@ -546,19 +731,38 @@ data:
               "sizeLimit": "8Gi"
             }
           ],
-          "secrets": [
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
-              }
-            }
-          ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "harness_composition_v1",
+            "description": "Harness composition canary (shell-only parallel composition). Mounts mirror the shipped harness-composition-url binding; declares no secret lanes.",
+            "adapters": [
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [],
+            "env": [],
+            "configSlots": []
           }
         },
         "harness-failures-url": {
@@ -590,19 +794,38 @@ data:
               "sizeLimit": "8Gi"
             }
           ],
-          "secrets": [
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
-              }
-            }
-          ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "harness_failures_v1",
+            "description": "Harness failure-path canary (shell-only failure class sweep). Mounts mirror the shipped harness-failures-url binding; declares no secret lanes.",
+            "adapters": [
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [],
+            "env": [],
+            "configSlots": []
           }
         },
         "harness-fleet-smoke-url": {
@@ -634,33 +857,45 @@ data:
               "sizeLimit": "8Gi"
             }
           ],
-          "secrets": [
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
-              }
-            }
-          ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1"
+          },
+          "interface": {
+            "apiVersion": "criteria.brokenbots.dev/v1",
+            "kind": "WorkflowInterface",
+            "workflow": "harness_fleet_smoke_v1",
+            "description": "Harness fleet-smoke canary (shell-only fleet sweep). Mounts mirror the shipped harness-fleet-smoke-url binding; declares no secret lanes.",
+            "adapters": [
+              "shell"
+            ],
+            "mounts": [
+              {
+                "name": "data",
+                "mountPath": "/data",
+                "kind": "pvc"
+              },
+              {
+                "name": "repo",
+                "mountPath": "/repo",
+                "kind": "pvc"
+              },
+              {
+                "name": "scratch",
+                "mountPath": "/tmp/scratch",
+                "kind": "tmp"
+              }
+            ],
+            "secretEnv": [],
+            "env": [],
+            "configSlots": []
           }
         }
       },
       "configLibrary": {
-        "criteria-repo": {
-          "ciGateCmd": "make ci"
-        },
         "castle": {
-          "buildCmd": "make build-castle",
-          "testCmd": "make test",
           "ciGateCmd": "export PATH=/data/tools/bin:/data/tools/go/bin:/data/tools/node20/bin:$PATH; export CGO_ENABLED=1; make build-castle test-conformance proto-lint && (cd castle && CGO_ENABLED=1 go test -race ./...) && (cd parapet && npm ci && npm run test:run) && make proto-check-drift"
         },
         "workflow-example": {
-          "buildCmd": "make build",
-          "testCmd": "make test",
           "ciGateCmd": "make ci && make vuln-scan"
         }
       },

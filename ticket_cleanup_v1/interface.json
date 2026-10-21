@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "ticket_cleanup_v1",
+  "description": "Ticket cleanup: single shell adapter over the Linear API under intake_root (LINEAR_API_KEY via the cleanup adapter secrets block). Mounts: data intake lane plus repo for the cleanup bookkeeping path. Declares no config slots: the tree is fully deterministic.",
+  "adapters": ["shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"}],
+  "secretEnv": ["LINEAR_API_KEY"],
+  "env": [],
+  "configSlots": []
+}

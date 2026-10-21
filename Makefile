@@ -146,6 +146,10 @@ validate: pincheck
 	# anchor) — its guard fails closed on a missing/duplicate item id, a
 	# broken series-slice assignment, or a conventions regression.
 	@node scripts/harness_matrix.mjs
+	# KB-310: every tree carries a machine-readable interface.json (ADR 307)
+	# and the example routes payload embeds consistent copies; the operator's
+	# admission validation uses whichever side carries the contract.
+	@node scripts/interface_validate.mjs
 
 # CRI-241 + CRI-243: apply the criteria-routes ConfigMap live. Deploy
 # ordering for the CRI-243 cutover (the criteria project's routes become

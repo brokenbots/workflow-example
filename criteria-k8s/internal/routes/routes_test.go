@@ -36,6 +36,11 @@ func validPayload() *Payload {
 				URL:       "git::https://github.com/example/repo.git//wf",
 				Ref:       "0123456789abcdef0123456789abcdef01234567",
 				Namespace: "criteria-jobs",
+				Interface: &WorkflowInterface{
+					APIVersion: InterfaceAPIVersion,
+					Kind:       InterfaceKind,
+					Workflow:   "wf",
+				},
 			},
 		},
 		Routes: []Route{
@@ -388,6 +393,9 @@ func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 // from parapet/node_modules/.bin. If this test fails, the shipped example
 // drifted back toward the ambient-node npm gate and live/tree diverged
 // (ConfigRenderDrift): re-sync both, don't ship the drift.
+// KB-310: the develop tree's interface declares base_branch and
+// ci_gate_cmd as its config slots, so the entry carries no buildCmd/testCmd
+// keys — unknown slots reject fail-closed.
 func TestShippedExampleCastleGatePinsNode20ParapetSuite(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
@@ -401,11 +409,12 @@ func TestShippedExampleCastleGatePinsNode20ParapetSuite(t *testing.T) {
 	if !ok {
 		t.Fatalf("configLibrary missing the castle entry (mirrors the live criteria-jobs CM)")
 	}
-	if castle.BuildCmd != "make build-castle" {
-		t.Errorf("castle buildCmd = %q, want make build-castle (%q: the build-parapet npm leg stays GitHub-CI-only)", castle.BuildCmd, castle.BuildCmd)
-	}
-	if castle.TestCmd != "make test" {
-		t.Errorf("castle testCmd = %q, want make test", castle.TestCmd)
+	if castle.BuildCmd != "" || castle.TestCmd != "" {
+		// KB-310: kanboard_develop_v1 declares no build_cmd/test_cmd slot,
+		// so config keys outside the declared slots reject fail-closed —
+		// the build/test legs live inside ciGateCmd, never as pinned
+		// buildCmd/testCmd keys.
+		t.Errorf("castle buildCmd = %q, testCmd = %q, want empty (KB-310 declares no such slots; the legs ride ciGateCmd)", castle.BuildCmd, castle.TestCmd)
 	}
 	gate := castle.CIGateCmd
 	// The in-session legs: Go/proto gates under the PVC toolchain path,
@@ -495,8 +504,8 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 	if wf.Class != ClassTriage {
 		t.Errorf("cleanup workflow class = %q, want %q (CRI-242 read-only admission)", wf.Class, ClassTriage)
 	}
-	if len(wf.Volumes) != 3 || len(wf.Secrets) != 2 {
-		t.Errorf("ticket-cleanup-url = %+v, want 3 volumes and 2 secrets (linear-api-key + github-tokens: the entrypoint requires WORKFLOW_GITHUB_TOKEN)", wf)
+	if len(wf.Volumes) != 2 || len(wf.Secrets) != 2 {
+		t.Errorf("ticket-cleanup-url = %+v, want 2 volumes (data + repo — scratch is not declared by the tree interface, KB-310) and 2 secrets (linear-api-key + the github-tokens CSI mount: the entrypoint's repo-clone requires the token surface, the cleanup pass itself does not consume its env)", wf)
 	}
 	for _, s := range wf.Secrets {
 		if s.Name == "linear-api-key" && s.MountPath != "/home/criteria/linear-secrets" {
@@ -956,6 +965,97 @@ func TestValidateK8sSecretVolume(t *testing.T) {
 	}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("Validate(k8s-secret volume) failed: %v", err)
+	}
+}
+
+// KB-310: every type=url workflow carries its tree's machine-readable
+// interface (the admission contract) and type=image carries none. The
+// interface's own shape validates against k8s/workflow-interface.schema.json.
+func TestValidateWorkflowInterfaceRequirement(t *testing.T) {
+	p := validPayload()
+	wf := p.WorkflowLibrary["wf-override"]
+	wf.Interface = nil
+	p.WorkflowLibrary["wf-override"] = wf
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "type=url requires interface") {
+		t.Errorf("Validate(url without interface) = %v, want fail-closed gap", err)
+	}
+
+	// Legacy carve-out: the baked-tree image path has no declared contract.
+	img := validPayload()
+	if err := img.Validate(); err != nil {
+		t.Fatalf("Validate(image-only) failed: %v", err)
+	}
+	iwf := img.WorkflowLibrary["wf-default"]
+	iwf.Interface = &WorkflowInterface{APIVersion: InterfaceAPIVersion, Kind: InterfaceKind, Workflow: "wf"}
+	img.WorkflowLibrary["wf-default"] = iwf
+	if err := img.Validate(); err == nil || !strings.Contains(err.Error(), "type=image must not declare interface") {
+		t.Errorf("Validate(image with interface) = %v, want rejection", err)
+	}
+}
+
+func TestValidateWorkflowInterfaceShape(t *testing.T) {
+	valid := func() *WorkflowInterface {
+		return &WorkflowInterface{
+			APIVersion: InterfaceAPIVersion,
+			Kind:       InterfaceKind,
+			Workflow:   "kanboard_develop_v1",
+			Adapters:   []string{"shell", "copilot"},
+			Mounts:     []WorkflowInterfaceMount{{Name: "workspace", MountPath: "/home/criteria/workspace", Kind: "pvc"}},
+			SecretEnv:  []string{"WORKFLOW_GITHUB_TOKEN"},
+			Env:        []string{"CRITERIA_RUN_MODE"},
+			ConfigSlots: []WorkflowInterfaceConfigSlot{{
+				Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "qa_gate",
+			}},
+		}
+	}
+	for label, mutate := range map[string]func(*WorkflowInterface){
+		"apiVersion": func(i *WorkflowInterface) { i.APIVersion = "v9" },
+		"kind":       func(i *WorkflowInterface) { i.Kind = "Workflow" },
+		"empty tree": func(i *WorkflowInterface) { i.Workflow = "" },
+		"bad tree":   func(i *WorkflowInterface) { i.Workflow = "1bad name" },
+		// KB-310 finding 5: the name grammar is one definition across the
+		// go/js/shell/schema copies — the previously-divergent inputs
+		// (leading digit, dot) must reject here too.
+		"leading digit tree": func(i *WorkflowInterface) { i.Workflow = "0valid_name" },
+		"dotted tree":        func(i *WorkflowInterface) { i.Workflow = "valid.dotted" },
+		"bad adapter":        func(i *WorkflowInterface) { i.Adapters = []string{"sh ll"} },
+		"dup adapter":        func(i *WorkflowInterface) { i.Adapters = []string{"shell", "shell"} },
+		"relative path":      func(i *WorkflowInterface) { i.Mounts[0].MountPath = "workspace" },
+		// KB-310: byte-exact mount paths — interface_validate.mjs rejects
+		// a trailing slash and the routes validator must agree with it.
+		"trailing slash": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/home/criteria/workspace/" },
+		// KB-310 finding 5: single-segment "/a" has no parent container
+		// path — `^/.+[^/]$` demands two segments, so both must reject.
+		"single-segment path": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/a" },
+		"bad kind":            func(i *WorkflowInterface) { i.Mounts[0].Kind = "hostPath" },
+		"dup mount":           func(i *WorkflowInterface) { i.Mounts = append(i.Mounts, i.Mounts[0]) },
+		"lower env":           func(i *WorkflowInterface) { i.SecretEnv = []string{"workflow_token"} },
+		"dup env":             func(i *WorkflowInterface) { i.Env = []string{"A", "A"} },
+		"dup secret":          func(i *WorkflowInterface) { i.SecretEnv = []string{"A", "A"} },
+		"bad slot":            func(i *WorkflowInterface) { i.ConfigSlots[0].Slot = "CiGateCmd" },
+		"dup slot": func(i *WorkflowInterface) {
+			i.ConfigSlots = append(i.ConfigSlots, i.ConfigSlots[0])
+		},
+		"bad slot var":   func(i *WorkflowInterface) { i.ConfigSlots[0].Variable = "1x" },
+		"missing target": func(i *WorkflowInterface) { i.ConfigSlots[0].Target = "" },
+		// KB-310: the platform slot surface is closed — only the config
+		// keys a project binding can carry through the KB-103 render, each
+		// with its canonical delivery variable.
+		"unknown slot key": func(i *WorkflowInterface) {
+			i.ConfigSlots[0] = WorkflowInterfaceConfigSlot{Slot: "deployCmd", Variable: "deploy_cmd", Target: "deploy"}
+		},
+		"non-canonical slot var": func(i *WorkflowInterface) {
+			i.ConfigSlots[0].Variable = "gate_cmd"
+		},
+	} {
+		iface := valid()
+		mutate(iface)
+		if err := validateInterface(iface); err == nil {
+			t.Errorf("validateInterface(%s) succeeded, want rejection", label)
+		}
+	}
+	if err := validateInterface(valid()); err != nil {
+		t.Errorf("validateInterface(valid) failed: %v", err)
 	}
 }
 

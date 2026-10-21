@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "review_triage_v1",
+  "description": "Review triage lane: read-only copilot reviewer over the intake/triage roots (data lane). No shell step, no repo lane; the reviewer authenticates with the workflow GitHub identity.",
+  "adapters": ["copilot"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"}],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": []
+}

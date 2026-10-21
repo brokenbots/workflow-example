@@ -38,6 +38,10 @@ const (
 	// emitted when admission refuses a url-type CriteriaRun whose spec
 	// carries no workflowSource (KB-6).
 	eventReasonWorkflowSourceMissing = "WorkflowSourceMissing"
+	// eventReasonInterfaceBindingMismatch is the Kubernetes event reason
+	// emitted when admission refuses a CriteriaRun whose binding fails the
+	// workflow interface's validation (KB-310).
+	eventReasonInterfaceBindingMismatch = "InterfaceBindingMismatch"
 )
 
 // CriteriaRunReconciler reconciles a CriteriaRun object into a batch/v1 Job.
@@ -235,6 +239,24 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return r.refuseMissingWorkflowSource(ctx, &run, logger)
 	}
 
+	// KB-310: a run carrying a stamped workflow interface validates its
+	// project binding against the tree's declared contract — required
+	// adapter kinds, mount paths, secret env lanes, env names — before any
+	// job creation or admission slot is taken. A url workflow authored
+	// without a stamped interface is refused closed first: there is no
+	// declaration the binding could be validated against, and skipping the
+	// gate would fall through to the baked-image path with an unstated
+	// binding. A mismatch refuses the run with the gap named; failure
+	// messages name both sides.
+	if message, gap := interfaceBindingGap(&run); gap {
+		return r.refuseInterfaceBindingMismatch(ctx, &run, message, logger)
+	}
+	if interfaceBindingApplies(&run) {
+		if err := validateInterfaceBinding(&run); err != nil {
+			return r.refuseInterfaceBindingMismatch(ctx, &run, err.Error(), logger)
+		}
+	}
+
 	// Enqueue the run for (repoURL, class)-keyed admission control
 	// (CRI-242). Only admitted runs are allowed to create child Jobs.
 	admitted, qstatus, _ := r.Queue.Enqueue(&run)
@@ -425,6 +447,10 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// persists it with the terminal phase: the sweep cannot age a run it
 	// cannot date.
 	stampTerminalAt(update, obs)
+	// KB-310: record what the run was bound to — workflow ref+digest,
+	// interface/binding checksums, operator version, resolved lanes — once,
+	// from the admitted binding, before the pass's status write persists it.
+	r.stampLaunchManifest(update, logger)
 	if !statusEqual(&run.Status, &update.Status) {
 		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
 		if err := r.Status().Update(ctx, update); err != nil {

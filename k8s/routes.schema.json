@@ -138,6 +138,107 @@
             "type": "string",
             "pattern": "^\\S+$"
           }
+        },
+        "interface": {
+          "type": "object",
+          "description": "KB-310 (ADR 307): the tree's machine-readable workflow interface — what the composed run requires from a binding (adapter kinds, mount paths, secret env lanes) and the config it honors (config slots). Required for type=url entries resolving to a repo tree; the watcher stamps it onto the run CR (spec.workflow.interface) and the operator validates the binding against it BEFORE job creation, fail closed. The schema of record is k8s/workflow-interface.schema.json (same shape; this inline copy keeps the payload self-contained so structural validators need no resolver).",
+          "additionalProperties": false,
+          "required": [
+            "apiVersion",
+            "kind",
+            "workflow"
+          ],
+          "properties": {
+            "apiVersion": {
+              "type": "string",
+              "const": "criteria.brokenbots.dev/v1"
+            },
+            "kind": {
+              "type": "string",
+              "const": "WorkflowInterface"
+            },
+            "workflow": {
+              "type": "string",
+              "description": "Workflow tree name the declaration belongs to.",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string"
+            },
+            "adapters": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "mounts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "mountPath", "kind"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "mountPath": {
+                    "type": "string",
+                    "pattern": "^/.+$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": ["pvc", "tmp"]
+                  }
+                }
+              },
+              "uniqueItems": true
+            },
+            "secretEnv": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              },
+              "uniqueItems": true
+            },
+            "env": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              },
+              "uniqueItems": true
+            },
+            "configSlots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["slot", "variable", "target"],
+                "properties": {
+                  "slot": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-zA-Z0-9_]*$"
+                  },
+                  "variable": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                }
+              },
+              "uniqueItems": true
+            }
+          }
         }
       },
       "allOf": [
@@ -168,6 +269,11 @@
                   "required": [
                     "ref"
                   ]
+                },
+                {
+                  "required": [
+                    "interface"
+                  ]
                 }
               ]
             }
@@ -185,9 +291,10 @@
             ]
           },
           "then": {
-            "description": "D1 url-only (no image) or url+image (image set); the URL is required.",
+            "description": "D1 url-only (no image) or url+image (image set); the URL is required, and a type=url workflow resolving to a repo tree carries its interface declaration (KB-310).",
             "required": [
-              "url"
+              "url",
+              "interface"
             ]
           }
         }

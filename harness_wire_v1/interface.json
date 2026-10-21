@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "harness_wire_v1",
+  "description": "Harness wire canary (copilot+shell). Mounts and secret lanes mirror the shipped harness-wire-url binding.",
+  "adapters": ["copilot","shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": []
+}

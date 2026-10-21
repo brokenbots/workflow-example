@@ -24,6 +24,7 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 )
 
 // kb6URLRun builds a CriteriaRun stamped with the named workflow object and
@@ -182,6 +183,13 @@ func TestReconcileRefusalCleansUpActuatedRunChildJobs(t *testing.T) {
 // control for KB-6: a url-type run that declares spec.workflowSource admits
 // normally and runs source mode on the criteria-base image — never the
 // baked Linear image.
+//
+// Shape note (KB-310): admission refuses a url run that carries no stamped
+// interface (interfaceBindingGap — a hand-authored run bypassing the routes
+// watcher cannot bring an unstated binding to job creation), so this
+// fixture carries the interface the routes watcher stamps onto every url
+// run (convertWorkflow, KB-310). Declaring no slots keeps the assertion on
+// KB-6's actual subject: source-mode image selection.
 func TestReconcileAdmitsURLWorkflowRunWithWorkflowSource(t *testing.T) {
 	scheme := newScheme(t)
 	run := kb6URLRun("kb6-url-with-source", "KB6-URL-WITH-SOURCE", &criteriav1.RunWorkflow{
@@ -189,6 +197,11 @@ func TestReconcileAdmitsURLWorkflowRunWithWorkflowSource(t *testing.T) {
 		Type:      "url",
 		Namespace: "default",
 		URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
+		Interface: &criteriav1.RunWorkflowInterface{
+			APIVersion: routes.InterfaceAPIVersion,
+			Kind:       routes.InterfaceKind,
+			Workflow:   "kanboard_triage_v1",
+		},
 	}, &criteriav1.RunWorkflowSource{
 		Type: "url",
 		URL:  "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",

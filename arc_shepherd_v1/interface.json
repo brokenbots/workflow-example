@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "arc_shepherd_v1",
+  "description": "Arc shepherd: manager-lane shepherd over the kanboard API (copilot+shell; KB_URL/KB_TOKEN adapter secrets bind var.kanboard_url/var.kanboard_app_token, GH tokens bind the workflow identity). Runs against a live castle server; needs the data lane for run bookkeeping only.",
+  "adapters": ["copilot","shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"}],
+  "secretEnv": ["KANBOARD_APP_TOKEN","KANBOARD_URL","WORKFLOW_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": []
+}

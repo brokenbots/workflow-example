@@ -58,8 +58,13 @@ const ConditionConfigRenderDrift = criteriav1.ConditionConfigRenderDrift
 func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criteriav1.CriteriaRun, update *criteriav1.CriteriaRun, logger logr.Logger) (driftMsg string, err error) {
 	ref := run.Spec.ConfigRef
 	if ref == nil {
-		// No pin: the render is the spec fields alone.
+		// No pin: the render is the spec fields alone. KB-310 validates the
+		// binding's config surface against the tree's declared slots before
+		// the render is recorded.
 		if run.Status.ConfigRender == nil && hasSpecRender(run.Spec) {
+			if detail := kb310ConfigSlotDetail(run, specFieldsRender(run.Spec), nil); detail != "" {
+				return detail, nil
+			}
 			update.Status.ConfigRender = specFieldsRender(run.Spec)
 			logger.Info("recording CriteriaRun config render (spec fields only, no config pin)", "criteriarun", run.Name)
 		}
@@ -108,6 +113,9 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 		if ref.ResourceVersion != "" {
 			return fmt.Sprintf("the pinned config ConfigMap %q (resourceVersion %q) no longer exists", ref.Name, ref.ResourceVersion), nil
 		}
+		if detail := kb310ConfigSlotDetail(run, specFieldsRender(run.Spec), nil); detail != "" {
+			return detail, nil
+		}
 		update.Status.ConfigRender = specFieldsRender(run.Spec)
 		logger.Info("recording CriteriaRun config render (spec fields only, pinned ConfigMap absent)", "criteriarun", run.Name, "configMap", ref.Name)
 		return "", nil
@@ -125,6 +133,9 @@ func (r *CriteriaRunReconciler) renderRunConfig(ctx context.Context, run *criter
 		TestCmd:         firstNonEmpty(cm.Data["testCmd"], run.Spec.TestCmd),
 		CIGateCmd:       firstNonEmpty(cm.Data["ciGateCmd"], run.Spec.CIGateCmd),
 		BaseBranch:      firstNonEmpty(cm.Data["baseBranch"], run.Spec.BaseBranch),
+	}
+	if detail := kb310ConfigSlotDetail(run, render, cm.Data); detail != "" {
+		return detail, nil
 	}
 	update.Status.ConfigRender = render
 	// The rendered values are what the run executes on: apply them onto
@@ -188,6 +199,82 @@ func (r *CriteriaRunReconciler) failConfigRenderDrift(ctx context.Context, run *
 // what the run executes on versus what the ConfigMap now is.
 func driftMessage(name, recorded, current string) string {
 	return fmt.Sprintf("the config ConfigMap %q was pinned at resourceVersion %q but now reads %q", name, recorded, current)
+}
+
+// kb310ConfigSlotDetail validates a derived render against the run's
+// stamped workflow interface (KB-310): the tree decides what may be
+// overridden, so a binding config surface carrying values for slots the
+// interface does not declare rejects unknown-slot, fail closed — no silent
+// ignore, and honoring overrides a tree does not support would be exactly
+// the bespoke entry hack the interface contract exists to prevent. Checked
+// sources are the derived render (spec fields outranked by CM values) and
+// any unknown ConfigMap data keys. The return is the fail-fast detail for
+// failConfigRenderDrift; "" admits the render. Interface-less runs (the
+// legacy carve-out) keep the pre-KB-310 behavior.
+func kb310ConfigSlotDetail(run *criteriav1.CriteriaRun, render *criteriav1.RunConfigRender, cmData map[string]string) string {
+	wf := run.Spec.Workflow
+	if wf == nil || wf.Interface == nil {
+		return ""
+	}
+	declared := make(map[string]bool, len(wf.Interface.ConfigSlots))
+	for _, s := range wf.Interface.ConfigSlots {
+		declared[s.Slot] = true
+	}
+	declaredKeys := func(slot string) bool { return declared[slot] }
+
+	// The four rendered values are the only config a run carries; a
+	// non-empty value for an undeclared slot is a binding override the
+	// tree does not support. Empty/absent values override nothing and are
+	// fine (a tree declares the slots it reads, not everything it may
+	// ignore).
+	for _, slot := range []struct{ name, value string }{
+		{"buildCmd", render.BuildCmd},
+		{"testCmd", render.TestCmd},
+		{"ciGateCmd", render.CIGateCmd},
+		{"baseBranch", render.BaseBranch},
+	} {
+		if slot.value != "" && !declaredKeys(slot.name) {
+			return fmt.Sprintf("config slot %q carries a value (%q) but the workflow interface of tree %q declares no such config slot%s (unknown-slot, fail closed: the tree decides what may be overridden, KB-310)",
+				slot.name, truncateForStatus(slot.value), wf.Interface.Workflow, bindingSource(cmData, slot.name))
+		}
+	}
+	// Unknown ConfigMap data keys are unknown-slot too: the binding
+	// supplies config the interface does not require, so the render must
+	// not silently drop it (the platform core keys above were checked with
+	// their values; anything else in the CM is undeclared by definition).
+	for key := range cmData {
+		if _, core := criteriav1.KB310ConfigSlotVariables[key]; core {
+			continue
+		}
+		if !declaredKeys(key) {
+			return fmt.Sprintf("config key %q present in the project's config ConfigMap is not declared by the workflow interface of tree %q (unknown-slot, fail closed; no silent ignore, KB-310)",
+				key, wf.Interface.Workflow)
+		}
+	}
+	return ""
+}
+
+// bindingSource names where a rejected slot's value came from — the pinned
+// ConfigMap or the run binding itself — so the both-sides message names the
+// tree and the offending side.
+func bindingSource(cmData map[string]string, key string) string {
+	if v, ok := cmData[key]; ok && v != "" {
+		return " in the project's config ConfigMap"
+	}
+	return " in the project's config binding"
+}
+
+// truncateForStatus keeps a rejected slot's value preview proportionate in
+// a condition message: values are commands or refs, never secrets, and the
+// message must stay readable. The cut honors the rune boundary so the
+// condition message stays valid UTF-8.
+func truncateForStatus(value string) string {
+	const max = 64
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max-1]) + "…"
 }
 
 // hasSpecRender reports whether a spec-fields-only render is worth

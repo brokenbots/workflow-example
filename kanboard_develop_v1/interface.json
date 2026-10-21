@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "kanboard_develop_v1",
+  "description": "Develop lane: pair-programming tree plus its locked workstream_handler_v1 subworkflow (copilot+shell). Mounts and secret lanes mirror the shipped kanboard-develop-url binding. base_branch sets the PR fork/validate base (branch_manager, checkout and the PR comment commit range); ci_gate_cmd is the developer step CI gate.",
+  "adapters": ["copilot","shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
+  "secretEnv": ["KANBOARD_APP_TOKEN","KANBOARD_URL","WORKFLOW_GITHUB_TOKEN","REVIEWER_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": [{"slot":"baseBranch","variable":"base_branch","target":"branch_manager/checkout + PR base","description":"Branch the run forks from, validates against, and opens its PR against."},{"slot":"ciGateCmd","variable":"ci_gate_cmd","target":"pair_programming_loop developer CI gate","description":"Command the developer step uses as its CI gate before review."}]
+}

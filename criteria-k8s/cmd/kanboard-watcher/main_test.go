@@ -430,6 +430,180 @@ func TestTriggerTagGatesFiring(t *testing.T) {
 	assert.Empty(t, tw.runs(t), "no run without the trigger tag")
 }
 
+// urlInterfaceRoutesJSON (KB-310): the interface delivery fixture. The
+// workflow is type=url — the only type that carries a tree interface —
+// and its interface populates every field of the contract (adapters,
+// mounts with both storage kinds, secret lanes, workflow env, and config
+// slots with slot/variable/target/description) so a dropped field in the
+// routes -> RunWorkflow conversion is observable as a deep-equal mismatch.
+const urlInterfaceRoutesJSON = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "workflowLibrary": {
+    "kanboard-develop-url": {
+      "type": "url",
+      "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=0b8136650d5622381bf18a597ed93b8c272ba19b",
+      "ref": "0b8136650d5622381bf18a597ed93b8c272ba19b",
+      "namespace": "criteria-jobs",
+      "adapterImages": {
+        "shell": "localhost:5000/criteria-adapter-shell-peer:dev",
+        "copilot": "localhost:5000/criteria-adapter-copilot-peer:dev"
+      },
+      "volumes": [
+        {"name": "workspace", "kind": "pvc", "claim": "criteria-workspace", "mountPath": "/home/criteria/workspace"},
+        {"name": "scratch", "kind": "tmp", "mountPath": "/tmp/scratch", "sizeLimit": "4Gi"}
+      ],
+      "secrets": [
+        {"name": "github-tokens", "secretProviderClass": "copilot-spc", "mountPath": "/home/criteria/secrets",
+         "env": {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}},
+        {"name": "linear-api-key", "secretProviderClass": "linear-spc", "mountPath": "/home/criteria/linear-secrets",
+         "env": {"LINEAR_API_KEY": "linear_api_key"}}
+      ],
+      "interface": {
+        "apiVersion": "criteria.brokenbots.dev/v1",
+        "kind": "WorkflowInterface",
+        "workflow": "kanboard_develop_v1",
+        "description": "Kanboard develop: shared tree with a pvc workspace and a tmp scratch mount",
+        "adapters": ["shell", "copilot"],
+        "mounts": [
+          {"name": "workspace", "mountPath": "/home/criteria/workspace", "kind": "pvc"},
+          {"name": "scratch", "mountPath": "/tmp/scratch", "kind": "tmp"}
+        ],
+        "secretEnv": ["WORKFLOW_GITHUB_TOKEN", "LINEAR_API_KEY"],
+        "env": ["CRITERIA_RUN_MODE"],
+        "configSlots": [
+          {"slot": "baseBranch", "variable": "base_branch", "target": "branch_manager/checkout + PR base",
+           "description": "Branch the run forks from and opens its PR against."},
+          {"slot": "ciGateCmd", "variable": "ci_gate_cmd", "target": "pair_programming_loop developer CI gate",
+           "description": "Command the developer step uses as its CI gate before review."}
+        ]
+      }
+    }
+  },
+  "routes": [
+    {"name": "kb-develop-url", "workflow": "kanboard-develop-url", "project": "Kanboard Tickets", "states": ["Ready"]}
+  ]
+}`
+
+// TestPollStampsWorkflowInterface is the KB-310 contract test for the
+// interface delivery path: a type=url workflow's interface must survive
+// the routes -> run CR conversion field-for-field, because admission
+// validates the binding against the CR copy, not the routes entry — a
+// conversion that drops SecretEnv, Mounts, or ConfigSlots would fail open.
+func TestPollStampsWorkflowInterface(t *testing.T) {
+	tw := newTestWatcher(t, urlInterfaceRoutesJSON)
+	tw.kbS.addTask(20, 9, "k8s-run") // column 9 = Ready
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	require.NotNil(t, runs[0].Spec.Workflow)
+	require.Equal(t, "kanboard-develop-url", runs[0].Spec.Workflow.Name)
+
+	// Expected is hand-built from the fixture JSON's interface block, not
+	// derived from the routes parser, so any conversion drop (or a parser
+	// drop) breaks the equality.
+	expected := &criteriav1.RunWorkflowInterface{
+		APIVersion:  "criteria.brokenbots.dev/v1",
+		Kind:        "WorkflowInterface",
+		Workflow:    "kanboard_develop_v1",
+		Description: "Kanboard develop: shared tree with a pvc workspace and a tmp scratch mount",
+		Adapters:    []string{"shell", "copilot"},
+		Mounts: []criteriav1.RunWorkflowInterfaceMount{
+			{Name: "workspace", MountPath: "/home/criteria/workspace", Kind: "pvc"},
+			{Name: "scratch", MountPath: "/tmp/scratch", Kind: "tmp"},
+		},
+		SecretEnv: []string{"WORKFLOW_GITHUB_TOKEN", "LINEAR_API_KEY"},
+		Env:       []string{"CRITERIA_RUN_MODE"},
+		ConfigSlots: []criteriav1.RunWorkflowInterfaceConfigSlot{
+			{Slot: "baseBranch", Variable: "base_branch", Target: "branch_manager/checkout + PR base",
+				Description: "Branch the run forks from and opens its PR against."},
+			{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
+				Description: "Command the developer step uses as its CI gate before review."},
+		},
+	}
+	require.Equal(t, expected, runs[0].Spec.Workflow.Interface)
+}
+
+// convertWorkflow-level coverage of the same boundary: image mode carries
+// no interface, and a url interface is copied field-for-field without
+// aliasing the source.
+func TestConvertWorkflowInterface(t *testing.T) {
+	t.Run("image workflow has nil interface", func(t *testing.T) {
+		out := convertWorkflow("kanboard-intake", routes.Workflow{
+			Type:  routes.TypeImage,
+			Image: "localhost:5000/linear-intake-remote:dev",
+		})
+		require.NotNil(t, out)
+		require.Nil(t, out.Interface)
+	})
+
+	t.Run("url workflow interface copies every field", func(t *testing.T) {
+		src := &routes.WorkflowInterface{
+			APIVersion:  routes.InterfaceAPIVersion,
+			Kind:        routes.InterfaceKind,
+			Workflow:    "kanboard_develop_v1",
+			Description: "shared tree contract",
+			Adapters:    []string{"shell", "copilot"},
+			Mounts: []routes.WorkflowInterfaceMount{
+				{Name: "workspace", MountPath: "/home/criteria/workspace", Kind: "pvc"},
+				{Name: "scratch", MountPath: "/tmp/scratch", Kind: "tmp"},
+			},
+			SecretEnv: []string{"WORKFLOW_GITHUB_TOKEN", "LINEAR_API_KEY"},
+			Env:       []string{"CRITERIA_RUN_MODE"},
+			ConfigSlots: []routes.WorkflowInterfaceConfigSlot{
+				{Slot: "baseBranch", Variable: "base_branch", Target: "branch_manager/checkout + PR base",
+					Description: "Branch the run forks from and opens its PR against."},
+				{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
+					Description: "Command the developer step uses as its CI gate before review."},
+			},
+		}
+		routesWf := routes.Workflow{
+			Type:      routes.TypeURL,
+			URL:       "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=abc",
+			Interface: src,
+		}
+
+		out := convertWorkflow("kanboard-develop-url", routesWf)
+		require.Equal(t, &criteriav1.RunWorkflowInterface{
+			APIVersion:  routes.InterfaceAPIVersion,
+			Kind:        routes.InterfaceKind,
+			Workflow:    "kanboard_develop_v1",
+			Description: "shared tree contract",
+			Adapters:    []string{"shell", "copilot"},
+			Mounts: []criteriav1.RunWorkflowInterfaceMount{
+				{Name: "workspace", MountPath: "/home/criteria/workspace", Kind: "pvc"},
+				{Name: "scratch", MountPath: "/tmp/scratch", Kind: "tmp"},
+			},
+			SecretEnv: []string{"WORKFLOW_GITHUB_TOKEN", "LINEAR_API_KEY"},
+			Env:       []string{"CRITERIA_RUN_MODE"},
+			ConfigSlots: []criteriav1.RunWorkflowInterfaceConfigSlot{
+				{Slot: "baseBranch", Variable: "base_branch", Target: "branch_manager/checkout + PR base",
+					Description: "Branch the run forks from and opens its PR against."},
+				{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
+					Description: "Command the developer step uses as its CI gate before review."},
+			},
+		}, out.Interface)
+
+		// The copy is deep: mutating the CR's interface must not leak into
+		// the routes entry (the routes payload is reused across polls).
+		out.Interface.Adapters[0] = "mutated"
+		out.Interface.Mounts[0] = criteriav1.RunWorkflowInterfaceMount{Name: "mutated"}
+		out.Interface.ConfigSlots[0].Slot = "mutated"
+		require.Equal(t, "shell", src.Adapters[0])
+		require.Equal(t, routes.WorkflowInterfaceMount{Name: "workspace", MountPath: "/home/criteria/workspace", Kind: "pvc"}, src.Mounts[0])
+		require.Equal(t, "baseBranch", src.ConfigSlots[0].Slot)
+	})
+
+	t.Run("nil url interface stays nil", func(t *testing.T) {
+		routesWf := routes.Workflow{Type: routes.TypeURL, URL: "git::x?ref=abc"}
+		out := convertWorkflow("wf-url", routesWf)
+		require.NotNil(t, out)
+		require.Nil(t, out.Interface)
+	})
+}
+
 // testRoutesJSONConfig (KB-103): kanboard fixture with a configLibrary and
 // a route binding to it; the entry omits testCmd so the entry-by-entry
 // outranking against the fallback flags is observable in the stamp.
