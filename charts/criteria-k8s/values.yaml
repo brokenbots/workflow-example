@@ -68,6 +68,16 @@ operator:
   # "0s" disables sweeping. Durations use Go time.ParseDuration units.
   retentionPeriod: 168h # 7d
   retentionInterval: 1h
+  # KB-309: archived-terminal CriteriaRun retention. Deleting an archived
+  # terminal run loses nothing (castle's run archive holds the history) but
+  # bounds the operator's live memory of finished work. 0 days disables the
+  # sweep; the keep-last floor protects the newest terminal runs per ticket
+  # family for failure forensics; the namespace list opts namespaces in for
+  # deletion (comma separated; empty keeps the sweep entirely inert), so
+  # cutovers flip it on per namespace after their archive leg verifies.
+  crRetentionDays: 7
+  crRetentionKeepLast: 3
+  crRetentionNamespaces: ""
   # Ollama-compatible provider endpoint handed to adapter workflows.
   providerBaseUrl: http://192.168.17.116:11434/v1
   # Castle observation (CRI-135): the operator polls the castle ServerService

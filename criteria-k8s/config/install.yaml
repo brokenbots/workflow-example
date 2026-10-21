@@ -376,6 +376,18 @@ spec:
                     still Running, the run is failed with a StallWatchdog
                     condition so CriteriaRun reflects Failed instead of
                     hanging in Running.
+                terminalAt:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Time the run went terminal (KB-309): stamped once, when
+                    the phase first lands on a terminal value, preferring the
+                    castle terminal envelope's own timestamp with the
+                    reconcile clock as fallback. The terminal retention
+                    sweep's aging clock: a terminal run is only eligible for
+                    deletion once this is set and older than the retention
+                    window; an unstamped terminal run is never a deletion
+                    candidate.
                 observedGeneration:
                   type: integer
                   format: int64

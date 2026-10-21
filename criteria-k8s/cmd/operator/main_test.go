@@ -207,6 +207,38 @@ func (f *failingBackfillArchiver) ListRunArchives(ctx context.Context, req *conn
 
 func (f *failingBackfillArchiver) Disabled() bool { return false }
 
+func TestGetInt(t *testing.T) {
+	t.Run("env wins over default", func(t *testing.T) {
+		t.Setenv("CR_RETENTION_DAYS", "14")
+		assert.Equal(t, 14, getInt("CR_RETENTION_DAYS", 7))
+	})
+	t.Run("unset falls back", func(t *testing.T) {
+		os.Unsetenv("CR_RETENTION_KEEP_LAST")
+		assert.Equal(t, 3, getInt("CR_RETENTION_KEEP_LAST", 3))
+	})
+	t.Run("non-numeric falls back", func(t *testing.T) {
+		t.Setenv("CR_RETENTION_DAYS", "ten")
+		assert.Equal(t, 7, getInt("CR_RETENTION_DAYS", 7))
+	})
+}
+
+// The retention allowlist rides the --cr-retention-namespaces flag value
+// (whose default resolves the CR_RETENTION_NAMESPACES env var at flag
+// declaration): parseCsv's contract is what main feeds the sweeper
+// constructor, so a trimmed/emptied allowlist comes out the same on either
+// input path.
+func TestParseCsv(t *testing.T) {
+	t.Run("flag value splits on commas and trims", func(t *testing.T) {
+		assert.Equal(t, []string{"criteria-jobs", "review-jobs"}, parseCsv("criteria-jobs, review-jobs"))
+	})
+	t.Run("blank and whitespace entries are dropped", func(t *testing.T) {
+		assert.Equal(t, []string{"criteria-jobs"}, parseCsv(" criteria-jobs ,, "))
+	})
+	t.Run("empty value parses empty (sweep inert)", func(t *testing.T) {
+		assert.Empty(t, parseCsv(""))
+	})
+}
+
 func TestCastleTokenFromEnv(t *testing.T) {
 	t.Run("CASTLE_TOKEN wins", func(t *testing.T) {
 		t.Setenv("CASTLE_TOKEN", "env-token")

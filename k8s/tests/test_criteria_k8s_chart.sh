@@ -157,6 +157,18 @@ cmp -s <(clusterrole_rules "$REPO_ROOT/criteria-k8s/config/rbac/role.yaml") \
 grep -q 'name: RETENTION_PERIOD' "$RENDERED" || fail "operator deployment missing RETENTION_PERIOD"
 grep -q 'value: "168h"' "$RENDERED" || fail "operator RETENTION_PERIOD default is not 168h"
 grep -q 'name: RETENTION_INTERVAL' "$RENDERED" || fail "operator deployment missing RETENTION_INTERVAL"
+# KB-309: archived-terminal CriteriaRun retention is threaded into the
+# operator env; the namespace allowlist gates deletion per namespace.
+grep -q 'name: CR_RETENTION_DAYS' "$RENDERED" || fail "operator deployment missing CR_RETENTION_DAYS"
+awk '/name: CR_RETENTION_DAYS/{getline; if ($0 !~ /value: "7"/) exit 1}' "$RENDERED" \
+    || fail "operator CR_RETENTION_DAYS default is not 7"
+grep -q 'name: CR_RETENTION_KEEP_LAST' "$RENDERED" || fail "operator deployment missing CR_RETENTION_KEEP_LAST"
+awk '/name: CR_RETENTION_KEEP_LAST/{getline; if ($0 !~ /value: "3"/) exit 1}' "$RENDERED" \
+    || fail "operator CR_RETENTION_KEEP_LAST default is not 3"
+grep -q 'name: CR_RETENTION_NAMESPACES' "$RENDERED" || fail "operator deployment missing CR_RETENTION_NAMESPACES"
+grep -q 'crRetentionDays: 7' "$CHART/values.yaml" || fail "values.yaml missing operator crRetentionDays"
+grep -q 'crRetentionKeepLast: 3' "$CHART/values.yaml" || fail "values.yaml missing operator crRetentionKeepLast"
+grep -q 'crRetentionNamespaces:' "$CHART/values.yaml" || fail "values.yaml missing operator crRetentionNamespaces"
 # KB-24: the stall watchdog window is threaded into the operator env with the
 # documented 30m default.
 grep -q 'name: CRITERIA_STALL_WINDOW' "$RENDERED" || fail "operator deployment missing CRITERIA_STALL_WINDOW"
