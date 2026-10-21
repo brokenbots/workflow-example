@@ -212,6 +212,149 @@ type RunWorkflow struct {
 	// pods, ahead of the event's image_reference and the operator's
 	// configured registry/tag defaults.
 	AdapterImages map[string]string `json:"adapterImages,omitempty"`
+
+	// Interface is the workflow tree's machine-readable interface
+	// declaration (KB-310, ADR 307): what a run needs from a project
+	// binding (adapter kinds, mount paths, secret env lanes, env names)
+	// and the config slots the tree honors. Stamped from the routes
+	// workflow object's embedded interface; routes validate it
+	// structurally and the operator's admission validation fails a run
+	// closed when its binding does not satisfy the contract. Nil for
+	// type=image runs (pre-KB-310) — image-mode bindings skip admission
+	// interface validation (the legacy carve-out).
+	Interface *RunWorkflowInterface `json:"interface,omitempty"`
+}
+
+// RunWorkflowInterface is the workflow tree's machine-readable interface
+// declaration (KB-310, ADR 307): the stamped copy of the tree's
+// interface.json the operator validates bindings against before job
+// creation. The declaration is the supported override surface: a binding
+// may only carry what the tree honors.
+type RunWorkflowInterface struct {
+	// APIVersion is the declared apiVersion
+	// (criteria.brokenbots.dev/v1).
+	APIVersion string `json:"apiVersion"`
+
+	// Kind is the declared kind: always WorkflowInterface.
+	Kind string `json:"kind"`
+
+	// Workflow is the workflow tree name the declaration belongs to.
+	Workflow string `json:"workflow"`
+
+	// Description is the tree's one-line description of the contract.
+	Description string `json:"description,omitempty"`
+
+	// Adapters are the required adapter kinds; every one must be present
+	// in the binding's adapterImages at admission. Extra adapterImages are
+	// tolerated (not every tree needs every possible kind).
+	Adapters []string `json:"adapters,omitempty"`
+
+	// Mounts are the required mount paths (name to mountPath, kind
+	// pvc|tmp); each must be satisfied by a binding volume at the byte
+	// exact mountPath.
+	Mounts []RunWorkflowInterfaceMount `json:"mounts,omitempty"`
+
+	// SecretEnv are the required secret env lanes (environment variable
+	// names); each must be resolvable from the binding's secrets env
+	// maps at admission, fail closed with the lane named.
+	SecretEnv []string `json:"secretEnv,omitempty"`
+
+	// Env are the environment names the tree reads on the workflow
+	// binding itself; binding workflow env keys outside this set reject.
+	Env []string `json:"env,omitempty"`
+
+	// ConfigSlots are the config keys the tree honors: per slot, the
+	// config key name (the platform config key or a declared slot), the
+	// tree variable it lands in, and the step/agent that consumes it.
+	// A binding config key outside this set (and outside the rendered
+	// platform core the tree honors) rejects as unknown-slot.
+	ConfigSlots []RunWorkflowInterfaceConfigSlot `json:"configSlots,omitempty"`
+}
+
+// RunWorkflowInterfaceMount is one required mount path of an interface
+// declaration (KB-310).
+type RunWorkflowInterfaceMount struct {
+	// Name is the mount's logical name in the tree.
+	Name string `json:"name"`
+
+	// MountPath is the byte-exact container path the binding must satisfy.
+	MountPath string `json:"mountPath"`
+
+	// Kind is pvc (a bound claim) or tmp (an emptyDir scratch).
+	Kind string `json:"kind"`
+}
+
+// RunWorkflowInterfaceConfigSlot is one config slot of an interface
+// declaration (KB-310): a config key the tree honors, the tree variable it
+// lands in, and the step/agent that consumes it.
+type RunWorkflowInterfaceConfigSlot struct {
+	// Slot is the config key name the binding may carry (camelCase,
+	// lowercase first letter): either a platform core key
+	// (buildCmd/testCmd/ciGateCmd/baseBranch) or a declared tree slot.
+	Slot string `json:"slot"`
+
+	// Variable is the tree variable the slot's value renders as
+	// (--var name=value).
+	Variable string `json:"variable"`
+
+	// Target is the step/agent within the tree that reads the variable.
+	Target string `json:"target"`
+
+	// Description describes the slot's purpose.
+	Description string `json:"description,omitempty"`
+}
+
+// RunLaunchManifest is the launch manifest stamped into status at admission
+// (KB-310): the reproducibility contract of exactly what a run was admitted
+// with. Stamped once per run; never re-derived.
+type RunLaunchManifest struct {
+	// WorkflowRef is the resolved workflow source URL the run executes
+	// (spec.workflow.url); empty for image-mode runs.
+	WorkflowRef string `json:"workflowRef,omitempty"`
+
+	// WorkflowDigest is the operator-declared pin the source fetch was
+	// verified against (sha256:<hex> content digest or commit ref); empty
+	// when the run carried no pin (the decision-demo follow-up convention).
+	WorkflowDigest string `json:"workflowDigest,omitempty"`
+
+	// InterfaceChecksum is the sha256 of the canonical JSON encoding of
+	// spec.workflow.interface at admission; empty when the run carried no
+	// interface.
+	InterfaceChecksum string `json:"interfaceChecksum,omitempty"`
+
+	// BindingChecksum is the sha256 of spec.workflow's canonical JSON
+	// encoding (encoding/json sorts map keys, so the stamp is
+	// deterministic): the hash of exactly what the binding carried.
+	BindingChecksum string `json:"bindingChecksum"`
+
+	// OperatorVersion is the operator binary version at admission
+	// (OPERATOR_VERSION when set).
+	OperatorVersion string `json:"operatorVersion,omitempty"`
+
+	// Lanes are the resolved secret lanes the run was admitted with, each
+	// "<ENV_NAME>@<secret entry name>" sorted; empty when the run carries
+	// no secret lanes.
+	Lanes []string `json:"lanes,omitempty"`
+}
+
+// DeepCopyInto for RunLaunchManifest.
+func (in *RunLaunchManifest) DeepCopyInto(out *RunLaunchManifest) {
+	*out = *in
+	if in.Lanes != nil {
+		in, out := &in.Lanes, &out.Lanes
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+}
+
+// DeepCopy creates a copy of RunLaunchManifest.
+func (in *RunLaunchManifest) DeepCopy() *RunLaunchManifest {
+	if in == nil {
+		return nil
+	}
+	out := new(RunLaunchManifest)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // RunWorkflowVolume is a storage volume stamped from the routes ConfigMap.
@@ -354,6 +497,12 @@ type CriteriaRunStatus struct {
 	// disabled. Not part of the terminal-completion gate.
 	FinalState string `json:"finalState,omitempty"`
 
+	// LaunchManifest is the launch manifest stamped once at admission
+	// (KB-310): workflow ref+digest, interface checksum, binding checksum,
+	// operator version, and the resolved secret lanes — the
+	// reproducibility contract of exactly what the run was admitted with.
+	LaunchManifest *RunLaunchManifest `json:"launchManifest,omitempty"`
+
 	// LastStepProgress is the timestamp of the newest step-progress event in
 	// the run's castle event stream (lifecycle envelopes, plus the copilot
 	// adapter's agent-activity AdapterEvents — agent.message deltas, tool
@@ -405,6 +554,15 @@ const (
 	// ConditionConfigRenderDrift is stamped when a run fails on a config
 	// ConfigMap pin mismatch (KB-103).
 	ConditionConfigRenderDrift = "ConfigRenderDrift"
+
+	// ConditionInterfaceBindingMismatch is stamped when a run fails
+	// admission because its project binding does not satisfy the workflow
+	// tree's interface declaration (KB-310, ADR 307): a required adapter
+	// kind missing, a required mount path unsatisfied, an interface secret
+	// env lane unresolvable, or a binding key the interface does not
+	// declare (fail closed — no silent ignore). The condition message
+	// names both sides (tree + binding) for troubleshootability.
+	ConditionInterfaceBindingMismatch = "InterfaceBindingMismatch"
 
 	// ConditionTerminalArchivePending is stamped when the terminal archive
 	// gate could NOT store the run's castle archive record yet ("archival
@@ -522,6 +680,51 @@ func (in *RunWorkflow) DeepCopyInto(out *RunWorkflow) {
 			(*out)[k] = v
 		}
 	}
+	if in.Interface != nil {
+		in, out := &in.Interface, &out.Interface
+		*out = new(RunWorkflowInterface)
+		**out = **in
+	}
+}
+
+// DeepCopyInto for RunWorkflowInterface.
+func (in *RunWorkflowInterface) DeepCopyInto(out *RunWorkflowInterface) {
+	*out = *in
+	if in.Adapters != nil {
+		in, out := &in.Adapters, &out.Adapters
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.Mounts != nil {
+		in, out := &in.Mounts, &out.Mounts
+		*out = make([]RunWorkflowInterfaceMount, len(*in))
+		copy(*out, *in)
+	}
+	if in.SecretEnv != nil {
+		in, out := &in.SecretEnv, &out.SecretEnv
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.Env != nil {
+		in, out := &in.Env, &out.Env
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ConfigSlots != nil {
+		in, out := &in.ConfigSlots, &out.ConfigSlots
+		*out = make([]RunWorkflowInterfaceConfigSlot, len(*in))
+		copy(*out, *in)
+	}
+}
+
+// DeepCopy creates a copy of RunWorkflowInterface.
+func (in *RunWorkflowInterface) DeepCopy() *RunWorkflowInterface {
+	if in == nil {
+		return nil
+	}
+	out := new(RunWorkflowInterface)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopy creates a copy of RunWorkflow.
@@ -610,6 +813,11 @@ func (in *CriteriaRunStatus) DeepCopyInto(out *CriteriaRunStatus) {
 		in, out := &in.ConfigRender, &out.ConfigRender
 		*out = new(RunConfigRender)
 		**out = **in
+	}
+	if in.LaunchManifest != nil {
+		in, out := &in.LaunchManifest, &out.LaunchManifest
+		*out = new(RunLaunchManifest)
+		(*in).DeepCopyInto(*out)
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions

@@ -216,6 +216,91 @@ spec:
                       additionalProperties:
                         type: string
                         pattern: '^\S+$'
+                interface:
+                  type: object
+                  description: >-
+                    The workflow tree's machine-readable interface
+                    declaration (KB-310, ADR 307): what a run needs from a
+                    project binding (adapter kinds, mount paths, secret env
+                    lanes, env names) and the config slots the tree honors.
+                    Stamped from the routes workflow object; the schema of
+                    record is k8s/workflow-interface.schema.json. The
+                    operator's admission validation fails a run closed when
+                    its binding does not satisfy the contract
+                    (InterfaceBindingMismatch). Nil for type=image runs
+                    (pre-KB-310 legacy carve-out).
+                  required:
+                    - apiVersion
+                    - kind
+                    - workflow
+                  properties:
+                    apiVersion:
+                      type: string
+                      description: Declared apiVersion (criteria.brokenbots.dev/v1).
+                    kind:
+                      type: string
+                      description: Declared kind (WorkflowInterface).
+                    workflow:
+                      type: string
+                      description: Workflow tree name the declaration belongs to.
+                    description:
+                      type: string
+                      description: The tree's one-line description of the contract.
+                    adapters:
+                      type: array
+                      description: Required adapter kinds.
+                      items:
+                        type: string
+                    mounts:
+                      type: array
+                      description: Required mount paths.
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - mountPath
+                          - kind
+                        properties:
+                          name:
+                            type: string
+                          mountPath:
+                            type: string
+                          kind:
+                            type: string
+                            enum:
+                              - pvc
+                              - tmp
+                    secretEnv:
+                      type: array
+                      description: Required secret env lanes (environment variable names).
+                      items:
+                        type: string
+                    env:
+                      type: array
+                      description: Environment names the tree reads on the workflow binding itself.
+                      items:
+                        type: string
+                    configSlots:
+                      type: array
+                      description: Config keys the tree honors.
+                      items:
+                        type: object
+                        required:
+                          - slot
+                          - variable
+                          - target
+                        properties:
+                          slot:
+                            type: string
+                            description: Config key name the binding may carry.
+                          variable:
+                            type: string
+                            description: Tree variable the slot's value renders as.
+                          target:
+                            type: string
+                            description: Step/agent within the tree that reads the variable.
+                          description:
+                            type: string
                 workflowSource:
                   type: object
                   description: >-
@@ -315,6 +400,37 @@ spec:
                         against, and opens its PR against (ConfigMap value
                         outranking the spec field; empty remains "main" at
                         consumption).
+                launchManifest:
+                  type: object
+                  description: >-
+                    Launch manifest stamped once at admission (KB-310): the
+                    reproducibility contract of exactly what the run was
+                    admitted with — workflow ref+digest, interface and
+                    binding checksums, operator version, resolved secret
+                    lanes.
+                  required:
+                    - bindingChecksum
+                  properties:
+                    workflowRef:
+                      type: string
+                      description: Resolved workflow source URL the run executes.
+                    workflowDigest:
+                      type: string
+                      description: Operator-declared pin the source fetch was verified against.
+                    interfaceChecksum:
+                      type: string
+                      description: Sha256 of the stamped interface's canonical JSON.
+                    bindingChecksum:
+                      type: string
+                      description: Sha256 of spec.workflow's canonical JSON.
+                    operatorVersion:
+                      type: string
+                      description: Operator binary version at admission (OPERATOR_VERSION when set).
+                    lanes:
+                      type: array
+                      description: Resolved secret lanes, each "<ENV_NAME>@<secret entry name>", sorted.
+                      items:
+                        type: string
                 ticketState:
                   type: string
                   description: >-

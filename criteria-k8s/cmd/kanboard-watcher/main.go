@@ -1067,6 +1067,22 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		URL:       wf.URL,
 		Ref:       wf.Ref,
 	}
+	if wf.Interface != nil {
+		// KB-310: stamp the tree's interface declaration onto the run CR —
+		// the operator validates the project binding against it before
+		// job creation and records its checksum in the launch manifest.
+		out.Interface = &criteriav1.RunWorkflowInterface{
+			APIVersion:  wf.Interface.APIVersion,
+			Kind:        wf.Interface.Kind,
+			Workflow:    wf.Interface.Workflow,
+			Description: wf.Interface.Description,
+			Adapters:    copyStringSlice(wf.Interface.Adapters),
+			Mounts:      copyInterfaceMounts(wf.Interface.Mounts),
+			SecretEnv:   copyStringSlice(wf.Interface.SecretEnv),
+			Env:         copyStringSlice(wf.Interface.Env),
+			ConfigSlots: copyInterfaceConfigSlots(wf.Interface.ConfigSlots),
+		}
+	}
 	if wf.Env != nil {
 		out.Env = make(map[string]string, len(wf.Env))
 		for k, v := range wf.Env {
@@ -1127,6 +1143,46 @@ func copyStringMap(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
 		out[k] = v
+	}
+	return out
+}
+
+func copyStringSlice(names []string) []string {
+	if names == nil {
+		return nil
+	}
+	out := make([]string, len(names))
+	copy(out, names)
+	return out
+}
+
+func copyInterfaceMounts(mounts []routes.WorkflowInterfaceMount) []criteriav1.RunWorkflowInterfaceMount {
+	if mounts == nil {
+		return nil
+	}
+	out := make([]criteriav1.RunWorkflowInterfaceMount, len(mounts))
+	for i, m := range mounts {
+		out[i] = criteriav1.RunWorkflowInterfaceMount{
+			Name:      m.Name,
+			MountPath: m.MountPath,
+			Kind:      m.Kind,
+		}
+	}
+	return out
+}
+
+func copyInterfaceConfigSlots(slots []routes.WorkflowInterfaceConfigSlot) []criteriav1.RunWorkflowInterfaceConfigSlot {
+	if slots == nil {
+		return nil
+	}
+	out := make([]criteriav1.RunWorkflowInterfaceConfigSlot, len(slots))
+	for i, s := range slots {
+		out[i] = criteriav1.RunWorkflowInterfaceConfigSlot{
+			Slot:        s.Slot,
+			Variable:    s.Variable,
+			Target:      s.Target,
+			Description: s.Description,
+		}
 	}
 	return out
 }
