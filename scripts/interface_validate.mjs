@@ -20,7 +20,18 @@
 //      ConfigMap embeds an interface copy, the copy is structurally valid,
 //      and when it names a repo tree the copy is byte-identical to that
 //      tree's interface.json (the routes CM is the delivery vehicle to the
-//      operator: drift there would silently change the admission contract).
+//      operator: drift there would silently change the admission contract);
+//   5. every type=url workflowLibrary entry's binding (adapterImages,
+//      volumes, secrets' env maps, env) satisfies its tree's interface
+//      declaration under the same fail-closed rules the operator applies
+//      (interfaceBindingApplies/validateInterfaceBinding, KB-310): four
+//      refused bindings shipped because nothing ran these rules, so the
+//      shipped example payload is now conformance-checked like a real CR;
+//   6. the conformance rules themselves are exercised by two engineered
+//      negative fixtures (an undeclared extra mount, a required secret
+//      lane the binding does not resolve) and one positive conforming
+//      fixture — a mirror that stops firing must fail loudly here, not
+//      silently re-admit what the operator refuses.
 //
 // Engineered failure fixtures (paths carrying a `tests` segment) are
 // excluded from discovery: they exercise the engine, not bindings, and
@@ -156,6 +167,80 @@ function validateInterface(iface, where) {
   }
 }
 
+// ── binding conformance: the shipped bindings must satisfy their own tree's
+// interface (KB-310) ─────────────────────────────────────────────────────────
+//
+// bindingViolations is the JS mirror of criteria-k8s admission
+// (internal/controller/interfacebinding.go validateInterfaceBinding): the
+// two must stay rule-equivalent, and the messages name both sides — the
+// tree (via the interface workflow) and the binding entry — so a refused
+// entry is troubleshootable from the test output alone.
+
+function bindingViolations(iface, binding) {
+  const mounts = iface.mounts ?? [];
+  const adapters = iface.adapters ?? [];
+  const secretEnv = iface.secretEnv ?? [];
+  const ifaceEnv = iface.env ?? [];
+  const wfName = binding.name ?? "<unnamed binding>";
+  const listOrNone = (names) => (names.length === 0 ? "[] (none)" : `[${names.join(" ")}]`);
+  const problems = [];
+
+  // Adapter kinds: interface-required kinds ⊆ binding adapterImages;
+  // extra kinds (a binding supplying more than the tree uses) tolerated.
+  const provided = Object.keys(binding.adapterImages ?? {}).sort();
+  for (const kind of adapters)
+    if (!(kind in (binding.adapterImages ?? {})))
+      problems.push(`interface "${iface.workflow}" requires adapter kind "${kind}"; binding "${wfName}" adapterImages provide ${listOrNone(provided)} (declare the missing kind's image for this tree, KB-310)`);
+
+  // Mounts: every binding volume must match an interface mount byte-exact
+  // on mountPath with the declared kind, and every interface mount must be
+  // satisfied by a binding volume.
+  const ifacePaths = new Map(mounts.map((m) => [m.mountPath, m]));
+  const bindingPaths = new Map();
+  const volumeList = [];
+  for (const v of binding.volumes ?? []) {
+    bindingPaths.set(v.mountPath, v);
+    volumeList.push(`${v.name} (${v.kind} at ${v.mountPath})`);
+    const declared = ifacePaths.get(v.mountPath);
+    if (!declared)
+      problems.push(`binding "${wfName}" supplies volume "${v.name}" (${v.kind} at ${v.mountPath}) which interface "${iface.workflow}" does not require; interface mounts: ${listOrNone(mounts.map((m) => `${m.name} (${m.kind} at ${m.mountPath})`))} — unknown-slot, fail closed (the declaration is the supported surface, KB-310)`);
+    else if (v.kind !== declared.kind)
+      problems.push(`binding "${wfName}" volume "${v.name}" wants kind "${v.kind}" at ${v.mountPath}, interface "${iface.workflow}" declares "${declared.kind}" (binding volumes and interface mounts must agree on kind, KB-310)`);
+  }
+  for (const declared of mounts) {
+    const v = bindingPaths.get(declared.mountPath);
+    if (!v)
+      problems.push(`interface "${iface.workflow}" requires mount "${declared.name}" (${declared.kind}) at "${declared.mountPath}"; binding "${wfName}" volumes: ${listOrNone(volumeList)} (mount paths must match byte-exact, KB-310)`);
+    else if (v.kind !== declared.kind)
+      problems.push(`interface "${iface.workflow}" requires mount "${declared.name}" as "${declared.kind}" at "${declared.mountPath}"; binding "${wfName}" volume at that path is "${v.kind}" (KB-310)`);
+  }
+
+  // Secret env lanes: binding secret env keys ⊆ interface secretEnv ∪ env;
+  // every interface-required secret env lane must resolve from the
+  // binding's secrets env maps. A secret with an empty env map contributes
+  // no keys (the CSI file-mount lane).
+  const resolved = new Map();
+  const secretList = [];
+  for (const s of binding.secrets ?? []) {
+    secretList.push(s.name);
+    for (const name of Object.keys(s.env ?? {})) {
+      if (!secretEnv.includes(name) && !ifaceEnv.includes(name))
+        problems.push(`binding "${wfName}" secret "${s.name}" carries env "${name}" which interface "${iface.workflow}" does not require; interface secretEnv: ${listOrNone(secretEnv)}, env: ${listOrNone(ifaceEnv)} (unknown-slot, fail closed, KB-310)`);
+      resolved.set(name, s.name);
+    }
+  }
+  for (const lane of secretEnv)
+    if (!resolved.has(lane))
+      problems.push(`interface "${iface.workflow}" requires secret env "${lane}"; binding "${wfName}" secrets (${listOrNone(secretList)}) carry no such env key (wire the lane in the binding secret's env map, KB-310)`);
+
+  // Env: binding env keys must be declared as interface env.
+  for (const name of Object.keys(binding.env ?? {}))
+    if (!ifaceEnv.includes(name))
+      problems.push(`binding "${wfName}" env key "${name}" is not declared by interface "${iface.workflow}" (interface env: ${listOrNone(ifaceEnv)}, secretEnv: ${listOrNone(secretEnv)}); unknown-slot, fail closed (KB-310)`);
+
+  return problems;
+}
+
 // ── tree discovery (same discipline as tree-outcome-flow.mjs) ───────────────
 
 function discoverTrees() {
@@ -263,11 +348,73 @@ if (payload) {
         fail(`k8s/examples/routes-configmap.yaml`, `workflowLibrary.${name}.interface drifts from ${tree}/interface.json`,
           `copy the tree's interface.json verbatim into the routes payload entry`);
     }
+    // Resolve the tree from the url itself (the operator parses the same
+    // .git//<tree> segment): the embedded interface must be the addressed
+    // tree's declaration, not another tree's.
+    const urlTree = typeof wf.url === "string" ? (/\.git\/\/([A-Za-z0-9_-]+)/.exec(wf.url) ?? [])[1] : undefined;
+    if (typeof tree === "string" && urlTree && urlTree !== tree)
+      fail(`k8s/examples/routes-configmap.yaml`,
+        `workflowLibrary.${name}.url addresses tree "${urlTree}" but its embedded interface declares workflow "${tree}" (one of the two points at the wrong tree)`);
+    if (typeof tree === "string")
+      for (const problem of bindingViolations(embedded, { ...wf, name }))
+        fail(`k8s/examples/routes-configmap.yaml (workflowLibrary.${name})`, problem);
   }
   for (const tree of trees) {
     const embedded = Object.entries(wfLibrary).find(([, wf]) => wf.interface && wf.interface.workflow === tree);
     if (!embedded) warn(`${tree} interface is not referenced by the example routes payload (subworkflow-only tree or not yet routed)`);
   }
+}
+
+// ── self-test: the conformance mirror must stay sharp (KB-310) ──────────────
+//
+// A rule that stops firing is exactly what shipped four refused bindings
+// past CI, so bindingViolations is exercised here against engineered
+// bindings: two negatives whose violations must fire, and one positive
+// that must stay clean.
+{
+  const selfIface = {
+    workflow: "selftest_tree",
+    adapters: ["shell"],
+    mounts: [{ name: "data", kind: "pvc", mountPath: "/data" }],
+    secretEnv: ["LINEAR_API_KEY"],
+    env: [],
+  };
+  const expectViolation = (label, binding, needle) => {
+    const problems = bindingViolations(selfIface, binding);
+    if (!problems.some((p) => p.includes(needle)))
+      fail("scripts/interface_validate.mjs (self-test)",
+        `binding-rule self-test "${label}" did not fire (expected a violation containing ${JSON.stringify(needle)}; got ${JSON.stringify(problems)}) — this mirror and the operator's validateInterfaceBinding have diverged, KB-310`,
+        "keep bindingViolations rule-equivalent to criteria-k8s validateInterfaceBinding");
+  };
+  // A binding that supplies a volume the tree never declares → unknown-slot.
+  expectViolation("undeclared-extra-mount", {
+    name: "selftest_binding",
+    volumes: [
+      { name: "data", kind: "pvc", mountPath: "/data" },
+      { name: "scratch", kind: "tmp", mountPath: "/tmp/scratch" },
+    ],
+    secrets: [{ name: "linear-api-key", env: { LINEAR_API_KEY: "linear_api_key" } }],
+    env: {},
+  }, `volume "scratch" (tmp at /tmp/scratch) which interface "selftest_tree" does not require`);
+  // A binding that does not resolve a required secret env lane.
+  expectViolation("missing-secret-lane", {
+    name: "selftest_binding",
+    volumes: [{ name: "data", kind: "pvc", mountPath: "/data" }],
+    secrets: [{ name: "github-tokens", env: { OTHER_ENV_KEY: "other_key" } }],
+    env: {},
+  }, `requires secret env "LINEAR_API_KEY"`);
+  // A fully conforming binding produces no violations (an extra copilot
+  // kind the tree does not declare must be tolerated).
+  const conformance = bindingViolations(selfIface, {
+    name: "selftest_binding",
+    adapterImages: { shell: "registry/criteria-adapter-shell-peer:latest", copilot: "registry/criteria-adapter-copilot-peer:latest" },
+    volumes: [{ name: "data", kind: "pvc", mountPath: "/data" }],
+    secrets: [{ name: "linear-api-key", env: { LINEAR_API_KEY: "linear_api_key" } }],
+    env: {},
+  });
+  if (conformance.length !== 0)
+    fail("scripts/interface_validate.mjs (self-test)",
+      `binding-rule self-test "conforming-binding" flagged a compliant binding: ${JSON.stringify(conformance)} — the mirror is stricter than the operator, KB-310`);
 }
 
 if (errors.length > 0) {
