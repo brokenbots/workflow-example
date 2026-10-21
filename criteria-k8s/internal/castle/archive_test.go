@@ -19,9 +19,9 @@ import (
 	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	castlev1 "github.com/brokenbots/castle/castle/gen/castle/v1"
 	castlev1connect "github.com/brokenbots/castle/castle/gen/castle/v1/castlev1connect"

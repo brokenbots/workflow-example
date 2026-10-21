@@ -138,7 +138,13 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// below must land its record before the reap deletes anything.
 		update := run.DeepCopy()
 		var obs *castle.Observation
-		if r.Castle == nil || r.Castle.Disabled() {
+		// stopPolling records that castle can never add more terminal
+		// information (source off, run unresolvable): the cleanup below
+		// still runs — gate, reap, sweep — but the pass ends without a
+		// requeue, as it did when the re-derivation sat first in the old
+		// ordering.
+		stopPolling := r.Castle == nil || r.Castle.Disabled()
+		if stopPolling {
 			obs = &castle.Observation{}
 		} else {
 			var obsErr error
@@ -155,6 +161,7 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 					// interval.
 					logger.Info("stopping castle observation for Job-terminal CriteriaRun: the runner agent can no longer register with castle", "error", obsErr)
 					obs = &castle.Observation{}
+					stopPolling = true
 				} else {
 					logger.Error(obsErr, "observing castle terminal for Job-terminal CriteriaRun")
 					return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
@@ -204,8 +211,11 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		// A watchdog-failed run's engine is gone: castle will never record a
 		// terminal for it, so the terminal-completion polling must stop
-		// instead of looping forever (KB-24).
-		if castleTerminalObserved(&update.Status) || stallWatchdogFired(&update.Status) {
+		// instead of looping forever (KB-24). The same stop applies when
+		// castle's side of the terminal handshake can never complete —
+		// castle disabled, or the run unresolvable after the runner Job
+		// turned terminal (observed above).
+		if stopPolling || castleTerminalObserved(&update.Status) || stallWatchdogFired(&update.Status) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{RequeueAfter: perScopeRequeueInterval}, nil
@@ -731,6 +741,13 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 	if err := r.ensureTerminalArchived(ctx, run, nil, logger); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The gate's stamps bumped the object version; the finalizer removal
+	// reads them back so its write cannot collide on resourceVersion.
+	var archivedFresh criteriav1.CriteriaRun
+	if err := r.Get(ctx, client.ObjectKeyFromObject(run), &archivedFresh); err != nil {
+		return ctrl.Result{}, fmt.Errorf("re-reading CriteriaRun after the archive stamp: %w", err)
+	}
+	run = &archivedFresh
 
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err

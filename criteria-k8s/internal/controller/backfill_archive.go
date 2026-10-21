@@ -50,7 +50,7 @@ type BackfillResult struct {
 // The archiver may be disabled (no castle configured): the pass then only
 // counts, archiving nothing — running backfill without an archive leg is a
 // coverage report, not a silent no-op.
-func BackfillRunArchives(ctx context.Context, c client.Client, archiver castle.RunArchiver, enricher *castle.Client, namespace, operatorVersion string, logger logr.Logger) (BackfillResult, error) {
+func BackfillRunArchives(ctx context.Context, c client.Client, archiver castle.RunArchiver, enricher castle.RunSource, namespace, operatorVersion string, logger logr.Logger) (BackfillResult, error) {
 	var res BackfillResult
 	// The gate logic (record build, ceilings, cr-uid fallback, pending
 	// stamping) is the reconciler's — a shallow reconciler bound to this
@@ -101,7 +101,7 @@ func BackfillRunArchives(ctx context.Context, c client.Client, archiver castle.R
 // step summary). A terminal run's runner job is usually already deleted and
 // its castle run may be beyond discovery; any such gap degrades to CR-only
 // fields, never blocks the archive.
-func enrichBackfillRun(ctx context.Context, enricher *castle.Client, run *criteriav1.CriteriaRun, logger logr.Logger) *castle.Observation {
+func enrichBackfillRun(ctx context.Context, enricher castle.RunSource, run *criteriav1.CriteriaRun, logger logr.Logger) *castle.Observation {
 	obs := &castle.Observation{}
 	if enricher == nil || enricher.Disabled() {
 		return obs
