@@ -5,6 +5,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	logr "github.com/go-logr/logr"
@@ -97,6 +98,15 @@ func TestKB310ConfigSlotDetail(t *testing.T) {
 	t.Run("workflow-less runs are the legacy image-mode path", func(t *testing.T) {
 		assert.Empty(t, kb310ConfigSlotDetail(&criteriav1.CriteriaRun{Spec: criteriav1.CriteriaRunSpec{BuildCmd: "make"}},
 			&criteriav1.RunConfigRender{BuildCmd: "make"}, nil))
+	})
+
+	t.Run("long values truncate on a rune boundary", func(t *testing.T) {
+		run := valid()
+		run.Spec.BuildCmd = strings.Repeat("é", 80)
+		detail := kb310ConfigSlotDetail(run, specFieldsRender(run.Spec), nil)
+		require.NotEmpty(t, detail)
+		assert.NotContains(t, detail, "\ufffd", "the preview must not split a rune into a replacement char")
+		assert.Contains(t, detail, "…", "long values preview truncated")
 	})
 }
 

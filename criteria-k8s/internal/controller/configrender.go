@@ -266,13 +266,15 @@ func bindingSource(cmData map[string]string, key string) string {
 
 // truncateForStatus keeps a rejected slot's value preview proportionate in
 // a condition message: values are commands or refs, never secrets, and the
-// message must stay readable.
+// message must stay readable. The cut honors the rune boundary so the
+// condition message stays valid UTF-8.
 func truncateForStatus(value string) string {
 	const max = 64
-	if len(value) <= max {
+	runes := []rune(value)
+	if len(runes) <= max {
 		return value
 	}
-	return value[:max-1] + "…"
+	return string(runes[:max-1]) + "…"
 }
 
 // hasSpecRender reports whether a spec-fields-only render is worth
