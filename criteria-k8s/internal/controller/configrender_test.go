@@ -9,8 +9,10 @@ package controller_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -24,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 )
@@ -404,4 +407,143 @@ func TestReconcileConfigMapReadErrorDefersInsteadOfFailing(t *testing.T) {
 	var after criteriav1.CriteriaRun
 	require.NoError(t, failingGet.Get(context.Background(), client.ObjectKeyFromObject(run), &after))
 	assert.NotEqual(t, criteriav1.PhaseFailed, after.Status.Phase, "an infrastructure read failure must not fail the run")
+}
+
+// runAdapterPod builds the per-scope adapter-labeled pod (same shape as the
+// internal-package fixture) for the drift-cleanup tests.
+func runAdapterPod(name, runName string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				jobbuilder.LabelRun:  runName,
+				jobbuilder.LabelRole: jobbuilder.RoleAdapter,
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "adapter", Image: "adp:1"}}},
+	}
+}
+
+// The KB-314 reorder must not loosen the drift-path cleanup: a drifted pin
+// still reaps the child Job AND the per-scope adapter pods (the adapters
+// dial the runner's shim, which dies with the Job — the CRI-130..142
+// failure mode), the archive record lands before the runner evidence is
+// destroyed (status write first, then gate, then deletes), and the
+// admission slot is free once the pass returns. Without the per-scope
+// adapter sweep this test fails on the surviving adapter pod.
+func TestReconcileConfigRenderDriftSweepsAdapterPods(t *testing.T) {
+	run := newConfigRun("kb103-drift-adapters", &criteriav1.CriteriaRunConfigRef{Name: repoCM, ResourceVersion: repoCMStamped})
+	run.Spec.PerScopeSessions = true
+	adapter := runAdapterPod("adp-drift-0", run.Name)
+	other := runAdapterPod("adp-keep-0", "kb103-other-run")
+	harness := newGateHarness(t, run, newRepoCM(repoCMStamped), adapter, other)
+	cl, archiver := harness.cl, harness.archiver
+	r := harness.reconciler()
+
+	// Admission renders config X at rv 77 and builds the runner Job; the
+	// adapter pods must survive a healthy pass.
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace(run.Namespace)))
+	require.Len(t, pods.Items, 2, "admission must not sweep adapter pods")
+
+	// The pinned CM is patched in place; the rv moves and the next pass
+	// fails the run fast on drift.
+	var cm corev1.ConfigMap
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: repoCM, Namespace: run.Namespace}, &cm))
+	cm.Data["ciGateCmd"] = "make new-gate"
+	require.NoError(t, cl.Update(context.Background(), &cm))
+
+	archiver.jobProbe = func() int { return childJobCount(t, cl, run.Namespace) }
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, archiver.keyCount(), "the drift archive landed")
+	require.NotEmpty(t, archiver.calls.archivedKeys)
+	assert.True(t, strings.HasPrefix(archiver.calls.archivedKeys[0], castle.CRUIDArchiveKeyPrefix),
+		"a run without a castle run id archives under the cr-uid fallback: %s", archiver.calls.archivedKeys[0])
+	assert.Equal(t, []int{1}, archiver.calls.jobsAtArchive, "the runner Job still existed when the record was written")
+
+	var updated criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &updated))
+	assert.Equal(t, criteriav1.PhaseFailed, updated.Status.Phase)
+	cond, ok := conditionFor(updated.Status, controller.ConditionConfigRenderDrift)
+	require.True(t, ok, "the ConfigRenderDrift condition must be stamped")
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace(run.Namespace)))
+	assert.Empty(t, jobs.Items, "the child Job is reaped after the record landed")
+
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace(run.Namespace)))
+	require.Len(t, pods.Items, 1, "only this run's adapter pods are swept")
+	assert.Equal(t, "adp-keep-0", pods.Items[0].Name, "adapter pods of other runs survive")
+
+	// The slot was released by the drift pass: a second dev run on the same
+	// repo is admitted, not parked behind the drifted one. CRI-291: it is
+	// picked up by its own requeue, not a nested reconcile.
+	next := newConfigRun("kb103-next-queued", &criteriav1.CriteriaRunConfigRef{Name: repoCM, ResourceVersion: repoCMStamped})
+	nextAdmitted, _, prevRunning := r.Queue.Enqueue(next)
+	assert.True(t, nextAdmitted, "the drift pass released the admission slot")
+	assert.Nil(t, prevRunning, "no run may still hold the slot")
+}
+
+// The release-before-gate alignment (CRI-291): a failing archive write must
+// not leave the admission slot held by the drift pass. The evidence stays
+// parked (nothing is reaped while the record is missing, TerminalArchivePending
+// is stamped), the run requeues with backoff, and the queue admits the next
+// run; when the archive recovers the sweep completes.
+func TestReconcileConfigRenderDriftFailingArchiveReleasesSlot(t *testing.T) {
+	run := newConfigRun("kb103-drift-noslot", &criteriav1.CriteriaRunConfigRef{Name: repoCM, ResourceVersion: repoCMStamped})
+	run.Spec.PerScopeSessions = true
+	adapter := runAdapterPod("adp-drift-0", run.Name)
+	harness := newGateHarness(t, run, newRepoCM(repoCMStamped), adapter)
+	cl, archiver := harness.cl, harness.archiver
+	r := harness.reconciler()
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err, "admission renders config X")
+
+	var cm corev1.ConfigMap
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: repoCM, Namespace: run.Namespace}, &cm))
+	cm.Data["ciGateCmd"] = "make new-gate"
+	require.NoError(t, cl.Update(context.Background(), &cm))
+
+	archiver.err = connect.NewError(connect.CodeUnavailable, nil)
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.Error(t, err, "the failed archive requeues with backoff (returned error)")
+
+	var drifted criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &drifted))
+	assert.Equal(t, criteriav1.PhaseFailed, drifted.Status.Phase)
+	assert.Empty(t, drifted.Status.ArchiveID)
+	assert.True(t, pendingConditionTrue(&drifted), "TerminalArchivePending is stamped")
+	assert.Equal(t, 0, archiver.keyCount(), "nothing was archived")
+	assert.Equal(t, 1, childJobCount(t, cl, run.Namespace), "the child Job survives an unarchived pass")
+
+	// The release-before-gate ordering is discriminated by a second dev run
+	// on the same repo: it can only be admitted while the drifted run no
+	// longer holds the slot.
+	next := newConfigRun("kb103-next-queued", &criteriav1.CriteriaRunConfigRef{Name: repoCM, ResourceVersion: repoCMStamped})
+	nextAdmitted, _, prevRunning := r.Queue.Enqueue(next)
+	assert.True(t, nextAdmitted, "the failed gate must not hold the admission slot")
+	assert.Nil(t, prevRunning, "no run may still hold the slot")
+
+	// The write leg recovers: the terminal branch lands the record and the
+	// terminal-cleanup guarantee reaps the Job and the adapter pods.
+	archiver.err = nil
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+
+	var recovered criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(run), &recovered))
+	assert.Equal(t, 1, archiver.keyCount())
+	assert.NotEmpty(t, recovered.Status.ArchiveID)
+	assert.False(t, pendingConditionTrue(&recovered))
+	assert.Equal(t, 0, childJobCount(t, cl, run.Namespace))
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace(run.Namespace)))
+	assert.Empty(t, pods.Items, "the adapter pods are swept once archived")
 }

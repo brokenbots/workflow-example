@@ -105,6 +105,11 @@ func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteri
 	if err := r.Status().Update(ctx, update); err != nil {
 		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on step-progress stall: %w", err)
 	}
+	// Release the queue slot so the next queued run is admitted (CRI-291:
+	// it is picked up by its own requeue, not a nested reconcile). Releasing
+	// before the archive gate keeps a castle outage from stalling admission,
+	// like the pass that lands the terminal branch above.
+	r.Queue.Release(run)
 	// KB-314: the run is terminal — its castle archive record lands BEFORE
 	// the runner evidence (child Jobs and their pods) is destroyed. A failed
 	// archive fails this pass with the TerminalArchivePending condition;
@@ -123,9 +128,6 @@ func (r *CriteriaRunReconciler) failRunStalled(ctx context.Context, run *criteri
 			return ctrl.Result{}, err
 		}
 	}
-	// Release the queue slot so the next queued run is admitted (CRI-291:
-	// it is picked up by its own requeue, not a nested reconcile).
-	r.Queue.Release(run)
 	return ctrl.Result{}, nil
 }
 

@@ -93,6 +93,13 @@ func (r *CriteriaRunReconciler) refuseMissingWorkflowSource(ctx context.Context,
 	if err := r.Status().Update(ctx, update); err != nil {
 		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on missing workflowSource: %w", err)
 	}
+	// Release any admission slot the run holds (it never enqueues on the
+	// gate's own pass, but a pre-gate operator may have admitted it) so the
+	// next queued run is admitted; it is picked up by its own requeue, not a
+	// nested reconcile (CRI-291). Releasing before the archive gate keeps a
+	// castle outage from stalling admission, like the pass that lands the
+	// terminal branch above.
+	r.Queue.Release(run)
 	if err := r.ensureTerminalArchived(ctx, update, nil, logger); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -109,10 +116,5 @@ func (r *CriteriaRunReconciler) refuseMissingWorkflowSource(ctx context.Context,
 	if r.Recorder != nil {
 		r.Recorder.Event(run, corev1.EventTypeWarning, eventReasonWorkflowSourceMissing, message)
 	}
-	// Release any admission slot the run holds (it never enqueues on the
-	// gate's own pass, but a pre-gate operator may have admitted it) so the
-	// next queued run is admitted; it is picked up by its own requeue, not a
-	// nested reconcile (CRI-291).
-	r.Queue.Release(run)
 	return ctrl.Result{}, nil
 }

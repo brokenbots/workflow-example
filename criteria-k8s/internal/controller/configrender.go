@@ -163,14 +163,24 @@ func (r *CriteriaRunReconciler) failConfigRenderDrift(ctx context.Context, run *
 	if err := r.Status().Update(ctx, update); err != nil {
 		return ctrl.Result{}, fmt.Errorf("marking CriteriaRun failed on config render drift: %w", err)
 	}
+	// Release the queue slot so the next queued run is admitted (CRI-291:
+	// it is picked up by its own requeue, not a nested reconcile). Releasing
+	// before the archive gate keeps a castle outage from stalling admission,
+	// like the pass that lands the terminal branch above.
+	r.Queue.Release(run)
 	if err := r.ensureTerminalArchived(ctx, update, nil, logger); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteChildJobs(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
-	// Release the queue slot so the next queued run is admitted.
-	r.Queue.Release(run)
+	// Per-scope adapter pods dial the runner's shim; with the runner Job
+	// deleted the shim is going away, so the adapters must not outlive it.
+	if run.Spec.PerScopeSessions {
+		if err := r.deleteRunAdapterPods(ctx, run, logger); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{}, nil
 }
 
