@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -56,7 +57,7 @@ var (
 	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr          = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
 	backfillRunArchives = flag.Bool("backfill-run-archives", getBool("BACKFILL_RUN_ARCHIVES", false), "One-shot run-archive backfill (KB-314): archive every terminal CriteriaRun into castle's run archive, then exit; the operator mode flag runs the normal reconciler loop instead")
-	castleToken         = getenv("CASTLE_TOKEN", "")
+	castleToken         = castleTokenFromEnv()
 	debugEventsFile     = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
 	retentionPeriod     = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
 	sweepInterval       = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
@@ -131,8 +132,8 @@ func main() {
 	// unarchived.
 	castleArchiver := castle.NewRunArchiveClient(castle.RunArchiverConfig{Addr: *castleAddr, Token: castleToken}, nil)
 	if *castleAddr != "" && castleToken == "" {
-		logger.Error(errors.New("CASTLE_TOKEN is not set while --castle-addr is"),
-			"run-archive lane disabled: castle address is set but no criteria token is wired, so terminal CriteriaRuns will NOT be archived into castle (wire the token via CASTLE_TOKEN — the chart's operator.castleTokenSecret — before relying on run archives)",
+		logger.Error(errors.New("castle address is set but no criteria token is wired"),
+			"run-archive lane disabled: castle address is set but CASTLE_TOKEN (or the CASTLE_TOKEN_FILE CSI mount the chart's operator.castleTokenSpc renders, or the secretKeyRef in config/manager) is missing, so terminal CriteriaRuns will NOT be archived into castle — wire the token before relying on run archives",
 			"castleAddr", *castleAddr)
 	}
 
@@ -317,6 +318,25 @@ func operatorScheme() (*runtime.Scheme, error) {
 		return nil, fmt.Errorf("registering apps scheme: %w", err)
 	}
 	return scheme, nil
+}
+
+// castleTokenFromEnv resolves the castle criteria token for the run-archive
+// and observation lanes: CASTLE_TOKEN first, else the file CASTLE_TOKEN_FILE
+// points at (the OpenBao Secrets Store CSI mount the chart renders — the
+// chart posture delivers credential material as mounted files, never env
+// values). Trailing whitespace from the mount file is trimmed. An absent or
+// unreadable file yields an empty token: the lane stays disabled and the
+// startup path logs the loud address-without-token error.
+func castleTokenFromEnv() string {
+	token := getenv("CASTLE_TOKEN", "")
+	if file := getenv("CASTLE_TOKEN_FILE", ""); token == "" && file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return ""
+		}
+		token = strings.TrimSpace(string(data))
+	}
+	return token
 }
 
 func getenv(key, fallback string) string {

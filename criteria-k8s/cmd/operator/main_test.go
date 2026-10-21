@@ -12,6 +12,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -204,3 +206,25 @@ func (f *failingBackfillArchiver) ListRunArchives(ctx context.Context, req *conn
 }
 
 func (f *failingBackfillArchiver) Disabled() bool { return false }
+
+func TestCastleTokenFromEnv(t *testing.T) {
+	t.Run("CASTLE_TOKEN wins", func(t *testing.T) {
+		t.Setenv("CASTLE_TOKEN", "env-token")
+		t.Setenv("CASTLE_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
+		require.Equal(t, "env-token", castleTokenFromEnv())
+	})
+	t.Run("file token trimmed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "token")
+		require.NoError(t, os.WriteFile(path, []byte("file-token\n"), 0o400))
+		os.Unsetenv("CASTLE_TOKEN")
+		t.Setenv("CASTLE_TOKEN", "")
+		t.Setenv("CASTLE_TOKEN_FILE", path)
+		require.Equal(t, "file-token", castleTokenFromEnv())
+	})
+	t.Run("unreadable file leaves token empty", func(t *testing.T) {
+		os.Unsetenv("CASTLE_TOKEN")
+		t.Setenv("CASTLE_TOKEN", "")
+		t.Setenv("CASTLE_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
+		require.Empty(t, castleTokenFromEnv())
+	})
+}

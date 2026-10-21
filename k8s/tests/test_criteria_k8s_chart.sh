@@ -244,6 +244,13 @@ check_override "PVC size override" "pvc.data.size=20Gi" 'storage: 20Gi'
 check_override "OpenBao secret path override" "openbao.secretPath=other/data/x" 'secretPath: other/data/x'
 check_override "operator job arch override" "operator.jobArch=arm64" 'value: "arm64"'
 check_override "operator legacy secret volumes override" "operator.legacySecretVolumes=true" 'value: "true"'
+# KB-314: the castle token lane is opt-in OpenBao CSI — setting
+# operator.castleTokenSpc renders the SPC, the CSI volume and the
+# CASTLE_TOKEN_FILE pointer in the operator deployment; the default (empty)
+# renders none of them (the count_kind SecretProviderClass assertion above
+# stays at 2).
+check_override "castle token SPC override" "operator.castleTokenSpc=castle-spc" 'CASTLE_TOKEN_FILE'
+check_override "castle token SPC object" "operator.castleTokenSpc=castle-spc" 'name: "castle-spc"'
 check_override "namespace override" "namespace=other-ns" 'namespace: other-ns'
 
 out="$(helm template criteria-k8s "$CHART" --set "images.workflow.repository=ghcr.io/acme/runner" --set "images.workflow.tag=v5")" \
