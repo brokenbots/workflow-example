@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"google.golang.org/protobuf/types/known/structpb"
 	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"

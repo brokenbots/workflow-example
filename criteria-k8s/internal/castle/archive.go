@@ -48,24 +48,24 @@ const (
 	MaxArchiveSteps      = 256
 	MaxArchiveConditions = 32
 
-	maxArchiveStepNameCap       = 256
-	maxArchiveStepOutcomeCap    = 64
-	maxArchiveConditionTypeCap  = 128
-	maxArchiveCondReasonCap = 128
-	maxArchiveConditionMsgCap   = 512
-	maxArchiveFailureReasonCap  = 2048
-	maxArchiveWorkflowNameCap   = 128
-	maxArchiveWorkflowRefCap    = 512
-	maxArchiveRepoCap           = 256
-	maxArchiveTicketCap         = 128
-	maxArchiveJobNameCap        = 64
-	maxArchiveRunIDCap          = 128
-	maxArchiveArchiveKeyCap     = 128
-	maxArchiveTreeDigestCap     = 256
-	maxArchiveChecksumCap       = 128
-	maxArchiveOperatorVerCap    = 64
-	maxArchiveFinalPhaseCap     = 32
-	maxArchiveTimestampCap      = 64
+	maxArchiveStepNameCap        = 256
+	maxArchiveStepOutcomeCap     = 64
+	maxArchiveConditionTypeCap   = 128
+	maxArchiveCondReasonCap      = 128
+	maxArchiveConditionMsgCap    = 512
+	maxArchiveFailureReasonCap   = 2048
+	maxArchiveWorkflowNameCap    = 128
+	maxArchiveWorkflowRefCap     = 512
+	maxArchiveRepoCap            = 256
+	maxArchiveTicketCap          = 128
+	maxArchiveJobNameCap         = 64
+	maxArchiveRunIDCap           = 128
+	maxArchiveArchiveKeyCap      = 128
+	maxArchiveTreeDigestCap      = 256
+	maxArchiveChecksumCap        = 128
+	maxArchiveOperatorVerCap     = 64
+	maxArchiveFinalPhaseCap      = 32
+	maxArchiveTimestampCap       = 64
 	maxArchiveTerminalCleanupCap = 16
 )
 
