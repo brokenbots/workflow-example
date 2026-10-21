@@ -1027,6 +1027,15 @@ func TestValidateWorkflowInterfaceShape(t *testing.T) {
 		},
 		"bad slot var":   func(i *WorkflowInterface) { i.ConfigSlots[0].Variable = "1x" },
 		"missing target": func(i *WorkflowInterface) { i.ConfigSlots[0].Target = "" },
+		// KB-310: the platform slot surface is closed — only the config
+		// keys a project binding can carry through the KB-103 render, each
+		// with its canonical delivery variable.
+		"unknown slot key": func(i *WorkflowInterface) {
+			i.ConfigSlots[0] = WorkflowInterfaceConfigSlot{Slot: "deployCmd", Variable: "deploy_cmd", Target: "deploy"}
+		},
+		"non-canonical slot var": func(i *WorkflowInterface) {
+			i.ConfigSlots[0].Variable = "gate_cmd"
+		},
 	} {
 		iface := valid()
 		mutate(iface)

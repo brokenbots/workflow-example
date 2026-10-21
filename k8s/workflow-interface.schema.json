@@ -91,11 +91,12 @@
         "properties": {
           "slot": {
             "$ref": "#/definitions/slotName",
-            "description": "Per-repo ConfigMap data key the binding carries this slot's value under. Platform-delivered keys (buildCmd, testCmd, ciGateCmd, baseBranch) ride the KB-103 render as-is."
+            "description": "Per-repo ConfigMap data key the binding carries this slot's value under. Must be one of the platform-delivered keys (buildCmd, testCmd, ciGateCmd, baseBranch): those are the only config values a project binding can carry through the KB-103 render.",
+            "enum": ["buildCmd", "testCmd", "ciGateCmd", "baseBranch"]
           },
           "variable": {
             "type": "string",
-            "description": "Tree workflow variable the value is delivered to (must be declared by the tree)."
+            "description": "Tree workflow variable the value is delivered to (must be declared by the tree; buildCmd/build_cmd, testCmd/test_cmd, ciGateCmd/ci_gate_cmd, baseBranch/base_branch)."
           },
           "target": {
             "type": "string",

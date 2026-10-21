@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	v1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 )
 
 const (
@@ -165,10 +167,14 @@ type WorkflowInterfaceMount struct {
 
 // WorkflowInterfaceConfigSlot is one config slot of an interface
 // declaration (KB-310): a config key the tree honors, the tree variable it
-// lands in, and the step/agent that consumes it.
+// lands in, and the step/agent that consumes it. Declared slots are
+// limited to the platform config key surface (buildCmd, testCmd, ciGateCmd,
+// baseBranch) with their canonical delivery variables — those are the keys
+// a project binding can carry through the KB-103 per-run config rendering.
 type WorkflowInterfaceConfigSlot struct {
 	// Slot is the config key name the binding may carry (camelCase,
-	// lowercase first letter).
+	// lowercase first letter). Must be one of the platform config keys
+	// (buildCmd, testCmd, ciGateCmd, baseBranch).
 	Slot string `json:"slot"`
 	// Variable is the tree variable the slot's value renders as.
 	Variable string `json:"variable"`
@@ -568,6 +574,13 @@ func validateInterface(iface *WorkflowInterface) error {
 			return fmt.Errorf("configSlots[%d] (%s): slot is not unique", i, s.Slot)
 		}
 		seenSlots[s.Slot] = true
+		wantVar, ok := v1.KB310ConfigSlotVariables[s.Slot]
+		if !ok {
+			return fmt.Errorf("configSlots[%d] (%s): slot is not a platform config key (declare only buildCmd, testCmd, ciGateCmd, or baseBranch — the keys a project binding can carry, KB-310)", i, s.Slot)
+		}
+		if s.Variable != wantVar {
+			return fmt.Errorf("configSlots[%d] (%s): variable %q is not the slot's delivery variable %q (the KB-103 render delivers the value as the tree variable, KB-310)", i, s.Slot, s.Variable, wantVar)
+		}
 		if !interfaceVarRe.MatchString(s.Variable) {
 			return fmt.Errorf("configSlots[%d] (%s): variable %q is not a tree variable", i, s.Slot, s.Variable)
 		}

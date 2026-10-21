@@ -17,6 +17,89 @@ import (
 
 func discardLogger() logr.Logger { return logr.Discard() }
 
+// testSlotInterface builds an interface that declares the develop tree's
+// config surface (base branch + CI gate only) — a tree that honors base
+// branch and CI gate but not build/test commands.
+func testSlotInterface() *criteriav1.RunWorkflowInterface {
+	iface := testInterface()
+	iface.ConfigSlots = []criteriav1.RunWorkflowInterfaceConfigSlot{
+		{Slot: "baseBranch", Variable: "base_branch", Target: "branch_manager"},
+		{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "developer"},
+	}
+	return iface
+}
+
+// KB-310: a binding's config surface is validated against the tree's
+// declared slots when the per-run config render is derived — an override
+// the tree does not honor rejects unknown-slot (the declaration is the
+// supported surface); declared slots render; unset slots override nothing
+// and are free.
+func TestKB310ConfigSlotDetail(t *testing.T) {
+	valid := func() *criteriav1.CriteriaRun {
+		run := testRun()
+		run.Spec.Workflow.Interface = testSlotInterface()
+		return run
+	}
+
+	t.Run("undeclared spec-field override rejects naming both sides", func(t *testing.T) {
+		run := valid()
+		run.Spec.BuildCmd = "npm run build"
+		detail := kb310ConfigSlotDetail(run, specFieldsRender(run.Spec), nil)
+		require.NotEmpty(t, detail, "an undeclared buildCmd override must reject")
+		assert.Contains(t, detail, `config slot "buildCmd"`)
+		assert.Contains(t, detail, `"npm run build"`)
+		assert.Contains(t, detail, `"kanboard_develop_v1"`, "the tree side is named")
+		assert.Contains(t, detail, "unknown-slot")
+	})
+
+	t.Run("declared slots render", func(t *testing.T) {
+		run := valid()
+		run.Spec.BaseBranch = "release/1.2"
+		run.Spec.CIGateCmd = "make check"
+		assert.Empty(t, kb310ConfigSlotDetail(run, specFieldsRender(run.Spec), nil))
+	})
+
+	t.Run("unset undeclared slots override nothing", func(t *testing.T) {
+		run := valid()
+		assert.Empty(t, kb310ConfigSlotDetail(run, specFieldsRender(run.Spec), nil),
+			"empty values override nothing and are free to deliver")
+	})
+
+	t.Run("CM-carried override for an undeclared slot rejects with the config side named", func(t *testing.T) {
+		run := valid()
+		render := &criteriav1.RunConfigRender{
+			ConfigMap: "castle", ResourceVersion: "7",
+			TestCmd: "npm test",
+		}
+		detail := kb310ConfigSlotDetail(run, render, map[string]string{"testCmd": "npm test"})
+		require.NotEmpty(t, detail)
+		assert.Contains(t, detail, `config slot "testCmd"`)
+		assert.Contains(t, detail, `in the project's config ConfigMap`)
+	})
+
+	t.Run("unknown ConfigMap data key rejects even valueless in the render", func(t *testing.T) {
+		run := valid()
+		render := &criteriav1.RunConfigRender{ConfigMap: "castle", ResourceVersion: "7"}
+		detail := kb310ConfigSlotDetail(run, render, map[string]string{"deployCmd": "./deploy"})
+		require.NotEmpty(t, detail)
+		assert.Contains(t, detail, `config key "deployCmd"`)
+		assert.Contains(t, detail, "no silent ignore")
+	})
+
+	t.Run("interface-less runs keep the pre-KB-310 behavior", func(t *testing.T) {
+		run := testRun()
+		run.Spec.Workflow.Interface = nil
+		run.Spec.BuildCmd = "npm run build"
+		render := &criteriav1.RunConfigRender{ConfigMap: "castle", ResourceVersion: "7", BuildCmd: "x"}
+		assert.Empty(t, kb310ConfigSlotDetail(run, render, map[string]string{"deployCmd": "./deploy"}))
+	})
+
+	t.Run("workflow-less runs are the legacy image-mode path", func(t *testing.T) {
+		assert.Empty(t, kb310ConfigSlotDetail(&criteriav1.CriteriaRun{Spec: criteriav1.CriteriaRunSpec{BuildCmd: "make"}},
+			&criteriav1.RunConfigRender{BuildCmd: "make"}, nil))
+	})
+}
+
 // testInterface builds the interface declaration the tests validate
 // against: two adapters, one tmp mount, one pvc mount, one secret lane,
 // one env name.

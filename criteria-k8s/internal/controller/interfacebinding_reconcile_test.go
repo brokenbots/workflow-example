@@ -169,6 +169,32 @@ func TestReconcileStampsLaunchManifest(t *testing.T) {
 		"the manifest pins the first admission, not the latest pass")
 }
 
+// TestReconcileRefusesUnknownConfigSlot drives the KB-310 config-slot side
+// of admission: the tree's interface declares its override surface, and a
+// binding config value for a slot the tree does not honor rejects
+// unknown-slot with both sides named (no Jobs, no launch manifest).
+func TestReconcileRefusesUnknownConfigSlot(t *testing.T) {
+	r, run, _, cl := interfaceBindingFixture(t, func(spec *criteriav1.CriteriaRunSpec) {
+		spec.BuildCmd = "make ci" // the developer tree honors no buildCmd slot
+	})
+	ctx := context.Background()
+
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, res)
+
+	var refused criteriav1.CriteriaRun
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(run), &refused))
+	assert.Equal(t, criteriav1.PhaseFailed, refused.Status.Phase)
+	cond := condByType(t, refused, criteriav1.ConditionConfigRenderDrift)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	for _, want := range []string{`config slot "buildCmd"`, "kanboard_develop_v1", "unknown-slot", "KB-310"} {
+		assert.Contains(t, cond.Message, want, "the refusal names the offending slot and the tree")
+	}
+	assert.Empty(t, jobNamesForRun(t, cl, "cri-310"), "no Job may be created for the refused run")
+	assert.Nil(t, refused.Status.LaunchManifest, "a refused run stamps no launch manifest")
+}
+
 func condByType(t *testing.T, run criteriav1.CriteriaRun, condType string) metav1.Condition {
 	t.Helper()
 	if idx := slices.IndexFunc(run.Status.Conditions, func(c metav1.Condition) bool { return c.Type == condType }); idx >= 0 {

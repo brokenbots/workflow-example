@@ -896,6 +896,22 @@ func (in *CriteriaRunList) DeepCopyObject() runtime.Object {
 
 var SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
 
+// KB310ConfigSlotVariables is the platform config slot surface (KB-310):
+// the config keys a project binding may carry and the tree variable each
+// is delivered as, exactly the KB-103 per-run config rendering shape (spec
+// fields / pinned ConfigMap data keys rendered by the operator and threaded
+// to the runner env). A tree may declare any subset honoring what its HCL
+// reads; a slot outside this map has no delivery vehicle, so declaring one
+// is a lie — both the routes validation and the operator admission reject
+// it. Shared by internal/routes (workflow-interface parsing) and
+// internal/controller (render-time slot validation).
+var KB310ConfigSlotVariables = map[string]string{
+	"buildCmd":   "build_cmd",
+	"testCmd":    "test_cmd",
+	"ciGateCmd":  "ci_gate_cmd",
+	"baseBranch": "base_branch",
+}
+
 // AddToScheme adds the types in this group-version to the given scheme.
 func AddToScheme(s *runtime.Scheme) error {
 	return SchemeBuilder.AddToScheme(s)

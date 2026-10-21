@@ -46,6 +46,17 @@ const SECRET_ENV = /^[A-Z][A-Z0-9_]*$/;
 const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
 const SLOT_NAME = /^[a-z][a-zA-Z0-9_]*$/;
 
+// The platform slot surface (KB-310): the config keys a project binding
+// may carry and the tree variable each is delivered as through the KB-103
+// per-run config rendering. A declared slot outside this map has no
+// delivery vehicle and is rejected by both this script and the operator.
+const CONFIG_SLOT_VARIABLES = {
+  buildCmd: "build_cmd",
+  testCmd: "test_cmd",
+  ciGateCmd: "ci_gate_cmd",
+  baseBranch: "base_branch",
+};
+
 function vLabel(value, where, what) {
   if (typeof value !== "string" || !LABEL.test(value) || value.length > 128)
     fail(where, `${what} must be a 1-128 char name (got ${JSON.stringify(value)})`);
@@ -129,6 +140,10 @@ function validateInterface(iface, where) {
           fail(where, `configSlots[${i}]: unknown field "${k}"`);
       if (typeof s.slot !== "string" || !SLOT_NAME.test(s.slot) || s.slot.length > 128)
         fail(where, `configSlots[${i}].slot must be a camelCase ConfigMap data key (got ${JSON.stringify(s.slot)})`);
+      if (!["buildCmd", "testCmd", "ciGateCmd", "baseBranch"].includes(s.slot))
+        fail(where, `configSlots[${i}].slot "${s.slot}" is not a platform config key (declare only buildCmd, testCmd, ciGateCmd, or baseBranch — the keys a project binding can carry, KB-310)`);
+      if (CONFIG_SLOT_VARIABLES[s.slot] && s.variable !== CONFIG_SLOT_VARIABLES[s.slot])
+        fail(where, `configSlots[${i}] (${s.slot}).variable must be "${CONFIG_SLOT_VARIABLES[s.slot]}" (the KB-103 render delivers the value as that tree variable, KB-310)`);
       vLabel(s.variable, where, `configSlots[${i}].variable`);
       if (typeof s.target !== "string" || s.target.length === 0 || s.target.length > 256)
         fail(where, `configSlots[${i}].target must name the step/agent the slot lands in`);
