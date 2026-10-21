@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/brokenbots/workflow-example/main/k8s/workflow-interface.schema.json",
+  "title": "Criteria workflow interface declaration (KB-310, ADR 307)",
+  "description": "Machine-readable interface contract a shared workflow tree declares about what it requires and what it may be overridden with. One 'interface.json' per tree root. The criteria-k8s operator validates a run's workflow binding against this declaration BEFORE job creation (fail closed): a required adapter kind missing from the binding's adapterImages, a mount or secret-env lane the binding does not resolve, or an undeclared config key the binding carries is rejected at admission with both sides (tree + project) named.\n\nThe declaration is the tree's supported reuse surface: a project binding may override only config keys the tree declares as slots ('no adding hacks to do overrides if the workflow already supports it'). Slots that name a platform-delivered ConfigMap key (buildCmd, testCmd, ciGateCmd, baseBranch — the KB-103 render) are delivered through the existing per-run config rendering; a slot naming its own key rides the same pipeline as a rendered slot.\n\nConfig-library note: the example payload inline in k8s/examples/routes-configmap.yaml carries an identical copy per workflowLibrary entry (byte-for-byte); scripts/interface_validate.mjs cross-checks the copies and rejects drift.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "workflow"
+  ],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "criteria.brokenbots.dev/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "WorkflowInterface"
+    },
+    "workflow": {
+      "$ref": "#/definitions/label",
+      "description": "Workflow tree name the declaration belongs to. Must equal the tree directory name the file lives in (scripts/interface_validate.mjs enforces the pairing)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human summary of the derivation (which surfaces the tree consumes and how the sets were derived). Never parsed by the operator."
+    },
+    "adapters": {
+      "type": "array",
+      "description": "Adapter kinds the composed run requires (the tree plus its locked subworkflow closure). A binding whose adapterImages lacks a kind listed here is rejected at admission with the named gap. Optional; empty = the tree requires no adapter image from the binding (engine-internal adapters, e.g. decision_kind).",
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/label"
+      },
+      "uniqueItems": true
+    },
+    "mounts": {
+      "type": "array",
+      "description": "Storage mount paths the composed run requires: name, mountPath and the storage kind the binding must supply at that path (scope KB-310: pvc or tmp). A binding volume at an undeclared mountPath/kind is rejected as unknown-slot; a required mount path missing is rejected with the named gap. Path normalization is byte-exact.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "mountPath", "kind"],
+        "properties": {
+          "name": {
+            "$ref": "#/definitions/label",
+            "description": "Binding volume name (matches routes.json workflow volumes[].name)."
+          },
+          "mountPath": {
+            "type": "string",
+            "description": "Container mount path the binding must supply, e.g. /data. Byte-exact; no trailing-slash normalization."
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["pvc", "tmp"],
+            "description": "Storage kind the binding must carry at that path."
+          }
+        }
+      },
+      "uniqueItems": true
+    },
+    "secretEnv": {
+      "type": "array",
+      "description": "Secret env names the composed run must resolve from the binding's secret lanes (binding Secrets[].env keys). Each must be present in at least one binding secret env map at admission (rejection names the missing lane); a binding secret env key NOT declared here is rejected as unknown-slot (fail closed). Entries whose env map is empty declare a lane mount with no env surface (e.g. netrc fetch plumbing) and are exempt from the unknown-slot check.",
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/secretEnvName"
+      },
+      "uniqueItems": true
+    },
+    "env": {
+      "type": "array",
+      "description": "Non-secret run-level env names (binding workflow env map) the tree requires. Optional; empty = the tree requires no run-level env. A binding workflow env name not listed here is rejected as unknown-slot. Volume-level env maps (CRITERIA_* engine plumbing) are platform-owned and never validated against this list.",
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/envName"
+      },
+      "uniqueItems": true
+    },
+    "configSlots": {
+      "type": "array",
+      "description": "Config the tree honors from the project's per-repo ConfigMap (the binding's config surface). Each entry: the ConfigMap data key ('slot'), the tree workflow variable the value lands in ('variable'), and the step/agent that reads it ('target'). The tree — not the platform — decides the override surface: a pinned ConfigMap key outside the platform core set (buildCmd, testCmd, ciGateCmd, baseBranch) and this list is rejected at admission as unknown-slot. Platform-core keys NOT declared here are likewise rejected for this tree (the tree does not honor them). Slot variables are cross-checked against the tree's declared variables by scripts/interface_validate.mjs.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slot", "variable", "target"],
+        "properties": {
+          "slot": {
+            "$ref": "#/definitions/slotName",
+            "description": "Per-repo ConfigMap data key the binding carries this slot's value under. Platform-delivered keys (buildCmd, testCmd, ciGateCmd, baseBranch) ride the KB-103 render as-is."
+          },
+          "variable": {
+            "type": "string",
+            "description": "Tree workflow variable the value is delivered to (must be declared by the tree)."
+          },
+          "target": {
+            "type": "string",
+            "description": "Step/agent the slot lands in (documentation for troubleshootability, e.g. 'kanboard_develop_v1 developer CI gate')."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional human note on what a project may put in this slot."
+          }
+        }
+      },
+      "uniqueItems": true
+    }
+  },
+  "definitions": {
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "slotName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z][a-zA-Z0-9_]*$"
+    },
+    "secretEnvName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "envName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    }
+  }
+}

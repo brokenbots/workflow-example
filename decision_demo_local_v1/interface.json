@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "decision_demo_local_v1",
+  "description": "Local decision demo: decision adapter is engine-internal (no adapter image, no storage, no secret lanes). Requires nothing beyond the binding itself.",
+  "adapters": [],
+  "mounts": [],
+  "secretEnv": [],
+  "env": [],
+  "configSlots": []
+}

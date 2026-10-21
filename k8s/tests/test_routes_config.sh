@@ -63,15 +63,16 @@ printf '%s' "$manifest" | grep -Eq 'ghp_[A-Za-z0-9]|github_pat_|BEGIN (RSA |EC )
     fail "example ConfigMap embeds credential material"
 
 # ---------------------------------------------------------------- validation
-python3 - "$SCHEMA" "$EXAMPLE" <<'PYEOF'
+python3 - "$SCHEMA" "$EXAMPLE" "$REPO_ROOT" <<'PYEOF'
 import copy
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 
-schema_path, example_path = sys.argv[1], sys.argv[2]
+schema_path, example_path, repo_root = sys.argv[1], sys.argv[2], sys.argv[3]
 
 LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -79,7 +80,7 @@ SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 NOSPACE_RE = re.compile(r"^\S+$")
 MOUNT_RE = re.compile(r"^/")
 
-WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages"}
+WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages", "interface"}
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
@@ -89,6 +90,22 @@ CONFIG_TAG_MATCHES = {"", "all", "any"}
 VOLUME_KINDS = ("pvc", "nfs", "tmp", "k8s-secret")
 WORKFLOW_TYPES = ("url", "image")
 WORKFLOW_CLASSES = ("dev", "triage")
+
+# KB-310 (ADR 307): an interface declaration rides every type=url workflow
+# object; the inline mirror matches k8s/workflow-interface.schema.json (the
+# schema of record). NAME_RE values mirror the interface schema's
+# pattern-constrained fields; SLOT_RE is the config-slot name surface ("the
+# tree decides what may be overridden" — camelCase slot names, lowercase
+# first letter), and VAR_RE/ENV_RE are tree-variable and secret-env lanes.
+INTERFACE_KEYS = {"apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots"}
+MOUNT_KEYS = {"name", "mountPath", "kind"}
+SLOT_KEYS = {"slot", "variable", "target", "description"}
+INTERFACE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+MOUNT_PATH_RE = re.compile(r"^/.+$")
+MOUNT_KINDS = ("pvc", "tmp")
+SECRET_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+SLOT_RE = re.compile(r"^[a-z][a-zA-Z0-9_]*$")
+VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def load_example(path):
@@ -208,6 +225,97 @@ def validate_volume(volume, where, errs):
                 errs.append(f"{where}: k8s-secret volume must not declare {key}")
 
 
+def validate_interface(iface, where, errs):
+    if not isinstance(iface, dict):
+        errs.append(f"{where} must be an object")
+        return
+    for key in ("apiVersion", "kind", "workflow"):
+        if key not in iface:
+            errs.append(f"{where} is missing required field {key}")
+    for key in iface:
+        if key not in INTERFACE_KEYS:
+            errs.append(f"{where} has unknown field {key!r}")
+    if iface.get("apiVersion") != "criteria.brokenbots.dev/v1":
+        errs.append(f"{where}.apiVersion must be criteria.brokenbots.dev/v1")
+    if iface.get("kind") != "WorkflowInterface":
+        errs.append(f"{where}.kind must be WorkflowInterface")
+    for key in ("workflow", "description"):
+        if key in iface and (not isinstance(iface[key], str) or not iface[key]):
+            errs.append(f"{where}.{key} must be a non-empty string")
+    for key in ("adapters", "secretEnv", "env"):
+        if key not in iface:
+            continue
+        names = iface[key]
+        if not isinstance(names, list):
+            errs.append(f"{where}.{key} must be an array")
+            continue
+        for i, val in enumerate(names):
+            if not isinstance(val, str) or not val:
+                errs.append(f"{where}.{key}[{i}] must be a non-empty string")
+                continue
+            if key == "adapters" and not INTERFACE_NAME_RE.match(val):
+                errs.append(f"{where}.adapters[{i}] {val!r} is not an adapter kind name")
+            if key in ("secretEnv", "env") and not SECRET_ENV_RE.match(val):
+                errs.append(f"{where}.{key}[{i}] {val!r} is not an env name (UPPER_SNAKE)")
+        if len(set(names)) != len(names):
+            errs.append(f"{where}.{key} has duplicate entries")
+    if "mounts" in iface:
+        mounts = iface["mounts"]
+        if not isinstance(mounts, list):
+            errs.append(f"{where}.mounts must be an array")
+        else:
+            seen = set()
+            for i, mount in enumerate(mounts):
+                mw = f"{where}.mounts[{i}]"
+                if not isinstance(mount, dict):
+                    errs.append(f"{mw} must be an object")
+                    continue
+                for key in ("name", "mountPath", "kind"):
+                    if key not in mount:
+                        errs.append(f"{mw} is missing required field {key}")
+                for key in mount:
+                    if key not in MOUNT_KEYS:
+                        errs.append(f"{mw} has unknown field {key!r}")
+                mname = mount.get("name")
+                if mname is None or not isinstance(mname, str) or not INTERFACE_NAME_RE.match(mname or ""):
+                    errs.append(f"{mw}.name is not a mount name")
+                elif mname in seen:
+                    errs.append(f"{where}.mounts has duplicate name {mname!r}")
+                seen.add(mname)
+                for key in ("mountPath", "kind"):
+                    if key == "mountPath" and ("mountPath" not in mount or MOUNT_PATH_RE.match(mount.get("mountPath", "")) is None):
+                        errs.append(f"{mw}.mountPath must be an absolute path")
+                    if key == "kind" and mount.get("kind") not in MOUNT_KINDS:
+                        errs.append(f"{mw}.kind {mount.get('kind')!r} must be one of pvc, tmp")
+    if "configSlots" in iface:
+        slots = iface["configSlots"]
+        if not isinstance(slots, list):
+            errs.append(f"{where}.configSlots must be an array")
+        else:
+            seen = set()
+            for i, slot in enumerate(slots):
+                sw = f"{where}.configSlots[{i}]"
+                if not isinstance(slot, dict):
+                    errs.append(f"{sw} must be an object")
+                    continue
+                for key in ("slot", "variable", "target"):
+                    if key not in slot:
+                        errs.append(f"{sw} is missing required field {key}")
+                    elif not isinstance(slot[key], str) or not slot[key]:
+                        errs.append(f"{sw}.{key} must be a non-empty string")
+                for key in slot:
+                    if key not in SLOT_KEYS:
+                        errs.append(f"{sw} has unknown field {key!r}")
+                name = slot.get("slot")
+                if name is None or SLOT_RE.match(name or "") is None:
+                    errs.append(f"{sw}.slot {name!r} is not a slot name (lowercase-first camelCase)")
+                elif name in seen:
+                    errs.append(f"{where}.configSlots has duplicate slot {name!r}")
+                seen.add(name)
+                if "variable" in slot and VAR_RE.match(slot.get("variable", "")) is None:
+                    errs.append(f"{sw}.variable {slot.get('variable')!r} is not a tree variable name")
+
+
 def validate_workflow(name, workflow, where, errs):
     if not isinstance(workflow, dict):
         errs.append(f"{where} must be an object")
@@ -221,6 +329,15 @@ def validate_workflow(name, workflow, where, errs):
     wtype = workflow.get("type")
     if "type" in workflow and wtype not in WORKFLOW_TYPES:
         errs.append(f"{where}.type {wtype!r} must be one of url, image")
+    if "interface" in workflow:
+        if wtype == "image":
+            errs.append(f"{where}: type image must not declare interface (ADR-0005 D1; "
+                        "the interface is the tree's, not the image's)")
+        else:
+            validate_interface(workflow["interface"], f"{where}.interface", errs)
+    elif wtype == "url":
+        errs.append(f"{where}: type url requires interface (KB-310 — every shared tree "
+                    "declares the machine-readable contract the operator validates bindings against)")
     namespace = workflow.get("namespace")
     if "namespace" in workflow and not is_label(namespace):
         errs.append(f"{where}.namespace {namespace!r} is not a DNS-1123 label")
@@ -597,6 +714,45 @@ negative.extend([
     ("config-blank-basebranch", True, mutate(kb154_blank_basebranch)),
 ])
 
+# KB-310 (ADR 307): interface fail-closed variants. A type=url workflow
+# without an interface, an interface with an unknown field, a mount with a
+# bad kind, a slot with a bad name, and an image workflow declaring an
+# interface all reject — the declaration is the admission contract and must
+# be shape-complete before the operator trusts it.
+def kb310_drop_interface(d):
+    d[LIB][URLWF].pop("interface")
+
+
+def kb310_interface_unknown_field(d):
+    d[LIB][URLWF]["interface"]["slots"] = []
+
+
+def kb310_mount_bad_kind(d):
+    d[LIB][URLWF]["interface"]["mounts"][0]["kind"] = "hostPath"
+
+
+def kb310_slot_bad_name(d):
+    d[LIB][URLWF]["interface"]["configSlots"].append(
+        {"slot": "BaseBranch", "variable": "base_branch", "target": "branch_manager/checkout"})
+
+
+def kb310_slot_unknown_field(d):
+    d[LIB][URLWF]["interface"]["configSlots"][0]["default"] = "main"
+
+
+def kb310_image_with_interface(d):
+    d[LIB][BAKED]["interface"] = {"apiVersion": "criteria.brokenbots.dev/v1", "kind": "WorkflowInterface", "workflow": BAKED}
+
+
+negative.extend([
+    ("url-workflow-missing-interface", True, mutate(kb310_drop_interface)),
+    ("interface-unknown-field", True, mutate(kb310_interface_unknown_field)),
+    ("interface-mount-bad-kind", True, mutate(kb310_mount_bad_kind)),
+    ("interface-slot-bad-name", True, mutate(kb310_slot_bad_name)),
+    ("interface-slot-unknown-field", True, mutate(kb310_slot_unknown_field)),
+    ("image-workflow-with-interface", True, mutate(kb310_image_with_interface)),
+])
+
 failures = []
 
 
@@ -896,6 +1052,91 @@ else:
         if s.get("name") == "linear-api-key" and s.get("mountPath") != "/home/criteria/linear-secrets":
             failures.append("shipped example: ticket-cleanup-url linear-api-key mountPath must be"
                             " /home/criteria/linear-secrets (the runner's file: OriginRef path)")
+
+# KB-310 (ADR 307): the shipped example declares the machine-readable
+# workflow interface. Every type=url object embeds the byte-identical
+# interface.json of the tree its url resolves to (the operator stamps it
+# onto the run CR and validates the project binding against it BEFORE job
+# creation), type=image objects carry none, and the shipped configLibrary /
+# secret env surfaces stay within what the referenced trees honor — the
+# example must admit, fail closed must not fire on the golden payload, and
+# a trim (unknown-slot regression) breaks the test before a run does.
+url_interfaces = []
+for wf_name, wf in base[LIB].items():
+    if wf.get("type") != "url":
+        if "interface" in wf:
+            failures.append(f"shipped example: {wf_name} is type=image and must not declare interface")
+        continue
+    iface = wf.get("interface")
+    if not isinstance(iface, dict):
+        failures.append(f"shipped example: {wf_name} must embed interface (KB-310)")
+        continue
+    m = re.search(r"\.git//([A-Za-z0-9_-]+)", wf.get("url", ""))
+    if m is None:
+        failures.append(f"shipped example: {wf_name} url does not resolve to a repo tree")
+        continue
+    tree = m.group(1)
+    if iface.get("workflow") != tree:
+        failures.append(f"shipped example: {wf_name} interface.workflow {iface.get('workflow')!r}"
+                        f" must name the url's tree {tree!r}")
+        continue
+    tree_iface_path = os.path.join(repo_root, tree, "interface.json")
+    if not os.path.exists(tree_iface_path):
+        failures.append(f"shipped example: {wf_name} names tree {tree} but {tree}/interface.json"
+                        " is missing from the repo")
+        continue
+    with open(tree_iface_path, encoding="utf-8") as fh:
+        tree_iface = json.load(fh)
+    if iface != tree_iface:
+        failures.append(f"shipped example: {wf_name} embedded interface diverges from"
+                        f" {tree}/interface.json (regenerate the copy; the stamps must match)")
+    url_interfaces.append((wf_name, tree, iface))
+
+# Spot checks: the tree decides the override surface, so the shipped
+# configLibrary entries must stay within what the trees declaring them
+# honor (the 4 platform-core keys map to tree variables; a key whose tree
+# variable the tree does not declare is an unknown-slot binding).
+develop_iface = next((i for n, t, i in url_interfaces if n == "kanboard-develop-url"), None)
+if develop_iface is not None:
+    honored = {s.get("slot") for s in develop_iface.get("configSlots", [])}
+    if honored != {"baseBranch", "ciGateCmd"}:
+        failures.append(f"shipped example: kanboard_develop_v1 honors {sorted(honored)},"
+                        " want {baseBranch, ciGateCmd} — re-trim configLibrary when this changes")
+
+cfg = base.get("configLibrary", {})
+if "criteria-repo" in cfg:
+    failures.append("shipped example: configLibrary.criteria-repo must not return (the"
+                    " ticket_cleanup_v1 tree honors no config slots; the ciGateCmd entry"
+                    " was an unknown-slot binding)")
+for repo_name in ("castle", "workflow-example"):
+    entry = cfg.get(repo_name)
+    if entry is None:
+        failures.append(f"shipped example: configLibrary missing {repo_name} (KB-270/KB-273)")
+    else:
+        extra = sorted(set(entry) - {"ciGateCmd"})
+        if extra:
+            failures.append(f"shipped example: configLibrary.{repo_name} declares {extra}"
+                            " but kanboard_develop_v1 honors only ciGateCmd+baseBranch —"
+                            " unknown-slot keys were trimmed (KB-310); never re-add them")
+        if not entry.get("ciGateCmd"):
+            failures.append(f"shipped example: configLibrary.{repo_name} must keep ciGateCmd (KB-273)")
+
+# Secret env lanes: binding-side env surfaces must not exceed the trees'
+# declared secretEnv lanes (fail-closed trim regressions).
+triage_wf = base[LIB].get("kanboard-triage-url")
+if isinstance(triage_wf, dict):
+    for s in triage_wf.get("secrets", []):
+        if s.get("name") == "github-tokens" and s.get("env") != {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}:
+            failures.append(f"shipped example: kanboard-triage-url github-tokens env ="
+                            f" {s.get('env')!r}, want only WORKFLOW_GITHUB_TOKEN (the"
+                            " kanboard_triage_v1 tree declares no reviewer lane)")
+cleanup_wf = base[LIB].get("ticket-cleanup-url")
+if isinstance(cleanup_wf, dict):
+    for s in cleanup_wf.get("secrets", []):
+        if s.get("name") == "github-tokens" and "env" in s:
+            failures.append(f"shipped example: ticket-cleanup-url github-tokens must not map env"
+                            f" keys ({sorted(s['env'])} — the ticket_cleanup_v1 tree declares no"
+                            " secret env; the CSI lane mount stays for the base entrypoint)")
 
 # KB-11 smoke regression: the kanboard dual-source objects carried no pin
 # assertions here while their ref stayed at 308315c (the #94 re-pin) after

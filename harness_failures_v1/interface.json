@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "harness_failures_v1",
+  "description": "Harness failure-path canary (shell-only failure class sweep). Mounts mirror the shipped harness-failures-url binding; declares no secret lanes.",
+  "adapters": ["shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
+  "secretEnv": [],
+  "env": [],
+  "configSlots": []
+}

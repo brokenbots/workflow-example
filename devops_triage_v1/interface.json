@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "devops_triage_v1",
+  "description": "Ops triage lane triaging ops evidence against the repo (copilot+shell). repo_dir/ops_root ride the repo and data lanes; the devops/worker steps authenticate with the workflow GitHub identity. base_branch sets the ops-branch base; ci_gate_cmd gates the refine step.",
+  "adapters": ["copilot","shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"}],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": [{"slot":"baseBranch","variable":"base_branch","target":"branch_manager/checkout + ops PR base","description":"Branch the ops triage run forks from and opens its PR against."},{"slot":"ciGateCmd","variable":"ci_gate_cmd","target":"devops refine step CI gate","description":"Command the refine step uses as its CI gate."}]
+}

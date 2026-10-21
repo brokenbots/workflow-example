@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "qa_triage_v1",
+  "description": "QA repro lane (copilot+shell), run as the kanboard_triage_v1 repro subworkflow or directly. repo_dir/triage_root ride the repo and data lanes; the investigator/supervisor steps authenticate with the workflow GitHub identity. build_cmd/test_cmd drive the repro checks.",
+  "adapters": ["copilot","shell"],
+  "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"}],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": [{"slot":"buildCmd","variable":"build_cmd","target":"qa repro checks (build)","description":"Command the repro build leg runs against the fetched repo."},{"slot":"testCmd","variable":"test_cmd","target":"qa repro checks (test)","description":"Command the repro test leg runs against the fetched repo."}]
+}
