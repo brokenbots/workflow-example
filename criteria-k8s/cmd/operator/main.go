@@ -13,10 +13,12 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	rest "k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,6 +54,7 @@ var (
 	dataPVC             = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr          = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
+	backfillRunArchives = flag.Bool("backfill-run-archives", getBool("BACKFILL_RUN_ARCHIVES", false), "One-shot run-archive backfill (KB-314): archive every terminal CriteriaRun into castle's run archive, then exit; the operator mode flag runs the normal reconciler loop instead")
 	castleToken         = getenv("CASTLE_TOKEN", "")
 	debugEventsFile     = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
 	retentionPeriod     = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
@@ -116,6 +119,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The archive lane rides the same token as run observation (KB-314):
+	// castle's interceptor rejects anonymous ArchiveRun calls, so a
+	// tokenless lane leaves the archive leg off (the reconciler then skips
+	// it instead of wedging terminal reaping) and the backfill mode fails
+	// closed instead of pretending coverage.
+	castleArchiver := castle.NewRunArchiveClient(castle.RunArchiverConfig{Addr: *castleAddr, Token: castleToken}, nil)
+
+	// KB-314 backfill mode: one-shot archive of the operator's terminal
+	// CriteriaRun backlog, then exit. Run on demand (an operator image
+	// exec'd with --backfill-run-archives) — never before #309's retention
+	// sweep deletes castle history.
+	if *backfillRunArchives {
+		if err := runArchiveBackfill(ctx, cfg, scheme, castleArchiver, *castleAddr, castleToken, *namespaceFlag, getenv("OPERATOR_VERSION", ""), logger); err != nil {
+			logger.Error(err, "run-archive backfill failed")
+			os.Exit(1)
+		}
+		return
+	}
+
 	mgr, err := ctrl.NewManager(cfg, manager.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: *metricsAddr},
@@ -161,6 +183,12 @@ func main() {
 		Recorder: mgr.GetEventRecorderFor("criteria-k8s-operator"),
 		Castle:   castleClient,
 		PodState: podStateFeed,
+		// The run-archive client (KB-314): stores terminal run records
+		// before child-job reaping and finalizer removal.
+		RunArchiver: castleArchiver,
+		// Archive-record provenance: the running operator's version, from
+		// OPERATOR_VERSION (unset resolves to a "dev" record value).
+		OperatorVersion: getenv("OPERATOR_VERSION", ""),
 		// Probe the operator Deployment's declared env so a run admitted
 		// mid-rollout resolves the image the cluster deploys with instead
 		// of the reconciling pod's stale process env (CRI-264).
@@ -306,4 +334,39 @@ func getBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+// runArchiveBackfill runs the KB-314 one-shot backfill of the operator's
+// terminal CriteriaRun backlog into castle's run archive, then reports
+// coverage: it exits non-zero when any terminal run remains unarchived, so
+// the caller (a Job over the operator image, an engineer's exec) re-runs
+// it — archive stamps make re-runs skip completed work.
+func runArchiveBackfill(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme, archiver castle.RunArchiver, addr, token, namespace, operatorVersion string, logger logr.Logger) error {
+	if archiver == nil || archiver.Disabled() {
+		return fmt.Errorf("run-archive backfill requires --castle-addr and CASTLE_TOKEN: archiving nothing and exiting clean would falsely claim coverage")
+	}
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("building the backfill client: %w", err)
+	}
+	enricher := castle.New(castle.Config{Addr: addr, Token: token}, nil)
+	res, err := controller.BackfillRunArchives(ctx, directClient, archiver, enricher, namespace, operatorVersion, logger)
+	if err != nil {
+		return err
+	}
+	logger.Info("run-archive backfill pass complete",
+		"terminalRuns", res.TerminalRuns,
+		"alreadyArchived", res.AlreadyArchived,
+		"archived", res.Archived,
+		"failed", res.Failed,
+		"namespace", namespace)
+	missing, err := controller.CountMissingRunArchives(ctx, directClient, namespace)
+	if err != nil {
+		return err
+	}
+	if missing > 0 || res.Failed > 0 {
+		return fmt.Errorf("%d terminal CriteriaRuns remain without a castle archive record (%d failed this pass; re-run to resume)", missing, res.Failed)
+	}
+	logger.Info("run-archive backfill coverage complete: every terminal CriteriaRun carries an archive id")
+	return nil
 }
