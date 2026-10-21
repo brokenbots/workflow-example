@@ -13,6 +13,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -500,5 +501,44 @@ func TestCRRetentionNeverTouchesOtherNamespaces(t *testing.T) {
 	}
 	if _, err := getSweptJob(t, cl, "elsewhere", "adp-other-ns-job"); err != nil {
 		t.Fatal("Jobs outside the managed namespace are never touched")
+	}
+}
+
+// The acceptance's bulk clause: deleting the 100 aged archived Succeeded
+// runs of criteria-jobs leaves zero ownerless Jobs/Pods. In the fake the CR
+// deletions land during the first pass (no finalizer) while their children
+// are still live, so the orphan verify needs the follow-up pass — the same
+// two-pass shape as production, where the finalizer's finalize deletes the
+// child Jobs and the next sweep reaps whatever leaked.
+func TestCRRetentionBulkDeletionLeavesZeroOwnerlessChildren(t *testing.T) {
+	const count = 100
+	objs := make([]client.Object, 0, count*3)
+	for i := 0; i < count; i++ {
+		run := retentionRun(fmt.Sprintf("cri-bulk-%03d", i), fmt.Sprintf("uid-bulk-%03d", i), "CRI-BULK")
+		job := adapterJob(fmt.Sprintf("cri-bulk-%03d-runner", i), "default", run.Name)
+		withCriteriaRunOwnerRef(job, run.Name, string(run.UID), true)
+		pod := adapterPod(fmt.Sprintf("cri-bulk-%03d-adapter", i), "default", run.Name)
+		withCriteriaRunOwnerRef(pod, run.Name, string(run.UID), true)
+		objs = append(objs, run, job, pod)
+	}
+	cl := newSweepClient(t, objs...)
+
+	s := retentionSweeper(cl)
+	s.KeepLast = 0
+	s.sweep(context.Background(), logr.Discard())
+	// The deletions landed; the children are still present pending the orphan sweep.
+	var jobs batchv1.JobList
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	require.Len(t, jobs.Items, count)
+	s.sweep(context.Background(), logr.Discard())
+
+	// Zero ownerless children after the follow-up pass, zero runs left.
+	require.NoError(t, cl.List(context.Background(), &jobs, client.InNamespace("default")))
+	assert.Empty(t, jobs.Items, "no orphaned Jobs may remain after the bulk deletion")
+	var pods corev1.PodList
+	require.NoError(t, cl.List(context.Background(), &pods, client.InNamespace("default")))
+	assert.Empty(t, pods.Items, "no orphaned Pods may remain after the bulk deletion")
+	for i := 0; i < count; i++ {
+		assertGone(t, cl, fmt.Sprintf("cri-bulk-%03d", i))
 	}
 }
