@@ -737,7 +737,13 @@ func (r *CriteriaRunReconciler) finalize(ctx context.Context, run *criteriav1.Cr
 	// archive write leg is down, the gate stamps TerminalArchivePending and
 	// this pass fails WITHOUT removing the finalizer, so the CR (and the
 	// data the record needs) survives until the record lands. Runs already
-	// carrying an archive id pass straight through.
+	// carrying an archive id pass straight through. The nil observation is
+	// intended: a CR deleted mid-flight has no castle observation, so the
+	// record is deletion provenance — FinalPhase carries whatever phase the
+	// run reached (possibly "Running"), start/end timestamps stay empty,
+	// and the workflow verdict is only appended when status.finalState
+	// carries one. Deleting the evidence matters more than a thinner
+	// record.
 	if err := r.ensureTerminalArchived(ctx, run, nil, logger); err != nil {
 		return ctrl.Result{}, err
 	}

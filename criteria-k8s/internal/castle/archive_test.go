@@ -318,11 +318,19 @@ func TestApplyArchiveRecordCeilings(t *testing.T) {
 }
 
 // A cap smaller than the ellipsis marker byte-truncates without emitting
-// the marker: tiny caps still keep the field's prefix.
+// the marker: tiny caps still keep the field's prefix (never dropping it
+// entirely), and cuts never split a UTF-8 rune.
 func TestTruncateTinyCap(t *testing.T) {
 	assert.Equal(t, "ab", truncate("abcdef", 2))
 	assert.Equal(t, "abcdef", truncate("abcdef", 10))
 	assert.Equal(t, "", truncate("", 5))
+	// Rune-boundary regression: the byte cap must not land inside the
+	// multibyte rune ("a" + four two-byte é = 11 bytes; cap 6 → marker
+	// fits, cut backs up off the rune's continuation byte).
+	assert.Equal(t, "aé…", truncate("aéééé", 6))
+	// Marker-sized cut inside a rune with no room to back up cleanly
+	// under the marker: the rune-safe prefix is kept, unmarked.
+	assert.Equal(t, "aé", truncate("aéé", 3))
 }
 
 func bigTestArchiveRecord() *castlev1.ArchiveRecord {

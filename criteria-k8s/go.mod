@@ -4,6 +4,7 @@ go 1.26.9
 
 require (
 	connectrpc.com/connect v1.21.0
+	github.com/brokenbots/castle/castle v0.0.0-20261020234026-80e08c432051
 	github.com/brokenbots/criteria/sdk v0.0.0-20261012210349-0ce237de2084
 	github.com/go-logr/logr v1.4.1
 	github.com/stretchr/testify v1.9.0
@@ -18,7 +19,6 @@ require (
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/brokenbots/castle/castle v0.0.0-20261020234026-80e08c432051 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect

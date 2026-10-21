@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 
@@ -233,14 +234,32 @@ func truncate(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
-	// byte-truncate deterministically: archive ceilings are evidence caps,
-	// not character-perfect editors, and multibyte runes only ever lose a
-	// suffix. Truncation is marked with an ellipsis so a reader can tell a
-	// capped field apart from short input.
-	if max <= len("…") {
-		return s[:max]
+	// A rune-safe cut point: byte caps must not land inside a multibyte
+	// rune, or the surviving prefix's encoding would be corrupted; the cut
+	// moves back to the nearest rune boundary (losing at most 3 bytes).
+	cutRuneSafe := func(cap int) string {
+		cut := cap
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut]
 	}
-	return s[:max-len("…")] + "…"
+	if max <= len("…") {
+		// Cap smaller than the marker: keep a rune-safe prefix, unmarked.
+		return cutRuneSafe(max)
+	}
+	cut := max - len("…")
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if cut <= 0 {
+		// No rune boundary leaves room for the marker: rune-safe prefix,
+		// marker dropped (tiny-cap posture).
+		return cutRuneSafe(max)
+	}
+	// Truncation is marked with an ellipsis so a reader can tell a capped
+	// field apart from short input.
+	return s[:cut] + "…"
 }
 
 // Compile-time proof the client satisfies the controller-facing surface.

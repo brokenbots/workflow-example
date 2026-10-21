@@ -80,7 +80,7 @@ type Terminal struct {
 	// carry no final_state column (mapRun never sets it), so on the record
 	// path this stays empty.
 	FinalState string
-	// Reason is the RunFailed reason, when the run run failed.
+	// Reason is the RunFailed reason, when the run failed.
 	Reason string
 	// At is the terminal event's timestamp: the terminal envelope's wire
 	// time, or the run record's ended_at on the record path. Zero when

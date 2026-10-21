@@ -163,16 +163,23 @@ func (r *CriteriaRunReconciler) buildTerminalArchiveRecord(ctx context.Context, 
 	}
 
 	record := &castlev1.ArchiveRecord{
-		Ticket:          run.Spec.TicketID,
-		Repo:            run.Spec.RepoURL,
-		JobName:         run.Status.JobName,
-		WorkflowName:    workflowName,
-		WorkflowRef:     workflowRef,
-		TreeDigest:      treeDigest,
-		FinalPhase:      string(run.Status.Phase),
-		OperatorVersion: r.operatorVersion(),
-		FailureReason:   archiveFailureReason(run, obs),
-		Restarts:        int32(restarts),
+		Ticket:       run.Spec.TicketID,
+		Repo:         run.Spec.RepoURL,
+		JobName:      run.Status.JobName,
+		WorkflowName: workflowName,
+		WorkflowRef:  workflowRef,
+		TreeDigest:   treeDigest,
+		// Binding/project provenance: the run's config ConfigMap pin
+		// (KB-103) is the only configmap-shaped provenance the operator
+		// carries; it is name@resourceVersion, name alone when no RV was
+		// stamped. The binding side stays empty — WorkflowGraphs bindings
+		// are pinned digests, not ConfigMaps, so there is no operator
+		// producer to fill binding_configmap_checksum from.
+		ProjectConfigmapChecksum: projectConfigmapChecksum(run),
+		FinalPhase:               string(run.Status.Phase),
+		OperatorVersion:          r.operatorVersion(),
+		FailureReason:            archiveFailureReason(run, obs),
+		Restarts:                 int32(restarts),
 		// backoff_evictions has no operator producer: nothing counts
 		// runner Job evictions today, so zero is the honest value.
 		BackoffEvictions: 0,
@@ -202,11 +209,53 @@ func (r *CriteriaRunReconciler) buildTerminalArchiveRecord(ctx context.Context, 
 	for _, step := range obs.Steps {
 		record.Steps = append(record.Steps, &castlev1.ArchiveStep{Name: step.Name, Outcome: step.Outcome})
 	}
+	if verdict := archiveWorkflowVerdict(run, obs); verdict != "" {
+		// The workflow's own verdict (SCOPE 1's finalState): the proto's
+		// conditions list is where the record contract carries it. The CR
+		// status is authoritative ("failed", "handler_complete",
+		// "need_assistance" verbs); the castle terminal envelope backs it
+		// up when the CR field is empty. Empty from both stays empty — a
+		// verdict is never invented (e.g. the finalize()-with-nil-obs
+		// deletion path on a still-Running run).
+		record.Conditions = append(record.Conditions, &castlev1.ArchiveCondition{
+			Type:    "FinalState",
+			Status:  "True",
+			Reason:  verdict,
+			Message: "workflow final state: " + verdict,
+		})
+	}
 	// The ceilings are enforced for real inside the archiver (the single
 	// choke point on the wire); building capped bodies here keeps direct
 	// callers (backfill, tests) equally honest.
 	castle.ApplyArchiveRecordCeilings(record)
 	return record, effectiveKey, nil
+}
+
+// archiveWorkflowVerdict resolves the run's workflow verdict for the record
+// conditions list: the CR status' finalState, else the castle terminal
+// envelope's final_state. Empty from both keeps the field out of the record.
+func archiveWorkflowVerdict(run *criteriav1.CriteriaRun, obs *castle.Observation) string {
+	if run.Status.FinalState != "" {
+		return run.Status.FinalState
+	}
+	if obs.Terminal != nil && obs.Terminal.FinalState != "" {
+		return obs.Terminal.FinalState
+	}
+	return ""
+}
+
+// projectConfigmapChecksum renders the run's KB-103 config ConfigMap pin as
+// a provenance checksum: "name@resourceVersion", the name alone when the
+// watcher stamped no RV. Nil Spec.ConfigRef stays empty.
+func projectConfigmapChecksum(run *criteriav1.CriteriaRun) string {
+	ref := run.Spec.ConfigRef
+	if ref == nil || ref.Name == "" {
+		return ""
+	}
+	if ref.ResourceVersion == "" {
+		return ref.Name
+	}
+	return ref.Name + "@" + ref.ResourceVersion
 }
 
 // archiveFailureReason resolves the record's failure_reason: the terminal
