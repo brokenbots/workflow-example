@@ -86,7 +86,18 @@ var (
 	// CriteriaRun is gone (force-deleted CRs orphan them; GC only covers
 	// deletionTimestamp-propagated deletes). 0 disables the sweep.
 	adapterSweepInterval = flag.Duration("adapter-sweep-interval", getDuration("ADAPTER_SWEEP_INTERVAL", 30*time.Second), "How often adapter pods/jobs of deleted CriteriaRuns are swept (0 disables)")
-	namespaceFlag        = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
+	// KB-309: archived terminal CriteriaRun retention. Deleting an archived
+	// terminal run loses nothing (the castle run archive holds the history)
+	// but bounds the operator's live memory of finished work. 0 days
+	// disables the sweep; the keep-last floor protects the newest terminal
+	// runs of a ticket family for failure forensics (0 keeps none); the
+	// namespace allowlist opts namespaces in for DELETION (the sweep is
+	// inert in namespaces not listed), so cutovers flip it on after their
+	// archive leg verifies.
+	crRetentionDays       = flag.Int("cr-retention-days", getInt("CR_RETENTION_DAYS", controller.DefaultCRRetentionDays), "Delete archived terminal CriteriaRuns older than this many days (KB-309; 0 disables)")
+	crRetentionKeepLast   = flag.Int("cr-retention-keep-last", getInt("CR_RETENTION_KEEP_LAST", controller.DefaultCRRetentionKeepLast), "Keep this many newest terminal CriteriaRuns per ticket family regardless of age (KB-309; 0 keeps none)")
+	crRetentionNamespaces = flag.String("cr-retention-namespaces", getenv("CR_RETENTION_NAMESPACES", ""), "Comma-separated namespaces where archived terminal CriteriaRuns get deleted (KB-309); empty keeps the sweep inert")
+	namespaceFlag         = flag.String("namespace", getenv("CRITERIA_NAMESPACE", "criteria-jobs"), "Namespace the operator manages")
 	// CRI-264: the operator Deployment whose env the reconciler probes for
 	// the runner image resolution. A CriteriaRun admitted while this
 	// Deployment rolls out must not read the reconciling pod's (stale)
@@ -265,6 +276,25 @@ func main() {
 		logger.Info("adapter sweep disabled (adapter-sweep-interval=0)")
 	}
 
+	// KB-309: archived terminal CriteriaRun retention. The constructor
+	// sanitizes the allowlist (trims, drops blanks), so the enable decision
+	// rides the sanitized set: deletion needs a window AND at least one
+	// opted-in namespace (empty allowlist keeps the sweep inert). Uses the
+	// DIRECT client so deletion never acts on a stale view of which runs
+	// exist, and shares the manager's lifecycle.
+	retentionNamespaces := getCsv("CR_RETENTION_NAMESPACES", nil)
+	crRetentionSweeper := controller.NewCRRetentionSweeper(directClient, *namespaceFlag, time.Duration(*crRetentionDays)*24*time.Hour, *crRetentionKeepLast, retentionNamespaces, *sweepInterval)
+	if *crRetentionDays > 0 && len(crRetentionSweeper.Allowlist) > 0 {
+		go crRetentionSweeper.Run(ctx)
+		logger.Info("criteria run retention sweep enabled",
+			"days", *crRetentionDays, "keepLast", *crRetentionKeepLast,
+			"namespaces", retentionNamespaces, "interval", sweepInterval.String())
+	} else if *crRetentionDays > 0 {
+		logger.Info("criteria run retention sweep disabled (no namespaces opted in)", "days", *crRetentionDays)
+	} else {
+		logger.Info("criteria run retention sweep disabled (cr-retention-days=0)")
+	}
+
 	// KB-234 operator leg: serve the boot gate's operator view. The
 	// endpoint reads the CR through the DIRECT client (never the cache) so
 	// a boot decision never rides a stale informer view.
@@ -362,6 +392,27 @@ func getBool(key string, fallback bool) bool {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
 		}
+	}
+	return fallback
+}
+
+// getInt resolves an operator env var to an int flag default: the parsed
+// value when it parses, else the fallback (mirrors getBool's leniency).
+func getInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+// getCsv splits a comma-separated env value into raw entries; the consumer
+// (the retain constructor) trims entries and drops blanks. An unset env var
+// falls back to the provided default.
+func getCsv(key string, fallback []string) []string {
+	if v := os.Getenv(key); v != "" {
+		return strings.Split(v, ",")
 	}
 	return fallback
 }

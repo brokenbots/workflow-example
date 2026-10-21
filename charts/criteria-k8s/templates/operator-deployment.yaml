@@ -49,6 +49,15 @@ spec:
               value: {{ .Values.operator.retentionPeriod | quote }}
             - name: RETENTION_INTERVAL
               value: {{ .Values.operator.retentionInterval | quote }}
+            # KB-309: archived-terminal CriteriaRun retention. 0 days
+            # disables the sweep; the namespace list opts namespaces in for
+            # deletion (the sweep is inert in namespaces not listed).
+            - name: CR_RETENTION_DAYS
+              value: {{ .Values.operator.crRetentionDays | quote }}
+            - name: CR_RETENTION_KEEP_LAST
+              value: {{ .Values.operator.crRetentionKeepLast | quote }}
+            - name: CR_RETENTION_NAMESPACES
+              value: {{ .Values.operator.crRetentionNamespaces | quote }}
             # Default Criteria workflow image recorded in CriteriaRuns.
             - name: DEFAULT_CRITERIA_IMAGE
               value: "{{ .Values.images.workflow.repository }}:{{ .Values.images.workflow.tag }}"

@@ -207,6 +207,37 @@ func (f *failingBackfillArchiver) ListRunArchives(ctx context.Context, req *conn
 
 func (f *failingBackfillArchiver) Disabled() bool { return false }
 
+func TestGetInt(t *testing.T) {
+	t.Run("env wins over default", func(t *testing.T) {
+		t.Setenv("CR_RETENTION_DAYS", "14")
+		assert.Equal(t, 14, getInt("CR_RETENTION_DAYS", 7))
+	})
+	t.Run("unset falls back", func(t *testing.T) {
+		os.Unsetenv("CR_RETENTION_KEEP_LAST")
+		assert.Equal(t, 3, getInt("CR_RETENTION_KEEP_LAST", 3))
+	})
+	t.Run("non-numeric falls back", func(t *testing.T) {
+		t.Setenv("CR_RETENTION_DAYS", "ten")
+		assert.Equal(t, 7, getInt("CR_RETENTION_DAYS", 7))
+	})
+}
+
+func TestGetCsv(t *testing.T) {
+	t.Run("env splits on commas", func(t *testing.T) {
+		t.Setenv("CR_RETENTION_NAMESPACES", "criteria-jobs, review-jobs")
+		assert.Equal(t, []string{"criteria-jobs", " review-jobs"}, getCsv("CR_RETENTION_NAMESPACES", nil))
+	})
+	t.Run("unset falls back", func(t *testing.T) {
+		os.Unsetenv("CR_RETENTION_NAMESPACES")
+		assert.Equal(t, []string{"criteria-jobs"}, getCsv("CR_RETENTION_NAMESPACES", []string{"criteria-jobs"}))
+	})
+	t.Run("empty env splits to a blank entry the constructor drops", func(t *testing.T) {
+		t.Setenv("CR_RETENTION_NAMESPACES", ",")
+		got := getCsv("CR_RETENTION_NAMESPACES", []string{"criteria-jobs"})
+		assert.Equal(t, []string{"", ""}, got)
+	})
+}
+
 func TestCastleTokenFromEnv(t *testing.T) {
 	t.Run("CASTLE_TOKEN wins", func(t *testing.T) {
 		t.Setenv("CASTLE_TOKEN", "env-token")
