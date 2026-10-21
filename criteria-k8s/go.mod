@@ -1,6 +1,6 @@
 module github.com/brokenbots/workflow-example/criteria-k8s
 
-go 1.26.9
+go 1.26.10
 
 require (
 	connectrpc.com/connect v1.21.0
