@@ -1251,8 +1251,10 @@ else:
 # KB-278: the harness_composition_v1 tree object — url-only, class=triage,
 # shipped PINLESS pre-close, same convention as the contracts leg (the
 # KB-278 follow-up re-pins ref/?ref= to the squash-merge commit at the
-# card's close). Name-referenced secrets and the recorded fleet pin set
-# verbatim, shared with the other harness legs.
+# card's close). No binding secret: the tree interface declares no secret
+# lanes (a shipped WORKFLOW_GITHUB_TOKEN lane would refuse admission as
+# unknown-slot; the F36 secret-free root stands — KB-310 review), and the
+# recorded fleet pin set verbatim, shared with the other harness legs.
 harness_composition_wf = base[LIB].get("harness-composition-url")
 if not isinstance(harness_composition_wf, dict):
     failures.append("shipped example: workflowLibrary missing the harness-composition-url object (KB-278)")
@@ -1271,13 +1273,15 @@ else:
         failures.append("shipped example: harness-composition-url must be url-only (no process image)")
     hcomp_secrets = harness_composition_wf.get("secrets")
     hcomp_secret_names = [s.get("name") for s in hcomp_secrets] if isinstance(hcomp_secrets, list) else []
-    if hcomp_secret_names != ["github-tokens"]:
-        failures.append("shipped example: harness-composition-url must bind exactly the github-tokens CSI surface"
-                        " (name references only, CRI-214 section 3.8)")
+    if hcomp_secret_names != []:
+        failures.append(f"shipped example: harness-composition-url must bind no secret"
+                        f" (the tree's interface declares no secret lanes; a"
+                        f" WORKFLOW_GITHUB_TOKEN binding is undeclared there and rejects"
+                        f" admission as unknown-slot — KB-310 review, got {hcomp_secret_names})")
     for s in hcomp_secrets if isinstance(hcomp_secrets, list) else []:
-        if s.get("env") != {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}:
-            failures.append("shipped example: harness-composition-url github-tokens env must bind"
-                            " WORKFLOW_GITHUB_TOKEN=workflow_github_token (name reference only)")
+        if "env" in s:
+            failures.append("shipped example: harness-composition-url binds no secret lane,"
+                            " so no secret may carry an env map (KB-310 review)")
     hcomp_volumes = harness_composition_wf.get("volumes")
     hcomp_volume_names = [v.get("name") for v in hcomp_volumes] if isinstance(hcomp_volumes, list) else []
     if hcomp_volume_names != ["data", "repo", "scratch"]:
@@ -1287,8 +1291,10 @@ else:
 # KB-279: the harness_failures_v1 tree object — url-only, class=triage,
 # shipped PINLESS pre-close (same convention as the composition leg; the
 # KB-279 follow-up re-pins ref/?ref= to the squash-merge commit at the
-# card's close). Name-referenced secrets and the recorded fleet pin set
-# verbatim, shared with the other harness legs.
+# card's close). No binding secret: the tree interface declares no secret
+# lanes (a shipped WORKFLOW_GITHUB_TOKEN lane would refuse admission as
+# unknown-slot; the F36 secret-free root stands — KB-310 review), and the
+# recorded fleet pin set verbatim, shared with the other harness legs.
 harness_failures_wf = base[LIB].get("harness-failures-url")
 if not isinstance(harness_failures_wf, dict):
     failures.append("shipped example: workflowLibrary missing the harness-failures-url object (KB-279)")
@@ -1307,13 +1313,15 @@ else:
         failures.append("shipped example: harness-failures-url must be url-only (no process image)")
     hfail_secrets = harness_failures_wf.get("secrets")
     hfail_secret_names = [s.get("name") for s in hfail_secrets] if isinstance(hfail_secrets, list) else []
-    if hfail_secret_names != ["github-tokens"]:
-        failures.append("shipped example: harness-failures-url must bind exactly the github-tokens CSI surface"
-                        " (name references only, CRI-214 section 3.8)")
+    if hfail_secret_names != []:
+        failures.append(f"shipped example: harness-failures-url must bind no secret"
+                        f" (the tree's interface declares no secret lanes; a"
+                        f" WORKFLOW_GITHUB_TOKEN binding is undeclared there and rejects"
+                        f" admission as unknown-slot — KB-310 review, got {hfail_secret_names})")
     for s in hfail_secrets if isinstance(hfail_secrets, list) else []:
-        if s.get("env") != {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}:
-            failures.append("shipped example: harness-failures-url github-tokens env must bind"
-                            " WORKFLOW_GITHUB_TOKEN=workflow_github_token (name reference only)")
+        if "env" in s:
+            failures.append("shipped example: harness-failures-url binds no secret lane,"
+                            " so no secret may carry an env map (KB-310 review)")
     hfail_volumes = harness_failures_wf.get("volumes")
     hfail_volume_names = [v.get("name") for v in hfail_volumes] if isinstance(hfail_volumes, list) else []
     if hfail_volume_names != ["data", "repo", "scratch"]:
@@ -1323,8 +1331,9 @@ else:
 # KB-280: the harness_fleet_smoke_v1 tree object — url-only, class=triage,
 # shipped PINLESS pre-close (same convention as the other harness legs). The
 # canary is the no-agent slice: no copilot member, so adapterImages is
-# SHELL-ONLY, and the github-tokens binding exists for the private-repo URL
-# fetch, not for the canary's own use (F36: name references only).
+# SHELL-ONLY, and it binds no secret: the tree interface declares no secret
+# lanes (a shipped WORKFLOW_GITHUB_TOKEN lane would refuse admission as
+# unknown-slot; the F36 secret-free root stands — KB-310 review).
 harness_fleet_smoke_wf = base[LIB].get("harness-fleet-smoke-url")
 if not isinstance(harness_fleet_smoke_wf, dict):
     failures.append("shipped example: workflowLibrary missing the harness-fleet-smoke-url object (KB-280)")
@@ -1346,13 +1355,15 @@ else:
                         " (the canary is the no-agent slice — no copilot identity to image, F36)")
     hfsm_secrets = harness_fleet_smoke_wf.get("secrets")
     hfsm_secret_names = [s.get("name") for s in hfsm_secrets] if isinstance(hfsm_secrets, list) else []
-    if hfsm_secret_names != ["github-tokens"]:
-        failures.append("shipped example: harness-fleet-smoke-url must bind exactly the github-tokens CSI surface"
-                        " (exists for the private-repo URL fetch; name references only, CRI-214 section 3.8)")
+    if hfsm_secret_names != []:
+        failures.append(f"shipped example: harness-fleet-smoke-url must bind no secret"
+                        f" (the tree's interface declares no secret lanes; a"
+                        f" WORKFLOW_GITHUB_TOKEN binding is undeclared there and rejects"
+                        f" admission as unknown-slot — KB-310 review, got {hfsm_secret_names})")
     for s in hfsm_secrets if isinstance(hfsm_secrets, list) else []:
-        if s.get("env") != {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}:
-            failures.append("shipped example: harness-fleet-smoke-url github-tokens env must bind"
-                            " WORKFLOW_GITHUB_TOKEN=workflow_github_token (name reference only)")
+        if "env" in s:
+            failures.append("shipped example: harness-fleet-smoke-url binds no secret lane,"
+                            " so no secret may carry an env map (KB-310 review)")
     hfsm_volumes = harness_fleet_smoke_wf.get("volumes")
     hfsm_volume_names = [v.get("name") for v in hfsm_volumes] if isinstance(hfsm_volumes, list) else []
     if hfsm_volume_names != ["data", "repo", "scratch"]:

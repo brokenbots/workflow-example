@@ -281,12 +281,6 @@ data:
               "kind": "pvc",
               "claim": "criteria-repo",
               "mountPath": "/repo"
-            },
-            {
-              "name": "scratch",
-              "kind": "tmp",
-              "mountPath": "/tmp/scratch",
-              "sizeLimit": "8Gi"
             }
           ],
           "secrets": [
@@ -737,16 +731,6 @@ data:
               "sizeLimit": "8Gi"
             }
           ],
-          "secrets": [
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
-              }
-            }
-          ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
             "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
@@ -755,9 +739,8 @@ data:
             "apiVersion": "criteria.brokenbots.dev/v1",
             "kind": "WorkflowInterface",
             "workflow": "harness_composition_v1",
-            "description": "Harness composition canary (copilot+shell parallel composition). Mounts mirror the shipped harness-composition-url binding; declares no secret lanes.",
+            "description": "Harness composition canary (shell-only parallel composition). Mounts mirror the shipped harness-composition-url binding; declares no secret lanes.",
             "adapters": [
-              "copilot",
               "shell"
             ],
             "mounts": [
@@ -809,16 +792,6 @@ data:
               "kind": "tmp",
               "mountPath": "/tmp/scratch",
               "sizeLimit": "8Gi"
-            }
-          ],
-          "secrets": [
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
-              }
             }
           ],
           "adapterImages": {
@@ -882,16 +855,6 @@ data:
               "kind": "tmp",
               "mountPath": "/tmp/scratch",
               "sizeLimit": "8Gi"
-            }
-          ],
-          "secrets": [
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token"
-              }
             }
           ],
           "adapterImages": {
