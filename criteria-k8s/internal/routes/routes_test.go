@@ -1013,12 +1013,20 @@ func TestValidateWorkflowInterfaceShape(t *testing.T) {
 		"kind":          func(i *WorkflowInterface) { i.Kind = "Workflow" },
 		"empty tree":    func(i *WorkflowInterface) { i.Workflow = "" },
 		"bad tree":      func(i *WorkflowInterface) { i.Workflow = "1bad name" },
+		// KB-310 finding 5: the name grammar is one definition across the
+		// go/js/shell/schema copies — the previously-divergent inputs
+		// (leading digit, dot) must reject here too.
+		"leading digit tree": func(i *WorkflowInterface) { i.Workflow = "0valid_name" },
+		"dotted tree":        func(i *WorkflowInterface) { i.Workflow = "valid.dotted" },
 		"bad adapter":   func(i *WorkflowInterface) { i.Adapters = []string{"sh ll"} },
 		"dup adapter":   func(i *WorkflowInterface) { i.Adapters = []string{"shell", "shell"} },
 		"relative path": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "workspace" },
 		// KB-310: byte-exact mount paths — interface_validate.mjs rejects
 		// a trailing slash and the routes validator must agree with it.
 		"trailing slash": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/home/criteria/workspace/" },
+		// KB-310 finding 5: single-segment "/a" has no parent container
+		// path — `^/.+[^/]$` demands two segments, so both must reject.
+		"single-segment path": func(i *WorkflowInterface) { i.Mounts[0].MountPath = "/a" },
 		"bad kind":       func(i *WorkflowInterface) { i.Mounts[0].Kind = "hostPath" },
 		"dup mount":      func(i *WorkflowInterface) { i.Mounts = append(i.Mounts, i.Mounts[0]) },
 		"lower env":      func(i *WorkflowInterface) { i.SecretEnv = []string{"workflow_token"} },

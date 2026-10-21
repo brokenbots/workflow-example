@@ -52,10 +52,39 @@ const fail = (file, msg, hint) =>
 
 // ── structural validation mirroring k8s/workflow-interface.schema.json ──────
 
-const LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// One grammar everywhere (KB-310 finding 5: the label and mountPath rules
+// previously lived in four divergent copies). These are the Go definitions
+// from criteria-k8s/internal/routes/routes.go (interfaceNameRe,
+// interfacePathRe) held byte-identical; the parity block at the bottom of
+// this file fails the build when any of the four surfaces drifts again.
+const LABEL = new RegExp("^[A-Za-z][A-Za-z0-9_-]*$");
+const PATH_RE = new RegExp("^/.+[^/]$");
 const SECRET_ENV = /^[A-Z][A-Z0-9_]*$/;
 const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
 const SLOT_NAME = /^[a-z][a-zA-Z0-9_]*$/;
+
+// labelViolation renders the violation message for a label-shaped name
+// (tree workflow, adapter kind, mount name) or null when the name conforms.
+function labelViolation(value) {
+  if (typeof value !== "string" || !LABEL.test(value) || value.length > 128)
+    return "must be a 1-128 char name";
+  return null;
+}
+
+function vLabel(value, where, what) {
+  const violation = labelViolation(value);
+  if (violation) fail(where, `${what} ${violation} (got ${JSON.stringify(value)})`);
+}
+
+// mountPathViolation renders the violation message for a mountPath or null
+// when the path conforms. The null-byte guard is defense in depth beyond
+// the shared regexp (a NUL would sail through the regexes in every
+// language and corrupt the mount target).
+function mountPathViolation(value) {
+  if (typeof value !== "string" || !PATH_RE.test(value) || value.includes("\0"))
+    return "must be an absolute container path without trailing slash";
+  return null;
+}
 
 // The platform slot surface (KB-310): the config keys a project binding
 // may carry and the tree variable each is delivered as through the KB-103
@@ -67,11 +96,6 @@ const CONFIG_SLOT_VARIABLES = {
   ciGateCmd: "ci_gate_cmd",
   baseBranch: "base_branch",
 };
-
-function vLabel(value, where, what) {
-  if (typeof value !== "string" || !LABEL.test(value) || value.length > 128)
-    fail(where, `${what} must be a 1-128 char name (got ${JSON.stringify(value)})`);
-}
 
 function validateInterface(iface, where) {
   if (typeof iface !== "object" || iface === null || Array.isArray(iface)) {
@@ -117,8 +141,9 @@ function validateInterface(iface, where) {
         if (!["name", "mountPath", "kind"].includes(k))
           fail(where, `mounts[${i}]: unknown field "${k}"`);
       vLabel(m.name, where, `mounts[${i}].name`);
-      if (typeof m.mountPath !== "string" || !m.mountPath.startsWith("/") || m.mountPath.endsWith("/") || m.mountPath.includes("\0"))
-        fail(where, `mounts[${i}].mountPath must be an absolute container path without trailing slash`);
+      const pathViolation = mountPathViolation(m.mountPath);
+      if (pathViolation)
+        fail(where, `mounts[${i}].mountPath ${pathViolation}`);
       if (!["pvc", "tmp"].includes(m.kind))
         fail(where, `mounts[${i}].kind must be "pvc" or "tmp" (KB-310 scope, got ${JSON.stringify(m.kind)})`);
     });
@@ -415,6 +440,59 @@ if (payload) {
   if (conformance.length !== 0)
     fail("scripts/interface_validate.mjs (self-test)",
       `binding-rule self-test "conforming-binding" flagged a compliant binding: ${JSON.stringify(conformance)} — the mirror is stricter than the operator, KB-310`);
+
+  // The consolidated grammars reject the previously divergent inputs
+  // (KB-310 finding 5: leading digit, dot, trailing slash, /a).
+  const grammar = (label, helper, value, expectFire) => {
+    const violation = helper(value);
+    if ((violation !== null) !== expectFire)
+      fail("scripts/interface_validate.mjs (self-test)",
+        `grammar self-test "${label}" (${JSON.stringify(value)}) ${violation === null ? "accepted" : "rejected"} — expected ${expectFire ? "rejection" : "acceptance"}; the consolidated name/mountPath grammar loosened or tightened unexpectedly`);
+  };
+  grammar("label leading-digit", labelViolation, "0foo", true);
+  grammar("label dot", labelViolation, "a.b", true);
+  grammar("label plain tree name", labelViolation, "kanboard_develop_v1", false);
+  grammar("mountPath trailing-slash", mountPathViolation, "/data/", true);
+  grammar("mountPath single-segment /a", mountPathViolation, "/a", true);
+  grammar("mountPath nul byte", mountPathViolation, "/data\0", true);
+  grammar("mountPath plain", mountPathViolation, "/data", false);
+  grammar("mountPath deep", mountPathViolation, "/home/criteria/workspace", false);
+}
+
+// ── regex parity: one definition, four copies (KB-310 finding 5) ────────────
+// The interface name and mountPath grammars are each spelled out in four
+// places (Go operator, this validator, the shell test, the JSON schema).
+// They drifted apart once; this leg fails if any copy stops being
+// byte-identical to the Go definition in internal/routes/routes.go.
+{
+  const mjsSrc = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  const goSrc = readFileSync(join(repoRoot, "criteria-k8s", "internal", "routes", "routes.go"), "utf8");
+  const shellSrc = readFileSync(join(repoRoot, "k8s", "tests", "test_routes_config.sh"), "utf8");
+  const schema = JSON.parse(readFileSync(join(repoRoot, "k8s", "workflow-interface.schema.json"), "utf8"));
+  const grab = (label, src, re, file) => {
+    const m = src.match(re);
+    if (!m)
+      fail("regex parity (KB-310 finding 5)", `${label} not found in ${file} — the parity block's extraction regexp is stale vs a renamed or reformatted definition`);
+    return m ? m[1] : null;
+  };
+  const goName = grab("interfaceNameRe", goSrc, /interfaceNameRe = mustCompile\(`([^`]+)`\)/, "criteria-k8s/internal/routes/routes.go");
+  const goPath = grab("interfacePathRe", goSrc, /interfacePathRe = mustCompile\(`([^`]+)`\)/, "criteria-k8s/internal/routes/routes.go");
+  const shName = grab("INTERFACE_NAME_RE", shellSrc, /INTERFACE_NAME_RE = re\.compile\(r"([^"]+)"\)/, "k8s/tests/test_routes_config.sh");
+  const shPath = grab("MOUNT_PATH_RE", shellSrc, /MOUNT_PATH_RE = re\.compile\(r"([^"]+)"\)/, "k8s/tests/test_routes_config.sh");
+  const mjsName = grab("LABEL", mjsSrc, /const LABEL = new RegExp\("([^"]+)"\)/, "scripts/interface_validate.mjs");
+  const mjsPath = grab("PATH_RE", mjsSrc, /const PATH_RE = new RegExp\("([^"]+)"\)/, "scripts/interface_validate.mjs");
+  const schemaName = schema && schema.definitions && schema.definitions.label && schema.definitions.label.pattern;
+  const schemaPath = schema && schema.properties && schema.properties.mounts && schema.properties.mounts.items && schema.properties.mounts.items.properties && schema.properties.mounts.items.properties.mountPath && schema.properties.mounts.items.properties.mountPath.pattern;
+  const parity = (what, copies) => {
+    if (new Set(copies).size !== 1)
+      fail("regex parity (KB-310 finding 5)", `${what} drifted: ${JSON.stringify(copies)} — consolidate on the Go definition in criteria-k8s/internal/routes/routes.go so all four agree byte-exactly`);
+    else if (copies[0] === null || copies[0] === undefined)
+      fail("regex parity (KB-310 finding 5)", `${what} extraction failed`);
+    else
+      console.log(`interface-contract: parity: ${what} identical across go/js/shell/schema (${copies[0]})`);
+  };
+  parity("interface name grammar", [goName, shName, mjsName, schemaName]);
+  parity("mountPath grammar", [goPath, shPath, mjsPath, schemaPath]);
 }
 
 if (errors.length > 0) {

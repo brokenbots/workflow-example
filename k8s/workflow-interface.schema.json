@@ -51,7 +51,8 @@
           },
           "mountPath": {
             "type": "string",
-            "description": "Container mount path the binding must supply, e.g. /data. Byte-exact; no trailing-slash normalization."
+            "pattern": "^/.+[^/]$",
+            "description": "Container mount path the binding must supply, e.g. /data. Absolute, at least two path segments, no trailing slash (same grammar as criteria-k8s/internal/routes interfacePathRe, scripts/interface_validate.mjs PATH_RE and k8s/tests/test_routes_config.sh MOUNT_PATH_RE). Byte-exact; no trailing-slash normalization."
           },
           "kind": {
             "type": "string",
@@ -115,7 +116,9 @@
     "label": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 128
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+      "description": "Same grammar as criteria-k8s/internal/routes (interfaceNameRe), scripts/interface_validate.mjs (LABEL) and k8s/tests/test_routes_config.sh (INTERFACE_NAME_RE) — four copies of one definition, kept identical; scripts/interface_validate.mjs asserts parity."
     },
     "slotName": {
       "type": "string",
