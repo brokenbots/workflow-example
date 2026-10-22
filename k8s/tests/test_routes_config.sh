@@ -900,14 +900,6 @@ def kb313_leave_only_adapterimages(d):
         workflow.pop("secrets", None)
 
 
-def kb313_leave_only_adapterimages(d):
-    kb313_all_done(d)
-    for workflow in d[LIB].values():
-        workflow.pop("env", None)
-        workflow.pop("volumes", None)
-        workflow.pop("secrets", None)
-
-
 def kb313_postcutover_clean(d):
     kb313_all_done(d)
     for workflow in d[LIB].values():

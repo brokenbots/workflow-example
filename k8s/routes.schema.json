@@ -64,6 +64,44 @@
       }
     }
   },
+  "allOf": [
+    {
+      "$comment": "KB-313 (ADR 307) two-revision gate on the global run-config surfaces. Post-cutover — every projectRegistry entry marked cutover: done — the global CM is workflow catalog (trees + interface refs) + projectRegistry + route rules only, so workflowLibrary entries must carry no volumes/secrets/env/adapterImages. While the migration window is open (at least one registry entry without the marker, or no registry at all) the surfaces still validate. Mirrors the structural validator in k8s/tests/test_routes_config.sh and criteria-k8s/internal/routes' ValidationError.",
+      "if": {
+        "required": ["projectRegistry"],
+        "properties": {
+          "projectRegistry": {
+            "minProperties": 1,
+            "additionalProperties": {
+              "required": ["cutover"],
+              "properties": {
+                "cutover": {
+                  "const": "done"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "workflowLibrary": {
+            "additionalProperties": {
+              "not": {
+                "anyOf": [
+                  { "required": ["volumes"] },
+                  { "required": ["secrets"] },
+                  { "required": ["env"] },
+                  { "required": ["adapterImages"] }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "else": {}
+    }
+  ],
   "definitions": {
     "label": {
       "type": "string",
