@@ -216,12 +216,12 @@ func TestInterfaceBindingGap(t *testing.T) {
 func TestValidateInterfaceBinding(t *testing.T) {
 	good := testRun()
 	good.Spec.Workflow.Interface = testInterface()
-	require.NoError(t, validateInterfaceBinding(good), "the matching binding admits")
+	require.NoError(t, validateInterfaceBinding(good, false), "the matching binding admits")
 
 	extraAdapters := testRun()
 	extraAdapters.Spec.Workflow.Interface = testInterface()
 	extraAdapters.Spec.Workflow.AdapterImages["intake"] = "reg/intake:1"
-	require.NoError(t, validateInterfaceBinding(extraAdapters),
+	require.NoError(t, validateInterfaceBinding(extraAdapters, false),
 		"extra binding adapter kinds are tolerated; only required kinds are validated")
 
 	for _, tc := range []struct {
@@ -290,7 +290,7 @@ func TestValidateInterfaceBinding(t *testing.T) {
 			run := testRun()
 			tc.m(run.Spec.Workflow)
 			run.Spec.Workflow.Interface = testInterface()
-			err := validateInterfaceBinding(run)
+			err := validateInterfaceBinding(run, false)
 			require.Error(t, err, "the mutated binding must reject")
 			for _, want := range tc.want {
 				assert.Contains(t, err.Error(), want)
@@ -313,14 +313,14 @@ func TestValidateInterfaceBindingEmptyEnvSecretExempt(t *testing.T) {
 	})
 	// Operator plumbing rides volume-level env maps (CRITERIA_*), exempt.
 	run.Spec.Workflow.Volumes[0].Env = map[string]string{"CRITERIA_RUN_ID": "run-id"}
-	require.NoError(t, validateInterfaceBinding(run),
+	require.NoError(t, validateInterfaceBinding(run, false),
 		"empty secret env maps and volume-level plumbing env are exempt from the interface contract")
 }
 
 func TestLaunchManifest(t *testing.T) {
 	run := testRun()
 	run.Spec.Workflow.Interface = testInterface()
-	require.NoError(t, validateInterfaceBinding(run))
+	require.NoError(t, validateInterfaceBinding(run, false))
 
 	manifest, err := launchManifest(run, "k8s-9.9.9")
 	require.NoError(t, err)
@@ -367,18 +367,18 @@ func TestStampLaunchManifestIdempotent(t *testing.T) {
 	run.Spec.Workflow.Interface = testInterface()
 	update := run.DeepCopy()
 	stamper := &CriteriaRunReconciler{}
-	stamper.stampLaunchManifest(update, discardLogger())
+	stamper.stampLaunchManifest(update, "", discardLogger())
 	require.NotNil(t, update.Status.LaunchManifest, "an interface-carrying run gets a manifest")
 	first := *update.Status.LaunchManifest
 
-	stamper.stampLaunchManifest(update, discardLogger())
+	stamper.stampLaunchManifest(update, "", discardLogger())
 	assert.Equal(t, first, *update.Status.LaunchManifest,
 		"stampLaunchManifest is idempotent: the manifest pins the first admission")
 
 	legacy := testRun()
 	legacy.Spec.Workflow.Interface = nil
 	legacyUpdate := legacy.DeepCopy()
-	stamper.stampLaunchManifest(legacyUpdate, discardLogger())
+	stamper.stampLaunchManifest(legacyUpdate, "", discardLogger())
 	assert.Nil(t, legacyUpdate.Status.LaunchManifest,
 		"the legacy carve-out (no stamped interface) carries no manifest")
 }

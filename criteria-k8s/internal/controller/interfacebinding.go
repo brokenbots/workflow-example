@@ -88,18 +88,24 @@ func interfaceBindingGap(run *criteriav1.CriteriaRun) (string, bool) {
 //     byte-exact mountPath with the declared kind (pvc|tmp), and every
 //     interface mount must be satisfied by a binding volume;
 //   - every interface-required secret env lane must resolve from the
-//     binding's secrets env maps, and every env key the binding's secrets
-//     carry must be declared by the interface (volume-level env maps on
-//     volumes are operator plumbing and exempt; a secret with an empty
-//     env map contributes no keys — the CSI file-mount lane);
-//   - every binding env key must be declared by the interface. A
-//     secret-lane name delivered as a plain env key is an unknown slot:
-//     credentials ride secret lanes, never workflow env.
+//     binding's secrets env maps, and (KB-310 mode only) every env key
+//     the binding's secrets carry must be declared by the interface
+//     (volume-level env maps on volumes are operator plumbing and
+//     exempt; a secret with an empty env map contributes no keys — the
+//     CSI file-mount lane);
+//   - KB-310 mode: every binding env key must be declared by the
+//     interface. A secret-lane name delivered as a plain env key is an
+//     unknown slot: credentials ride secret lanes, never workflow env.
+//     KB-311 project-bound mode flips this in both places: the interface
+//     becomes the REQUIREMENT side — binding env must cover every
+//     declared env name, and secret lanes must resolve — while extra
+//     binding env keys and extra secret env keys are legal (the binding
+//     is the project's own complete execution config, ADR 307).
 //
 // Errors name both sides — the tree (interface workflow and name) and the
 // project binding (workflow name and the offending binding entry) — so a
 // rejected run is troubleshootable from the message alone.
-func validateInterfaceBinding(run *criteriav1.CriteriaRun) error {
+func validateInterfaceBinding(run *criteriav1.CriteriaRun, projectBound bool) error {
 	wf := run.Spec.Workflow
 	iface := wf.Interface
 
@@ -143,13 +149,15 @@ func validateInterfaceBinding(run *criteriav1.CriteriaRun) error {
 	}
 
 	// Secret env lanes: required lanes resolve from binding secrets env
-	// maps; binding secret env keys are declared by the interface.
+	// maps; KB-310 mode additionally rejects binding secret env keys the
+	// interface does not declare (KB-311 project-bound mode: extras are
+	// the project's own credential lanes and stay legal).
 	resolved := map[string]string{}
 	secretList := make([]string, 0, len(wf.Secrets))
 	for _, s := range wf.Secrets {
 		secretList = append(secretList, s.Name)
 		for name := range s.Env {
-			if !slices.Contains(iface.SecretEnv, name) && !slices.Contains(iface.Env, name) {
+			if !projectBound && !slices.Contains(iface.SecretEnv, name) && !slices.Contains(iface.Env, name) {
 				return fmt.Errorf("binding %q secret %q carries env %q which interface %q does not require; interface secretEnv: %s, env: %s (unknown-slot, fail closed, KB-310)",
 					wf.Name, s.Name, name, iface.Workflow, listOrNone(iface.SecretEnv), listOrNone(iface.Env))
 			}
@@ -164,7 +172,19 @@ func validateInterfaceBinding(run *criteriav1.CriteriaRun) error {
 			iface.Workflow, lane, wf.Name, listOrNone(secretList))
 	}
 
-	// Env: binding env keys must be declared as interface env.
+	// Env: KB-310 mode — binding env keys must be declared as interface
+	// env. KB-311 project-bound mode — the flip: declared env names are
+	// requirements the binding env must cover; extra keys are the
+	// project's own env (tool paths, proxies, KB-311) and stay legal.
+	if projectBound {
+		for _, name := range iface.Env {
+			if _, ok := wf.Env[name]; !ok {
+				return fmt.Errorf("interface %q requires env %q; binding %q env (%s) does not cover it (project binding mode: the binding env must cover the tree's declared env names, KB-311)",
+					iface.Workflow, name, wf.Name, listOrNone(sortedKeys(wf.Env)))
+			}
+		}
+		return nil
+	}
 	for name := range wf.Env {
 		if !slices.Contains(iface.Env, name) {
 			return fmt.Errorf("binding %q env key %q is not declared by interface %q (interface env: %s, secretEnv: %s); unknown-slot, fail closed (KB-310)",
@@ -274,10 +294,15 @@ func listOrNone(names []string) string {
 func (r *CriteriaRunReconciler) refuseInterfaceBindingMismatch(ctx context.Context, run *criteriav1.CriteriaRun, message string, logger logr.Logger) (ctrl.Result, error) {
 	wf := run.Spec.Workflow
 	// The tree exists on mismatched-interface refusals; the interface-less
-	// gap refusal (interfaceBindingGap) has nil, so it omits the field
-	// rather than nil-deref — the gap message carries the addressed tree.
-	attrs := []any{"workflow", wf.Name, "ticket", run.Spec.TicketID, "mismatch", message}
-	if wf.Interface != nil {
+	// gap refusal (interfaceBindingGap) and the KB-311 binding-pin
+	// refusals can run without one, so the field names what it has rather
+	// than nil-deref — each refusal message carries its own context.
+	attrs := []any{"ticket", run.Spec.TicketID}
+	if wf != nil {
+		attrs = append(attrs, "workflow", wf.Name)
+	}
+	attrs = append(attrs, "mismatch", message)
+	if wf != nil && wf.Interface != nil {
 		attrs = append(attrs, "tree", wf.Interface.Workflow)
 	}
 	logger.Info("refusing to admit CriteriaRun: binding does not satisfy the workflow interface (KB-310)", attrs...)
@@ -316,8 +341,11 @@ func (r *CriteriaRunReconciler) refuseInterfaceBindingMismatch(ctx context.Conte
 // later pass whose env or operator moved on must not silently re-stamp
 // what the run was actually bound to, so the manifest pins the first
 // admission. Runs without a stamped interface (the legacy carve-out)
-// carry no manifest.
-func (r *CriteriaRunReconciler) stampLaunchManifest(update *criteriav1.CriteriaRun, logger logr.Logger) {
+// carry no manifest. KB-311: a project-bound run's binding checksum is
+// the project binding payload's canonical-JSON digest (passed in from
+// the admission read); the empty hash is the KB-310 workflow-object
+// digest (pre-cutover runs keep it).
+func (r *CriteriaRunReconciler) stampLaunchManifest(update *criteriav1.CriteriaRun, bindingSum string, logger logr.Logger) {
 	wf := update.Spec.Workflow
 	if wf == nil || wf.Interface == nil || update.Status.LaunchManifest != nil {
 		return
@@ -329,6 +357,9 @@ func (r *CriteriaRunReconciler) stampLaunchManifest(update *criteriav1.CriteriaR
 		logger.Info("building launch manifest failed; run stays unmanifested",
 			"criteriarun", update.Name, "error", err.Error())
 		return
+	}
+	if bindingSum != "" {
+		manifest.BindingChecksum = bindingSum
 	}
 	update.Status.LaunchManifest = manifest
 }

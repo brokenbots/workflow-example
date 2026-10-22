@@ -146,9 +146,9 @@ func (p Payload) Checksum() string {
 // from): binding-shaped fields are REPLACED — adapter images, env,
 // volumes, secrets — because the project now owns the execution config
 // (ADR 307). Tree-shaped fields the workflow entry still provides (Type,
-// URL, Ref, Interface, Class) are preserved.
+// Image — the url+image process image —, URL, Ref, Interface, Class) are
+// preserved.
 func (p Payload) Apply(wf routes.Workflow) routes.Workflow {
-	wf.Image = ""
 	wf.Volumes = nil
 	wf.Secrets = nil
 	wf.Env = nil

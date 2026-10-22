@@ -218,8 +218,8 @@ func TestApplyMaterializesBinding(t *testing.T) {
 	if goApplied.URL != tree.URL || goApplied.Ref != "abc1234" || goApplied.Type != "url" {
 		t.Errorf("Apply must preserve the tree references, got %+v", goApplied)
 	}
-	if goApplied.Image != "" || goApplied.AdapterImages["peer-go"] == "" {
-		t.Errorf("Apply must replace image data with the binding's: %+v", goApplied)
+	if goApplied.Image != "legacy-image:1" || goApplied.AdapterImages["peer-go"] == "" {
+		t.Errorf("Apply must preserve the workflow entry's process image and replace adapter images with the binding's: %+v", goApplied)
 	}
 	if tsApplied.AdapterImages["peer-go"] != "" || tsApplied.AdapterImages["peer-node"] == "" {
 		t.Errorf("typescript-sdk binding must not carry the go project's images: %+v", tsApplied.AdapterImages)
