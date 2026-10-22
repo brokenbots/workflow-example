@@ -96,6 +96,33 @@ type CriteriaRunSpec struct {
 	// CRI-226). Nil keeps the pre-KB-103 behavior: commands come from the
 	// spec fields alone (watcher-level fallback defaults).
 	ConfigRef *CriteriaRunConfigRef `json:"configRef,omitempty"`
+
+	// ProjectBindingRef (KB-311, ADR 307) references the project's binding
+	// ConfigMap (criteria-binding) in the run's namespace: the resource
+	// pinning the project's COMPLETE execution config (images, env,
+	// volumes, secrets, config slots). The watcher stamps it for projects
+	// marked cutover:done in the routes projectRegistry, with the
+	// resourceVersion observed at stamping time; the operator admits
+	// through that binding and re-verifies the pin, fail closed. Nil keeps
+	// the pre-KB-311 behavior: the workflow entry's inline config is the
+	// whole contract.
+	ProjectBindingRef *CriteriaRunProjectBindingRef `json:"projectBindingRef,omitempty"`
+}
+
+// CriteriaRunProjectBindingRef pins the project binding ConfigMap (KB-311)
+// by namespace-local name plus the resourceVersion observed when it was
+// read at stamping time. Namespace-local by construction: the registry
+// routes the run into the project's own namespace, so no cross-namespace
+// reference is expressible.
+type CriteriaRunProjectBindingRef struct {
+	// Name is the binding ConfigMap name in the run's namespace
+	// (always "criteria-binding").
+	Name string `json:"name"`
+
+	// ResourceVersion is the binding ConfigMap RV observed at stamping
+	// time; the operator fail-closes on a mismatch (the binding changed
+	// under an admitted run).
+	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
 // CriteriaRunConfigRef pins a per-repo config ConfigMap (KB-103) by
@@ -627,6 +654,26 @@ func (in *CriteriaRunSpec) DeepCopyInto(out *CriteriaRunSpec) {
 		*out = new(CriteriaRunConfigRef)
 		**out = **in
 	}
+	if in.ProjectBindingRef != nil {
+		in, out := &in.ProjectBindingRef, &out.ProjectBindingRef
+		*out = new(CriteriaRunProjectBindingRef)
+		**out = **in
+	}
+}
+
+// DeepCopyInto for CriteriaRunProjectBindingRef.
+func (in *CriteriaRunProjectBindingRef) DeepCopyInto(out *CriteriaRunProjectBindingRef) {
+	*out = *in
+}
+
+// DeepCopy creates a copy of CriteriaRunProjectBindingRef.
+func (in *CriteriaRunProjectBindingRef) DeepCopy() *CriteriaRunProjectBindingRef {
+	if in == nil {
+		return nil
+	}
+	out := new(CriteriaRunProjectBindingRef)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopyInto for RunConfigRender.
