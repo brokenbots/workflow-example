@@ -16,6 +16,12 @@ set -euo pipefail
 # three ways: shipped example == RECORDED_PIN_SET == live criteria-routes CM
 # (the live leg skips when no kubectl/cluster is reachable, e.g. CI).
 #
+# KB-313 (ADR 307): namespace is optional on workflowLibrary entries and the
+# global run-config surfaces (volumes/secrets/env/adapterImages) ride the
+# two-revision gate — warned while the migration window is open, rejected
+# once every projectRegistry entry is cutover: done (mirrored from
+# criteria-k8s/internal/routes).
+#
 # Validation always runs a dependency-free structural validator mirroring the
 # schema. When python's jsonschema module is available, the payload and every
 # variant are additionally checked against the shipped schema itself, so the
@@ -326,7 +332,10 @@ def validate_workflow(name, workflow, where, errs):
     if not isinstance(workflow, dict):
         errs.append(f"{where} must be an object")
         return
-    for key in ("type", "namespace"):
+    for key in ("type",):
+        # KB-313 (ADR 307): namespace is optional — cutover-done projects run
+        # in their project binding's namespace; a namespace-less entry's runs
+        # resolve the run's own namespace.
         if key not in workflow:
             errs.append(f"{where} is missing required field {key}")
     for key in workflow:
@@ -526,6 +535,21 @@ def validate(doc):
             for i, route in enumerate(routes if isinstance(routes, list) else []):
                 if isinstance(route, dict) and route.get("project") not in registry:
                     errs.append(f"payload.routes[{i}].project {route.get('project')!r} is not in projectRegistry (the registry is the only ticket->project routing table, KB-311)")
+        # KB-313 (ADR 307): the global CM is a thin catalog — a post-cutover
+        # payload (the registry is non-empty and every entry cutover: done)
+        # that still carries global run-config (volumes/secrets/env/
+        # adapterImages) on a workflowLibrary entry is rejected. This mirrors
+        # criteria-k8s/internal/routes' two-revision hard edge; pre-cutover
+        # payloads keep the surfaces with a warning on the Go side.
+        if isinstance(registry, dict) and registry \
+                and not [p for p, e in registry.items()
+                         if not (isinstance(e, dict) and e.get("cutover") == "done")]:
+            for name, workflow in (library or {}).items():
+                if not isinstance(workflow, dict):
+                    continue
+                present = [k for k in ("volumes", "secrets", "env", "adapterImages") if k in workflow]
+                if present:
+                    errs.append(f"payload.workflowLibrary.{name} still carries global run-config {', '.join(present)}; post-cutover the global CM is workflow catalog + projectRegistry + routes only (KB-313, ADR 307)")
     return errs
 
 
@@ -846,6 +870,67 @@ negative.extend([
 
 positive.extend([
     ("registry-entry-without-cutover", mutate(kb311_registry_entry_without_cutover)),
+])
+
+# KB-313 (ADR 307): two-revision gate on the global run-config surfaces
+# (volumes/secrets/env/adapterImages). While the migration window is open —
+# at least one registry entry without the cutover: done marker — the
+# surfaces stay legal on workflowLibrary entries (that is the shipped
+# example itself); post-cutover they are rejected, mirroring
+# criteria-k8s/internal/routes' ValidationError. namespace is OPTIONAL on
+# workflowLibrary entries: cutover-done projects run in their project
+# binding's namespace, so the global CM stops owning run placement.
+def kb313_all_done(d):
+    for entry in d["projectRegistry"].values():
+        entry["cutover"] = "done"
+
+
+def kb313_only_env_remains(d):
+    # the shipped payload carries no top-level env on workflowLibrary
+    # entries, so "env remains" means one entry gains one
+    kb313_all_done(d)
+    d[LIB][URLWF]["env"] = {"RUNNER_NOTE": "stale"}
+
+
+def kb313_leave_only_adapterimages(d):
+    kb313_all_done(d)
+    for workflow in d[LIB].values():
+        workflow.pop("env", None)
+        workflow.pop("volumes", None)
+        workflow.pop("secrets", None)
+
+
+def kb313_postcutover_clean(d):
+    kb313_all_done(d)
+    for workflow in d[LIB].values():
+        workflow.pop("env", None)
+        workflow.pop("adapterImages", None)
+        workflow.pop("volumes", None)
+        workflow.pop("secrets", None)
+
+
+def kb313_namespace_optional(d):
+    d[LIB][URLWF].pop("namespace")
+
+
+def kb313_window_half_done(d):
+    # "Criteria Go Dev" keeps its done marker; the rest stay un-cut — the
+    # window is open, so the payload-wide stale surfaces stay legal.
+    for project, entry in d["projectRegistry"].items():
+        if project != "Criteria Go Dev":
+            entry.pop("cutover", None)
+
+
+negative.extend([
+    ("postcutover-stale-global-surfaces", True, mutate(kb313_all_done)),
+    ("postcutover-stale-env-remains", True, mutate(kb313_only_env_remains)),
+    ("postcutover-stale-adapterimages-remains", True, mutate(kb313_leave_only_adapterimages)),
+])
+
+positive.extend([
+    ("postcutover-clean", mutate(kb313_postcutover_clean)),
+    ("namespace-optional-workflow-entry", mutate(kb313_namespace_optional)),
+    ("migration-window-half-done-registry", mutate(kb313_window_half_done)),
 ])
 
 failures = []

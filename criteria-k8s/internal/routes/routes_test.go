@@ -1549,8 +1549,8 @@ func TestValidateProjectRegistry(t *testing.T) {
 	p.ProjectRegistry = map[string]ProjectEntry{
 		// The payload's own routes ("Runner", "Other") must stay resolvable
 		// through the registry — the registry is the routing table.
-		"Runner":  {Namespace: "criteria-jobs"},
-		"Other":   {Namespace: "other-jobs"},
+		"Runner":          {Namespace: "criteria-jobs"},
+		"Other":           {Namespace: "other-jobs"},
 		"Criteria Go Dev": entry(),
 		"TypeScript SDK": {
 			Namespace: "typescript-sdk",
@@ -1682,5 +1682,168 @@ func TestShippedExampleProjectRegistry(t *testing.T) {
 		if entry.IsCutoverDone() {
 			t.Errorf("%s reports cutover done (pre-cutover while the global CM still carries binding data)", project)
 		}
+	}
+}
+
+// KB-313 (ADR 307): namespace is optional on a workflow-library entry —
+// cutover-done entries route into their project's registry namespace and a
+// namespace-less entry's runs resolve the run's own namespace. A present
+// value must still be a DNS-1123 label.
+func TestNamespaceOptionalWorkflowEntry(t *testing.T) {
+	noNS := validPayload()
+	wf := noNS.WorkflowLibrary["wf-default"]
+	wf.Namespace = ""
+	noNS.WorkflowLibrary["wf-default"] = wf
+	if err := noNS.Validate(); err != nil {
+		t.Fatalf("Validate(namespace-less entry) failed: %v", err)
+	}
+	var wfJSON struct {
+		Namespace string `json:"namespace"`
+	}
+	raw, err := json.Marshal(noNS.WorkflowLibrary["wf-default"])
+	if err != nil {
+		t.Fatalf("marshaling namespace-less workflow: %v", err)
+	}
+	if err := json.Unmarshal(raw, &wfJSON); err != nil {
+		t.Fatalf("unmarshaling namespace-less workflow: %v", err)
+	}
+	if wfJSON.Namespace != "" {
+		t.Errorf("namespace-less entry marshals %q, want an omitted key", wfJSON.Namespace)
+	}
+
+	bad := validPayload()
+	badWf := bad.WorkflowLibrary["wf-default"]
+	badWf.Namespace = "Bad_NS"
+	bad.WorkflowLibrary["wf-default"] = badWf
+	err = bad.Validate()
+	if err == nil || !strings.Contains(err.Error(), "DNS-1123") {
+		t.Errorf("Validate(bad namespace label) = %v, want a DNS-1123 rejection", err)
+	}
+}
+
+// KB-313 (ADR 307): the migration window is allow-with-warning. A payload
+// with no registry (pre-KB-311) or with any non-cutover-done registry
+// entry validates while its workflowLibrary carries the global run-config
+// surfaces, and DeprecationWarnings lists exactly the entries still
+// carrying them.
+func TestDeprecatedGlobalSurfacesAllowWithWarning(t *testing.T) {
+	warnList := func(p *Payload) []string {
+		t.Helper()
+		if err := p.Validate(); err != nil {
+			t.Fatalf("Validate(migration window with stale surfaces) failed: %v", err)
+		}
+		return p.DeprecationWarnings()
+	}
+	assertWarnings := func(p *Payload, wantEntry string) {
+		t.Helper()
+		warnings := warnList(p)
+		if len(warnings) != 1 {
+			t.Fatalf("DeprecationWarnings() = %v, want one warning for %q", warnings, wantEntry)
+		}
+		if !strings.Contains(warnings[0], wantEntry) {
+			t.Errorf("warning %q does not name %q", warnings[0], wantEntry)
+		}
+		if !strings.Contains(warnings[0], "volumes, secrets, env, adapterImages") {
+			t.Errorf("warning %q does not list the stale surface keys", warnings[0])
+		}
+	}
+	stalePayload := func() *Payload {
+		p := validPayload()
+		wf := p.WorkflowLibrary["wf-default"]
+		wf.Volumes = []Volume{{Name: "scratch", Kind: "tmp", MountPath: "/scratch"}}
+		wf.Secrets = []Secret{{Name: "gh", SecretProviderClass: "spc", MountPath: "/secrets"}}
+		wf.Env = map[string]string{"CRITERIA_RUN_MODE": "k8s"}
+		wf.AdapterImages = map[string]string{"shell": "reg.dev/shell:1"}
+		p.WorkflowLibrary["wf-default"] = wf
+		return p
+	}
+
+	// No registry: the pre-KB-311 payload shape stays in the warning window.
+	assertWarnings(stalePayload(), "wf-default")
+
+	// A registry with any non-cutover-done entry keeps the window open.
+	mixed := stalePayload()
+	mixed.ProjectRegistry = map[string]ProjectEntry{
+		"Runner":          {Namespace: "criteria-jobs"},
+		"Other":           {Namespace: "other-jobs"},
+		"Criteria Go Dev": {Namespace: "criteria-go-dev", Cutover: CutoverDone},
+		"TypeScript SDK":  {Namespace: "typescript-sdk", Cutover: CutoverDone},
+	}
+	assertWarnings(mixed, "wf-default")
+}
+
+// KB-313 (ADR 307): the post-cutover gate. Once EVERY projectRegistry
+// entry is cutover-done, the payload hard-rejects any workflowLibrary
+// entry still carrying volumes/secrets/env/adapterImages — the global CM
+// owns zero project-shaped data in the end state — while a clean
+// post-cutover payload validates and carries no warnings.
+func TestPostCutoverRejectsGlobalRunConfigSurfaces(t *testing.T) {
+	doneRegistry := func() map[string]ProjectEntry {
+		return map[string]ProjectEntry{
+			"Runner":          {Namespace: "criteria-jobs", Cutover: CutoverDone},
+			"Other":           {Namespace: "other-jobs", Cutover: CutoverDone},
+			"Criteria Go Dev": {Namespace: "criteria-go-dev", Cutover: CutoverDone},
+		}
+	}
+	stale := validPayload()
+	wf := stale.WorkflowLibrary["wf-default"]
+	wf.Env = map[string]string{"CRITERIA_RUN_MODE": "k8s"}
+	wf.AdapterImages = map[string]string{"shell": "reg.dev/shell:1"}
+	stale.WorkflowLibrary["wf-default"] = wf
+	stale.ProjectRegistry = doneRegistry()
+	err := stale.Validate()
+	if err == nil {
+		t.Fatal("Validate(post-cutover payload with stale surfaces) accepted the payload")
+	}
+	for _, want := range []string{"post-cutover", "KB-313", "workflowLibrary", "env, adapterImages"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("rejection %v does not mention %q", err, want)
+		}
+	}
+	// The warning lane is moot post-cutover: Validate rejects, so no valid
+	// post-cutover payload ever carries a warning.
+	if warnings := stale.DeprecationWarnings(); warnings != nil {
+		t.Errorf("DeprecationWarnings(post-cutover) = %v, want nil", warnings)
+	}
+
+	clean := validPayload()
+	clean.ProjectRegistry = doneRegistry()
+	if err := clean.Validate(); err != nil {
+		t.Fatalf("Validate(clean post-cutover payload) failed: %v", err)
+	}
+	if warnings := clean.DeprecationWarnings(); warnings != nil {
+		t.Errorf("DeprecationWarnings(clean) = %v, want nil", warnings)
+	}
+}
+
+// KB-313 acceptance: two cut-over projects and three un-cut projects
+// coexist through the migration window — the un-cut side keeps the global
+// library stamping (warned), the cut-over side serves binding references,
+// and the payload validates as one unit while any un-cut entry exists.
+func TestMigrationWindowCoexistence(t *testing.T) {
+	p := validPayload()
+	wf := p.WorkflowLibrary["wf-default"]
+	wf.Env = map[string]string{"CRITERIA_RUN_MODE": "k8s"}
+	wf.Volumes = []Volume{{Name: "scratch", Kind: "tmp", MountPath: "/scratch"}}
+	p.WorkflowLibrary["wf-default"] = wf
+	p.ProjectRegistry = map[string]ProjectEntry{
+		// Two cut-over projects: binding-first execution.
+		"Criteria Go Dev": {Namespace: "criteria-go-dev", Repos: []string{"brokenbots/criteria-go-dev"}, Cutover: CutoverDone},
+		"TypeScript SDK":  {Namespace: "typescript-sdk", Repos: []string{"brokenbots/typescript-sdk"}, Cutover: CutoverDone},
+		// Three un-cut projects: the global library keeps serving them,
+		// warned, until each cuts over.
+		"Runner":           {Namespace: "criteria-jobs"},
+		"Other":            {Namespace: "other-jobs"},
+		"Kanboard Tickets": {Namespace: "criteria-jobs", Repos: []string{"brokenbots/workflow-example"}},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("Validate(two cut-over + three un-cut coexistence) failed: %v", err)
+	}
+	warnings := p.DeprecationWarnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "wf-default") {
+		t.Errorf("DeprecationWarnings() = %v, want the single stale entry named", warnings)
+	}
+	if p.PostCutover() {
+		t.Error("PostCutover() = true during the migration window, want false")
 	}
 }

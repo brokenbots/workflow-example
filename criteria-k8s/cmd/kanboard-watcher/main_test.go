@@ -70,6 +70,20 @@ func (r *logRecorder) contains(substr string) bool {
 	return false
 }
 
+// count returns how many log entries contain substr, for tests that pin
+// dedupe or repeat behavior.
+func (r *logRecorder) count(substr string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, e := range r.entries {
+		if strings.Contains(e.msg, substr) {
+			count++
+		}
+	}
+	return count
+}
+
 // kbServer fakes the Kanboard JSON-RPC surface the watcher uses.
 type kbServer struct {
 	mu      sync.Mutex
@@ -1837,13 +1851,14 @@ func TestRoutesLoadFailureFailsThePoll(t *testing.T) {
 	assert.True(t, ok, "the poll loop completed the poll, so the process is live")
 }
 
-// bindingRoutesJSON (KB-311): the cutover-done fixture. The project
-// registry routes "Kanboard Tickets" through the criteria-go-dev
-// namespace with cutover marked done, and the global workflowLibrary
-// entry deliberately carries binding-shaped data (env, adapterImages,
-// volumes, secrets): the binding-first CR must carry NONE of it —
-// references only, with the full execution config served by the
-// project-owned criteria-binding CM.
+// bindingRoutesJSON (KB-311 + KB-313): the cutover-done fixture. The
+// project registry routes "Kanboard Tickets" through the criteria-go-dev
+// namespace with cutover marked done, and the global workflowLibrary entry
+// is the POST-CUTOVER shape — pure catalog (tree references + interface),
+// no binding-shaped data, because Validate hard-rejects global run-config
+// surfaces once every registry project is cutover-done (KB-313, ADR 307).
+// The binding-first CR must still carry references only: the full
+// execution config is served by the project-owned criteria-binding CM.
 const bindingRoutesJSON = `{
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "Routes",
@@ -1858,14 +1873,6 @@ const bindingRoutesJSON = `{
       "image": "localhost:5000/criteria:dev",
       "namespace": "criteria-jobs",
       "class": "triage",
-      "env": {"STALE_GLOBAL_ENV": "must-not-be-stamped"},
-      "adapterImages": {"shell": "localhost:5000/adapter-shell:dev"},
-      "volumes": [
-        {"name": "tokens", "kind": "k8s-secret", "secretName": "github-tokens", "mountPath": "/home/criteria/secrets", "readOnly": true}
-      ],
-      "secrets": [
-        {"name": "gh", "secretProviderClass": "global-spc", "mountPath": "/home/criteria/gh"}
-      ],
       "interface": {
         "apiVersion": "criteria.brokenbots.dev/v1",
         "kind": "WorkflowInterface",
@@ -1923,6 +1930,44 @@ const bindingGlobalRoutesJSON = `{
         ],
         "secretEnv": ["GH_TOKEN"],
         "env": ["CRITERIA_RUN_MODE"],
+        "configSlots": [
+          {"slot": "buildCmd", "variable": "build_cmd", "target": "build step", "description": "Command that builds the tree."}
+        ]
+      }
+    }
+  },
+  "routes": [
+    {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]}
+  ]
+}`
+
+// staleGlobalPostCutoverRoutesJSON is the pre-KB-313 cutover-done payload
+// shape: the registry is entirely cutover-done but the workflowLibrary
+// entry still carries global run-config surfaces. KB-313 (ADR 307) makes
+// this payload illegal — the post-cutover gate hard-rejects it and the
+// poll fails closed instead of stamping project-shaped config the global
+// CM no longer owns.
+const staleGlobalPostCutoverRoutesJSON = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "projectRegistry": {
+    "Kanboard Tickets": {"namespace": "criteria-go-dev", "repos": ["brokenbots/workflow-example"], "cutover": "done"}
+  },
+  "workflowLibrary": {
+    "kanboard-intake": {
+      "type": "url",
+      "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
+      "ref": "0b8136650d5622381bf18a597ed93b8c272ba19b",
+      "image": "localhost:5000/criteria:dev",
+      "namespace": "criteria-jobs",
+      "class": "triage",
+      "env": {"STALE_GLOBAL_ENV": "must-not-be-stamped"},
+      "adapterImages": {"shell": "localhost:5000/adapter-shell:dev"},
+      "interface": {
+        "apiVersion": "criteria.brokenbots.dev/v1",
+        "kind": "WorkflowInterface",
+        "workflow": "kanboard_triage_v1",
+        "adapters": ["shell"],
         "configSlots": [
           {"slot": "buildCmd", "variable": "build_cmd", "target": "build step", "description": "Command that builds the tree."}
         ]
@@ -2116,6 +2161,44 @@ func TestPollPreCutoverKeepsGlobalStamping(t *testing.T) {
 	require.Len(t, wf.Volumes, 1)
 	require.Len(t, wf.Secrets, 1)
 	assert.Equal(t, "criteria-jobs", wf.Namespace, "the tree's namespace drives TargetNamespace pre-cutover")
+}
+
+// TestPollPreCutoverLogsDeprecationWarningsOnce exercises the KB-313
+// (ADR 307) allow-with-warning lane at the intake: the stale global
+// run-config surfaces are logged once per warning-set change (never per
+// poll — the payload reloads every cycle), and the pre-cutover firing
+// behavior is untouched.
+func TestPollPreCutoverLogsDeprecationWarningsOnce(t *testing.T) {
+	tw := newTestWatcher(t, bindingGlobalRoutesJSON)
+	tw.kbS.addTask(24, 5, "k8s-run")
+
+	tw.pollOnce(t)
+	require.Len(t, tw.runs(t), 1, "the migration-window poll still fires the run")
+	assert.Equal(t, 1, tw.logs.count("KB-313 deprecated global run-config surfaces"),
+		"the stale surfaces are logged once")
+
+	// The unchanged warning set is not repeated on the next poll.
+	tw.pollOnce(t)
+	assert.Empty(t, tw.runsIn(t, cutoverNS), "no binding-namespace run on a pre-cutover payload")
+	assert.Len(t, tw.runs(t), 1, "no refire while the first run is in flight")
+	assert.Equal(t, 1, tw.logs.count("KB-313 deprecated global run-config surfaces"),
+		"the unchanged warning set is not repeated per poll")
+}
+
+// TestPollPostCutoverRejectsStaleGlobalSurfaces exercises the KB-313 (ADR
+// 307) post-cutover gate at the intake: a routes payload whose registry is
+// entirely cutover-done but whose workflowLibrary still carries global
+// run-config surfaces fails closed — no run fires, and the error names the
+// rejection.
+func TestPollPostCutoverRejectsStaleGlobalSurfaces(t *testing.T) {
+	tw := newTestWatcher(t, staleGlobalPostCutoverRoutesJSON)
+	tw.kbS.addTask(25, 5, "k8s-run")
+
+	err := tw.w.poll(context.Background())
+	require.Error(t, err, "a post-cutover CM with global run-config surfaces fails closed")
+	assert.Contains(t, err.Error(), "post-cutover")
+	assert.Contains(t, err.Error(), "KB-313")
+	assert.Empty(t, tw.runs(t), "no run fires off a payload that fails validation")
 }
 
 // TestPollCutoverGatesFiringOnProjectNamespaceRun exercises the

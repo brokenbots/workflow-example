@@ -286,6 +286,11 @@ type watcher struct {
 	routingTags   []string
 	repoValidator func(string) bool
 	projectID     int
+	// lastDeprecationMemo dedupes the KB-313 deprecation warnings across
+	// polls: the payload re-reads every poll, so a migration-window CM
+	// carrying stale global run-config surfaces would otherwise repeat the
+	// same warning on every 60s cycle forever.
+	lastDeprecationMemo string
 	// lastRuns records, per ticket, the runs index entry seen at the
 	// previous poll, so reconciliation only acts on changes (the CRI-252
 	// change-driven discipline). The run identity is part of the record:
@@ -481,6 +486,29 @@ func (w *watcher) serveHealth(ctx context.Context) error {
 	return nil
 }
 
+// reportBindingDeprecations surfaces the KB-313 (ADR 307) deprecation
+// warnings the routes payload carries: the migration window is
+// allow-with-warning, and this intake is the operator's running view of the
+// shipped CM, so its stale global run-config surfaces are logged (with the
+// workflow entries still carrying them) whenever the warning set changes —
+// once per change, not once per poll. The post-cutover case never reaches
+// here as a warning: LoadFile hard-rejects that payload and poll fails
+// closed above.
+func (w *watcher) reportBindingDeprecations(p *routes.Payload) {
+	warnings := p.DeprecationWarnings()
+	if len(warnings) == 0 {
+		w.lastDeprecationMemo = ""
+		return
+	}
+	memo := strings.Join(warnings, "\n")
+	if memo == w.lastDeprecationMemo {
+		return
+	}
+	w.lastDeprecationMemo = memo
+	w.log.Info("routes payload carries KB-313 deprecated global run-config surfaces; migrate the entries' projects onto per-project bindings (binding-first, KB-311) before the cut-overs make them a validation error",
+		"surfaces", strings.Join(warnings, " | "))
+}
+
 // poll mirrors the linear watcher's structure: routes fail closed, one
 // listing read per poll, the runs index gates firing, in-flight duplicates
 // suppressed. Kanboard tags are the analogue of Linear labels; the trigger
@@ -493,6 +521,7 @@ func (w *watcher) poll(ctx context.Context) error {
 		// poll and keep the pod Ready through a persistent routes outage.
 		return fmt.Errorf("load routes payload: %w", err)
 	}
+	w.reportBindingDeprecations(routesPayload)
 	// Dual-source scoping (mirrors the linear watcher): query only the
 	// watched project's routes' columns, so linear state names never reach
 	// the Kanboard query.
