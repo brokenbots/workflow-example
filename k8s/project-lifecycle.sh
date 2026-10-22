@@ -24,6 +24,7 @@
 #
 # Usage:
 #   project-lifecycle.sh render [--namespace NS] [--binding-file FILE] [--output FILE]
+#   project-lifecycle.sh binding-checksum [--namespace NS]
 #   project-lifecycle.sh apply [--namespace NS] [--file FILE]
 #   project-lifecycle.sh openbao-wire [--namespace NS]
 #   project-lifecycle.sh verify [--namespace NS]
@@ -79,11 +80,46 @@ extract_data_json() {
   ' "$file"
 }
 
-# jq -Sc and Go encoding/json agree on the canonical encoding for the
-# payloads this repo ships (object keys sorted; the values are image refs,
-# env values and mount paths, so no HTML-escape divergence). This mirrors the
-# operator's own algorithm (status.launchManifest.bindingChecksum docs).
-canonical_sha256() { jq -Sc . | sha256sum | awk '{print $1}'; }
+# Mirrors Go's json.Marshal of the binding.Payload STRUCT — the operator's
+# checksum input (internal/binding: payload.Checksum(), the digest stamped into
+# status.launchManifest.bindingChecksum by the project-binding admission path).
+# Three properties jq -Sc does NOT have: struct-field ORDER (the struct emits
+# fields in declaration order, not sorted; nested Volume/Secret reuse the
+# routes structs' order), omitempty semantics on the optional
+# Volume/Secret fields, and Go's HTML string escaping (& < > become \u0026
+# \u003c \u003e — the shipped go binding carries "&&" in config.ciGateCmd, so
+# this divergence is real, not theoretical). Map keys sort (encoding/json
+# sorts all maps; jq's codepoint sort matches Go's UTF-8 byte sort).
+# Known mirror limit: a string carrying a literal escape-sequence TEXT
+# (e.g. the six characters \u003c) escapes the sed pass — the Go gate
+# TestShippedGoBindingChecksumMatchesRenderedCM stays the algorithm's
+# authority; no shipped binding carries such content.
+canonical_json_binding() {
+  jq -j -c '
+    def srt: to_entries | sort_by(.key) | from_entries;
+    def vol:
+      . as $v
+      | (reduce (["subPath", $v.subPath], ["readOnly", $v.readOnly], ["claim", $v.claim],
+                 ["server", $v.server], ["path", $v.path], ["sizeLimit", $v.sizeLimit],
+                 ["secretName", $v.secretName]) as $kv ({name: $v.name, kind: $v.kind, mountPath: $v.mountPath};
+           if ($kv[1] == null or $kv[1] == false or $kv[1] == "") then . else . + {($kv[0]): $kv[1]} end))
+      | . + (if (($v.env // {}) == {}) then {} else {env: ($v.env | srt)} end);
+    def sec:
+      . as $s
+      | {name: $s.name, secretProviderClass: $s.secretProviderClass, mountPath: $s.mountPath}
+      | . + (if (($s.env // {}) == {}) then {} else {env: ($s.env | srt)} end);
+    {
+      apiVersion: .apiVersion,
+      kind: .kind,
+      images: (if .images == null then null else (.images | srt) end),
+      env: (if .env == null then null else (.env | srt) end),
+      volumes: (if .volumes == null then null else (.volumes | map(vol)) end),
+      secrets: (if .secrets == null then null else (.secrets | map(sec)) end),
+      config: (if .config == null then null else (.config | srt) end)
+    }
+  ' | sed 's/</\\u003c/g; s/>/\\u003e/g; s/&/\\u0026/g'
+}
+canonical_sha256() { canonical_json_binding | sha256sum | awk '{print $1}'; }
 
 # The routes example is the routing table of record; a project must be
 # carried by its projectRegistry. Echoes the entry as {key,value} JSON.
@@ -137,8 +173,8 @@ render() {
 #   ./k8s/project-lifecycle.sh render --namespace ${ns}
 # The binding ConfigMap below is spliced verbatim from
 # k8s/examples/binding-${ns}.yaml — the KB-311 fail-closed binding schema
-# (k8s/criteria-binding.schema.json) is its contract. Binding checksum
-# (canonical JSON, operator algorithm): ${checksum}
+# (k8s/criteria-binding.schema.json) is its contract.
+# Binding checksum (canonical JSON, operator algorithm): ${checksum}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -646,6 +682,7 @@ main() {
   shift
   case "$cmd" in
     render) parse_args "$@"; render ;;
+    binding-checksum) parse_args "$@"; render_common; echo "${checksum}" ;;
     apply) apply "$@" ;;
     openbao-wire) openbao_wire "$@" ;;
     verify) verify "$@" ;;

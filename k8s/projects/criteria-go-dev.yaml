@@ -6,8 +6,8 @@
 #   ./k8s/project-lifecycle.sh render --namespace criteria-go-dev
 # The binding ConfigMap below is spliced verbatim from
 # k8s/examples/binding-criteria-go-dev.yaml — the KB-311 fail-closed binding schema
-# (k8s/criteria-binding.schema.json) is its contract. Binding checksum
-# (canonical JSON, operator algorithm): 72e3384faff56b31050ec5c0392674b8d212972c6eba1d2cc39121afb966a8aa
+# (k8s/criteria-binding.schema.json) is its contract.
+# Binding checksum (canonical JSON, operator algorithm): c84f51f06cb14c4e2451030f0b88f344dbdb23d230edb0df4bae31a0c154a58a
 apiVersion: v1
 kind: Namespace
 metadata:
