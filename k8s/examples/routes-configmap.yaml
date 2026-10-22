@@ -45,6 +45,17 @@
 # workflowLibrary entries until KB-313 deletes them (binding-first,
 # deletion second).
 #
+# KB-313 (ADR 307): the global CM is a thin catalog — workflow trees +
+# interface refs + projectRegistry + route rules, nothing else. The four
+# global run-config surfaces on workflowLibrary entries (volumes, secrets,
+# env, adapterImages) are deprecated: routes-sync.sh never edits them again
+# (it only aligns url/ref pins), the watcher treats them as warning-only
+# while the window above is open, and validation hard-rejects the payload
+# once every projectRegistry entry is cutover:done. pincheck class E makes
+# a post-cutover payload with stale surfaces a CI error. Entries that have
+# cut over carry no namespace here: their runs resolve the project binding's
+# namespace (binding CM), so 'namespace' is optional in this schema.
+#
 # CRI-243 (plan CRI-214 M10.1, exit condition 3): the criteria project's
 # routes followed the split pattern — the 'criteria-triage' route fired
 # linear_triage_v1 on [Triage] and the 'criteria-develop' route fired

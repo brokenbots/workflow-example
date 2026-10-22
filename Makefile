@@ -211,6 +211,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_kanboard_watcher_watchdog.sh
 	@echo "Running routes ConfigMap schema regression test (CRI-216)..."
 	./k8s/tests/test_routes_config.sh
+	@echo "Running pincheck class E routes staleness regression test (KB-313)..."
+	./k8s/tests/test_pincheck_routes_class.sh
 	@echo "Running per-project binding ConfigMap schema regression test (KB-311)..."
 	./k8s/tests/test_criteria_binding.sh
 	@echo "Running per-project namespace cutover regression test (KB-312)..."
@@ -267,6 +269,7 @@ lint: lint-go
 		k8s/tests/test_criteria_k8s_chart.sh \
 		k8s/tests/test_kanboard_watcher_watchdog.sh \
 		k8s/tests/test_routes_config.sh \
+		k8s/tests/test_pincheck_routes_class.sh \
 		k8s/tests/test_criteria_binding.sh \
 		k8s/project-lifecycle.sh \
 		k8s/tests/test_project_lifecycle.sh \

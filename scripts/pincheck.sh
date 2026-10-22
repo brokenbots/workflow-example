@@ -8,6 +8,10 @@
 #   B. no stale hardcoded adapter refs in CI/test guards
 #   C. lockfile freshness: every tree compiles strict against its current lockfile
 #   D. routes CM alignment (delegates to routes-sync.sh --check when reachable)
+#   E. routes CM global run-config staleness (KB-313, ADR 307): a post-cutover
+#      payload (every projectRegistry entry cutover:done) that still carries
+#      volumes/secrets/env/adapterImages on workflowLibrary entries is a CI
+#      error; while the migration window is open the stale surfaces are noted.
 # Exit: 0 only when every check passes. Honors CRITERIA_BIN; container fallback.
 set -uo pipefail
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
@@ -107,6 +111,29 @@ if command -v kubectl >/dev/null 2>&1 && kubectl -n criteria-jobs get cm criteri
 else
     note "D: routes CM check skipped (no cluster access)"
 fi
+
+# -- E: routes CM global run-config staleness (KB-313, ADR 307): delegated to
+# scripts/check_routes_stale.sh — a post-cutover payload (every projectRegistry
+# entry cutover: done) that still carries volumes/secrets/env/adapterImages on
+# workflowLibrary entries is a CI error; while the migration window is open the
+# stale surfaces are noted. Checked on the shipped example, plus the live CM
+# when kubectl can reach it.
+E_BEFORE=$FAILED
+TMP_PAYLOAD="$(mktemp)"
+if ./scripts/check_routes_stale.sh k8s/examples/routes-configmap.yaml; then
+    note "E: shipped routes CM passes the KB-313 staleness gate"
+else
+    bad "E: shipped routes CM fails the KB-313 staleness gate"
+fi
+if [ "$FAILED" = "$E_BEFORE" ] && command -v kubectl >/dev/null 2>&1 \
+    && kubectl -n criteria-jobs get cm criteria-routes -o jsonpath='{.data.routes\.json}' > "$TMP_PAYLOAD" 2>/dev/null; then
+    if ./scripts/check_routes_stale.sh - "live criteria-routes CM" < "$TMP_PAYLOAD"; then
+        note "E: live routes CM passes the KB-313 staleness gate"
+    else
+        bad "E: live routes CM fails the KB-313 staleness gate"
+    fi
+fi
+rm -f "$TMP_PAYLOAD"
 
 if [ "$FAILED" -gt 0 ]; then
     echo "pincheck: $FAILED check class(es) failed — fix ALL above in one pass" >&2
