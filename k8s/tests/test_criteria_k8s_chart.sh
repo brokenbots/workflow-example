@@ -29,11 +29,15 @@ cmp -s "$CHART/crds/criteria.brokenbots.dev_criteriaruns.yaml" \
     fail "chart CRD has drifted from criteria-k8s/config/crd/bases"
 
 # install.yaml carries a third copy of the CriteriaRun CRD (a hand-maintained
-# structural schema with status subresource and an enumerated
-# status.properties map, so unknown fields are pruned by the API server).
-# It must expose the same status.properties key set as the chart CRD: a
-# missing key there means the operator's status writes of that field are
-# silently dropped on clusters installed from install.yaml.
+# structural schema with the status subresource and enumerated
+# spec.properties and status.properties maps, so unknown fields are pruned
+# by the API server). It must expose the same spec.properties key set (a
+# key present in the chart CRD but absent from install.yaml — e.g. the
+# KB-311 projectBindingRef pin — is pruned at admission, so the watcher's
+# stamp is silently dropped and the operator never reads it) and the same
+# status.properties key set: a missing status key means the operator's
+# status writes of that field are silently dropped on clusters installed
+# from install.yaml.
 crd_status_props() {
     awk '/^            status:$/{on = 1; next}
          on && /^            [a-z]/{on = 0}
@@ -42,6 +46,14 @@ crd_status_props() {
 cmp -s <(crd_status_props "$CHART/crds/criteria.brokenbots.dev_criteriaruns.yaml") \
     <(crd_status_props "$REPO_ROOT/criteria-k8s/config/install.yaml") || \
     fail "install.yaml CRD status.properties drifted from the chart CRD (e.g. missing castleTerminalObserved)"
+crd_spec_props() {
+    awk '/^            spec:$/{on = 1; next}
+         on && /^            [a-z]/{on = 0}
+         on && /^                [a-zA-Z]+:$/{gsub(/:$/, "", $0); print $1}' "$1" | sort
+}
+cmp -s <(crd_spec_props "$CHART/crds/criteria.brokenbots.dev_criteriaruns.yaml") \
+    <(crd_spec_props "$REPO_ROOT/criteria-k8s/config/install.yaml") || \
+    fail "install.yaml CRD spec.properties drifted from the chart CRD (a chart-CRD spec key missing from install.yaml is pruned at admission — e.g. the KB-311 projectBindingRef pin)"
 
 # Chart-embedded wrapper scripts must be byte-identical to the canonical
 # k8s/ sources (generate-pod-adapter-manifest.sh keeps them in sync).
