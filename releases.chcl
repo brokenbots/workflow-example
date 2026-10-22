@@ -5,8 +5,11 @@
 #   2. `make repin` rewrites every adapters.chcl version for that adapter,
 #   3. `make repin-check` (also inside `make validate`) fails on ANY version
 #      literal not equal to the manifest value — stragglers cannot exist,
-#   4. `make routes-sync` re-renders the criteria-routes CM url pins from the
-#      current HEAD + peer images from the peer_image_tags block.
+#   4. `make routes-sync` re-renders the criteria-routes CM url/ref pins from
+#      the current HEAD. It touches pins only: KB-313 (ADR 307) retired the
+#      peer_image_tags block — adapter image tags are per-project binding
+#      concerns now, and the old peer_shell_tag/peer_copilot_tag literals are
+#      gone because the global routes CM no longer carries adapterImages.
 #
 # NEVER hand-edit a version in a tree adapters.chcl again. This file is data,
 # read by scripts/repin.sh + scripts/repin_check.sh — it is HCL-shaped so the
@@ -16,9 +19,10 @@
 copilot = "0.5.17" # KB-263 typed verdict payloads + KB-216 + KB-260 (published 10-16)
 shell   = "0.5.5"  # identical to main as of 10-18 (KB-283)
 
-# criteria-base peer adapter image tags in the routes CM adapterImages blocks.
-peer_shell_tag   = "k8s-0.5.56-1"
-peer_copilot_tag = "k8s-0.5.56-1"
+# KB-313 (ADR 307): the former peer_shell_tag/peer_copilot_tag literals are
+# gone — peer adapter image tags are a per-project binding concern now
+# (binding CMs), not a releases-propagated pin. routes-sync never touches
+# adapterImages again.
 
 # Every workflowLibrary url pin in the routes CM resolves to THIS sha
 # ("head" = git rev-parse HEAD at render time).
