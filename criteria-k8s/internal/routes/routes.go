@@ -820,6 +820,28 @@ func validateAdapterImages(images map[string]string) error {
 	return nil
 }
 
+// The exported wrappers below reuse the routes payload rules for the
+// per-project binding payload (KB-311, ADR 307): the binding's volumes,
+// secrets, env, and adapter images validate against the same single
+// source of truth.
+
+// ValidateVolume exposes the routes volume rules to the binding package.
+func ValidateVolume(v Volume) error { return validateVolume(v) }
+
+// ValidateSecret exposes the routes secret rules to the binding package.
+func ValidateSecret(s Secret) error { return validateSecret(s) }
+
+// ValidateEnvMap exposes the env map rules to the binding package.
+func ValidateEnvMap(env map[string]string, where string) error {
+	return validateEnvMap(env, where)
+}
+
+// ValidateAdapterImages exposes the adapter image rules to the binding
+// package.
+func ValidateAdapterImages(images map[string]string) error {
+	return validateAdapterImages(images)
+}
+
 // validateSecretEnv checks the secret's env mapping: env var names to key
 // (rendered file) names within the SecretProviderClass mount. Values are
 // names only, never secret values.
