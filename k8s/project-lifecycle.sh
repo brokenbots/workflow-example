@@ -30,8 +30,10 @@
 #   project-lifecycle.sh verify [--namespace NS]
 #   project-lifecycle.sh triage [--namespace NS]
 #   project-lifecycle.sh retention-on/off [--namespace NS]
+#   project-lifecycle.sh retention-plan on|off [--namespace NS]
+#       (offline helper: prints the exact kubectl env mutation the toggle runs)
 #
-# Cluster-bound commands (apply/verify/triage/retention-*) need kubectl;
+# Cluster-bound commands (apply/verify/triage/retention-on|off) need kubectl;
 # render does not. The go-domain namespace criteria-go-dev is the default (the
 # KB-312 acceptance leg); other domains' cutovers are separate cards.
 set -euo pipefail
@@ -567,21 +569,34 @@ apply() {
 
 openbao_wire() {
   parse_args "$@"; resolve_binding_file
+  # Emits a directly paste-able, parse-able command sequence following the
+  # documented shared-OpenBao pattern (k8s/README.md 'OpenBao wiring',
+  # k8s/01-openbao-config.yaml): the pod's CLI binary is vault. The policy is
+  # written from STDIN (no temp file left in the pod) and the token is passed
+  # the same way the README pattern does — via env on the kubectl exec.
   cat <<EOF
 # Wire the project namespace's OpenBao role + policy against the SHARED
-# OpenBao pod (same pattern as k8s/01-openbao-config.yaml; roleName ${ns}).
-ROOT_TOKEN=<operator-root-token> /bin/sh -c '
-kubectl exec -n default openbao-0 -- sh -c 'echo "
-path \"criteria/data/${ns}/*\" { capabilities = [\"read\", \"list\"] }
-path \"criteria/metadata/${ns}/*\" { capabilities = [\"read\", \"list\"] }
-path \"criteria/data/linear\" { capabilities = [\"read\", \"list\"] }
-path \"criteria/metadata/linear\" { capabilities = [\"read\", \"list\"] }
-" > /tmp/${ns}.hcl' && \\
-  kubectl exec -n default openbao-0 -- sh -c "VAULT_TOKEN=\$ROOT_TOKEN bao policy write ${ns} /tmp/${ns}.hcl; \\
-    VAULT_TOKEN=\$ROOT_TOKEN bao write auth/kubernetes/role/${ns} \\
-      bound_service_account_names=criteria-runner \\
-      bound_service_account_namespaces=${ns} \\
-      policies=${ns} ttl=1h"
+# OpenBao pod (k8s/01-openbao-config.yaml pattern; roleName ${ns}; pod CLI
+# binary: vault). Sets V (root token) and pipes the policy inline:
+V='<operator-root-token>'
+kubectl exec -n default openbao-0 -- env VAULT_TOKEN="\${V}" vault policy write ${ns} - <<'POLICY_EOF'
+path "criteria/data/${ns}/*" {
+  capabilities = ["read", "list"]
+}
+path "criteria/metadata/${ns}/*" {
+  capabilities = ["read", "list"]
+}
+path "criteria/data/linear" {
+  capabilities = ["read", "list"]
+}
+path "criteria/metadata/linear" {
+  capabilities = ["read", "list"]
+}
+POLICY_EOF
+kubectl exec -n default openbao-0 -- env VAULT_TOKEN="\${V}" vault write auth/kubernetes/role/${ns} \\
+  bound_service_account_names=criteria-runner \\
+  bound_service_account_namespaces=${ns} \\
+  policies=${ns} ttl=1h
 EOF
   echo "# Reference copy lives in the rendered manifest: ConfigMap openbao-role-reference (${ns})."
 }
@@ -589,8 +604,7 @@ EOF
 verify() {
   parse_args "$@"; resolve_binding_file
   need_kubectl
-  local checksum stamped payload
-  checksum="$(binding_checksum_for "$binding_file")"
+  local stamped payload local_digest live_digest stamped_hex
 
   echo "== verify ${ns}: namespace labels =="
   kubectl get ns "$ns" -o json | jq -e --arg ns "$ns" \
@@ -608,6 +622,12 @@ verify() {
     err "binding ConfigMap criteria-binding not found in ${ns}"
   fi
   [ -n "$payload" ] || err "binding ConfigMap criteria-binding has an empty binding.json in ${ns}"
+  # The deployed CM must carry the committed target state (drift between the
+  # cluster and the repo is caught here, not attributed to the CR).
+  local_digest="$(binding_checksum_for "$binding_file")"
+  live_digest="$(printf '%s' "$payload" | canonical_sha256)"
+  [ "$live_digest" = "$local_digest" ] \
+    || err "deployed binding CM is not the committed target state: live ${ns}/criteria-binding binding.json hashes ${live_digest}, committed target state (${binding_file}) hashes ${local_digest}"
   echo "operator rollout, PVCs, binding CM: ok"
 
   if [ -n "$run_id" ]; then
@@ -616,9 +636,13 @@ verify() {
       err "run ${run_id} not found in ${ns}"
     fi
     [ -n "$stamped" ] || err "run ${run_id} carries no status.launchManifest.bindingChecksum"
-    [ "$stamped" = "$checksum" ] \
-      || err "binding checksum mismatch for ${run_id}: status stamps ${stamped}, live binding payload hashes ${checksum}"
-    echo "run ${run_id}: launch-manifest binding checksum matches live binding content (${checksum})"
+    # The project-binding admission path stamps "sha256:<hex>" of the payload
+    # it read AT ADMITTANCE; the acceptance leg is that this digest matches the
+    # LIVE CM content (not the repo file), so hash the fetched payload here.
+    stamped_hex="${stamped#sha256:}"
+    [ "$stamped_hex" = "$live_digest" ] \
+      || err "binding checksum mismatch for ${run_id}: CR status.launchManifest stamps ${stamped}, live ${ns}/criteria-binding binding.json hashes ${live_digest}"
+    echo "run ${run_id}: CR stamp ${stamped} == live CM binding.json digest ${live_digest}"
   fi
 
   echo "== verify ${ns}: registry entry + global CM shrink =="
@@ -659,18 +683,48 @@ triage() {
   echo "   deployment carries it via castle-token-spc)"
 }
 
+# Pure toggle data: the exact env mutations (one `name=value` token per line)
+# for the KB-309 retention switch, isolated from kubectl so tests can assert
+# the armed/inert shapes offline.
+retention_env_lines() {
+  local onoff="$1" ns="$2"
+  if [ "$onoff" = "on" ]; then
+    # The operator arms the KB-309 sweeper ONLY when cr-retention-days > 0 AND
+    # the allowlist is non-empty (criteria-k8s/cmd/operator/main.go); setting
+    # namespace/keep-last alone arms nothing, so days MUST go positive too.
+    # 7 is controller.DefaultCRRetentionDays (internal/controller/crretention.go);
+    # keep in step if that default moves.
+    printf '%s\n' "CR_RETENTION_NAMESPACES=$ns" CR_RETENTION_DAYS=7 CR_RETENTION_KEEP_LAST=1
+  else
+    # Restore the fully inert rendered triple: days=0 disarms the sweep at the
+    # flag level (days<=0 never starts it), the allowlist and keep-last are
+    # removed (kubectl - suffix), matching the shape the render emits.
+    printf '%s\n' CR_RETENTION_DAYS=0 CR_RETENTION_KEEP_LAST=0 CR_RETENTION_NAMESPACES-
+  fi
+}
+
+# Offline-readable form of the toggle's cluster action (the exact kubectl line
+# a retention-on|off would run). No cluster access needed.
+retention_plan() {
+  local onoff="$1"; shift
+  parse_args "$@"
+  printf 'kubectl -n %s set env deployment/criteria-k8s-operator' "$ns"
+  local kv
+  while IFS= read -r kv; do printf ' %s' "$kv"; done < <(retention_env_lines "$onoff" "$ns")
+  printf '\n'
+}
+
 retention_toggle() {
   local onoff="$1"; shift
   parse_args "$@"; resolve_binding_file
   need_kubectl
+  local env_args=() kv
+  while IFS= read -r kv; do env_args+=("$kv"); done < <(retention_env_lines "$onoff" "$ns")
+  kubectl -n "$ns" set env deployment/criteria-k8s-operator "${env_args[@]}"
   if [ "$onoff" = "on" ]; then
-    kubectl -n "$ns" set env deployment/criteria-k8s-operator \
-      CR_RETENTION_NAMESPACES="$ns" CR_RETENTION_KEEP_LAST=1
-    echo "project-lifecycle: KB-309 retention ON for ${ns} (allowlist + keep-last 1)"
+    echo "project-lifecycle: KB-309 retention ON for ${ns} (days 7, allowlist ${ns}, keep-last 1)"
     echo "project-lifecycle: confirm the castle archive round-trip was proven BEFORE this toggle"
   else
-    kubectl -n "$ns" set env deployment/criteria-k8s-operator \
-      CR_RETENTION_NAMESPACES- CR_RETENTION_KEEP_LAST-
     echo "project-lifecycle: KB-309 retention OFF for ${ns} (inert again)"
   fi
 }
@@ -689,6 +743,7 @@ main() {
     triage) triage "$@" ;;
     retention-on) retention_toggle on "$@" ;;
     retention-off) retention_toggle off "$@" ;;
+    retention-plan) retention_plan "$@" ;;
     help|-h|--help) usage ;;
     *) err "unknown command '${cmd}'; see '$0 help'" ;;
   esac

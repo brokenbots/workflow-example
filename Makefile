@@ -337,7 +337,7 @@ ci: validate
 	@echo "== ci: k8s manifest shell tests =="
 	@for t in k8s/tests/test_*.sh; do \
 		case "$$t" in \
-			*test_create_ready_state.sh|*test_env_listen_ports.sh|*test_routes_config.sh|*test_criteria_binding.sh|*test_project_lifecycle.sh) \
+			*test_create_ready_state.sh|*test_env_listen_ports.sh|*test_routes_config.sh|*test_criteria_binding.sh) \
 				if ! command -v python3 >/dev/null 2>&1; then \
 					echo "SKIP $$t: needs python3 (not installed on this runner; CI covers it)"; \
 					continue; \

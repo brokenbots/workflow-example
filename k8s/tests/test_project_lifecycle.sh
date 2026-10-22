@@ -12,11 +12,12 @@
 # cutover platform-namespace shrink), plus the checksum the operator stamps
 # at admission matches the binding payload the namespace serves.
 #
-# Live-cluster legs (apply/verify/triage/retention) need kubectl and a
-# cluster; they are exercised by the operator, not here. This test runs
-# offline; the only soft dependency is python3+pyyaml for the YAML parse
-# leg (skipped with a loud notice when absent, like the other python-needing
-# k8s tests).
+# Live-cluster legs (apply/verify/triage/retention-on|off) need kubectl and a
+# cluster; they are exercised by the operator, not here. The toggle's env
+# mutations are pinned offline via the pure 'retention-plan' helper, and
+# openbao-wire's emitted wiring is parse-checked. This test runs offline; the
+# only soft dependency is python3+pyyaml for the YAML parse leg (skipped with
+# a loud notice when absent, like the other python-needing k8s tests).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -169,6 +170,11 @@ pass "binding claims resolve the per-ns PVCs (criteria-data, criteria-repo)"
 
 # 7) Registry/route behavior the cutover leaves behind (offline mirror of
 #    verify's global-CM legs against the routes example of record).
+#    NOTE (history): the global-CM shrink itself was done by KB-311 —
+#    routes-configmap.yaml already carried cutover:done for the go domain and
+#    no go-domain workflowLibrary entries at this card's base (975eb73).
+#    These legs pin that state as a regression guard: KB-312's cutover leg
+#    must keep it true (the KB-312 verify 'global CM' leg enforces it live).
 routes_json="$(awk '/^[ ]*routes.json: \|$/{b=1;next} b&&(/^[ \t]/||$0==""){sub(/^[ \t]*/,"",$0);print;next} b{exit}' "$examples/routes-configmap.yaml")"
 [ -n "$routes_json" ] || fail "routes example carries no routes.json"
 jq -e --arg ns criteria-go-dev \
@@ -193,5 +199,76 @@ if "$lifecycle" render --namespace no-such-project 2>/dev/null >/dev/null; then
   fail "render allowed a namespace with no binding example (cutovers are binding-first)"
 fi
 pass "fail-closed refusals (platform ns, unknown project)"
+
+# 9) The KB-309 retention toggle must emit env mutations the operator actually
+#    honors: the CR sweeper arms ONLY when cr-retention-days > 0 AND the
+#    namespace allowlist is non-empty (criteria-k8s/cmd/operator/main.go), so
+#    'on' must set a positive CR_RETENTION_DAYS (controller.DefaultCRRetention-
+#    Days = 7, internal/controller/crretention.go) and 'off' must restore the
+#    fully inert rendered triple — otherwise the toggle would print ON while
+#    the operator logs 'criteria run retention sweep disabled'.
+retention_plan() { "$lifecycle" retention-plan "$@" --namespace criteria-go-dev; }
+on_plan="$(retention_plan on)"
+off_plan="$(retention_plan off)"
+echo "$on_plan" | grep -q 'CR_RETENTION_NAMESPACES=criteria-go-dev' \
+  || fail "retention-on does not arm the namespace allowlist"
+echo "$on_plan" | grep -Eq 'CR_RETENTION_DAYS=[1-9][0-9]*' \
+  || fail "retention-on does not set a positive CR_RETENTION_DAYS — the sweep stays disabled (no-op toggle)"
+echo "$on_plan" | grep -q 'CR_RETENTION_DAYS=7' \
+  || fail "retention-on must use controller.DefaultCRRetentionDays (crretention.go) unless a documented choice is made"
+echo "$on_plan" | grep -Eq 'CR_RETENTION_KEEP_LAST=[1-9][0-9]*' \
+  || fail "retention-on does not set a positive keep-last"
+echo "$off_plan" | grep -q 'CR_RETENTION_DAYS=0' \
+  || fail "retention-off does not zero CR_RETENTION_DAYS (the sweep must not re-arm)"
+echo "$off_plan" | grep -q 'CR_RETENTION_NAMESPACES-' \
+  || fail "retention-off does not clear the namespace allowlist"
+echo "$off_plan" | grep -q 'CR_RETENTION_KEEP_LAST=0' \
+  || fail "retention-off does not restore keep-last to the rendered inert value (0)"
+if echo "$on_plan" | grep -Eq 'CR_RETENTION_DAYS=(0)?[[:space:]]*$'; then
+  fail "retention-on arms a zero-day window"
+fi
+pass "retention toggle: on arms days=7 + allowlist + keep-last; off restores the inert rendered triple"
+
+# 10) The SPC wiring leg (openbao-wire) must emit a paste-able, parse-able
+#     command sequence following the documented shared-OpenBao pattern
+#     (k8s/01-openbao-config.yaml / README 'OpenBao wiring'): pod CLI binary
+#     vault, policy write from STDIN (no temp file left in the pod), role
+#     write bounded to the project's criteria-runner SA. bash -n catches
+#     nested-quoting regressions offline.
+"$lifecycle" openbao-wire --namespace criteria-go-dev >"$tmp/wire.sh"
+bash -n "$tmp/wire.sh" || fail "openbao-wire output does not parse as shell (quoting leak)"
+grep -q 'vault policy write criteria-go-dev -' "$tmp/wire.sh" \
+  || fail "openbao-wire does not write the per-ns policy from stdin"
+grep -q 'vault write auth/kubernetes/role/criteria-go-dev' "$tmp/wire.sh" \
+  || fail "openbao-wire does not write the per-ns OpenBao role"
+grep -q 'bound_service_account_namespaces=criteria-go-dev' "$tmp/wire.sh" \
+  || fail "openbao-wire role is not namespaced to the project"
+grep -q 'bound_service_account_names=criteria-runner' "$tmp/wire.sh" \
+  || fail "openbao-wire role is not bounded to the project's criteria-runner SA"
+grep -q 'policies=criteria-go-dev' "$tmp/wire.sh" \
+  || fail "openbao-wire role does not attach the per-ns policy"
+grep -q 'path "criteria/data/criteria-go-dev/\*"' "$tmp/wire.sh" \
+  || fail "openbao-wire policy does not scope reads to the project's data paths"
+grep -q 'path "criteria/metadata/criteria-go-dev/\*"' "$tmp/wire.sh" \
+  || fail "openbao-wire policy does not scope reads to the project's metadata paths"
+grep -q 'path "criteria/data/linear"' "$tmp/wire.sh" \
+  || fail "openbao-wire policy drops the shared linear path"
+if grep -Eq '[^a-zA-Z0-9-]bao (policy|write) ' "$tmp/wire.sh"; then
+  fail "openbao-wire invokes the 'bao' binary; the pod's CLI is vault (documented pattern)"
+fi
+if grep -q '/tmp/' "$tmp/wire.sh"; then
+  fail "openbao-wire leaves policy temp files inside the OpenBao pod"
+fi
+pass "openbao-wire: paste-able vault wiring (stdin policy, per-ns role over the openbao-0 pod)"
+
+# 11) The canonical digest seam behind verify's live-CM leg (payload JSON ->
+#     sha256 of the operator's marshal) must agree on the committed render's
+#     spliced payload as well as the example, and match the committed stamp —
+#     verify hashes the LIVE ConfigMap payload with this same seam at compare
+#     time, so a mirror drift here would misattribute deployed-vs-repo drift.
+render_checksum="$("$lifecycle" binding-checksum --binding-file k8s/projects/criteria-go-dev.yaml --namespace criteria-go-dev)"
+[ "$render_checksum" = "$checksum" ] \
+  || fail "committed render payload does not hash to the committed stamp (${render_checksum} != ${checksum}); verify's live-CM digest seam is stale"
+pass "payload->digest seam agrees on example and committed render (verify's live-CM authority)"
 
 echo "PASS: KB-312 project lifecycle regression test (${lifecycle}, k8s/projects/criteria-go-dev.yaml, binding checksum ${checksum})"
