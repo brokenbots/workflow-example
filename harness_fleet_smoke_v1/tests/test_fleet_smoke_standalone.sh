@@ -516,7 +516,7 @@ else
        grep -Fqx 'class=F33 name=zero_pod_recreates marker=pod_creates==1 scope=root identity=shell.pass_in@remote.smoke (one provision, zero recreates)' "$r_rec/census_vocabulary.jsonl" >/dev/null 2>&1; then
         ok "census record: the F33 EXPECTED vocabulary pins pod_creates==1 per (scope, adapter/environment)"
     else
-        fail "census record leg: rc=$rc, census=[$r_rec/census_vocabulary.jsonl] missing F33 census line (got: $(cat "$r_rec/census_vocabulary.jsonl" 2>/dev/null | head -3))"
+        fail "census record leg: rc=$rc, census=[$r_rec/census_vocabulary.jsonl] missing F33 census line (got: $(head -3 "$r_rec/census_vocabulary.jsonl" 2>/dev/null))"
     fi
     if grep -Fqx 'designed_pod_creates_expected=1' "$r_rec/census_vocabulary.jsonl" >/dev/null 2>&1; then
         ok "census record: the designed green run's EXPECTED budget is exactly ONE provision (root scope); the borrower adds zero"

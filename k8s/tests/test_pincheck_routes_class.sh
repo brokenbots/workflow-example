@@ -32,7 +32,7 @@ command -v jq >/dev/null 2>&1 || fail "jq is required"
 # Build a routes payload with the given stale key set on the given entries:
 # make_payload <registry-json> <wf-name>=<stale-keys[,..]> ...
 make_payload() {
-    local registry="$1" entry_name entry_keys stale_json wf
+    local registry="$1" entry_name entry_keys
     shift
     local entries=""
     for spec in "$@"; do
