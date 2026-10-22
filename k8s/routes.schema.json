@@ -86,8 +86,7 @@
       "description": "A workflow-library object: how a run obtains its workflow (ADR-0005 D1/D2) and where/how it executes.",
       "additionalProperties": false,
       "required": [
-        "type",
-        "namespace"
+        "type"
       ],
       "properties": {
         "type": {
@@ -99,7 +98,7 @@
         },
         "namespace": {
           "$ref": "#/definitions/label",
-          "description": "Kubernetes namespace this workflow's runs are admitted into. Must match the namespace of this ConfigMap, the SecretProviderClasses, and the volumes it references."
+          "description": "Kubernetes namespace this workflow's runs are admitted into. Optional (KB-313, ADR 307): cutover-done projects execute in their registry namespace through the project's binding CM, and a namespace-less entry's runs resolve the run's own namespace. Must match the namespace of this ConfigMap, the SecretProviderClasses, and the volumes it references."
         },
         "class": {
           "description": "Admission queue class (CRI-242): 'dev' runs serialize per repoURL (at most one dev run at a time per repoURL), while 'triage' runs are read-only against the repo and may run concurrently with any run on the same repoURL (per-ticket PVC clones isolate state). Omitted defaults to 'dev', so routes without an explicit class keep the per-repo serialization they had before classes existed. The class is stamped onto the CriteriaRun the watcher creates; the operator keys its admission queue on (repoURL, class).",
@@ -126,25 +125,25 @@
         },
         "volumes": {
           "type": "array",
-          "description": "Storage volumes the workflow's runs need. Names must be unique within the workflow.",
+          "description": "Storage volumes the workflow's runs need. Names must be unique within the workflow. DEPRECATED post-cutover (KB-313, ADR 307): the global CM stops owning project-shaped run config, so volumes move into the per-project binding CMs (binding-first, KB-311); while the migration window is open (any projectRegistry entry without the 'done' marker, or no registry at all) the field still validates with a warning, and Validate rejects the payload once every registry project is cutover-done.",
           "items": {
             "$ref": "#/definitions/volume"
           }
         },
         "secrets": {
           "type": "array",
-          "description": "Secrets the workflow's runs consume, referenced by SecretProviderClass name (OpenBao via the Secrets Store CSI driver). No credential material may appear here (plan CRI-214 section 3.8). Names must be unique within the workflow.",
+          "description": "Secrets the workflow's runs consume, referenced by SecretProviderClass name (OpenBao via the Secrets Store CSI driver). No credential material may appear here (plan CRI-214 section 3.8). Names must be unique within the workflow. DEPRECATED post-cutover (KB-313, ADR 307): secrets move into the per-project binding CMs (binding-first, KB-311); while the migration window is open the field still validates with a warning, and Validate rejects the payload once every registry project is cutover-done.",
           "items": {
             "$ref": "#/definitions/secret"
           }
         },
         "env": {
           "$ref": "#/definitions/envMap",
-          "description": "Static environment variables set on every run of this workflow."
+          "description": "Static environment variables set on every run of this workflow. DEPRECATED post-cutover (KB-313, ADR 307): env moves into the per-project binding CMs (binding-first, KB-311); while the migration window is open the field still validates with a warning, and Validate rejects the payload once every registry project is cutover-done."
         },
         "adapterImages": {
           "type": "object",
-          "description": "Per-adapter-kind image references this workflow pins for the operator (CRI-214 M14). Keys are adapter kinds (e.g. shell, copilot); values are full image references, conventionally digest-pinned. The override wins over the provision_wanted event's image_reference and the operator's configured registry/tag defaults.",
+          "description": "Per-adapter-kind image references this workflow pins for the operator (CRI-214 M14). Keys are adapter kinds (e.g. shell, copilot); values are full image references, conventionally digest-pinned. The override wins over the provision_wanted event's image_reference and the operator's configured registry/tag defaults. DEPRECATED post-cutover (KB-313, ADR 307): adapter images are a per-project binding concern — the global CM stops owning them entirely and routes-sync never edits them again; while the migration window is open the field still validates with a warning, and Validate rejects the payload once every registry project is cutover-done.",
           "propertyNames": {
             "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
           },

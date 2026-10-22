@@ -109,29 +109,46 @@ type Payload struct {
 	// global workflow-library binding data until its namespace serves its
 	// own binding (binding-first, deletion second).
 	ProjectRegistry map[string]ProjectEntry `json:"projectRegistry,omitempty"`
-	Routes        []Route                `json:"routes"`
+	Routes          []Route                 `json:"routes"`
 }
 
 // Workflow is a workflow-library object: how a run obtains its workflow and
 // where/how it executes.
 type Workflow struct {
-	Type      string `json:"type"`
-	Namespace string `json:"namespace"`
+	Type string `json:"type"`
+	// Namespace is the namespace the workflow's pre-cutover runs execute
+	// in. Optional (KB-313, ADR 307): cutover-done projects execute through
+	// their registry namespace and binding CM, and a namespace-less entry's
+	// runs resolve the run's own namespace. Validate still rejects a
+	// non-DNS-1123-label value.
+	Namespace string `json:"namespace,omitempty"`
 	// Class is the admission queue class (CRI-242): "dev" serializes per
 	// repoURL, "triage" (read-only against the repo) admits concurrently.
 	// Empty defaults to ClassDefault at stamping; Validate rejects any
 	// other value.
-	Class   string            `json:"class,omitempty"`
-	Image   string            `json:"image,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Ref     string            `json:"ref,omitempty"`
+	Class string `json:"class,omitempty"`
+	// Image is the workflow's process image (url+image or image mode).
+	Image string `json:"image,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Ref   string `json:"ref,omitempty"`
+	// Volumes, Secrets, Env, and AdapterImages are the KB-313 deprecated
+	// global run-config surfaces (ADR 307): the global CM stops owning
+	// project-shaped run config, so these fields are deprecated here and
+	// must move into per-project binding CMs (binding-first, deletion
+	// second — KB-311). While the migration window is open (any registry
+	// project not yet cutover-done, or no registry at all) they still
+	// validate and Payload.DeprecationWarnings lists them; once every
+	// registry project is cutover-done, Validate rejects the payload
+	// outright.
 	Volumes []Volume          `json:"volumes,omitempty"`
 	Secrets []Secret          `json:"secrets,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	// AdapterImages is the per-adapter-kind image override (CRI-214 M14):
 	// adapter kind ("shell", "copilot", ...) to a full image reference the
 	// operator stamps on this workflow's adapter pods, ahead of the event's
-	// image_reference and the configured registry/tag defaults.
+	// image_reference and the configured registry/tag defaults. Deprecated
+	// post-cutover (KB-313): adapter images are a per-project binding
+	// concern.
 	AdapterImages map[string]string `json:"adapterImages,omitempty"`
 	// Interface is the workflow tree's machine-readable interface
 	// declaration (KB-310, ADR 307) embedded in the workflow object: the
@@ -389,6 +406,13 @@ func LoadFile(path string) (*Payload, error) {
 // Validate enforces the fail-closed constraints of k8s/routes.schema.json:
 // the payload shape, the ADR-0005 D1/D2 source modes (declared, never
 // inferred), the pvc/nfs/tmp volume shapes, and route/library integrity.
+// KB-313 (ADR 307) adds the post-cutover gate: once every projectRegistry
+// entry is cutover-done, the workflowLibrary may no longer carry the global
+// run-config surfaces (volumes, secrets, env, adapterImages) the global CM
+// stopped owning — the payload hard-rejects so stale project-shaped data
+// cannot ship. While any registry project is un-cut (and on payloads
+// predating the registry) the same surfaces are allow-with-warning, surfaced
+// through DeprecationWarnings.
 func (p *Payload) Validate() error {
 	if p.APIVersion != APIVersion {
 		return fmt.Errorf("apiVersion must be %q, got %q", APIVersion, p.APIVersion)
@@ -430,6 +454,13 @@ func (p *Payload) Validate() error {
 		default:
 			return fmt.Errorf("projectRegistry[%q]: cutover must be %q or absent, got %q (binding-first, deletion second)", name, CutoverDone, entry.Cutover)
 		}
+	}
+	// KB-313 (ADR 307): the post-cutover gate — see DeprecationWarnings.
+	// Fail closed here so the shipped CM cannot keep project-shaped run
+	// config after its owning projects have all cut over; the intake logs
+	// the same surfaces as warnings while the migration window is open.
+	if stale := p.staleBindingShapes(); len(stale) > 0 && p.PostCutover() {
+		return fmt.Errorf("post-cutover payload still carries global run-config surfaces the CM no longer owns (KB-313, ADR 307): %s", strings.Join(stale, "; "))
 	}
 	if len(p.Routes) == 0 {
 		return errors.New("routes must not be empty")
@@ -498,6 +529,72 @@ func (p *Payload) Project(name string) (ProjectEntry, bool) {
 	return entry, ok
 }
 
+// PostCutover reports whether the payload's migration window (KB-311,
+// KB-313 — the #311 cutover flags) is closed: a non-empty projectRegistry
+// in which every project is cutover-done. A payload without a registry
+// predates the registry and stays in the warning window.
+func (p *Payload) PostCutover() bool {
+	if len(p.ProjectRegistry) == 0 {
+		return false
+	}
+	for _, entry := range p.ProjectRegistry {
+		if !entry.IsCutoverDone() {
+			return false
+		}
+	}
+	return true
+}
+
+// staleBindingShapes returns one "entry: keys" string per workflowLibrary
+// entry still carrying a deprecated global run-config surface (KB-313,
+// ADR 307), sorted by entry name for deterministic output.
+func (p *Payload) staleBindingShapes() []string {
+	var stale []string
+	names := make([]string, 0, len(p.WorkflowLibrary))
+	for name := range p.WorkflowLibrary {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		wf := p.WorkflowLibrary[name]
+		var keys []string
+		if len(wf.Volumes) > 0 {
+			keys = append(keys, "volumes")
+		}
+		if len(wf.Secrets) > 0 {
+			keys = append(keys, "secrets")
+		}
+		if len(wf.Env) > 0 {
+			keys = append(keys, "env")
+		}
+		if len(wf.AdapterImages) > 0 {
+			keys = append(keys, "adapterImages")
+		}
+		if len(keys) > 0 {
+			stale = append(stale, fmt.Sprintf("workflowLibrary[%q]: %s", name, strings.Join(keys, ", ")))
+		}
+	}
+	return stale
+}
+
+// DeprecationWarnings lists the deprecated global run-config surfaces the
+// payload's workflowLibrary entries still carry (KB-313, ADR 307): the
+// migration window is allow-with-warning, so the intake logs these instead
+// of passing over them silently. Empty on a post-cutover payload — Validate
+// hard-rejects the stale surfaces there, so a valid post-cutover payload
+// never carries them.
+func (p *Payload) DeprecationWarnings() []string {
+	stale := p.staleBindingShapes()
+	if len(stale) == 0 || p.PostCutover() {
+		return nil
+	}
+	warnings := make([]string, 0, len(stale))
+	for _, entry := range stale {
+		warnings = append(warnings, entry+": deprecated global run-config surfaces (KB-313, ADR 307) — per-project bindings own run config; these reject once every projectRegistry entry is cutover-done")
+	}
+	return warnings
+}
+
 // validateWorkflow enforces the per-workflow constraints, including the
 // ADR-0005 D1/D2 mode mapping: type=image means image-only (no url/ref,
 // D2 fail-closed), type=url means the url is required (with or without an
@@ -546,7 +643,11 @@ func validateWorkflow(name string, wf Workflow) error {
 	default:
 		return fmt.Errorf("class must be %q or %q, got %q", ClassDev, ClassTriage, wf.Class)
 	}
-	if !labelRe.MatchString(wf.Namespace) {
+	// Namespace is optional since KB-313 (ADR 307): cutover-done entries
+	// route into their project's registry namespace and a namespace-less
+	// entry's runs resolve the run's own namespace. A present value must
+	// still be a DNS-1123 label.
+	if wf.Namespace != "" && !labelRe.MatchString(wf.Namespace) {
 		return fmt.Errorf("namespace %q is not a DNS-1123 label", wf.Namespace)
 	}
 	if err := validateEnvMap(wf.Env, "env"); err != nil {
