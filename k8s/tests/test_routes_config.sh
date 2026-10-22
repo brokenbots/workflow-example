@@ -913,16 +913,20 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 8,
+shipped_err(len(base["routes"]) == 10,
             f"shipped example routes = {len(base['routes'])}, want the CRI-310 cleanup route, "
-            "the two kanboard routes, and the KB-277/KB-278/KB-279/KB-280/KB-276 harness legs "
+            "the two kanboard routes plus the KB-311 acceptance pair (kanboard-develop-go/"
+            "kanboard-develop-ts: two projects, same tree, different bindings), and the "
+            "KB-277/KB-278/KB-279/KB-280/KB-276 harness legs "
             "(contracts/composition/failures/fleet-smoke/wire; the criteria split routes are retired, KB-281)")
 route_names = {r.get("name") for r in base["routes"] if isinstance(r, dict)}
 shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-develop",
+                            "kanboard-develop-go", "kanboard-develop-ts",
                             "harness-contracts", "harness-composition", "harness-failures",
                             "harness-fleet-smoke", "harness-wire"},
             f"shipped example route names = {sorted(route_names)}, want cleanup + kanboard pair"
-            " + harness-contracts + harness-composition + harness-failures + harness-fleet-smoke + harness-wire")
+            " + KB-311 acceptance pair + harness-contracts + harness-composition"
+            " + harness-failures + harness-fleet-smoke + harness-wire")
 for retired_route in ("criteria-triage", "criteria-develop"):
     shipped_err(retired_route not in route_names,
                 f"shipped example: the retired {retired_route} route returned (KB-281)")
