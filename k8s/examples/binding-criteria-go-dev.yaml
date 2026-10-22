@@ -16,9 +16,12 @@
 # (k8s/examples/binding-typescript-sdk.yaml) run THE SAME workflow tree
 # (kanboard_develop_v1 — the identical url+ref the routes payload names) with
 # DIFFERENT images+env: reuse-by-binding, identical tree digest. Everything
-# resolves in this project's own namespace: the PVC claims, the
-# SecretProviderClasses (same names as other namespaces only because it is
-# the project's own OpenBao estate), nothing cross-namespace.
+# resolves in this project's own namespace: the PVC claims (criteria-data /
+# criteria-repo — the KB-312 per-namespace PVC shape, one criteria-data per
+# project ns), the SecretProviderClasses (same names as other namespaces only
+# because it is the project's own OpenBao estate), nothing cross-namespace.
+# k8s/project-lifecycle.sh (KB-312) renders the namespace's complete target
+# state with this binding spliced in.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -44,7 +47,7 @@ data:
         {
           "name": "data",
           "kind": "pvc",
-          "claim": "criteria-go-dev-data",
+          "claim": "criteria-data",
           "mountPath": "/data",
           "env": {
             "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
@@ -55,7 +58,7 @@ data:
         {
           "name": "repo",
           "kind": "pvc",
-          "claim": "criteria-go-dev-repo",
+          "claim": "criteria-repo",
           "mountPath": "/repo"
         },
         {
