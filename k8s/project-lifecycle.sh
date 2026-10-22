@@ -675,7 +675,7 @@ retention_toggle() {
   fi
 }
 
-usage() { sed -n '21,38p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk '/^# Usage:/,/separate cards\.$/' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local cmd="${1:-}"; [ -n "$cmd" ] || { usage >&2; exit 2; }
