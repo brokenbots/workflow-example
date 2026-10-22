@@ -1,0 +1,359 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/brokenbots/workflow-example/main/k8s/criteria-binding.schema.json",
+  "title": "Criteria project binding payload (KB-311, ADR 307)",
+  "description": "The per-project execution binding, the project's COMPLETE execution config (ADR 307: a light core good at launching well-defined workflows via their CM). The payload lives in the 'binding.json' data key of the 'criteria-binding' ConfigMap in the PROJECT's namespace and is validated against this schema by k8s/tests/test_criteria_binding.sh.\n\nThe binding is project-owned data ONLY: images (adapter kind -> full image ref), env (project env for develop sessions: tool paths, GOFLAGS, npm proxies ...), volumes (the project's OWN PVCs/nfs/tmp/k8s-secret mounts), secrets (the project's OWN SecretProviderClasses — per-project credentials; never cross-namespace references, and same-namespace scoping makes that impossible by construction), and config ({slot -> value}: VALUES for the platform config slots the workflow tree declares, KB-103-shaped delivery). NOTHING else — validation rejects unknown keys fail-closed on every level (top-level, volumes, secrets, config slots).\n\nThe project registry (the routes ConfigMap's projectRegistry, KB-311) is the ONLY ticket->project routing table; a registry entry marked cutover: done is served by its namespace's own binding, and the intake stamps only {workflow ref, project binding ref, class, secrets lane} into the run CR — no image/env/volume data beyond binding REFERENCES. The workflow tree keeps its own identity: the workflowLibrary entry's image (process image) and url/ref (content) stay tree-level; adapterImages/env/volumes/secrets/config move here.\n\nThe binding is never edited by the platform: write access is the project's alone; the platform's only write path for a project is its registry entry. The operator parses with UnknownField rejection and validates against the run's workflow interface before creating Jobs, and stamps a binding checksum into the launch manifest at admission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "images",
+    "env",
+    "volumes",
+    "secrets",
+    "config"
+  ],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "criteria.brokenbots.dev/v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "CriteriaBinding"
+    },
+    "images": {
+      "type": "object",
+      "description": "Adapter images (CRI-214 M14) the project runs its workflow tree on: adapter kind (\"shell\", \"copilot\", ...) -> full image reference. Every adapter kind the tree's interface declares must be covered; kinds the tree does not declare are rejected at admission.",
+      "propertyNames": {
+        "$ref": "#/definitions/label"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "description": "Full image reference for the adapter kind (registry/repo:tag or digest).",
+        "pattern": "^\\S+$"
+      }
+    },
+    "env": {
+      "type": "object",
+      "description": "Project environment for its develop sessions: tool paths, GOFLAGS, npm proxies, ... Environment variable name to literal string value.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "volumes": {
+      "type": "array",
+      "description": "The project's OWN storage mounted into the tree's runner, named and mounted at mountPath. Claims/Secrets/SPCs resolve in the binding's own namespace — a binding can never reference another namespace's storage (KB-311).",
+      "items": {
+        "$ref": "#/definitions/volume"
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "description": "The project's OWN credentials, mounted via the Secrets Store CSI driver from OpenBao and referenced by SecretProviderClass name resolved in the binding's own namespace. No credential material may appear here (plan CRI-214 section 3.8).",
+      "items": {
+        "$ref": "#/definitions/secret"
+      }
+    },
+    "config": {
+      "type": "object",
+      "description": "VALUES for the platform config slots the workflow tree declares (KB-310's slot surface, delivered KB-103-shaped): slot name -> literal value the operator renders into the run's build/test/ci-gate commands and baseBranch. Unknown slot names are rejected — a binding may set exactly the slots a tree declares.",
+      "propertyNames": {
+        "enum": [
+          "buildCmd",
+          "testCmd",
+          "ciGateCmd",
+          "baseBranch"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "description": "Literal value the operator renders for the slot (KB-103: values outrank the run spec's stamped fields).",
+        "minLength": 1
+      }
+    }
+  },
+  "definitions": {
+    "label": {
+      "type": "string",
+      "description": "DNS-1123 label (RFC 1123): lowercase alphanumeric or '-', max 63 characters.",
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "maxLength": 63
+    },
+    "volume": {
+      "type": "object",
+      "description": "A storage volume of kind pvc, nfs, tmp, or k8s-secret, mounted into the workflow's runner at mountPath. Everything resolves in the binding's own namespace (the project's): the claim, the NFS export, the plain Secret.",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "mountPath"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/label",
+          "description": "Volume name; unique within the binding."
+        },
+        "kind": {
+          "description": "Volume backing kind: pvc (PersistentVolumeClaim), nfs (network share), tmp (emptyDir scratch), or k8s-secret (a plain namespace Secret mounted as files).",
+          "enum": [
+            "pvc",
+            "nfs",
+            "tmp",
+            "k8s-secret"
+          ]
+        },
+        "mountPath": {
+          "type": "string",
+          "description": "Absolute in-container mount path.",
+          "pattern": "^/"
+        },
+        "subPath": {
+          "type": "string",
+          "description": "Optional subdirectory of the volume to mount instead of its root.",
+          "minLength": 1
+        },
+        "readOnly": {
+          "type": "boolean",
+          "description": "Mount the volume read-only. Defaults to false."
+        },
+        "claim": {
+          "type": "string",
+          "description": "pvc kind: name of the PersistentVolumeClaim (the binding's own namespace).",
+          "minLength": 1
+        },
+        "server": {
+          "type": "string",
+          "description": "nfs kind: NFS server hostname or address.",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "description": "nfs kind: exported path on the NFS server.",
+          "minLength": 1
+        },
+        "sizeLimit": {
+          "type": "string",
+          "description": "tmp kind: Kubernetes quantity sizing the emptyDir (e.g. 8Gi).",
+          "minLength": 1
+        },
+        "secretName": {
+          "type": "string",
+          "description": "k8s-secret kind: name of the Secret (the binding's own namespace) mounted as files at mountPath.",
+          "minLength": 1
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment mapping anchored on this volume: values conventionally reference paths under mountPath (e.g. CRITERIA_RUN_DIR_ROOT: /data/.criteria/runs).",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pvc"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "claim"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "server"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "sizeLimit"
+                  ]
+                },
+                {
+                  "required": [
+                    "secretName"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "nfs"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "server",
+              "path"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "claim"
+                  ]
+                },
+                {
+                  "required": [
+                    "sizeLimit"
+                  ]
+                },
+                {
+                  "required": [
+                    "secretName"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "tmp"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "claim"
+                  ]
+                },
+                {
+                  "required": [
+                    "server"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "secretName"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "k8s-secret"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "secretName"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "claim"
+                  ]
+                },
+                {
+                  "required": [
+                    "server"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "sizeLimit"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "secret": {
+      "type": "object",
+      "description": "A secret the project's runs consume, mounted via the Secrets Store CSI driver from OpenBao and referenced by SecretProviderClass name resolved in the binding's own namespace. No credential material may appear here (plan CRI-214 section 3.8).",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "secretProviderClass",
+        "mountPath"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/label",
+          "description": "Logical name; unique within the binding."
+        },
+        "secretProviderClass": {
+          "type": "string",
+          "description": "OpenBao/CSI name reference: name of the SecretProviderClass (secrets-store.csi.x-k8s.io, provider openbao) backing this secret, in the binding's own namespace (per-project credentials; never cross-namespace).",
+          "minLength": 1
+        },
+        "mountPath": {
+          "type": "string",
+          "description": "Absolute path where the CSI volume renders the SecretProviderClass objects as files.",
+          "pattern": "^/"
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment mapping for this secret: environment variable name to the key (rendered file) name within the SecretProviderClass mount. Names only — never secret values.",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "description": "Key (rendered file) name within the SecretProviderClass mount, e.g. linear_api_key.",
+            "pattern": "^[A-Za-z0-9._-]+$"
+          }
+        }
+      }
+    }
+  }
+}
