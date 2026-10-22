@@ -28,6 +28,8 @@
 #   project-lifecycle.sh apply [--namespace NS] [--file FILE]
 #   project-lifecycle.sh openbao-wire [--namespace NS]
 #   project-lifecycle.sh verify [--namespace NS]
+#       (verify enforces the deployed binding CM against the committed target
+#        state even without --run: repo-vs-cluster drift fails the check)
 #   project-lifecycle.sh triage [--namespace NS]
 #   project-lifecycle.sh retention-on/off [--namespace NS]
 #   project-lifecycle.sh retention-plan on|off [--namespace NS]
@@ -66,8 +68,12 @@ default_binding_file() { echo "${repo_root}/k8s/examples/binding-${ns}.yaml"; }
 default_render_path() { echo "${repo_root}/k8s/projects/${ns}.yaml"; }
 
 resolve_binding_file() {
-  binding_file="$(default_binding_file)"
-  [ -f "$binding_file" ] || err "no binding example for namespace ${ns}: missing ${binding_file} (cutovers are binding-first, KB-311)"
+  # Honor an explicitly supplied --binding-file; only fall back to the
+  # per-namespace example when none was given (silently dropping the flag
+  # would make --binding-file a no-op).
+  [ -n "$binding_file" ] || binding_file="$(default_binding_file)"
+  [ -f "$binding_file" ] \
+    || err "binding file not found: ${binding_file} (supplied via --binding-file, or the per-ns example $(default_binding_file) when unset; cutovers are binding-first, KB-311)"
 }
 
 # Extract a JSON payload from the YAML 'data: <key>: |' block of a shipped
@@ -579,7 +585,7 @@ openbao_wire() {
 # OpenBao pod (k8s/01-openbao-config.yaml pattern; roleName ${ns}; pod CLI
 # binary: vault). Sets V (root token) and pipes the policy inline:
 V='<operator-root-token>'
-kubectl exec -n default openbao-0 -- env VAULT_TOKEN="\${V}" vault policy write ${ns} - <<'POLICY_EOF'
+kubectl exec -i -n default openbao-0 -- env VAULT_TOKEN="\${V}" vault policy write ${ns} - <<'POLICY_EOF'
 path "criteria/data/${ns}/*" {
   capabilities = ["read", "list"]
 }
@@ -686,6 +692,11 @@ triage() {
 # Pure toggle data: the exact env mutations (one `name=value` token per line)
 # for the KB-309 retention switch, isolated from kubectl so tests can assert
 # the armed/inert shapes offline.
+# Pure toggle data: the exact env mutations (one `name=value` token per line)
+# for the KB-309 retention switch, isolated from kubectl so tests can assert
+# the armed/inert shapes offline. Callers validate the on|off state BEFORE
+# reading this function (it runs in a process substitution, so an err here
+# would only kill the substitution, not the command).
 retention_env_lines() {
   local onoff="$1" ns="$2"
   if [ "$onoff" = "on" ]; then
@@ -708,16 +719,25 @@ retention_env_lines() {
 retention_plan() {
   local onoff="$1"; shift
   parse_args "$@"
+  validate_retention_state "$onoff"
   printf 'kubectl -n %s set env deployment/criteria-k8s-operator' "$ns"
   local kv
   while IFS= read -r kv; do printf ' %s' "$kv"; done < <(retention_env_lines "$onoff" "$ns")
   printf '\n'
 }
 
+validate_retention_state() {
+  case "$1" in
+    on|off) ;;
+    *) err "retention toggle state must be on|off, got '${1}'" ;;
+  esac
+}
+
 retention_toggle() {
   local onoff="$1"; shift
   parse_args "$@"; resolve_binding_file
   need_kubectl
+  validate_retention_state "$onoff"
   local env_args=() kv
   while IFS= read -r kv; do env_args+=("$kv"); done < <(retention_env_lines "$onoff" "$ns")
   kubectl -n "$ns" set env deployment/criteria-k8s-operator "${env_args[@]}"

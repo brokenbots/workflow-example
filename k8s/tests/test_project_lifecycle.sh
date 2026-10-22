@@ -239,6 +239,8 @@ pass "retention toggle: on arms days=7 + allowlist + keep-last; off restores the
 bash -n "$tmp/wire.sh" || fail "openbao-wire output does not parse as shell (quoting leak)"
 grep -q 'vault policy write criteria-go-dev -' "$tmp/wire.sh" \
   || fail "openbao-wire does not write the per-ns policy from stdin"
+grep -Eq 'exec -i .* vault policy write' "$tmp/wire.sh" \
+  || fail "openbao-wire's stdin policy write lacks kubectl exec -i/--stdin: no policy content reaches the pod (vault sees EOF)"
 grep -q 'vault write auth/kubernetes/role/criteria-go-dev' "$tmp/wire.sh" \
   || fail "openbao-wire does not write the per-ns OpenBao role"
 grep -q 'bound_service_account_namespaces=criteria-go-dev' "$tmp/wire.sh" \
@@ -261,14 +263,27 @@ if grep -q '/tmp/' "$tmp/wire.sh"; then
 fi
 pass "openbao-wire: paste-able vault wiring (stdin policy, per-ns role over the openbao-0 pod)"
 
-# 11) The canonical digest seam behind verify's live-CM leg (payload JSON ->
-#     sha256 of the operator's marshal) must agree on the committed render's
-#     spliced payload as well as the example, and match the committed stamp —
-#     verify hashes the LIVE ConfigMap payload with this same seam at compare
-#     time, so a mirror drift here would misattribute deployed-vs-repo drift.
-render_checksum="$("$lifecycle" binding-checksum --binding-file k8s/projects/criteria-go-dev.yaml --namespace criteria-go-dev)"
-[ "$render_checksum" = "$checksum" ] \
-  || fail "committed render payload does not hash to the committed stamp (${render_checksum} != ${checksum}); verify's live-CM digest seam is stale"
-pass "payload->digest seam agrees on example and committed render (verify's live-CM authority)"
+# 11) The canonical digest seam (behind verify's live-CM leg and
+#     binding-checksum) must consume the SUPPLIED payload — an altered binding
+#     payload must hash differently, and an unmodified copy of the committed
+#     render must reproduce the committed digest exactly (guards both the
+#     mirror and the --binding-file argument path).
+cp k8s/projects/criteria-go-dev.yaml "$tmp/render-alt.yaml"
+sed 's|localhost:5000/criteria-adapter-shell-peer-go:0.5.56|localhost:5000/criteria-adapter-shell-peer-go:0.9.99|' \
+  k8s/projects/criteria-go-dev.yaml >"$tmp/render-alt.yaml"
+alt_digest="$("$lifecycle" binding-checksum --binding-file "$tmp/render-alt.yaml" --namespace criteria-go-dev)"
+[ "$alt_digest" != "$checksum" ] \
+  || fail "binding-checksum --binding-file did not consume the supplied file (an altered payload still hashes the example digest ${checksum}) — the seam assertion is vacuous"
+"$lifecycle" binding-checksum --binding-file k8s/projects/criteria-go-dev.yaml --namespace criteria-go-dev >"$tmp/render.digest"
+read -r copy_digest <"$tmp/render.digest"
+[ "$copy_digest" = "$checksum" ] \
+  || fail "committed render payload does not hash to the committed stamp (${copy_digest} != ${checksum}); verify's live-CM digest seam is stale"
+# The on/off retention-plan states still parse through the honored flag path
+# after resolve_binding_file's change (a missing --binding-file default must
+# keep erroring for unknown namespaces).
+if "$lifecycle" binding-checksum --namespace no-such-project 2>/dev/null; then
+  fail "binding-checksum did not fail closed on a namespace with no binding example"
+fi
+pass "payload->digest seam consumes supplied payloads (altered != committed; unmodified == committed)"
 
 echo "PASS: KB-312 project lifecycle regression test (${lifecycle}, k8s/projects/criteria-go-dev.yaml, binding checksum ${checksum})"
