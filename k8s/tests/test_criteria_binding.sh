@@ -311,46 +311,82 @@ def validate_registry(registry, routes):
 
 # -------------------------------------------------- interface conformance
 def binding_conformance(binding, iface, label):
+    """Python mirror of scripts/interface_validate.mjs bindingViolations in
+    its KB-311 projectEnv mode (and of criteria-k8s admission's
+    validateInterfaceBinding): adapters/mounts/secretEnv follow the
+    interface's string shapes, project env extras stay legal (KB-311 ADR
+    307), and unused/undeclared entries fail closed. Keep the three
+    rule-equivalent — a divergence here is a false PASS on the contract."""
     errs = []
-    iface_kinds = {m["kind"] for m in iface.get("mounts", []) if isinstance(m, dict)}
-    volumes = binding.get("volumes", [])
-    mounts = iface.get("mounts", [])
-    for mount in mounts:
-        match = [v for v in volumes
-                 if isinstance(v, dict) and v.get("name") == mount.get("name")]
-        if len(match) != 1:
-            errs.append(f"{label}: interface mount {mount.get('name')!r} is not provided by exactly one binding volume")
-            continue
-        volume = match[0]
-        if volume.get("mountPath") != mount.get("mountPath") or volume.get("kind") != mount.get("kind"):
-            errs.append(f"{label}: interface mount {mount.get('name')!r} must be provided with mountPath {mount.get('mountPath')!r}, kind {mount.get('kind')!r} "
-                        f"({volume.get('mountPath')!r}, {volume.get('kind')!r} shipped)")
-        if volume.get("kind") not in iface_kinds:
-            errs.append(f"{label}: binding volume {volume.get('name')!r} uses kind {volume.get('kind')!r} outside the interface's declared kinds")
+    wf = iface.get("workflow") or "<unknown workflow>"
+    volumes = [v for v in binding.get("volumes", []) if isinstance(v, dict)]
+    mounts = [m for m in iface.get("mounts", []) if isinstance(m, dict)]
+
+    def list_or_none(names):
+        return "[] (none)" if not names else "[" + " ".join(names) + "]"
+
+    def volume_desc(v):
+        return f"{v.get('name')} ({v.get('kind')} at {v.get('mountPath')})"
+
+    # Mounts: binding volumes must match interface mounts byte-exact on
+    # mountPath with the declared kind, and every interface mount must be
+    # supplied; a volume no mount declares fails closed.
+    iface_paths = {m.get("mountPath"): m for m in mounts}
+    volume_paths = {v.get("mountPath"): v for v in volumes}
     for volume in volumes:
-        if isinstance(volume, dict) and volume.get("name") not in {m.get("name") for m in mounts}:
-            errs.append(f"{label}: binding volume {volume.get('name')!r} is not declared by the interface (unknown mount, fail closed)")
-    adapters = binding.get("images", {})
-    for adapter in iface.get("adapters", []):
-        if isinstance(adapter, dict) and adapter.get("kind") not in adapters:
-            errs.append(f"{label}: interface adapter kind {adapter.get('kind')!r} has no binding image")
-    for lane in iface.get("secretEnv", []):
-        match = [s for s in binding.get("secrets", [])
-                 if isinstance(s, dict) and s.get("mountPath") == lane.get("mountPath")]
-        if not match:
-            errs.append(f"{label}: interface secret lane at {lane.get('mountPath')!r} has no binding secret")
-            continue
-        secret = match[0]
-        if secret.get("secretProviderClass") != lane.get("secretProviderClass"):
-            errs.append(f"{label}: interface secret lane at {lane.get('mountPath')!r} must reference SecretProviderClass {lane.get('secretProviderClass')!r} "
-                        f"({secret.get('secretProviderClass')!r} shipped)")
-        for env_name in (lane.get("env") or {}):
-            if env_name not in (secret.get("env") or {}):
-                errs.append(f"{label}: interface secret lane at {lane.get('mountPath')!r} requires env {env_name!r} which the binding secret does not resolve")
-    env = binding.get("env", {})
-    for declared in iface.get("env", []):
-        if isinstance(declared, dict) and declared.get("name") not in env:
-            errs.append(f"{label}: interface requires env {declared.get('name')!r} which the project binding does not carry (project env must COVER the tree's declared env)")
+        declared = iface_paths.get(volume.get("mountPath"))
+        if declared is None:
+            errs.append(f"{label}: binding supplies volume {volume.get('name')!r} ({volume.get('kind')!r} at {volume.get('mountPath')!r}) "
+                        f"which interface {wf!r} does not require; interface mounts: {list_or_none([volume_desc(m) for m in mounts])} "
+                        f"(unknown mount, fail closed — the declaration is the supported surface)")
+        elif volume.get("kind") != declared.get("kind"):
+            errs.append(f"{label}: binding volume {volume.get('name')!r} wants kind {volume.get('kind')!r} at {volume.get('mountPath')!r}; "
+                        f"interface {wf!r} declares {declared.get('kind')!r} (binding volumes and interface mounts must agree on kind)")
+    for declared in mounts:
+        volume = volume_paths.get(declared.get("mountPath"))
+        if volume is None:
+            errs.append(f"{label}: interface {wf!r} requires mount {declared.get('name')!r} ({declared.get('kind')!r}) at {declared.get('mountPath')!r}; "
+                        f"binding volumes {list_or_none([volume_desc(v) for v in volumes])} (mount paths must match byte-exact)")
+
+    # Adapter kinds: interface-required kinds ⊆ binding images (the
+    # interface declares kind STRINGS); extra images tolerated.
+    images = binding.get("images") or {}
+    for kind in iface.get("adapters", []):
+        if kind not in images:
+            errs.append(f"{label}: interface {wf!r} requires adapter kind {kind!r}; binding images provide {list_or_none(sorted(images))}")
+
+    # Secret env lanes (string names, KB-310): the union of binding secret
+    # env-map KEYS is the resolution surface — every interface secretEnv
+    # name must resolve from it and every carried key must be declared
+    # (secretEnv ∪ env). A secret with no env map contributes nothing (the
+    # CSI file-mount lane); SPC/mountPath references stay structural
+    # (validate_secret), not lane-matched.
+    declared_secret_lanes = iface.get("secretEnv", [])
+    declared_env = iface.get("env", [])
+    secret_names = []
+    resolved = {}
+    for secret in (s for s in binding.get("secrets", []) if isinstance(s, dict)):
+        secret_names.append(secret.get("name"))
+        for key in (secret.get("env") or {}):
+            if key not in declared_secret_lanes and key not in declared_env:
+                errs.append(f"{label}: binding secret {secret.get('name')!r} carries env {key!r} which interface {wf!r} does not require; "
+                            f"interface secretEnv: {list_or_none(declared_secret_lanes)}, env: {list_or_none(declared_env)} (unknown slot, fail closed)")
+            resolved[key] = secret.get("name")
+    for lane in declared_secret_lanes:
+        if lane not in resolved:
+            errs.append(f"{label}: interface {wf!r} requires secret env {lane!r}; binding secrets {list_or_none(secret_names)} "
+                        f"carry no such env key (wire the lane in the binding secret's env map)")
+
+    # Project env (KB-311, ADR 307): every env name the interface declares
+    # must be covered by the project binding's env; extra keys are the
+    # project's own execution config (tool paths, GOFLAGS, npm proxies ...)
+    # and stay legal — the KB-311 divergence from KB-310 global mode.
+    env = binding.get("env") or {}
+    for name in declared_env:
+        if name not in env:
+            errs.append(f"{label}: interface {wf!r} requires env {name!r}; binding env carries {list_or_none(sorted(env))} "
+                        f"(project env must cover the tree's declared env, KB-311)")
+
     declared_slots = {s.get("slot") for s in iface.get("configSlots", []) if isinstance(s, dict)}
     for slot in (binding.get("config") or {}):
         if slot not in declared_slots:
@@ -466,7 +502,7 @@ def expect_registry_reject(label, mutate, needle):
     if not any(needle in err for err in errs):
         failures.append(f"{label}: expected a registry violation containing {needle!r}, got {errs[:2]}")
 
-expect_registry_reject("registry/unknown-field", lambda r: r["Demo Registry"].update({"images": {}}), "unknown field")
+expect_registry_reject("registry/unknown-field", lambda r: list(r.values())[0].update({"images": {}}), "unknown field")
 expect_registry_reject("registry/blank-project", lambda r: r.update({" ": {"namespace": "demo-ns", "repos": ["o/n"]}}), "blank project name")
 expect_registry_reject("registry/bad-namespace", lambda r: list(r.values())[0].update({"namespace": "Bad_NS"}), "DNS-1123 label")
 expect_registry_reject("registry/bad-repo", lambda r: list(r.values())[0].update({"repos": ["missing-slash"]}), "owner/name")
@@ -488,9 +524,9 @@ try:
             failures.append(f"{os.path.basename(path)}: expected valid against the shipped binding schema, got: "
                             + "; ".join(e.message for e in errors[:3]))
     reg_validator = jsonschema.Draft7Validator(schemas["routes"])
-    reg_errors = list(reg_validator.iter_errors({"projectRegistry": registry, "workflowLibrary": {}, "routes": []}))
+    reg_errors = list(reg_validator.iter_errors(routes_payload))
     if reg_errors:
-        failures.append("routes example projectRegistry: expected valid against the shipped routes schema, got: "
+        failures.append("routes example (routes.json incl. projectRegistry): expected valid against the shipped routes schema, got: "
                         + "; ".join(e.message for e in reg_errors[:3]))
     print("jsonschema: binding payloads + projectRegistry validated against the shipped draft-07 schemas")
 except ImportError:
