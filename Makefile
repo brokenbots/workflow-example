@@ -213,6 +213,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_routes_config.sh
 	@echo "Running per-project binding ConfigMap schema regression test (KB-311)..."
 	./k8s/tests/test_criteria_binding.sh
+	@echo "Running per-project namespace cutover regression test (KB-312)..."
+	./k8s/tests/test_project_lifecycle.sh
 	@echo "Running Ready for Development Linear state script regression test (CRI-241)..."
 	./k8s/tests/test_create_ready_state.sh
 	@echo "Running criteria-base image structure regression test (CRI-230)..."
@@ -266,6 +268,8 @@ lint: lint-go
 		k8s/tests/test_kanboard_watcher_watchdog.sh \
 		k8s/tests/test_routes_config.sh \
 		k8s/tests/test_criteria_binding.sh \
+		k8s/project-lifecycle.sh \
+		k8s/tests/test_project_lifecycle.sh \
 		k8s/create-ready-for-development-state.sh \
 		k8s/tests/test_create_ready_state.sh \
 		criteria-base/entrypoint.sh \
