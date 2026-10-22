@@ -99,8 +99,8 @@ func TestParseAndValidate(t *testing.T) {
 	if len(p.WorkflowLibrary) != 10 {
 		t.Errorf("workflowLibrary size = %d, want 10", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 8 {
-		t.Errorf("routes size = %d, want 8", len(p.Routes))
+	if len(p.Routes) != 10 {
+		t.Errorf("routes size = %d, want 10", len(p.Routes))
 		if len(p.WorkflowLibrary) != 6 {
 			t.Errorf("workflowLibrary size = %d, want 6", len(p.WorkflowLibrary))
 		}
@@ -108,9 +108,10 @@ func TestParseAndValidate(t *testing.T) {
 			t.Errorf("routes size = %d, want 4", len(p.Routes))
 		}
 		// KB-281: the retired criteria-triage / criteria-develop routes are gone.
-		// Surviving route order: the criteria project's cleanup-only route, then
-		// the two kanboard routes, then the KB-276 harness-wire route (also on
-		// the criteria project; it fires only under the dave-go tag gate).
+		// Surviving route order: the criteria project's cleanup-only route, the
+		// two kanboard routes, then the KB-311 per-project develop pair and the
+		// harness legs (also on the criteria project; those fire under tag
+		// gates).
 		if n := p.Routes[0].Name; n != "criteria-cleanup" {
 			t.Errorf("routes[0] = %q, want %q (criteria project: cleanup only)", n, "criteria-cleanup")
 		}
@@ -122,25 +123,41 @@ func TestParseAndValidate(t *testing.T) {
 		}
 		// KB-277: harness-contracts, then the KB-278 composition leg and the
 		// KB-279 failures leg — the criteria project's dave-go tag-gated harness
-		// series legs (each firing its own *-url object).
-		if n := p.Routes[3].Name; n != "harness-contracts" {
-			t.Errorf("routes[3] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
+		// series legs (each firing its own *-url object). KB-311: the two
+		// per-project develop routes ride routes[3]/routes[4] (the acceptance
+		// pair, both on the same kanboard-develop-url object), so the harness
+		// series legs shift to routes[5:9] and the wire leg closes at [9].
+		// KB-311: the acceptance pair first — two distinct projects running
+		// THE SAME workflow object (identical tree digest) by binding.
+		if p.Routes[3].Project != "Criteria Go Dev" || p.Routes[4].Project != "TypeScript SDK" {
+			t.Errorf("routes[3:5] projects = %q/%q, want the KB-311 acceptance pair", p.Routes[3].Project, p.Routes[4].Project)
 		}
-		if p.Routes[3].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("harness-contracts route project = %q, want %q", p.Routes[3].Project, "Criteria K8s Workflow Runner")
+		if p.Routes[3].Workflow != "kanboard-develop-url" || p.Routes[4].Workflow != "kanboard-develop-url" {
+			t.Errorf("routes[3:5] workflows = %q/%q, want BOTH on kanboard-develop-url (same tree, different bindings)", p.Routes[3].Workflow, p.Routes[4].Workflow)
 		}
-		if p.Routes[3].Workflow != "harness-contracts-url" {
-			t.Errorf("harness-contracts route workflow = %q, want %q", p.Routes[3].Workflow, "harness-contracts-url")
+		for _, r := range p.Routes[3:5] {
+			if !slices.Equal(r.States, []string{"Ready"}) {
+				t.Errorf("route %s states = %v, want [Ready]", r.Name, r.States)
+			}
+		}
+		if n := p.Routes[5].Name; n != "harness-contracts" {
+			t.Errorf("routes[5] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
+		}
+		if p.Routes[5].Project != "Criteria K8s Workflow Runner" {
+			t.Errorf("harness-contracts route project = %q, want %q", p.Routes[5].Project, "Criteria K8s Workflow Runner")
+		}
+		if p.Routes[5].Workflow != "harness-contracts-url" {
+			t.Errorf("harness-contracts route workflow = %q, want %q", p.Routes[5].Workflow, "harness-contracts-url")
 		}
 		if _, ok := p.WorkflowLibrary["harness-contracts-url"]; !ok {
 			t.Errorf("workflowLibrary missing the harness-contracts-url object (KB-277)")
 		}
-		// KB-278: the harness-composition leg rides routes[4].
-		if n := p.Routes[4].Name; n != "harness-composition" {
-			t.Errorf("routes[4] = %q, want %q (KB-278 harness composition route)", n, "harness-composition")
+		// KB-278: the harness-composition leg rides routes[6].
+		if n := p.Routes[6].Name; n != "harness-composition" {
+			t.Errorf("routes[6] = %q, want %q (KB-278 harness composition route)", n, "harness-composition")
 		}
-		if p.Routes[4].Workflow != "harness-composition-url" {
-			t.Errorf("harness-composition route workflow = %q, want %q", p.Routes[4].Workflow, "harness-composition-url")
+		if p.Routes[6].Workflow != "harness-composition-url" {
+			t.Errorf("harness-composition route workflow = %q, want %q", p.Routes[6].Workflow, "harness-composition-url")
 		}
 		// KB-278: the object must stay url-ONLY — no commit ref/refKey may bind
 		// the pinless-at-close harness series (CRI-260 three-way check).
@@ -152,17 +169,17 @@ func TestParseAndValidate(t *testing.T) {
 			comp.Ref != "" || len(comp.Volumes) != 3 || len(comp.Secrets) != 1 {
 			t.Errorf("harness-composition-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-278)", comp)
 		}
-		// KB-279: the harness-failures leg rides routes[5] — the failures leg
+		// KB-279: the harness-failures leg rides routes[7] — the failures leg
 		// fires harness_failures_v1 (engineered failure-path fixtures, matrix
 		// E24-E32 + G12) with the same pinless-at-close convention.
-		if n := p.Routes[5].Name; n != "harness-failures" {
-			t.Errorf("routes[5] = %q, want %q (KB-279 harness failures route)", n, "harness-failures")
+		if n := p.Routes[7].Name; n != "harness-failures" {
+			t.Errorf("routes[7] = %q, want %q (KB-279 harness failures route)", n, "harness-failures")
 		}
-		if p.Routes[5].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("harness-failures route project = %q, want %q", p.Routes[5].Project, "Criteria K8s Workflow Runner")
+		if p.Routes[7].Project != "Criteria K8s Workflow Runner" {
+			t.Errorf("harness-failures route project = %q, want %q", p.Routes[7].Project, "Criteria K8s Workflow Runner")
 		}
-		if p.Routes[5].Workflow != "harness-failures-url" {
-			t.Errorf("harness-failures route workflow = %q, want %q", p.Routes[5].Workflow, "harness-failures-url")
+		if p.Routes[7].Workflow != "harness-failures-url" {
+			t.Errorf("harness-failures route workflow = %q, want %q", p.Routes[7].Workflow, "harness-failures-url")
 		}
 		fail, ok := p.WorkflowLibrary["harness-failures-url"]
 		if !ok {
@@ -172,20 +189,20 @@ func TestParseAndValidate(t *testing.T) {
 			fail.Ref != "" || len(fail.Volumes) != 3 || len(fail.Secrets) != 1 {
 			t.Errorf("harness-failures-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-279)", fail)
 		}
-		if len(p.Routes[5].Tags) == 0 || p.Routes[5].Tags[0] != "harness-validation" {
-			t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[5].Tags)
+		if len(p.Routes[7].Tags) == 0 || p.Routes[7].Tags[0] != "harness-validation" {
+			t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[7].Tags)
 		}
-		// KB-280: the harness-fleet-smoke leg rides routes[6] — the series'
+		// KB-280: the harness-fleet-smoke leg rides routes[8] — the series'
 		// fast-feedback canary (harness_fleet_smoke_v1, ~90s deterministic
 		// no-agent pre-leg gate) with the same pinless-at-close convention.
-		if n := p.Routes[6].Name; n != "harness-fleet-smoke" {
-			t.Errorf("routes[6] = %q, want %q (KB-280 harness fleet-smoke route)", n, "harness-fleet-smoke")
+		if n := p.Routes[8].Name; n != "harness-fleet-smoke" {
+			t.Errorf("routes[8] = %q, want %q (KB-280 harness fleet-smoke route)", n, "harness-fleet-smoke")
 		}
-		if p.Routes[6].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("harness-fleet-smoke route project = %q, want %q", p.Routes[6].Project, "Criteria K8s Workflow Runner")
+		if p.Routes[8].Project != "Criteria K8s Workflow Runner" {
+			t.Errorf("harness-fleet-smoke route project = %q, want %q", p.Routes[8].Project, "Criteria K8s Workflow Runner")
 		}
-		if p.Routes[6].Workflow != "harness-fleet-smoke-url" {
-			t.Errorf("harness-fleet-smoke route workflow = %q, want %q", p.Routes[6].Workflow, "harness-fleet-smoke-url")
+		if p.Routes[8].Workflow != "harness-fleet-smoke-url" {
+			t.Errorf("harness-fleet-smoke route workflow = %q, want %q", p.Routes[8].Workflow, "harness-fleet-smoke-url")
 		}
 		fsmoke, ok := p.WorkflowLibrary["harness-fleet-smoke-url"]
 		if !ok {
@@ -205,17 +222,17 @@ func TestParseAndValidate(t *testing.T) {
 			t.Errorf("harness-fleet-smoke-url shell pin = %q, want the recorded fleet pin set (KB-280)", fsmoke.AdapterImages["shell"])
 		}
 	}
-	// KB-276: the wire/transport leg routes after the four landed harness legs
-	// (contracts/composition/failures/fleet-smoke) - the wire route is routes[7];
-	// its url object ships in the same payload (routes count 7 -> 8).
-	if n := p.Routes[7].Name; n != "harness-wire" {
-		t.Errorf("routes[7] = %q, want %q (KB-276 harness wire/transport route)", n, "harness-wire")
+	// KB-276: the wire/transport leg routes after the harness series legs and
+	// the KB-311 acceptance pair (develop-go/develop-ts) — the wire route is
+	// routes[9]; its url object ships in the same payload (routes count 8 -> 10).
+	if n := p.Routes[9].Name; n != "harness-wire" {
+		t.Errorf("routes[9] = %q, want %q (KB-276 harness wire/transport route)", n, "harness-wire")
 	}
-	if p.Routes[7].Project != "Criteria K8s Workflow Runner" {
-		t.Errorf("harness-wire route project = %q, want %q", p.Routes[7].Project, "Criteria K8s Workflow Runner")
+	if p.Routes[9].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-wire route project = %q, want %q", p.Routes[9].Project, "Criteria K8s Workflow Runner")
 	}
-	if p.Routes[7].Workflow != "harness-wire-url" {
-		t.Errorf("harness-wire route workflow = %q, want %q", p.Routes[7].Workflow, "harness-wire-url")
+	if p.Routes[9].Workflow != "harness-wire-url" {
+		t.Errorf("harness-wire route workflow = %q, want %q", p.Routes[9].Workflow, "harness-wire-url")
 	}
 	wurl, ok := p.WorkflowLibrary["harness-wire-url"]
 	if !ok {
@@ -1517,5 +1534,153 @@ func TestValidatePositiveTagGroupEntry(t *testing.T) {
 	}
 	if _, err := Parse(marshalPayload(t, p)); err != nil {
 		t.Fatalf("Parse rejected a valid tag-group config entry: %v", err)
+	}
+}
+
+// KB-311 (ADR 307): the project-registry entry shape — closed vocabulary,
+// DNS-1123 namespace, advisory owner/name repo members — with the absent
+// marker staying legal (pre-cutover projects keep the global
+// workflow-library behavior: binding-first, deletion second).
+func TestValidateProjectRegistry(t *testing.T) {
+	entry := func() ProjectEntry {
+		return ProjectEntry{Namespace: "criteria-go-dev", Repos: []string{"brokenbots/criteria-go-dev"}}
+	}
+	p := validPayload()
+	p.ProjectRegistry = map[string]ProjectEntry{
+		// The payload's own routes ("Runner", "Other") must stay resolvable
+		// through the registry — the registry is the routing table.
+		"Runner":  {Namespace: "criteria-jobs"},
+		"Other":   {Namespace: "other-jobs"},
+		"Criteria Go Dev": entry(),
+		"TypeScript SDK": {
+			Namespace: "typescript-sdk",
+			Repos:     []string{"brokenbots/typescript-sdk"},
+			Cutover:   CutoverDone,
+		},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("Validate(registry) failed: %v", err)
+	}
+	if !p.ProjectRegistry["TypeScript SDK"].IsCutoverDone() {
+		t.Errorf("Project(entry with cutover=done).IsCutoverDone() = false, want true")
+	}
+	if p.ProjectRegistry["Criteria Go Dev"].IsCutoverDone() {
+		t.Errorf("Project(entry without marker).IsCutoverDone() = true, want false")
+	}
+	if _, ok := p.Project("Unknown Project"); ok {
+		t.Errorf("Project(unknown) = ok, want miss")
+	}
+
+	for label, mutate := range map[string]func(map[string]ProjectEntry){
+		"blank project name": func(reg map[string]ProjectEntry) {
+			delete(reg, "Criteria Go Dev")
+			reg["   "] = entry()
+		},
+		"bad namespace": func(reg map[string]ProjectEntry) {
+			reg["Bad Namespace"] = ProjectEntry{Namespace: "Bad_NS"}
+		},
+		"missing namespace": func(reg map[string]ProjectEntry) {
+			reg["No Namespace"] = ProjectEntry{Repos: []string{"o/n"}}
+		},
+		"bad repo": func(reg map[string]ProjectEntry) {
+			reg["Bad Repo"] = ProjectEntry{Namespace: "ns", Repos: []string{"missing-slash"}}
+		},
+		"unknown cutover": func(reg map[string]ProjectEntry) {
+			reg["Half Done"] = ProjectEntry{Namespace: "ns", Cutover: "half done"}
+		},
+	} {
+		bad := validPayload()
+		mutated := map[string]ProjectEntry{"Demo Project": entry()}
+		if bad.ProjectRegistry != nil {
+			t.Fatalf("unexpected preset registry")
+		}
+		mutate(mutated)
+		bad.ProjectRegistry = mutated
+		err := bad.Validate()
+		if err == nil {
+			t.Errorf("Validate(%s) accepted the registry entry", label)
+			continue
+		}
+		if !strings.Contains(err.Error(), "projectRegistry") {
+			t.Errorf("Validate(%s) error %v does not name projectRegistry", label, err)
+		}
+	}
+}
+
+// KB-311: when the payload carries a registry, every route's project must
+// resolve through it — the registry is the ONLY ticket->project routing
+// table. A payload without a registry keeps the pre-KB-311 behavior
+// (route projects unbound by the registry).
+func TestValidateRouteResolvesThroughProjectRegistry(t *testing.T) {
+	unregistered := validPayload()
+	err := unregistered.Validate()
+	if err != nil {
+		t.Fatalf("Validate(pre-KB-311 payload without registry) failed: %v", err)
+	}
+
+	withRegistry := validPayload()
+	withRegistry.ProjectRegistry = map[string]ProjectEntry{
+		"Runner": {Namespace: "criteria-jobs"},
+	}
+	err = withRegistry.Validate()
+	if err == nil || !strings.Contains(err.Error(), "projectRegistry") {
+		t.Errorf("Validate(route project not in registry) = %v, want routing-table rejection", err)
+	}
+
+	covered := validPayload()
+	covered.ProjectRegistry = map[string]ProjectEntry{
+		"Runner": {Namespace: "criteria-jobs"},
+		"Other":  {Namespace: "other-jobs"},
+	}
+	if err := covered.Validate(); err != nil {
+		t.Fatalf("Validate(routes registered) failed: %v", err)
+	}
+	entry, ok := covered.Project("Runner")
+	if !ok || entry.Namespace != "criteria-jobs" {
+		t.Errorf("Project(Runner) = (%+v, %v), want the registry entries", entry, ok)
+	}
+}
+
+// KB-311: the shipped routes example carries the registry both states
+// demonstrate — pre-cutover projects (global workflow-library binding data)
+// and cutover:done projects (namespace-bound criteria-binding execution);
+// the acceptance projects resolve with distinct namespaces.
+func TestShippedExampleProjectRegistry(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("reading shipped example: %v", err)
+	}
+	p, err := Parse([]byte(extractRoutesJSON(t, string(data))))
+	if err != nil {
+		t.Fatalf("Parse(shipped example) failed: %v", err)
+	}
+	if len(p.ProjectRegistry) == 0 {
+		t.Fatal("shipped example carries no projectRegistry (KB-311)")
+	}
+	for project, wantNS := range map[string]string{
+		"Criteria Go Dev": "criteria-go-dev",
+		"TypeScript SDK":  "typescript-sdk",
+	} {
+		entry, ok := p.Project(project)
+		if !ok {
+			t.Fatalf("registry missing the %q acceptance project", project)
+		}
+		if entry.Namespace != wantNS {
+			t.Errorf("%s namespace = %q, want %q", project, entry.Namespace, wantNS)
+		}
+		if !entry.IsCutoverDone() {
+			t.Errorf("%s is not cutover:done (the acceptance demonstrates binding-first execution)", project)
+		}
+	}
+	// The intake's pre-cutover route: those projects resolve but keep the
+	// global workflow-library behavior.
+	for _, project := range []string{"Criteria K8s Workflow Runner", "Kanboard Tickets"} {
+		entry, ok := p.Project(project)
+		if !ok {
+			t.Fatalf("registry missing %q", project)
+		}
+		if entry.IsCutoverDone() {
+			t.Errorf("%s reports cutover done (pre-cutover while the global CM still carries binding data)", project)
+		}
 	}
 }

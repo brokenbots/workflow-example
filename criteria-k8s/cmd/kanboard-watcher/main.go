@@ -14,11 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/binding"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -497,10 +499,31 @@ func (w *watcher) poll(ctx context.Context) error {
 	states := routesPayload.ProjectStates(w.projectName)
 	w.log.V(1).Info("polling kanboard for task columns declared by routes", "states", states)
 
+	// KB-311 (ADR 307): resolve this watcher's project through the registry
+	// — the only ticket->project routing table. A cutover-done entry routes
+	// the project's runs into its own namespace, where admission reads the
+	// project-owned criteria-binding CM instead of the global
+	// workflow-library data.
+	projectEntry, ok := routesPayload.Project(w.projectName)
+	if !ok {
+		// The registry is optional (pre-ADR-307 payloads); an absent entry
+		// keeps the pre-cutover global-library behavior.
+		projectEntry = routes.ProjectEntry{}
+	}
+	bindingNS := ""
+	cutover := (*routes.ProjectEntry)(nil)
+	if ok && projectEntry.IsCutoverDone() {
+		bindingNS = projectEntry.Namespace
+		cutover = &projectEntry
+		w.log.V(1).Info("project registry: cutover done; runs serve from the project namespace through its binding CM",
+			"project", w.projectName, "namespace", bindingNS)
+	}
+
 	// Runs index: one CriteriaRun list per poll backs both the firing gate
 	// and phase reconciliation. Only this watcher's runs (source=kanboard)
-	// are indexed, so the Linear watcher's runs never collide.
-	runs, err := w.indexRunPhases(ctx)
+	// are indexed, so the Linear watcher's runs never collide. Post-cutover
+	// runs live in the project namespace, so both listings are indexed.
+	runs, err := w.indexRunPhases(ctx, bindingNS)
 	if err != nil {
 		return err
 	}
@@ -635,7 +658,7 @@ func (w *watcher) poll(ctx context.Context) error {
 				"ticket", ticketID, "column", task.ColumnName)
 			continue
 		}
-		run := w.buildCriteriaRun(ctx, task, repoURL, sel)
+		run := w.buildCriteriaRun(ctx, task, repoURL, sel, cutover)
 		if err := w.client.Create(ctx, run); err != nil {
 			w.log.Error(err, "creating CriteriaRun", "ticket", ticketID)
 			continue
@@ -671,47 +694,65 @@ func (w *watcher) isRoutingSignal(tag string) bool {
 }
 
 // indexRunPhases lists CriteriaRuns created by this watcher (source=kanboard)
-// and groups them by ticket. The KB source label isolates them from the
-// Linear watcher's runs so both watchers coexist in one namespace. The
-// ticket's most recent run (creation time, name tiebreak — the linear
-// watcher's runNewer) is the reconciliation authority, so its phase and
-// admission class drive the column moves.
-func (w *watcher) indexRunPhases(ctx context.Context) (map[string]runPhases, error) {
-	list := &criteriav1.CriteriaRunList{}
-	req := client.ListOptions{
-		Namespace:     w.namespace,
-		LabelSelector: labels.SelectorFromSet(map[string]string{"criteria.brokenbots.dev/source": "kanboard"}),
-	}
-	if err := w.client.List(ctx, list, &req); err != nil {
-		return nil, err
-	}
+// in the watcher's namespace plus — when a cutover-done project namespace
+// is in play (KB-311) — that namespace too, groups them by ticket, and
+// returns the phase summary poll() needs to reconcile Kanboard columns and
+// gate firing: whether any run of the ticket is still in flight, and the
+// most recent run's phase/final state. The KB source label isolates them
+// from the Linear watcher's runs so both watchers coexist in one
+// namespace. The ticket's most recent run (creation time, name tiebreak —
+// the linear watcher's runNewer) is the reconciliation authority, so its
+// phase and admission class drive the column moves.
+func (w *watcher) indexRunPhases(ctx context.Context, bindingNS string) (map[string]runPhases, error) {
 	type ticketRuns struct {
 		active bool
 		latest criteriav1.CriteriaRun
 	}
 	groups := make(map[string]*ticketRuns)
-	for i := range list.Items {
-		run := &list.Items[i]
-		t := run.Spec.TicketID
-		if !strings.HasPrefix(t, "KB-") {
-			continue
+	accumulate := func(ns string) error {
+		list := &criteriav1.CriteriaRunList{}
+		req := client.ListOptions{
+			Namespace:     ns,
+			LabelSelector: labels.SelectorFromSet(map[string]string{"criteria.brokenbots.dev/source": "kanboard"}),
 		}
-		g := groups[t]
-		if g == nil {
-			g = &ticketRuns{}
-			groups[t] = g
+		if err := w.client.List(ctx, list, &req); err != nil {
+			return err
 		}
-		switch run.Status.Phase {
-		case criteriav1.PhaseFailed, criteriav1.PhaseSucceeded:
-			// settled: nothing in flight from this run
-		default:
-			// Pending, Running, Unknown — and the empty phase a freshly
-			// created run carries until the controller sets status — are
-			// all in flight (CRI-219).
-			g.active = true
+		for i := range list.Items {
+			run := &list.Items[i]
+			t := run.Spec.TicketID
+			if !strings.HasPrefix(t, "KB-") {
+				continue
+			}
+			g := groups[t]
+			if g == nil {
+				g = &ticketRuns{}
+				groups[t] = g
+			}
+			switch run.Status.Phase {
+			case criteriav1.PhaseFailed, criteriav1.PhaseSucceeded:
+				// settled: nothing in flight from this run
+			default:
+				// Pending, Running, Unknown — and the empty phase a freshly
+				// created run carries until the controller sets status — are
+				// all in flight (CRI-219).
+				g.active = true
+			}
+			if g.latest.Name == "" || runNewer(run, &g.latest) {
+				g.latest = *run
+			}
 		}
-		if g.latest.Name == "" || runNewer(run, &g.latest) {
-			g.latest = *run
+		return nil
+	}
+	if err := accumulate(w.namespace); err != nil {
+		return nil, err
+	}
+	if bindingNS != "" && bindingNS != w.namespace {
+		// KB-311: post-cutover runs live in the project namespace; a settled
+		// pre-cutover run and an active post-cutover one must reconcile
+		// against each other.
+		if err := accumulate(bindingNS); err != nil {
+			return nil, err
 		}
 	}
 	out := make(map[string]runPhases, len(groups))
@@ -970,7 +1011,13 @@ func (w *watcher) postFailureParkComment(ctx context.Context, task kanboard.Task
 // selection exactly as the linear watcher stamps them (CRI-222 contract);
 // the per-repo config pin consults the pinned CM at stamping time so
 // spec.configRef carries its resourceVersion when it exists.
-func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repoURL string, sel *routes.Selection) *criteriav1.CriteriaRun {
+//
+// A cutover-done project entry (KB-311, ADR 307) dispatches to the
+// binding-first stamping in buildBindingFirstRun.
+func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repoURL string, sel *routes.Selection, cutover *routes.ProjectEntry) *criteriav1.CriteriaRun {
+	if cutover != nil {
+		return w.buildBindingFirstRun(ctx, task, repoURL, sel, cutover)
+	}
 	ticketID := task.Identifier()
 	name := fmt.Sprintf("%s-%d", strings.ToLower(ticketID), nowUnix())
 	spec := criteriav1.CriteriaRunSpec{
@@ -1023,22 +1070,29 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repo
 	}
 }
 
-// postPinWarning surfaces the pin-read degradation on the ticket card so it
-// is visible where the work is tracked ("per-repo config ConfigMap read
+// postPinWarning surfaces the pin-read degradation on the ticket card so
+// it is visible where the work is tracked ("per-repo config ConfigMap read
 // failed at stamping" must not live only in the watcher log, KB-250
-// no-silent-degrade). Best-effort: the run already carries the name-only
-// pin and the operator renders it at job-build time, so a failed comment
-// post is logged for the log scrape instead of failing the fire — a
-// warning must not gate the fire it warns about.
+// no-silent-degrade). Best-effort: a failed comment post is logged for the
+// log scrape instead of failing the fire — a warning must not gate the
+// fire it warns about.
 func (w *watcher) postPinWarning(ctx context.Context, taskID int, ticketID, cmName string, pinErr error) {
-	body := fmt.Sprintf(
+	w.postWarning(ctx, taskID, ticketID, fmt.Sprintf(
 		"criteria-kanboard-watcher: the per-repo config ConfigMap %s could not be pinned at stamp time (%v); the run is stamped with a name-only pin and the operator renders the ConfigMap at job-build time",
-		cmName, pinErr)
+		cmName, pinErr))
+}
+
+// postWarning posts a best-effort degraded-mode warning comment on the
+// ticket card (KB-250 no-silent-degrade): the degradation is already
+// carried by the stamped run, so a failed comment post is logged for the
+// log scrape instead of failing the fire — a warning must not gate the
+// fire it warns about.
+func (w *watcher) postWarning(ctx context.Context, taskID int, ticketID, body string) {
 	if err := w.kb.AddComment(ctx, taskID, body); err != nil {
-		w.log.Error(err, "posting pin degradation warning comment on ticket", "ticket", ticketID)
+		w.log.Error(err, "posting degraded-stamp warning comment on ticket", "ticket", ticketID)
 		return
 	}
-	w.log.Info("posted pin degradation warning comment on ticket", "ticket", ticketID)
+	w.log.Info("posted degraded-stamp warning comment on ticket", "ticket", ticketID)
 }
 
 // columnNameFor resolves a column id to its title via the cached project map.
@@ -1066,22 +1120,7 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		Image:     wf.Image,
 		URL:       wf.URL,
 		Ref:       wf.Ref,
-	}
-	if wf.Interface != nil {
-		// KB-310: stamp the tree's interface declaration onto the run CR —
-		// the operator validates the project binding against it before
-		// job creation and records its checksum in the launch manifest.
-		out.Interface = &criteriav1.RunWorkflowInterface{
-			APIVersion:  wf.Interface.APIVersion,
-			Kind:        wf.Interface.Kind,
-			Workflow:    wf.Interface.Workflow,
-			Description: wf.Interface.Description,
-			Adapters:    copyStringSlice(wf.Interface.Adapters),
-			Mounts:      copyInterfaceMounts(wf.Interface.Mounts),
-			SecretEnv:   copyStringSlice(wf.Interface.SecretEnv),
-			Env:         copyStringSlice(wf.Interface.Env),
-			ConfigSlots: copyInterfaceConfigSlots(wf.Interface.ConfigSlots),
-		}
+		Interface: convertWorkflowInterface(wf.Interface),
 	}
 	if wf.Env != nil {
 		out.Env = make(map[string]string, len(wf.Env))
@@ -1125,6 +1164,106 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		}
 	}
 	return out
+}
+
+// convertWorkflowInterface deep-copies a routes interface declaration
+// (KB-310): the operator validates the project binding against it before
+// job creation and records its checksum in the launch manifest.
+func convertWorkflowInterface(in *routes.WorkflowInterface) *criteriav1.RunWorkflowInterface {
+	if in == nil {
+		return nil
+	}
+	return &criteriav1.RunWorkflowInterface{
+		APIVersion:  in.APIVersion,
+		Kind:        in.Kind,
+		Workflow:    in.Workflow,
+		Description: in.Description,
+		Adapters:    copyStringSlice(in.Adapters),
+		Mounts:      copyInterfaceMounts(in.Mounts),
+		SecretEnv:   copyStringSlice(in.SecretEnv),
+		Env:         copyStringSlice(in.Env),
+		ConfigSlots: copyInterfaceConfigSlots(in.ConfigSlots),
+	}
+}
+
+// convertBindingRefWorkflow stamps the workflow TREE references onto a
+// cutover-done project's CriteriaRun (KB-311, ADR 307): name, type, url+ref,
+// class, and the interface declaration (the secrets lane lives there).
+//
+// Everything the ADR hands to the project binding stays OFF the CR — env,
+// adapter images, volumes, secrets — so the CR carries binding REFERENCES
+// only and the project's criteria-binding CM owns the execution config.
+// The workflow declaration's namespace is deliberately not stamped: the
+// run executes in the project namespace, so jobbuilder.TargetNamespace
+// must resolve through the run's own namespace, not the global
+// workflow-library one.
+func convertBindingRefWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
+	return &criteriav1.RunWorkflow{
+		Name:      name,
+		Type:      wf.Type,
+		Class:     workflowClass(wf),
+		Image:     wf.Image,
+		URL:       wf.URL,
+		Ref:       wf.Ref,
+		Interface: convertWorkflowInterface(wf.Interface),
+	}
+}
+
+// buildBindingFirstRun stamps a cutover-done project's CriteriaRun
+// (KB-311, ADR 307): the CR lands in the registry entry's namespace and
+// carries ONLY references — the workflow tree (tree digest unchanged: same
+// name/type/url/ref/class/interface), a pin on the project-owned
+// criteria-binding ConfigMap, and the same watcher-contract fields the
+// pre-cutover stamper sets.
+//
+// The KB-103 spec-field stamping (buildCmd/testCmd/ciGateCmd/baseBranch and
+// the per-repo configRef pin) is skipped: the project binding's config
+// slots serve those values at admission, and a KB-103 spec-field stamp
+// would collide with binding-owned config at admission (undeclared-slot
+// refusal). The pre-cutover paths keep KB-103; the binding-first path
+// replaces it.
+//
+// KB-250 no-silent-degrade: the binding CM read at stamp time pins its
+// resourceVersion so admission proves the binding did not change between
+// stamp and admit. A read failure degrades to the name-only pin with a
+// card-comment warning — the degradation is never silent — and admission
+// still fails closed on the ref-less read, so nothing is lost beyond
+// provenance.
+func (w *watcher) buildBindingFirstRun(ctx context.Context, task kanboard.Task, repoURL string, sel *routes.Selection, entry *routes.ProjectEntry) *criteriav1.CriteriaRun {
+	ticketID := task.Identifier()
+	name := fmt.Sprintf("%s-%d", strings.ToLower(ticketID), nowUnix())
+	spec := criteriav1.CriteriaRunSpec{
+		TicketID:          ticketID,
+		RepoURL:           repoURL,
+		PerScopeSessions:  true,
+		MaxAgentVisits:    w.maxAgentVisits,
+		ProviderBaseURL:   w.providerBaseURL,
+		Workflow:          convertBindingRefWorkflow(sel.Name, sel.Workflow),
+		ProjectBindingRef: &criteriav1.CriteriaRunProjectBindingRef{Name: binding.CMName},
+	}
+	var cm corev1.ConfigMap
+	if err := w.client.Get(ctx, client.ObjectKey{Namespace: entry.Namespace, Name: binding.CMName}, &cm); err != nil {
+		w.log.Error(err, "binding ConfigMap read failed at stamping; stamping a name-only project binding pin",
+			"ticket", ticketID, "namespace", entry.Namespace, "configMap", binding.CMName)
+		w.postWarning(ctx, task.ID, ticketID, fmt.Sprintf(
+			"criteria-kanboard-watcher: the project binding ConfigMap %s in namespace %s could not be pinned at stamp time (%v); the run is stamped with a name-only pin and admission re-reads and proves the binding before job build",
+			binding.CMName, entry.Namespace, err))
+	} else {
+		spec.ProjectBindingRef.ResourceVersion = cm.ResourceVersion
+	}
+	runstamp.StampWorkflowSource(&spec, sel.Workflow)
+	return &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: entry.Namespace,
+			Labels: map[string]string{
+				"ticket":                         strings.ToLower(ticketID),
+				"app.kubernetes.io/managed-by":   "criteria-kanboard-watcher",
+				"criteria.brokenbots.dev/source": "kanboard",
+			},
+		},
+		Spec: spec,
+	}
 }
 
 // workflowClass resolves the admission queue class (CRI-242): an omitted

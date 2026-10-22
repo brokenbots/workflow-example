@@ -1,0 +1,92 @@
+# Project binding ConfigMap — the go-dev project's COMPLETE execution config
+# (KB-311, ADR 307). Name 'criteria-binding' in the PROJECT's namespace
+# (criteria-go-dev); single data key 'binding.json' holds the payload.
+#
+# The binding is owned by the project: no platform write path touches it —
+# the platform's only per-project write is that project's registry entry in
+# the routes ConfigMap's 'projectRegistry' (the ONLY ticket->project routing
+# table). The payload's schema of record is
+# k8s/criteria-binding.schema.json; k8s/tests/test_criteria_binding.sh
+# validates this example against it, including the fail-closed unknown-key
+# rule. On 'cutover: done' (registry), the intake stamps ONLY {workflow ref,
+# project binding ref, class, secrets lane} into the run CR — the images,
+# env, volumes, secrets and config below are what admission then serves.
+#
+# ACCEPTANCE (KB-311): this binding and the typescript-sdk project's
+# (k8s/examples/binding-typescript-sdk.yaml) run THE SAME workflow tree
+# (kanboard_develop_v1 — the identical url+ref the routes payload names) with
+# DIFFERENT images+env: reuse-by-binding, identical tree digest. Everything
+# resolves in this project's own namespace: the PVC claims, the
+# SecretProviderClasses (same names as other namespaces only because it is
+# the project's own OpenBao estate), nothing cross-namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: criteria-binding
+  namespace: criteria-go-dev
+data:
+  binding.json: |
+    {
+      "apiVersion": "criteria.brokenbots.dev/v1",
+      "kind": "CriteriaBinding",
+      "images": {
+        "shell": "localhost:5000/criteria-adapter-shell-peer-go:0.5.56",
+        "copilot": "localhost:5000/criteria-adapter-copilot-peer-go:0.5.56"
+      },
+      "env": {
+        "PATH": "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
+        "GOFLAGS": "-mod=readonly",
+        "GOPROXY": "https://proxy.golang.org,direct",
+        "GOTOOLCHAIN": "local",
+        "CRITERIA_TOOL_TIMEOUT": "45m"
+      },
+      "volumes": [
+        {
+          "name": "data",
+          "kind": "pvc",
+          "claim": "criteria-go-dev-data",
+          "mountPath": "/data",
+          "env": {
+            "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+            "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
+            "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
+          }
+        },
+        {
+          "name": "repo",
+          "kind": "pvc",
+          "claim": "criteria-go-dev-repo",
+          "mountPath": "/repo"
+        },
+        {
+          "name": "scratch",
+          "kind": "tmp",
+          "mountPath": "/tmp/scratch",
+          "sizeLimit": "8Gi"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "kanboard-api-key",
+          "secretProviderClass": "kanboard-spc",
+          "mountPath": "/home/criteria/kanboard-secrets",
+          "env": {
+            "KANBOARD_APP_TOKEN": "kanboard_app_token",
+            "KANBOARD_URL": "kanboard_url"
+          }
+        },
+        {
+          "name": "github-tokens",
+          "secretProviderClass": "copilot-spc",
+          "mountPath": "/home/criteria/secrets",
+          "env": {
+            "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+          }
+        }
+      ],
+      "config": {
+        "baseBranch": "main",
+        "ciGateCmd": "go build ./... && go vet ./... && go test ./..."
+      }
+    }

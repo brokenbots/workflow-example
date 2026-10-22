@@ -201,7 +201,7 @@ function validateInterface(iface, where) {
 // tree (via the interface workflow) and the binding entry — so a refused
 // entry is troubleshootable from the test output alone.
 
-function bindingViolations(iface, binding) {
+function bindingViolations(iface, binding, projectEnv = false) {
   const mounts = iface.mounts ?? [];
   const adapters = iface.adapters ?? [];
   const secretEnv = iface.secretEnv ?? [];
@@ -258,10 +258,215 @@ function bindingViolations(iface, binding) {
     if (!resolved.has(lane))
       problems.push(`interface "${iface.workflow}" requires secret env "${lane}"; binding "${wfName}" secrets (${listOrNone(secretList)}) carry no such env key (wire the lane in the binding secret's env map, KB-310)`);
 
-  // Env: binding env keys must be declared as interface env.
-  for (const name of Object.keys(binding.env ?? {}))
-    if (!ifaceEnv.includes(name))
-      problems.push(`binding "${wfName}" env key "${name}" is not declared by interface "${iface.workflow}" (interface env: ${listOrNone(ifaceEnv)}, secretEnv: ${listOrNone(secretEnv)}); unknown-slot, fail closed (KB-310)`);
+  // Env. KB-310 (global workflowLibrary bindings): binding env keys must be
+  // declared by the interface — unknown-slot, fail closed. KB-311
+  // (projectBinding mode, ADR 307): the project env is the project's own
+  // execution config (tool paths, GOFLAGS, npm proxies ...), so extra keys
+  // are fine by design and the flip side is a requirement — every env name
+  // the interface declares must be covered by the project env.
+  if (projectEnv) {
+    for (const name of ifaceEnv)
+      if (!(name in (binding.env ?? {})))
+        problems.push(`interface "${iface.workflow}" requires env "${name}"; binding "${wfName}" env carries ${listOrNone(Object.keys(binding.env ?? {}))} (project env must cover the tree's declared env, KB-311)`);
+  } else {
+    for (const name of Object.keys(binding.env ?? {}))
+      if (!ifaceEnv.includes(name))
+        problems.push(`binding "${wfName}" env key "${name}" is not declared by interface "${iface.workflow}" (interface env: ${listOrNone(ifaceEnv)}, secretEnv: ${listOrNone(secretEnv)}); unknown-slot, fail closed (KB-310)`);
+  }
+
+  return problems;
+}
+
+// ── project registry + binding CM structural rules (KB-311, ADR 307) ────────
+//
+// The two new configuration surfaces land with their own fail-closed shapes:
+//
+//   - projectRegistry (routes payload): Kanboard project name -> {namespace,
+//     repos, cutover} — the ONLY ticket->project routing table. repo members
+//     are advisory; cutover vocabulary is closed ("done" or absent).
+//   - criteria-binding payload (per-project CM): images/env/volumes/secrets/
+//     config — NOTHING else; unknown keys at every level are rejected
+//     (mirrors k8s/criteria-binding.schema.json and the operator's
+//     bindingPayload parse, both strict).
+
+const BINDING_TOP_KEYS = ["apiVersion", "kind", "images", "env", "volumes", "secrets", "config"];
+const BINDING_VOLUME_KEYS = ["name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"];
+const BINDING_SECRET_KEYS = ["name", "secretProviderClass", "mountPath", "env"];
+const REPO_REF = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const SPC_KEY = /^[A-Za-z0-9._-]+$/;
+
+function registryViolations(registry) {
+  const problems = [];
+  if (typeof registry !== "object" || registry === null || Array.isArray(registry))
+    return ["projectRegistry must be a JSON object of project name -> entry"];
+  if (Object.keys(registry).length === 0)
+    problems.push("projectRegistry carries no projects (remove the key instead of shipping an empty table)");
+  for (const [name, entry] of Object.entries(registry)) {
+    if (typeof name !== "string" || name.trim() === "")
+      problems.push(`projectRegistry key ${JSON.stringify(name)} must be a non-blank Kanboard project name`);
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      problems.push(`projectRegistry["${name}"] must be a JSON object`);
+      continue;
+    }
+    for (const key of Object.keys(entry))
+      if (!["namespace", "repos", "cutover"].includes(key))
+        problems.push(`projectRegistry["${name}"]: unknown field "${key}" (fail closed, KB-311)`);
+    const nsViolation = labelViolation(entry.namespace);
+    if (nsViolation)
+      problems.push(`projectRegistry["${name}"].namespace ${nsViolation} (entries must name the namespace executing the project's runs, KB-311)`);
+    if (typeof entry.repos !== "undefined" && entry.repos !== null) {
+      if (!Array.isArray(entry.repos))
+        problems.push(`projectRegistry["${name}"].repos must be an array of owner/name references`);
+      else for (const repo of entry.repos)
+        if (typeof repo !== "string" || !REPO_REF.test(repo))
+          problems.push(`projectRegistry["${name}"].repos entry ${JSON.stringify(repo)} must be an "owner/name" pair (advisory members, KB-311)`);
+    }
+    if (!["", undefined, null, "done"].includes(entry.cutover))
+      problems.push(`projectRegistry["${name}"].cutover must be "done" or absent (got ${JSON.stringify(entry.cutover)}; the marker vocabulary is closed, KB-311)`);
+  }
+  return problems;
+}
+
+// bindingStructuralViolations validates a parsed binding payload against
+// k8s/criteria-binding.schema.json's shape WITHOUT a jsonschema dependency
+// (same discipline as the shell regression harness): names, paths, kinds,
+// per-kind field rules, and the closed key sets at every level.
+function bindingStructuralViolations(payload) {
+  const problems = [];
+  const label = (value, what) => {
+    const v = labelViolation(value);
+    if (v) problems.push(`${what} ${v} (got ${JSON.stringify(value)})`);
+  };
+  const envMapViolation = (map, where, what) => {
+    if (typeof map !== "object" || map === null || Array.isArray(map))
+      return problems.push(`${where} ${what} must be a JSON object`);
+    for (const [name, value] of Object.entries(map)) {
+      if (!ENV_NAME.test(name))
+        problems.push(`${where} env name ${JSON.stringify(name)} must be a SCREAMING_SNAKE environment variable name`);
+      if (typeof value !== "string")
+        problems.push(`${where} env "${name}" value must be a string`);
+    }
+  };
+
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload))
+    return ["binding payload must be a JSON object"];
+  for (const key of Object.keys(payload))
+    if (!BINDING_TOP_KEYS.includes(key))
+      problems.push(`unknown field "${key}" at the binding top level (schema: additionalProperties false, fail closed, KB-311)`);
+  if (payload.apiVersion !== "criteria.brokenbots.dev/v1")
+    problems.push(`binding apiVersion must be "criteria.brokenbots.dev/v1"`);
+  if (payload.kind !== "CriteriaBinding")
+    problems.push(`binding kind must be "CriteriaBinding"`);
+
+  // images: adapter kind -> full image reference.
+  if (typeof payload.images !== "object" || payload.images === null || Array.isArray(payload.images))
+    problems.push("binding images must be a JSON object of adapter kind -> image reference");
+  else
+    for (const [kind, image] of Object.entries(payload.images)) {
+      label(kind, `binding images key`);
+      if (typeof image !== "string" || image.length === 0 || /\s/.test(image))
+        problems.push(`binding images["${kind}"] must be a full image reference without whitespace`);
+    }
+
+  // env: project environment (KB-311) — SCREAMING_SNAKE names, string values.
+  if (typeof payload.env !== "object" || payload.env === null || Array.isArray(payload.env))
+    problems.push("binding env must be a JSON object of environment variable name -> value");
+  else
+    envMapViolation(payload.env, "binding", "env");
+
+  // volumes: the project's OWN PVC/nfs/tmp/k8s-secret mounts.
+  if (!Array.isArray(payload.volumes))
+    problems.push("binding volumes must be an array");
+  else {
+    const seenNames = new Set();
+    payload.volumes.forEach((volume, i) => {
+      const where = `binding volumes[${i}]`;
+      if (typeof volume !== "object" || volume === null || Array.isArray(volume))
+        return problems.push(`${where} must be a JSON object`);
+      for (const key of Object.keys(volume))
+        if (!BINDING_VOLUME_KEYS.includes(key))
+          problems.push(`${where}: unknown field "${key}" (fail closed, KB-311)`);
+      label(volume.name, `${where} name`);
+      if (seenNames.has(volume.name))
+        problems.push(`binding volume name ${JSON.stringify(volume.name)} is not unique within the binding`);
+      seenNames.add(volume.name);
+      if (!["pvc", "nfs", "tmp", "k8s-secret"].includes(volume.kind))
+        problems.push(`${where} kind ${JSON.stringify(volume.kind)} must be one of pvc, nfs, tmp, k8s-secret`);
+      const pathViolation = mountPathViolation(volume.mountPath);
+      if (pathViolation) problems.push(`${where} mountPath ${pathViolation}`);
+      if (typeof volume.readOnly !== "undefined" && typeof volume.readOnly !== "boolean")
+        problems.push(`${where} readOnly must be a boolean`);
+      const has = (key) => typeof volume[key] === "string" && volume[key].length > 0;
+      if (volume.kind === "pvc") {
+        if (!has("claim")) problems.push(`${where} (pvc) requires claim`);
+        ["server", "path", "sizeLimit", "secretName"].forEach((key) => {
+          if (key in volume) problems.push(`${where} (${volume.kind} volume) declares cross-kind field "${key}"`);
+        });
+      } else if (volume.kind === "nfs") {
+        if (!has("server")) problems.push(`${where} (nfs) requires server`);
+        if (!has("path")) problems.push(`${where} (nfs) requires path`);
+        ["claim", "sizeLimit", "secretName"].forEach((key) => {
+          if (key in volume) problems.push(`${where} (${volume.kind} volume) declares cross-kind field "${key}"`);
+        });
+      } else if (volume.kind === "tmp") {
+        ["claim", "server", "path", "secretName"].forEach((key) => {
+          if (key in volume) problems.push(`${where} (${volume.kind} volume) declares cross-kind field "${key}"`);
+        });
+      } else if (volume.kind === "k8s-secret") {
+        if (!has("secretName")) problems.push(`${where} (k8s-secret) requires secretName`);
+        ["claim", "server", "path", "sizeLimit"].forEach((key) => {
+          if (key in volume) problems.push(`${where} (${volume.kind} volume) declares cross-kind field "${key}"`);
+        });
+      }
+      if ("env" in volume) envMapViolation(volume.env, where, "volume env");
+    });
+  }
+
+  // secrets: the project's OWN SecretProviderClasses (per-project
+  // credentials; no credential material, names only).
+  if (!Array.isArray(payload.secrets))
+    problems.push("binding secrets must be an array");
+  else {
+    const seenNames = new Set();
+    payload.secrets.forEach((secret, i) => {
+      const where = `binding secrets[${i}]`;
+      if (typeof secret !== "object" || secret === null || Array.isArray(secret))
+        return problems.push(`${where} must be a JSON object`);
+      for (const key of Object.keys(secret))
+        if (!BINDING_SECRET_KEYS.includes(key))
+          problems.push(`${where}: unknown field "${key}" (fail closed, KB-311)`);
+      label(secret.name, `${where} name`);
+      if (seenNames.has(secret.name))
+        problems.push(`binding secret name ${JSON.stringify(secret.name)} is not unique within the binding`);
+      seenNames.add(secret.name);
+      if (typeof secret.secretProviderClass !== "string" || secret.secretProviderClass.length === 0)
+        problems.push(`${where} secretProviderClass must be a non-blank SecretProviderClass name`);
+      const pathViolation = mountPathViolation(secret.mountPath);
+      if (pathViolation) problems.push(`${where} mountPath ${pathViolation}`);
+      if ("env" in secret) {
+        if (typeof secret.env !== "object" || secret.env === null || Array.isArray(secret.env))
+          problems.push(`${where} env must be a JSON object`);
+        else
+          for (const [name, key] of Object.entries(secret.env)) {
+            if (!ENV_NAME.test(name))
+              problems.push(`${where} env name ${JSON.stringify(name)} must be a SCREAMING_SNAKE environment variable name`);
+            if (typeof key !== "string" || !SPC_KEY.test(key))
+              problems.push(`${where} env "${name}" maps to rendered-key ${JSON.stringify(key)} which is not a SecretProviderClass key name (letters, digits, dot, dash, underscore only — names never values)`);
+          }
+      }
+    });
+  }
+
+  // config: VALUES for the tree's declared config slots (KB-103-shaped).
+  if (typeof payload.config !== "object" || payload.config === null || Array.isArray(payload.config))
+    problems.push("binding config must be a JSON object of slot -> value");
+  else
+    for (const [slot, value] of Object.entries(payload.config)) {
+      if (!Object.prototype.hasOwnProperty.call(CONFIG_SLOT_VARIABLES, slot))
+        problems.push(`binding config slot "${slot}" is not a platform config slot (declare only buildCmd, testCmd, ciGateCmd, baseBranch — fail closed, KB-311)`);
+      if (typeof value !== "string" || value.trim() === "")
+        problems.push(`binding config["${slot}"] value must be a non-blank string`);
+    }
 
   return problems;
 }
@@ -384,9 +589,225 @@ if (payload) {
       for (const problem of bindingViolations(embedded, { ...wf, name }))
         fail(`k8s/examples/routes-configmap.yaml (workflowLibrary.${name})`, problem);
   }
+  // KB-311: the projectRegistry is the ONLY ticket->project routing table —
+  // shape (fail closed), and integrity: every route's project must exist in
+  // it. repo members are advisory; namespaces must be valid DNS labels.
+  const registry = payload.projectRegistry;
+  if (registry !== undefined) {
+    for (const problem of registryViolations(registry))
+      fail("k8s/examples/routes-configmap.yaml (projectRegistry)", problem,
+        "fix the registry entry shape — schema of record: k8s/routes.schema.json #/definitions/projectEntry (KB-311)");
+    const projects = new Set(Object.keys(registry ?? {}));
+    for (const route of payload.routes ?? [])
+      if (typeof route.project === "string" && route.project && !projects.has(route.project))
+        fail("k8s/examples/routes-configmap.yaml", `route "${route.name}" selects project "${route.project}" which the projectRegistry does not carry`,
+          "the registry is the only ticket->project routing table — add the project's entry (KB-311)");
+    for (const [project, entry] of Object.entries(registry ?? {}))
+      if (entry && entry.cutover === "done")
+        console.log(`interface-contract: registry: ${project} cut over to namespace ${entry.namespace} (binding-CM execution, KB-311)`);
+  }
+
   for (const tree of trees) {
     const embedded = Object.entries(wfLibrary).find(([, wf]) => wf.interface && wf.interface.workflow === tree);
     if (!embedded) warn(`${tree} interface is not referenced by the example routes payload (subworkflow-only tree or not yet routed)`);
+  }
+}
+
+// ── KB-311: per-project binding ConfigMap examples (ADR 307) ────────────────
+//
+// Every shipped k8s/examples/binding-*.yaml is the kind of workstream item 1
+// made load-bearing: the project's COMPLETE execution config, served at
+// admission when the project's registry entry marks cutover: done. The legs:
+//
+//   1. the payload structurally validates against
+//      k8s/criteria-binding.schema.json (fail-closed unknown keys at every
+//      level — top-level, volume, secret, config slot);
+//   2. it belongs to a registry entry (namespace -> project, cutover: done
+//      — a binding for a pre-cutover namespace is not a live surface);
+//   3. that project's routes select exactly one workflow-library object and
+//      the binding SATISFIES the tree's interface (mounts byte-exact both
+//      ways, required adapter kinds covered, secret lanes resolved, declared
+//      env covered — KB-310 conformance with the KB-311 project-env rule);
+//   4. binding config slots are a subset of the tree's declared slots
+//      (unknown slots fail closed);
+//   5. the shipped set proves reuse-by-binding (the acceptance pair): every
+//      example resolves to the same tree (identical url+ref digest) while
+//      every images/env pair differs — two projects executing one tree.
+//
+// The structural mirror stays sharp via engineered negatives at the bottom.
+
+const bindingDir = join(repoRoot, "k8s", "examples");
+const bindingExamples = readdirSync(bindingDir)
+  .filter((name) => /^binding-.*\.yaml$/.test(name))
+  .sort();
+
+function blockScalar(src, key, file) {
+  const start = src.indexOf(`  ${key}: |`);
+  if (start === -1) fail(file, `no '${key}: |' data key found`);
+  const out = [];
+  for (const line of src.slice(start).split("\n").slice(1)) {
+    if (line.trim() === "---") break;
+    if (/^  [a-z]/.test(line)) break;
+    if (line.startsWith("    ") || line.trim() === "") out.push(line.slice(4));
+  }
+  return JSON.parse(out.join("\n"));
+}
+
+const resolvedBindings = [];
+for (const name of bindingExamples) {
+  const file = join(bindingDir, name);
+  const src = readFileSync(file, "utf8");
+  const ns = /^  namespace: (.+)$/m.exec(src)?.[1].trim();
+  if (!ns) fail(file, "cannot read the ConfigMap's metadata.namespace (the binding CM lives in the PROJECT's namespace, KB-311)");
+  let binding;
+  try {
+    binding = blockScalar(src, "binding.json", file);
+  } catch (e) {
+    fail(file, `cannot parse the binding.json data key: ${e.message}`);
+    continue;
+  }
+  for (const problem of bindingStructuralViolations(binding))
+    fail(`${file} (binding.json)`, problem, "fix the binding payload — schema of record: k8s/criteria-binding.schema.json (KB-311)");
+
+  // Registry connection: the namespace resolves to exactly one project and
+  // that project must be cut over (cutover: done) — a binding in a
+  // namespace the registry does not route to is not a live surface.
+  const reg = payload ? payload.projectRegistry : undefined;
+  if (typeof reg !== "object" || reg === null)
+    fail(file, `the example routes payload carries no projectRegistry to connect namespace "${ns}" to a project (KB-311)`);
+  const projects = [];
+  for (const [project, entry] of Object.entries(reg ?? {}))
+    if (entry && entry.namespace === ns) projects.push({ project, entry });
+  if (projects.length !== 1)
+    fail(file, `namespace "${ns}" maps to ${projects.length} registry projects (expected exactly one) — the registry is the only ticket->project routing table (KB-311)`);
+  const { project, entry } = projects[0];
+  if (entry.cutover !== "done")
+    fail(file, `project "${project}" (namespace ${ns}) is not marked cutover: done — the binding ConfigMap is served only after cutover (binding-first, deletion second, KB-311)`);
+
+  // The project's routes must select exactly one workflow-library object.
+  const workflowNames = new Set((payload.routes ?? [])
+    .filter((r) => r.project === project)
+    .map((r) => r.workflow));
+  if (workflowNames.size !== 1)
+    fail(file, `project "${project}" routes select ${workflowNames.size} workflows (expected exactly one); the example binding declares one tree's execution config`);
+  const workflowName = [...workflowNames][0];
+  const wf = (payload.workflowLibrary ?? {})[workflowName];
+  if (!wf)
+    fail(file, `project "${project}" selects workflow "${workflowName}" which the workflowLibrary does not carry`);
+  if (typeof wf !== "object" || wf.type !== "url" || !wf.interface)
+    fail(file, `project "${project}" selects workflow "${workflowName}" whose entry carries no embedded interface — url trees must inline it (the binding is validated against the tree's declaration, KB-311)`);
+  validateInterface(wf.interface, `${file} (via ${workflowName})`);
+
+  // KB-310 conformance with the KB-311 project-env rule: interface env is a
+  // requirement the project env must cover; extra project env is by design.
+  const mapped = {
+    name: name,
+    adapterImages: binding.images ?? {},
+    env: binding.env ?? {},
+    volumes: binding.volumes ?? [],
+    secrets: binding.secrets ?? [],
+  };
+  for (const problem of bindingViolations(wf.interface, mapped, true))
+    fail(`${file} (binding.json vs ${workflowName})`, problem, "the binding must satisfy the workflow tree's interface declaration (KB-310/KB-311)");
+
+  // Config slots: subset of the tree's declared slots, delivered KB-103-shaped.
+  const declaredSlots = new Set((wf.interface.configSlots ?? []).map((slot) => slot.slot));
+  for (const slot of Object.keys(binding.config ?? {}))
+    if (!declaredSlots.has(slot))
+      fail(`${file} (binding.json config)`, `binding config slot "${slot}" is not declared by interface "${wf.interface.workflow}" (declared: ${declaredSlots.size ? [...declaredSlots].join(", ") : "none"}) — unknown slot, fail closed (KB-311)`);
+
+  resolvedBindings.push({
+    file, namespace: ns, project, binding,
+    tree: `${wf.url ?? ""}|${wf.ref ?? ""}`,
+    hasTree: Boolean(wf.url),
+  });
+  console.log(`interface-contract: binding: ${name} (project ${project}, workflow ${workflowName}) structurally valid and interface-conformant`);
+}
+
+// Acceptance (KB-311): the shipped pair executes the SAME tree with
+// DIFFERENT images+env. Every binding example must resolve to the same
+// tree (identical url+ref digest) and every example pair must differ in
+// its images and env maps.
+if (resolvedBindings.length < 2)
+  fail("k8s/examples", `only ${resolvedBindings.length} binding example(s) shipped — the acceptance pair (same tree, different bindings) needs the KB-311 examples present`);
+{
+  const tree = new Set(resolvedBindings.map((b) => b.tree));
+  if (tree.size !== 1)
+    fail("k8s/examples", `binding examples resolve to ${tree.size} distinct trees (${[...tree].join(", ")}) — the acceptance demonstration is ONE tree executed by several projects`);
+  for (let i = 1; i < resolvedBindings.length; i++) {
+    const a = resolvedBindings[i - 1], b = resolvedBindings[i];
+    if (JSON.stringify(a.binding.images) === JSON.stringify(b.binding.images))
+      fail("k8s/examples", `binding examples ${a.file} and ${b.file} ship identical images — the acceptance demonstration requires different execution images per project (KB-311)`);
+    if (JSON.stringify(a.binding.env) === JSON.stringify(b.binding.env))
+      fail("k8s/examples", `binding examples ${a.file} and ${b.file} ship identical env — the acceptance demonstration requires different project env per project (KB-311)`);
+  }
+}
+
+// ── self-test: the KB-311 mirrors must stay sharp ───────────────────────────
+{
+  const good = {
+    apiVersion: "criteria.brokenbots.dev/v1",
+    kind: "CriteriaBinding",
+    images: { shell: "registry/criteria-adapter-shell-peer:latest" },
+    env: { GOFLAGS: "-mod=readonly" },
+    volumes: [{ name: "data", kind: "pvc", claim: "project-data", mountPath: "/data" },
+      { name: "scratch", kind: "tmp", mountPath: "/tmp/scratch", sizeLimit: "8Gi" }],
+    secrets: [{ name: "kanboard-api-key", secretProviderClass: "kanboard-spc", mountPath: "/home/criteria/kanboard-secrets", env: { KANBOARD_APP_TOKEN: "kanboard_app_token" } }],
+    config: { ciGateCmd: "make ci" },
+  };
+  const expectStructural = (label, mutate, needle) => {
+    const payload = JSON.parse(JSON.stringify(good));
+    mutate(payload);
+    const problems = bindingStructuralViolations(payload);
+    if (needle === null) {
+      if (problems.length !== 0)
+        fail("scripts/interface_validate.mjs (self-test)",
+          `binding structural self-test "${label}" flagged a compliant payload: ${JSON.stringify(problems)} — the structural mirror is stricter than the schema (KB-311)`);
+    } else if (!problems.some((p) => p.includes(needle)))
+      fail("scripts/interface_validate.mjs (self-test)",
+        `binding structural self-test "${label}" did not fire (expected a violation containing ${JSON.stringify(needle)}; got ${JSON.stringify(problems)}) — the structural mirror must reject what the schema rejects (KB-311)`);
+  };
+  expectStructural("conforming-binding", () => {}, null);
+  expectStructural("unknown-top-key", (d) => { d.workflowLibrary = {}; }, `unknown field "workflowLibrary" at the binding top level`);
+  expectStructural("unknown-config-slot", (d) => { d.config.unknownSlot = "x"; }, `not a platform config slot`);
+  expectStructural("volume-cross-kind", (d) => { d.volumes[0].server = "nfs.example"; }, `cross-kind field "server"`);
+  expectStructural("secret-env-name", (d) => { d.secrets[0].env.KANBOARD_APP_TOKEN = "with space"; }, `rendered-key`);
+  expectStructural("image-blank", (d) => { d.images.shell = " "; }, `without whitespace`);
+
+  const expectRegistry = (label, mutate, needles) => {
+    const reg = { "Demo Project": { namespace: "demo-ns" } };
+    mutate(reg);
+    const problems = registryViolations(reg);
+    if (needles.length === 0) {
+      if (problems.length !== 0)
+        fail("scripts/interface_validate.mjs (self-test)",
+          `registry self-test "${label}" flagged a compliant registry: ${JSON.stringify(problems)} — the registry mirror is stricter than the schema (KB-311)`);
+      return;
+    }
+    for (const needle of needles)
+      if (!problems.some((p) => p.includes(needle)))
+        fail("scripts/interface_validate.mjs (self-test)",
+          `registry self-test "${label}" did not fire (expected a violation containing ${JSON.stringify(needle)}; got ${JSON.stringify(problems)}) — the registry mirror must reject what the schema rejects (KB-311)`);
+  };
+  expectRegistry("conforming-registry", () => {}, []);
+  expectRegistry("unknown-field", (reg) => { reg["Demo Project"].workflow = "x"; }, [`unknown field "workflow"`]);
+  expectRegistry("bad-namespace", (reg) => { reg["Demo Project"].namespace = "BAD NS"; }, ["namespace"]);
+  expectRegistry("bad-repo", (reg) => { reg["Demo Project"].repos = ["no-slash"]; }, [`"owner/name"`]);
+  expectRegistry("bad-cutover", (reg) => { reg["Demo Project"].cutover = "half done"; }, ["cutover"]);
+
+  // The KB-311 project-env rule: interface env must be COVERED by the
+  // project env; extra project env is not unknown-slot.
+  {
+    const iface = { workflow: "selftest_tree", adapters: [], mounts: [], secretEnv: [], env: ["GOTOOLCHAIN"] };
+    const binding = { name: "project_binding", env: { GOFLAGS: "-mod=readonly", GOTOOLCHAIN: "local" } };
+    const problems = bindingViolations(iface, binding, true);
+    if (problems.length !== 0)
+      fail("scripts/interface_validate.mjs (self-test)",
+        `project-env self-test flagged a compliant project binding: ${JSON.stringify(problems)} — extra project env must stay legal (KB-311)`);
+    const gaps = bindingViolations(iface, { name: "project_binding", env: { GOFLAGS: "-mod=readonly" } }, true);
+    if (!gaps.some((p) => p.includes(`requires env "GOTOOLCHAIN"`)))
+      fail("scripts/interface_validate.mjs (self-test)",
+        `project-env self-test did not fire on an uncovered interface env (got ${JSON.stringify(gaps)}) — declared env must be a requirement in projectBinding mode (KB-311)`);
   }
 }
 

@@ -248,11 +248,37 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// gate would fall through to the baked-image path with an unstated
 	// binding. A mismatch refuses the run with the gap named; failure
 	// messages name both sides.
+	//
 	if message, gap := interfaceBindingGap(&run); gap {
 		return r.refuseInterfaceBindingMismatch(ctx, &run, message, logger)
 	}
+	// KB-311 (ADR 307): a run pinned to a project binding (spec.
+	// projectBindingRef) admits through the project's criteria-binding CM
+	// in the run's namespace instead of the workflow entry's inline
+	// binding data: the pin is re-verified, the payload parses fail
+	// closed, and its values are materialized onto the in-memory run the
+	// validation and the job builders act on. The projectBound validation
+	// mode then flips KB-310's unknown-slot rules for env and secret
+	// lanes (the interface becomes the requirement side; extra
+	// project-owned values are legal).
+	bindingSum := ""
+	if run.Spec.ProjectBindingRef != nil {
+		if run.Spec.Workflow == nil {
+			return r.refuseInterfaceBindingMismatch(ctx, &run,
+				fmt.Sprintf("run carries a project binding pin (%q) but no stamped workflow: the binding has no tree to satisfy, so admission is refused (KB-311)", run.Spec.ProjectBindingRef.Name), logger)
+		}
+		payload, sum, refusal, err := r.readProjectBinding(ctx, &run)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if refusal != "" {
+			return r.refuseInterfaceBindingMismatch(ctx, &run, refusal, logger)
+		}
+		materializeProjectBinding(&run, payload)
+		bindingSum = sum
+	}
 	if interfaceBindingApplies(&run) {
-		if err := validateInterfaceBinding(&run); err != nil {
+		if err := validateInterfaceBinding(&run, bindingSum != ""); err != nil {
 			return r.refuseInterfaceBindingMismatch(ctx, &run, err.Error(), logger)
 		}
 	}
@@ -360,7 +386,17 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// below returns; a CM read error other than drift propagates so the
 	// backoff retries the pass instead of failing the run off
 	// infrastructure problems.
-	drift, err := r.renderRunConfig(ctx, &run, update, logger)
+	// KB-311: project-bound runs render from the binding CM's config
+	// slots instead — provenance pinned to the binding CM's
+	// resourceVersion, so a binding replaced under an admitted run drifts
+	// the run fast.
+	var drift string
+	var err error
+	if run.Spec.ProjectBindingRef != nil {
+		drift, err = r.renderProjectBindingConfig(ctx, &run, update, logger)
+	} else {
+		drift, err = r.renderRunConfig(ctx, &run, update, logger)
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -449,8 +485,10 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	stampTerminalAt(update, obs)
 	// KB-310: record what the run was bound to — workflow ref+digest,
 	// interface/binding checksums, operator version, resolved lanes — once,
-	// from the admitted binding, before the pass's status write persists it.
-	r.stampLaunchManifest(update, logger)
+	// from the admitted binding, before the pass's status write persists
+	// it. KB-311: a project-bound run's binding checksum is the project
+	// binding payload's canonical-JSON digest, read this pass.
+	r.stampLaunchManifest(update, bindingSum, logger)
 	if !statusEqual(&run.Status, &update.Status) {
 		logger.Info("updating CriteriaRun status", "phase", update.Status.Phase, "jobName", update.Status.JobName)
 		if err := r.Status().Update(ctx, update); err != nil {

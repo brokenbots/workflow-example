@@ -1,0 +1,85 @@
+# Project binding ConfigMap — the typescript-sdk project's COMPLETE execution
+# config (KB-311, ADR 307). Name 'criteria-binding' in the PROJECT's
+# namespace (typescript-sdk); single data key 'binding.json' holds the
+# payload. Schema of record: k8s/criteria-binding.schema.json; the example is
+# validated by k8s/tests/test_criteria_binding.sh, fail-closed key checks
+# included.
+#
+# ACCEPTANCE (KB-311): a DIFFERENT project binding for the SAME workflow tree
+# as k8s/examples/binding-criteria-go-dev.yaml — both projects' routes point
+# at the identical kanboard_develop_v1 url+ref (identical tree digest), while
+# the images (node-flavored adapter builds), env (npm registry/proxy),
+# storage claims, secret mounts and config values are entirely this project's
+# own: reuse-by-binding. The project owns the payload; the platform's only
+# write path is this project's registry entry (cutover: done).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: criteria-binding
+  namespace: typescript-sdk
+data:
+  binding.json: |
+    {
+      "apiVersion": "criteria.brokenbots.dev/v1",
+      "kind": "CriteriaBinding",
+      "images": {
+        "shell": "localhost:5000/criteria-adapter-shell-peer-node:0.5.56",
+        "copilot": "localhost:5000/criteria-adapter-copilot-peer-node:0.5.56"
+      },
+      "env": {
+        "PATH": "/usr/local/node/bin:/usr/local/bin:/usr/bin:/bin",
+        "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org",
+        "NPM_CONFIG_PROXY": "http://proxy.internal:3128",
+        "NODE_OPTIONS": "--max-old-space-size=4096",
+        "CRITERIA_TOOL_TIMEOUT": "45m"
+      },
+      "volumes": [
+        {
+          "name": "data",
+          "kind": "pvc",
+          "claim": "typescript-sdk-data",
+          "mountPath": "/data",
+          "env": {
+            "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+            "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
+            "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
+          }
+        },
+        {
+          "name": "repo",
+          "kind": "pvc",
+          "claim": "typescript-sdk-repo",
+          "mountPath": "/repo"
+        },
+        {
+          "name": "scratch",
+          "kind": "tmp",
+          "mountPath": "/tmp/scratch",
+          "sizeLimit": "16Gi"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "kanboard-api-key",
+          "secretProviderClass": "kanboard-spc",
+          "mountPath": "/home/criteria/kanboard-secrets",
+          "env": {
+            "KANBOARD_APP_TOKEN": "kanboard_app_token",
+            "KANBOARD_URL": "kanboard_url"
+          }
+        },
+        {
+          "name": "github-tokens",
+          "secretProviderClass": "copilot-spc",
+          "mountPath": "/home/criteria/secrets",
+          "env": {
+            "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+          }
+        }
+      ],
+      "config": {
+        "baseBranch": "main",
+        "ciGateCmd": "npm run typecheck && npm run test"
+      }
+    }

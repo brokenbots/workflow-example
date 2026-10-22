@@ -33,6 +33,18 @@
 # is a routing change for future refires only — admitted runs stamped the
 # pin fail-closed (ConfigRenderDrift).
 #
+# KB-311 (ADR 307): 'projectRegistry' is the ONLY ticket->project routing
+# table — Kanboard project name -> {namespace, repos, cutover}. A project
+# with cutover: done is served by the 'criteria-binding' ConfigMap in its
+# own namespace (k8s/examples/binding-criteria-go-dev.yaml,
+# k8s/examples/binding-typescript-sdk.yaml — the acceptance pair: THE SAME
+# kanboard_develop_v1 tree executed with different bindings, identical tree
+# digest); the intake stamps only {workflow ref, project binding ref, class,
+# secrets lane} for it. Entries without the marker (the two live projects
+# here) keep the pre-cutover behavior: binding-shaped data still rides the
+# workflowLibrary entries until KB-313 deletes them (binding-first,
+# deletion second).
+#
 # CRI-243 (plan CRI-214 M10.1, exit condition 3): the criteria project's
 # routes followed the split pattern — the 'criteria-triage' route fired
 # linear_triage_v1 on [Triage] and the 'criteria-develop' route fired
@@ -899,6 +911,34 @@ data:
           "ciGateCmd": "make ci && make vuln-scan"
         }
       },
+      "projectRegistry": {
+        "Criteria K8s Workflow Runner": {
+          "namespace": "criteria-jobs",
+          "repos": [
+            "brokenbots/criteria-k8s"
+          ]
+        },
+        "Kanboard Tickets": {
+          "namespace": "criteria-jobs",
+          "repos": [
+            "brokenbots/workflow-example"
+          ]
+        },
+        "Criteria Go Dev": {
+          "namespace": "criteria-go-dev",
+          "repos": [
+            "brokenbots/criteria-go-dev"
+          ],
+          "cutover": "done"
+        },
+        "TypeScript SDK": {
+          "namespace": "typescript-sdk",
+          "repos": [
+            "brokenbots/typescript-sdk"
+          ],
+          "cutover": "done"
+        }
+      },
       "routes": [
         {
           "name": "criteria-cleanup",
@@ -923,6 +963,22 @@ data:
           "name": "kanboard-develop",
           "workflow": "kanboard-develop-url",
           "project": "Kanboard Tickets",
+          "states": [
+            "Ready"
+          ]
+        },
+        {
+          "name": "kanboard-develop-go",
+          "workflow": "kanboard-develop-url",
+          "project": "Criteria Go Dev",
+          "states": [
+            "Ready"
+          ]
+        },
+        {
+          "name": "kanboard-develop-ts",
+          "workflow": "kanboard-develop-url",
+          "project": "TypeScript SDK",
           "states": [
             "Ready"
           ]

@@ -345,6 +345,27 @@ spec:
                     resourceVersion:
                       type: string
                       description: ResourceVersion observed at stamping time; a later mismatch fails closed.
+                projectBindingRef:
+                  type: object
+                  description: >-
+                    Project binding ConfigMap pin (KB-311, ADR 307): the
+                    project's complete execution config (images, env,
+                    volumes, secrets, config slots) owned in the run's
+                    namespace under criteria-binding. The watcher stamps it
+                    for projects marked cutover:done in the routes
+                    projectRegistry; the operator admits through that
+                    binding and re-verifies the pin, fail closed. Nil keeps
+                    the pre-KB-311 behavior (the workflow entry's inline
+                    config is the whole contract).
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Binding ConfigMap name in the run's namespace (always "criteria-binding").
+                    resourceVersion:
+                      type: string
+                      description: ResourceVersion observed at stamping time; a later mismatch fails closed.
             status:
               type: object
               properties:

@@ -64,6 +64,13 @@ const (
 	TagMatchAny = "any"
 )
 
+// CutoverDone is the project-registry cutover marker (KB-311, ADR 307):
+// the entry's namespace serves its own criteria-binding ConfigMap. The
+// vocabulary of one value; anything else fails closed (an absent marker
+// stays legal — pre-cutover projects keep the global workflow-library
+// behavior until their binding cut-over: binding-first, deletion second).
+const CutoverDone = "done"
+
 // DefaultState is the Linear workflow state a route triggers on when it
 // omits its states list (CRI-218, ADR-0005 §3.4).
 const DefaultState = "Triage"
@@ -92,6 +99,16 @@ type Payload struct {
 	// name doubles as the per-repo ConfigMap the operator pins and renders
 	// for the run. Optional: payloads predating KB-103 validate unchanged.
 	ConfigLibrary map[string]ConfigEntry `json:"configLibrary,omitempty"`
+	// ProjectRegistry (KB-311, ADR 307) maps a Kanboard project name to
+	// the registry entry owning it: the namespace executing its runs and
+	// serving its criteria-binding ConfigMap, advisory owner/name repo
+	// members, and the cutover marker. The ONLY ticket->project routing
+	// table (routes still select the workflow within the project by
+	// project/tags/states). Optional: payloads predating KB-311 validate
+	// unchanged, and a project without the cutover marker keeps the
+	// global workflow-library binding data until its namespace serves its
+	// own binding (binding-first, deletion second).
+	ProjectRegistry map[string]ProjectEntry `json:"projectRegistry,omitempty"`
 	Routes        []Route                `json:"routes"`
 }
 
@@ -253,6 +270,32 @@ type ConfigEntry struct {
 	TagMatch string `json:"tagMatch,omitempty"`
 }
 
+// ProjectEntry (KB-311, ADR 307) is the project-registry entry a Kanboard
+// project name resolves to: the namespace executing the project's runs
+// (and serving the project's own criteria-binding ConfigMap), the advisory
+// owner/name repo members, and the cutover marker.
+type ProjectEntry struct {
+	// Namespace is where the project's CriteriaRuns are admitted and where
+	// its criteria-binding ConfigMap lives. Required.
+	Namespace string `json:"namespace"`
+	// Repos lists the owner/name repository references the project's
+	// tickets touch. Advisory only — never routed by (routes still select
+	// the workflow within the project; the registry route is the Kanboard
+	// project name, nothing else).
+	Repos []string `json:"repos,omitempty"`
+	// Cutover is "done" when the project's namespace serves its own
+	// binding CRITERIA-BINDING ConfigMap — the intake then stamps binding
+	// references only into the project namespace. Absent keeps the
+	// pre-cutover behavior (binding-first, deletion second, KB-311).
+	Cutover string `json:"cutover,omitempty"`
+}
+
+// IsCutoverDone reports whether the project's namespace serves its own
+// criteria-binding ConfigMap (binding-first execution, KB-311).
+func (e ProjectEntry) IsCutoverDone() bool {
+	return e.Cutover == CutoverDone
+}
+
 // Route assigns Linear tickets to a workflow-library object by project, tag
 // subset, and Linear workflow states.
 type Route struct {
@@ -279,6 +322,7 @@ var (
 	labelRe      = mustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	envNameRe    = mustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	secretKeyRe  = mustCompile(`^[A-Za-z0-9._-]+$`)
+	repoRefRe    = mustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 	whitespaceRe = mustCompile(`\s`)
 )
 
@@ -365,6 +409,28 @@ func (p *Payload) Validate() error {
 			return fmt.Errorf("configLibrary[%q]: %w", name, err)
 		}
 	}
+	// KB-311 (ADR 307): the project registry — the ONLY ticket->project
+	// routing table — is fail-closed at every field: blank project names,
+	// non-label namespaces, malformed repo refs, and cutover markers
+	// outside the closed vocabulary reject.
+	for name, entry := range p.ProjectRegistry {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("projectRegistry has a blank project name")
+		}
+		if !labelRe.MatchString(entry.Namespace) {
+			return fmt.Errorf("projectRegistry[%q]: namespace %q is not a DNS-1123 label", name, entry.Namespace)
+		}
+		for _, repo := range entry.Repos {
+			if !repoRefRe.MatchString(repo) {
+				return fmt.Errorf("projectRegistry[%q]: repo %q is not an \"owner/name\" reference", name, repo)
+			}
+		}
+		switch entry.Cutover {
+		case "", CutoverDone:
+		default:
+			return fmt.Errorf("projectRegistry[%q]: cutover must be %q or absent, got %q (binding-first, deletion second)", name, CutoverDone, entry.Cutover)
+		}
+	}
 	if len(p.Routes) == 0 {
 		return errors.New("routes must not be empty")
 	}
@@ -391,6 +457,15 @@ func (p *Payload) Validate() error {
 		if r.Project == "" {
 			return fmt.Errorf("routes[%d] (%s): project is required", i, r.Name)
 		}
+		// KB-311: when the payload carries a project registry, a route's
+		// project must resolve through it — the registry is the only
+		// ticket->project routing table, and a route selecting an
+		// unregistered project would route nowhere.
+		if len(p.ProjectRegistry) > 0 {
+			if _, ok := p.ProjectRegistry[r.Project]; !ok {
+				return fmt.Errorf("routes[%d] (%s): project %q is not present in projectRegistry", i, r.Name, r.Project)
+			}
+		}
 		if len(r.States) == 0 {
 			return fmt.Errorf("routes[%d] (%s): states must not be empty (omit the states key to default to [%s])", i, r.Name, DefaultState)
 		}
@@ -411,6 +486,16 @@ func (p *Payload) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Project resolves a Kanboard project name to its registry entry (KB-311,
+// ADR 307): the registry is the ONLY ticket->project routing table, so the
+// intake routes every ticket through this lookup (namespace + cutover
+// state) before anything else decides. Missing registry entries return
+// false and callers fail closed.
+func (p *Payload) Project(name string) (ProjectEntry, bool) {
+	entry, ok := p.ProjectRegistry[name]
+	return entry, ok
 }
 
 // validateWorkflow enforces the per-workflow constraints, including the
@@ -733,6 +818,28 @@ func validateAdapterImages(images map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// The exported wrappers below reuse the routes payload rules for the
+// per-project binding payload (KB-311, ADR 307): the binding's volumes,
+// secrets, env, and adapter images validate against the same single
+// source of truth.
+
+// ValidateVolume exposes the routes volume rules to the binding package.
+func ValidateVolume(v Volume) error { return validateVolume(v) }
+
+// ValidateSecret exposes the routes secret rules to the binding package.
+func ValidateSecret(s Secret) error { return validateSecret(s) }
+
+// ValidateEnvMap exposes the env map rules to the binding package.
+func ValidateEnvMap(env map[string]string, where string) error {
+	return validateEnvMap(env, where)
+}
+
+// ValidateAdapterImages exposes the adapter image rules to the binding
+// package.
+func ValidateAdapterImages(images map[string]string) error {
+	return validateAdapterImages(images)
 }
 
 // validateSecretEnv checks the secret's env mapping: env var names to key

@@ -41,6 +41,20 @@
         "$ref": "#/definitions/config"
       }
     },
+    "projectRegistry": {
+      "type": "object",
+      "description": "Project registry (KB-311, ADR 307): Kanboard project name -> the project's registry entry — the ONLY ticket->project routing table (routes still select the workflow within the project via project/tags/states). A project's binding lives in the entry's namespace: the 'criteria-binding' ConfigMap the project owns. 'cutover: done' marks a project whose namespace serves its own bindings — the intake stamps only {workflow ref, project binding ref, class, secrets lane} into CRs for it (no image/env/volume data, KB-103 config overrides included: they are project-shaped data) and reads the binding at admission; projects without the marker keep the global-CM workflow-library behavior until their binding cut-over (binding-first, deletion second). When present, every route's project must exist in this registry and every entry must carry a namespace.",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "description": "Kanboard project name as the ticket carries it (free-form: spaces allowed).",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/projectEntry"
+      }
+    },
     "routes": {
       "type": "array",
       "description": "Route entries assigning Linear tickets to workflow-library objects. Each ticket is matched by project, tag subset, and Linear workflow states.",
@@ -679,6 +693,36 @@
             "",
             "all",
             "any"
+          ]
+        }
+      }
+    },
+    "projectEntry": {
+      "type": "object",
+      "description": "A project's registry entry (KB-311, ADR 307): the namespace executing its runs and serving its binding ('criteria-binding' ConfigMap, owned by the project), the repos its tickets touch (advisory — route tags still select within the project), and the cutover marker. 'repo' members never route: the registry maps the Kanboard project name to the project, nothing else.",
+      "additionalProperties": false,
+      "required": [
+        "namespace"
+      ],
+      "properties": {
+        "namespace": {
+          "$ref": "#/definitions/label",
+          "description": "Namespace the project's runs are admitted into and its criteria-binding ConfigMap (its execution binding, KB-311) lives in. The intake creates CRs here."
+        },
+        "repos": {
+          "type": "array",
+          "description": "owner/name repository references the project's tickets touch (advisory metadata; per-card repo tags still select within the project).",
+          "items": {
+            "type": "string",
+            "description": "GitHub owner/name pair.",
+            "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"
+          }
+        },
+        "cutover": {
+          "type": "string",
+          "description": "Cutover marker (KB-311 migration sequencing): 'done' when this project's namespace serves its own criteria-binding — after cutover the intake stamps binding references only (the global workflowLibrary entries keep binding-shaped data until their deletion, binding-first then deletion). Absent (or any value other than 'done' — rejected) keeps the pre-cutover behavior: routes select binding-shaped data from the global payload.",
+          "enum": [
+            "done"
           ]
         }
       }

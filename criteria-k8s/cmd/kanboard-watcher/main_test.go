@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/binding"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 )
@@ -1834,4 +1835,306 @@ func TestRoutesLoadFailureFailsThePoll(t *testing.T) {
 	assert.Contains(t, reason, "no successful poll since startup")
 	ok, _ = tw.w.live()
 	assert.True(t, ok, "the poll loop completed the poll, so the process is live")
+}
+
+// bindingRoutesJSON (KB-311): the cutover-done fixture. The project
+// registry routes "Kanboard Tickets" through the criteria-go-dev
+// namespace with cutover marked done, and the global workflowLibrary
+// entry deliberately carries binding-shaped data (env, adapterImages,
+// volumes, secrets): the binding-first CR must carry NONE of it —
+// references only, with the full execution config served by the
+// project-owned criteria-binding CM.
+const bindingRoutesJSON = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "projectRegistry": {
+    "Kanboard Tickets": {"namespace": "criteria-go-dev", "repos": ["brokenbots/workflow-example"], "cutover": "done"}
+  },
+  "workflowLibrary": {
+    "kanboard-intake": {
+      "type": "url",
+      "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
+      "ref": "0b8136650d5622381bf18a597ed93b8c272ba19b",
+      "image": "localhost:5000/criteria:dev",
+      "namespace": "criteria-jobs",
+      "class": "triage",
+      "env": {"STALE_GLOBAL_ENV": "must-not-be-stamped"},
+      "adapterImages": {"shell": "localhost:5000/adapter-shell:dev"},
+      "volumes": [
+        {"name": "tokens", "kind": "k8s-secret", "secretName": "github-tokens", "mountPath": "/home/criteria/secrets", "readOnly": true}
+      ],
+      "secrets": [
+        {"name": "gh", "secretProviderClass": "global-spc", "mountPath": "/home/criteria/gh"}
+      ],
+      "interface": {
+        "apiVersion": "criteria.brokenbots.dev/v1",
+        "kind": "WorkflowInterface",
+        "workflow": "kanboard_triage_v1",
+        "adapters": ["shell", "codex"],
+        "mounts": [
+          {"name": "workspace", "mountPath": "/home/criteria/workspace", "kind": "pvc"}
+        ],
+        "secretEnv": ["GH_TOKEN"],
+        "env": ["CRITERIA_RUN_MODE"],
+        "configSlots": [
+          {"slot": "buildCmd", "variable": "build_cmd", "target": "build step", "description": "Command that builds the tree."}
+        ]
+      }
+    }
+  },
+  "routes": [
+    {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]}
+  ]
+}`
+
+// bindingGlobalRoutesJSON is the same routes payload with the registry
+// entry's cutover flag removed: the project is routed through the
+// registry but not yet cut over, so the watcher must keep the
+// pre-cutover global-library stamping.
+const bindingGlobalRoutesJSON = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "Routes",
+  "projectRegistry": {
+    "Kanboard Tickets": {"namespace": "criteria-go-dev", "repos": ["brokenbots/workflow-example"]}
+  },
+  "workflowLibrary": {
+    "kanboard-intake": {
+      "type": "url",
+      "url": "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1",
+      "ref": "0b8136650d5622381bf18a597ed93b8c272ba19b",
+      "image": "localhost:5000/criteria:dev",
+      "namespace": "criteria-jobs",
+      "class": "triage",
+      "env": {"STALE_GLOBAL_ENV": "must-be-stamped-pre-cutover"},
+      "adapterImages": {"shell": "localhost:5000/adapter-shell:dev"},
+      "volumes": [
+        {"name": "tokens", "kind": "k8s-secret", "secretName": "github-tokens", "mountPath": "/home/criteria/secrets", "readOnly": true}
+      ],
+      "secrets": [
+        {"name": "gh", "secretProviderClass": "global-spc", "mountPath": "/home/criteria/gh"}
+      ],
+      "interface": {
+        "apiVersion": "criteria.brokenbots.dev/v1",
+        "kind": "WorkflowInterface",
+        "workflow": "kanboard_triage_v1",
+        "adapters": ["shell", "codex"],
+        "mounts": [
+          {"name": "workspace", "mountPath": "/home/criteria/workspace", "kind": "pvc"}
+        ],
+        "secretEnv": ["GH_TOKEN"],
+        "env": ["CRITERIA_RUN_MODE"],
+        "configSlots": [
+          {"slot": "buildCmd", "variable": "build_cmd", "target": "build step", "description": "Command that builds the tree."}
+        ]
+      }
+    }
+  },
+  "routes": [
+    {"name": "kb-triage", "workflow": "kanboard-intake", "project": "Kanboard Tickets", "states": ["Backlog"]}
+  ]
+}`
+
+// cutoverBindingPayload mirrors k8s/examples/binding-criteria-go-dev.yaml:
+// the project namespace's COMPLETE execution config (KB-311). The env
+// lane covers the fixture tree's interface env slot.
+const cutoverBindingPayload = `{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "CriteriaBinding",
+  "images": {
+    "shell": "registry.dev/brokenbots/adapter-shell-peer-go:0.5.56",
+    "codex": "registry.dev/brokenbots/adapter-codex-peer-go:0.5.56"
+  },
+  "env": {"CRITERIA_RUN_MODE": "k8s", "GOFLAGS": "-mod=mod"},
+  "volumes": [
+    {"name": "workspace", "kind": "pvc", "claim": "go-dev-workspace", "mountPath": "/home/criteria/workspace"}
+  ],
+  "secrets": [
+    {"name": "github", "secretProviderClass": "go-dev-github-spc", "mountPath": "/home/criteria/secrets", "env": {"GH_TOKEN": "github_token"}}
+  ],
+  "config": {".build_cmd": "go build ./..."}
+}`
+
+// cutoverNS is the project namespace the binding-ready fixture routes
+// through.
+const cutoverNS = "criteria-go-dev"
+
+// installBindingCM installs the project namespace's criteria-binding CM
+// so the watcher's stamp-time pin resolves, and returns the CM as the
+// object store holds it (its resourceVersion is what the pin must carry).
+func (tw *testWatcher) installBindingCM(t *testing.T) corev1.ConfigMap {
+	t.Helper()
+	require.NoError(t, tw.client.Create(context.Background(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: binding.CMName, Namespace: cutoverNS},
+		Data:       map[string]string{binding.BindingKey: cutoverBindingPayload},
+	}))
+	var cm corev1.ConfigMap
+	require.NoError(t, tw.client.Get(context.Background(),
+		client.ObjectKey{Namespace: cutoverNS, Name: binding.CMName}, &cm))
+	return cm
+}
+
+// runsIn lists the watcher's runs in one namespace (the global namespace
+// before cutover, a project namespace after it).
+func (tw *testWatcher) runsIn(t *testing.T, ns string) []criteriav1.CriteriaRun {
+	t.Helper()
+	list := &criteriav1.CriteriaRunList{}
+	if err := tw.client.List(context.Background(), list, client.InNamespace(ns)); err != nil {
+		t.Fatal(err)
+	}
+	return list.Items
+}
+
+// TestPollCutoverFiresBindingFirstRun is the KB-311 intake contract for a
+// cutover-done project: the run lands in the registry entry's namespace
+// carrying binding REFERENCES only — the tree (unchanged digest inputs:
+// name/type/url/ref/class/interface), a resourceVersion-pinned
+// criteria-binding ref, and no env/adapterImages/volumes/secrets and no
+// KB-103 spec-fields, which the project's binding CM owns at admission.
+func TestPollCutoverFiresBindingFirstRun(t *testing.T) {
+	tw := newTestWatcher(t, bindingRoutesJSON)
+	cm := tw.installBindingCM(t)
+	tw.kbS.addTask(20, 5, "k8s-run") // column 5 = Backlog
+
+	tw.pollOnce(t)
+
+	runs := tw.runsIn(t, cutoverNS)
+	require.Len(t, runs, 1, "the cutover-done project's run lives in the project namespace")
+	assert.Empty(t, tw.runs(t), "no run in the global namespace once cutover is done")
+	run := runs[0]
+	assert.Equal(t, cutoverNS, run.Namespace)
+	assert.Equal(t, "KB-20", run.Spec.TicketID)
+	assert.Equal(t, "brokenbots/workflow-example", run.Spec.RepoURL)
+
+	// The binding pin: name + stamp-time resourceVersion, admission re-reads
+	// and proves it before job build.
+	require.NotNil(t, run.Spec.ProjectBindingRef)
+	assert.Equal(t, binding.CMName, run.Spec.ProjectBindingRef.Name)
+	require.NotEmpty(t, cm.ResourceVersion, "the fake store assigns a resourceVersion on create")
+	assert.Equal(t, cm.ResourceVersion, run.Spec.ProjectBindingRef.ResourceVersion,
+		"the pin proves the binding did not change between stamp and admit")
+
+	// The tree references only: binding-shaped data stays in the project's
+	// binding CM.
+	wf := run.Spec.Workflow
+	require.NotNil(t, wf)
+	assert.Equal(t, "kanboard-intake", wf.Name)
+	assert.Equal(t, "url", wf.Type)
+	assert.Equal(t, "triage", wf.Class)
+	assert.Equal(t, "localhost:5000/criteria:dev", wf.Image)
+	assert.Equal(t, "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1", wf.URL)
+	assert.Equal(t, "0b8136650d5622381bf18a597ed93b8c272ba19b", wf.Ref)
+	assert.Empty(t, wf.Env, "binding-shaped workflow env stays in the project binding")
+	assert.Empty(t, wf.AdapterImages, "binding adapter images stay in the project binding")
+	assert.Empty(t, wf.Volumes, "binding volumes stay in the project binding")
+	assert.Empty(t, wf.Secrets, "binding secrets stay in the project binding")
+	assert.Empty(t, wf.Namespace,
+		"namespace-less tree reference: TargetNamespace resolves the run's own namespace")
+	assert.Equal(t, "localhost:5000/criteria:dev", run.Spec.Image, "spec.image stamps from the tree")
+
+	// The secrets lane lives on the interface (tree data), unchanged.
+	require.NotNil(t, wf.Interface)
+	assert.Equal(t, "criteria.brokenbots.dev/v1", wf.Interface.APIVersion)
+	assert.Equal(t, "kanboard_triage_v1", wf.Interface.Workflow)
+	assert.Equal(t, []string{"shell", "codex"}, wf.Interface.Adapters)
+	assert.Equal(t, []string{"GH_TOKEN"}, wf.Interface.SecretEnv)
+	assert.Equal(t, []string{"CRITERIA_RUN_MODE"}, wf.Interface.Env)
+	require.Len(t, wf.Interface.ConfigSlots, 1)
+	assert.Equal(t, "buildCmd", wf.Interface.ConfigSlots[0].Slot)
+
+	// The source pin still carries the tree provenance.
+	require.NotNil(t, run.Spec.WorkflowSource)
+	assert.Equal(t, "url", run.Spec.WorkflowSource.Type)
+
+	// KB-103 spec-fields are NOT stamped: the binding's config slots own
+	// those values at admission, and a spec-field stamp would collide with
+	// binding-owned config.
+	assert.Empty(t, run.Spec.BuildCmd)
+	assert.Empty(t, run.Spec.TestCmd)
+	assert.Empty(t, run.Spec.CIGateCmd)
+	assert.Empty(t, run.Spec.BaseBranch)
+	assert.Nil(t, run.Spec.ConfigRef)
+}
+
+// TestPollCutoverDegradesToNameOnlyBindingPin is the KB-250
+// no-silent-degrade contract for the binding pin: a stamp-time binding CM
+// read failure keeps the run flowing on a name-only pin, logged AND
+// surfaced on the ticket card. Admission proves the binding on its own
+// read before job build, so nothing beyond provenance is lost.
+func TestPollCutoverDegradesToNameOnlyBindingPin(t *testing.T) {
+	want := apierrors.NewInternalError(errors.New("etcd down"))
+	tw := newTestWatcher(t, bindingRoutesJSON)
+	surface := fake.NewClientBuilder().WithScheme(tw.w.client.Scheme()).
+		WithStatusSubresource(&criteriav1.CriteriaRun{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.ConfigMap); ok {
+					return want
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	tw.w.client = surface
+	tw.client = surface
+	tw.kbS.addTask(21, 5, "k8s-run")
+
+	tw.pollOnce(t)
+
+	runs := tw.runsIn(t, cutoverNS)
+	require.Len(t, runs, 1, "the degradation must not fail the fire")
+	require.NotNil(t, runs[0].Spec.ProjectBindingRef)
+	assert.Equal(t, binding.CMName, runs[0].Spec.ProjectBindingRef.Name)
+	assert.Empty(t, runs[0].Spec.ProjectBindingRef.ResourceVersion, "the pin is name-only")
+	assert.True(t, tw.logs.contains("binding ConfigMap read failed at stamping"),
+		"the watcher logs the degradation")
+	comments := tw.kbS.commentBodiesOn(21)
+	require.Len(t, comments, 1, "the degradation is surfaced on the ticket card")
+	assert.Contains(t, comments[0], "criteria-binding")
+	assert.Contains(t, comments[0], "could not be pinned at stamp time")
+	assert.Contains(t, comments[0], "etcd down", "the card warning carries the underlying read error")
+}
+
+// TestPollPreCutoverKeepsGlobalStamping pins the migration boundary: a
+// routed-but-not-cutover-done project keeps the pre-cutover stamping —
+// global-library binding-shaped data stamped inline, KB-103 spec-fields,
+// projectBindingRef absent.
+func TestPollPreCutoverKeepsGlobalStamping(t *testing.T) {
+	tw := newTestWatcher(t, bindingGlobalRoutesJSON)
+	tw.kbS.addTask(22, 5, "k8s-run")
+
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	run := runs[0]
+	assert.Equal(t, "criteria-jobs", run.Namespace)
+	assert.Nil(t, run.Spec.ProjectBindingRef, "no binding ref before cutover")
+	wf := run.Spec.Workflow
+	require.NotNil(t, wf)
+	assert.Equal(t, map[string]string{"STALE_GLOBAL_ENV": "must-be-stamped-pre-cutover"}, wf.Env)
+	assert.Equal(t, map[string]string{"shell": "localhost:5000/adapter-shell:dev"}, wf.AdapterImages)
+	require.Len(t, wf.Volumes, 1)
+	require.Len(t, wf.Secrets, 1)
+	assert.Equal(t, "criteria-jobs", wf.Namespace, "the tree's namespace drives TargetNamespace pre-cutover")
+}
+
+// TestPollCutoverGatesFiringOnProjectNamespaceRun exercises the
+// two-namespace run index (KB-311): an in-flight run in the project
+// namespace gates a refire exactly as a global-namespace run does.
+func TestPollCutoverGatesFiringOnProjectNamespaceRun(t *testing.T) {
+	tw := newTestWatcher(t, bindingRoutesJSON)
+	tw.installBindingCM(t)
+	tw.kbS.addTask(23, 5, "k8s-run")
+
+	tw.pollOnce(t)
+	require.Len(t, tw.runsIn(t, cutoverNS), 1)
+
+	// A second poll with the card re-entered the trigger column must NOT
+	// refire while the project-namespace run is still in flight (its phase
+	// is empty until the controller sets status).
+	tw.kbS.setTaskColumn(23, 6)
+	tw.kbS.setTaskColumn(23, 5)
+	tw.pollOnce(t)
+
+	assert.Len(t, tw.runsIn(t, cutoverNS), 1, "no refire while the project run is in flight")
 }

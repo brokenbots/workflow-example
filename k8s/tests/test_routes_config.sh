@@ -84,7 +84,13 @@ WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes",
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
-TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes"}
+TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes", "projectRegistry"}
+# KB-311 (ADR 307): projectRegistry — the ONLY ticket->project routing table.
+# Entries mirror routes.schema.json's projectEntry: closed key set, DNS-1123
+# namespace, advisory owner/name repo members, cutover marker vocabulary of
+# one value ("done"). Route projects must exist here when the key is present.
+PROJECT_ENTRY_KEYS = {"namespace", "repos", "cutover"}
+REPO_REF_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 CONFIG_KEYS = {"buildCmd", "testCmd", "ciGateCmd", "baseBranch", "tags", "tagMatch"}
 CONFIG_TAG_MATCHES = {"", "all", "any"}
 VOLUME_KINDS = ("pvc", "nfs", "tmp", "k8s-secret")
@@ -513,7 +519,44 @@ def validate(doc):
                     errs.append(f"payload.routes has duplicate name {rn!r}")
                 seen.add(rn)
                 validate_route(route, f"payload.routes[{i}]", library, config_library, errs)
+    registry = doc.get("projectRegistry")
+    if "projectRegistry" in doc:
+        validate_registry(registry, errs)
+        if isinstance(registry, dict):
+            for i, route in enumerate(routes if isinstance(routes, list) else []):
+                if isinstance(route, dict) and route.get("project") not in registry:
+                    errs.append(f"payload.routes[{i}].project {route.get('project')!r} is not in projectRegistry (the registry is the only ticket->project routing table, KB-311)")
     return errs
+
+
+def validate_registry(registry, errs):
+    # KB-311 (ADR 307): the project registry — closed key sets, DNS-1123
+    # namespaces, advisory owner/name repo members, cutover vocabulary of
+    # exactly one marker ("done"). Same rules as routes.schema.json's
+    # projectEntry and interface_validate.mjs's registryViolations mirror.
+    if not isinstance(registry, dict) or not registry:
+        errs.append("payload.projectRegistry must be a non-empty object of project name -> entry")
+        return
+    for project, entry in registry.items():
+        if not isinstance(project, str) or re.search(r"\S", project) is None:
+            errs.append("payload.projectRegistry has a blank project name")
+            continue
+        if not isinstance(entry, dict):
+            errs.append(f"payload.projectRegistry.{project} must be an object")
+            continue
+        for key in entry:
+            if key not in PROJECT_ENTRY_KEYS:
+                errs.append(f"payload.projectRegistry.{project} has unknown field {key!r}")
+        namespace = entry.get("namespace")
+        if "namespace" not in entry or not is_label(namespace):
+            errs.append(f"payload.projectRegistry.{project}.namespace must be a DNS-1123 label")
+        repos = entry.get("repos")
+        if repos is not None and (not isinstance(repos, list) or any(
+                not isinstance(r, str) or REPO_REF_RE.match(r) is None for r in repos)):
+            errs.append(f"payload.projectRegistry.{project}.repos must be an array of owner/name repository references")
+        cutover = entry.get("cutover")
+        if "cutover" in entry and cutover not in ("done",):
+            errs.append(f"payload.projectRegistry.{project}.cutover {cutover!r} must be \"done\" or absent (binding-first, deletion second)")
 
 
 # --------------------------------------------------------- example variants
@@ -753,6 +796,58 @@ negative.extend([
     ("image-workflow-with-interface", True, mutate(kb310_image_with_interface)),
 ])
 
+# KB-311 (ADR 307): project-registry fail-closed variants. The registry is
+# the ticket->project routing table, so a bad entry poisons every ticket it
+# routes: unknown fields, namespace labels, repo refs, the cutover
+# vocabulary, and routes selecting projects the registry does not carry all
+# reject. A pre-cutover entry (no cutover marker) stays legal —
+# binding-first, deletion second.
+def kb311_registry_unknown_field(d):
+    d["projectRegistry"]["Criteria Go Dev"]["binding"] = {}
+
+
+def kb311_registry_bad_namespace(d):
+    d["projectRegistry"]["Criteria Go Dev"]["namespace"] = "Bad_NS"
+
+
+def kb311_registry_bad_repo(d):
+    d["projectRegistry"]["Criteria Go Dev"]["repos"] = ["missing-slash"]
+
+
+def kb311_registry_bad_cutover(d):
+    d["projectRegistry"]["Criteria Go Dev"]["cutover"] = "half done"
+
+
+def kb311_registry_blank_project(d):
+    d["projectRegistry"]["   "] = {"namespace": "demo-ns"}
+
+
+def kb311_registry_missing_namespace(d):
+    d["projectRegistry"]["Criteria Go Dev"].pop("namespace")
+
+
+def kb311_route_unregistered_project(d):
+    d["routes"][0]["project"] = "Unregistered Project"
+
+
+def kb311_registry_entry_without_cutover(d):
+    d["projectRegistry"]["Criteria Go Dev"].pop("cutover")
+
+
+negative.extend([
+    ("registry-unknown-field", True, mutate(kb311_registry_unknown_field)),
+    ("registry-bad-namespace", True, mutate(kb311_registry_bad_namespace)),
+    ("registry-bad-repo", True, mutate(kb311_registry_bad_repo)),
+    ("registry-bad-cutover", True, mutate(kb311_registry_bad_cutover)),
+    ("registry-blank-project", True, mutate(kb311_registry_blank_project)),
+    ("registry-missing-namespace", True, mutate(kb311_registry_missing_namespace)),
+    ("route-unregistered-project", False, mutate(kb311_route_unregistered_project)),
+])
+
+positive.extend([
+    ("registry-entry-without-cutover", mutate(kb311_registry_entry_without_cutover)),
+])
+
 failures = []
 
 
@@ -818,16 +913,20 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 8,
+shipped_err(len(base["routes"]) == 10,
             f"shipped example routes = {len(base['routes'])}, want the CRI-310 cleanup route, "
-            "the two kanboard routes, and the KB-277/KB-278/KB-279/KB-280/KB-276 harness legs "
+            "the two kanboard routes plus the KB-311 acceptance pair (kanboard-develop-go/"
+            "kanboard-develop-ts: two projects, same tree, different bindings), and the "
+            "KB-277/KB-278/KB-279/KB-280/KB-276 harness legs "
             "(contracts/composition/failures/fleet-smoke/wire; the criteria split routes are retired, KB-281)")
 route_names = {r.get("name") for r in base["routes"] if isinstance(r, dict)}
 shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-develop",
+                            "kanboard-develop-go", "kanboard-develop-ts",
                             "harness-contracts", "harness-composition", "harness-failures",
                             "harness-fleet-smoke", "harness-wire"},
             f"shipped example route names = {sorted(route_names)}, want cleanup + kanboard pair"
-            " + harness-contracts + harness-composition + harness-failures + harness-fleet-smoke + harness-wire")
+            " + KB-311 acceptance pair + harness-contracts + harness-composition"
+            " + harness-failures + harness-fleet-smoke + harness-wire")
 for retired_route in ("criteria-triage", "criteria-develop"):
     shipped_err(retired_route not in route_names,
                 f"shipped example: the retired {retired_route} route returned (KB-281)")
