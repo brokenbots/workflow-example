@@ -22,10 +22,9 @@
 // untouched — never re-derived, never overwritten.
 //
 // Ticket-source mapping: board columns for workflow states, JSON-RPC for
-// GraphQL. The handler subworkflow is shared with the Linear tree and keeps
-// its own Linear bookkeeping; the kanboard tree passes it an empty ticket_id,
-// which disables that path entirely, and performs the equivalent task-column
-// bookkeeping itself against Kanboard.
+// GraphQL. The handler subworkflow is shared with the kanboard tree and
+// owns no ticket bookkeeping; the kanboard tree performs the equivalent
+// task-column bookkeeping itself against Kanboard.
 
 workflow {
     name             = "kanboard_develop_v1"
@@ -95,16 +94,8 @@ data "internal" "branch" {
 subworkflow "handler" {
     source = "../workstream_handler_v1"
     input = {
-        // Empty ticket_id disables the handler's own Linear bookkeeping
-        // (its set_linear_review_state step is skipped entirely, see the
-        // route_reviewer_creds switch). The kanboard tree owns ticket
-        // bookkeeping itself: the fetch/review/done column moves happen in
-        // this tree's steps against Kanboard. The handler's linear_api_key
-        // variable stays bound (required by its signature) but with an
-        // empty value: no Linear call is reachable with ticket_id empty.
-        ticket_id            = ""
-        linear_review_state  = ""
-        linear_api_key       = ""
+        // The handler owns no ticket bookkeeping: the fetch/review/done
+        // column moves happen in this tree's steps against Kanboard.
         workstream_file      = data.internal.workstream_file.value
         repo_dir             = var.repo_dir
         // branch_manager creates the worktree itself; this workflow only
@@ -336,7 +327,7 @@ step "comment_handler_done" {
     outcome "success" { next = step.set_done_state }
     // CRI-275: the closing comment failed — a bookkeeping failure on the
     // post-merge path, so the run ends failed (success=false) exactly as in
-    // linear_intake_v1's comment_handler_done. The Done move is skipped: the
+    // the handler's comment steps. The Done move is skipped: the
     // observable outcome is not "Done" and no comment marks it; the failed
     // run record is what the watcher raises and refires on.
     outcome "failure" { next = state.failed }

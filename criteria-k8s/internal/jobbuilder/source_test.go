@@ -498,7 +498,7 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 			"JOB_NAME=cri-231",
 			"POD_IP=10.42.0.5",
 			"CRITERIA_RUN_DIR_ROOT=" + filepath.Join(dir, "runs"),
-			// The linear routes' declared secrets render this pair set via
+			// The declared secrets render this pair set via
 			// secretVarBindings; the script loops it into --var args.
 			"CRITERIA_SECRET_VARS=linear_api_key=file:/home/criteria/linear-secrets/linear_api_key\n" +
 				"reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token\n" +
@@ -509,8 +509,6 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 		assert.Contains(t, log, "argv: [apply] [git::https://example.com/org/workflows.git?ref=main] "+
 			"[--var] [ticket_id=] [--var] [repo_dir=/data/intake//repo] "+
 			"[--var] [intake_root=/data/intake] [--var] [triage_root=/data/triage] "+
-			"[--var] [linear_review_state=In Review] "+
-			"[--var] [linear_work_state=In Progress] [--var] [linear_done_state=Done] "+
 			"[--var] [base_branch=main] [--var] [build_cmd=] [--var] [test_cmd=] "+
 			"[--var] [ci_gate_cmd=] [--var] [provider_base_url=] "+
 			"[--workflow-ref] [28777aacc3cfbe85005ddb27f548116e692c0eb4] "+

@@ -15,12 +15,15 @@
 # KB-281 (2026-10-17): the linear_intake_v1 / linear_triage_v1 /
 # linear_develop_v1 trees and their url objects ('linear-intake-url',
 # 'linear-develop-url', 'linear-triage-url') plus the 'criteria-triage' /
-# 'criteria-develop' routes are RETIRED — removed from this example. The
-# 'linear-intake-v1' image object stays: it pins the frozen
-# localhost:5000/linear-intake-remote:dev registry image (nothing in this
-# repo builds that image anymore) and keeps the legacy intake behavior
-# reachable via a ticket's workflows-label-group override — no route
-# assigns it by default anymore.
+# 'criteria-develop' routes are RETIRED — removed from this example.
+# KB-304 (2026-10-19, Dave ruling: the Linear integration is dead) removes
+# the last residue: the 'linear-intake-v1' image object and the
+# 'criteria-cleanup' route rule are gone from this example too. The
+# example carries no object or rule naming the integration anymore; the
+# shipped workflowLibrary still pins the frozen
+# localhost:5000/linear-intake-remote:dev registry image nowhere, and no
+# route assigns legacy intake behavior by default. kanboard-triage /
+# kanboard-develop stay as-is.
 #
 # KB-103: 'configLibrary' holds per-repo runner config (build/test/ci-gate
 # commands). Each entry name doubles as the ConfigMap name the operator
@@ -69,14 +72,13 @@
 # dirty label is a ROUTING SURFACE. The 'ticket-cleanup-url' object fetches
 # the ticket_cleanup_v1 tree (url-only, no image, on criteria-base — the
 # CRI-244 validation-run-a child shape: single shell adapter, no git
-# operations, so its only secret is the Linear API key) and the
-# 'criteria-cleanup' route fires it on tickets carrying the watcher's sticky
-# "criteria-dirty" label in [Ready for Development]. (KB-281: the tag-less
-# general develop route this route used to out-prioritize is retired, so
-# for tickets without the dirty label nothing matches — the watcher fails
-# closed; the tag-based route needs no priority tie-break anymore. The
-# internal/routes/routes.go specific-over-general resolution still governs
-# the remaining multi-candidate shapes.) Its class is 'triage'
+# operations) and its 'criteria-cleanup' route fires it on tickets
+# carrying the watcher's sticky "criteria-dirty" label in [Ready for
+# Development]. (KB-281: the tag-less general develop route this route
+# used to out-prioritize is retired. KB-304: the route rule is retired
+# with it — the object stays, schema-validated and pinned, but no route
+# names it anymore; the tree remains reachable via a ticket's
+# workflows-label-group workflow override if a future route re-arms it.) Its class is 'triage'
 # (CRI-242): the cleanup pass is read-only against the repo.
 # The object ships WITHOUT a 'ref' pin deliberately: this repository squash
 # merges (the shipped pins all name main-landed commits — set in FOLLOW-UP
@@ -165,10 +167,9 @@
 # commit that lands the tree, because the subtree can't pin its own landing
 # commit. The route fires ON DAVE'S GO within the green-run plan only:
 # tag-gated (tagMatch=all on harness-validation + harness-contracts) over
-# the criteria project's Ready for Development state, so a plain
-# development card never matches it (criteria-cleanup selects the same
-# state but the different criteria-dirty tag; the kanboard routes select
-# the kanboard project). Secrets stay name references (CRI-214 plan
+# the criteria project's Ready for Development state (tagMatch=all), so a
+# plain development card never matches it (the kanboard routes select the
+# kanboard project; KB-304: no untagged criteria-project route remains). Secrets stay name references (CRI-214 plan
 # section 3.8), and adapterImages pin the recorded fleet pin set verbatim
 # (three-way pin agreement).
 #
@@ -217,9 +218,9 @@
 # that lands the tree, because the subtree can't pin its own landing commit.
 # The route fires ON DAVE'S GO within the green-run plan only: tag-gated
 # (tagMatch=all on harness-validation + harness-wire) over the criteria
-# project's Ready for Development state, so a plain development card never
-# matches it (criteria-cleanup selects the same state but the different
-# criteria-dirty tag; the kanboard routes select the kanboard project).
+# project's Ready for Development state (tagMatch=all), so a plain
+# development card never matches it (the kanboard routes select the
+# kanboard project; KB-304: no untagged criteria-project route remains).
 # Secrets stay name references (CRI-214 plan section 3.8), and adapterImages
 # pin the recorded fleet pin set verbatim (three-way pin agreement).
 apiVersion: v1
@@ -236,52 +237,6 @@ data:
       "apiVersion": "criteria.brokenbots.dev/v1",
       "kind": "Routes",
       "workflowLibrary": {
-        "linear-intake-v1": {
-          "type": "image",
-          "image": "localhost:5000/linear-intake-remote:dev",
-          "namespace": "criteria-jobs",
-          "volumes": [
-            {
-              "name": "data",
-              "kind": "pvc",
-              "claim": "criteria-data",
-              "mountPath": "/data",
-              "env": {
-                "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
-                "CRITERIA_SHELL_ALLOWED_PATHS": "/data"
-              }
-            },
-            {
-              "name": "repo",
-              "kind": "pvc",
-              "claim": "criteria-repo",
-              "mountPath": "/repo"
-            }
-          ],
-          "secrets": [
-            {
-              "name": "linear-api-key",
-              "secretProviderClass": "linear-spc",
-              "mountPath": "/home/criteria/linear-secrets",
-              "env": {
-                "LINEAR_API_KEY": "linear_api_key"
-              }
-            },
-            {
-              "name": "github-tokens",
-              "secretProviderClass": "copilot-spc",
-              "mountPath": "/home/criteria/secrets",
-              "env": {
-                "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-                "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
-              }
-            }
-          ],
-          "adapterImages": {
-            "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
-          }
-        },
         "ticket-cleanup-url": {
           "type": "url",
           "url": "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1?ref=0b8136650d5622381bf18a597ed93b8c272ba19b",
@@ -951,17 +906,6 @@ data:
         }
       },
       "routes": [
-        {
-          "name": "criteria-cleanup",
-          "workflow": "ticket-cleanup-url",
-          "project": "Criteria K8s Workflow Runner",
-          "tags": [
-            "criteria-dirty"
-          ],
-          "states": [
-            "Ready for Development"
-          ]
-        },
         {
           "name": "kanboard-triage",
           "workflow": "kanboard-triage-url",

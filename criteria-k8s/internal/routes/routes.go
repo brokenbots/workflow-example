@@ -1,6 +1,6 @@
 // Package routes reads and resolves the Criteria routes ConfigMap
-// (CRI-216/217), the operator configuration of record assigning Linear
-// tickets to workflow-library objects. The payload of record is
+// (CRI-216/217), the operator configuration of record assigning tickets
+// to workflow-library objects. The payload of record is
 // k8s/routes.schema.json; k8s/examples/routes-configmap.yaml is the shipped
 // example. Lookup rules (CRI-217, per ADR-0005): the k8s-run gate stays
 // global (watcher-side, not here); the ticket's project must exist in the
@@ -71,7 +71,7 @@ const (
 // behavior until their binding cut-over: binding-first, deletion second).
 const CutoverDone = "done"
 
-// DefaultState is the Linear workflow state a route triggers on when it
+// DefaultState is the workflow state a route triggers on when it
 // omits its states list (CRI-218, ADR-0005 §3.4).
 const DefaultState = "Triage"
 
@@ -313,15 +313,15 @@ func (e ProjectEntry) IsCutoverDone() bool {
 	return e.Cutover == CutoverDone
 }
 
-// Route assigns Linear tickets to a workflow-library object by project, tag
-// subset, and Linear workflow states.
+// Route assigns tickets to a workflow-library object by project, tag
+// subset, and workflow states.
 type Route struct {
 	Name     string   `json:"name"`
 	Workflow string   `json:"workflow"`
 	Project  string   `json:"project"`
 	Tags     []string `json:"tags,omitempty"`
 	TagMatch string   `json:"tagMatch,omitempty"`
-	// States holds the Linear workflow state names this route triggers on.
+	// States holds the workflow state names this route triggers on.
 	// Omitted in the payload defaults to [DefaultState] (CRI-218); an
 	// explicit empty or null list is rejected by Validate, mirroring the
 	// schema of record (minItems: 1).
@@ -965,11 +965,11 @@ var ErrNoRoute = errors.New("no route matches the ticket's project and state")
 
 // ErrUnknownWorkflow reports that the resolved workflow name (project
 // default or workflows-group label) is absent from workflowLibrary. Fail
-// closed: no run, watcher log, Linear comment.
+// closed: no run, watcher log, ticket comment.
 var ErrUnknownWorkflow = errors.New("workflow is not present in the routes workflowLibrary")
 
 // ErrAmbiguousWorkflow reports several workflows-group labels on one ticket.
-// Fail closed on the ambiguity: no run, watcher log, Linear comment.
+// Fail closed on the ambiguity: no run, watcher log, ticket comment.
 var ErrAmbiguousWorkflow = errors.New("multiple workflow labels in the workflows label group")
 
 // ErrUnknownConfig (KB-103) reports that a selected config name (a route's
@@ -983,8 +983,8 @@ var ErrUnknownConfig = errors.New("config is not present in the routes configLib
 var ErrAmbiguousConfig = errors.New("multiple config labels in the configs label group")
 
 // TicketStates returns the deduplicated, sorted union of all routes'
-// declared states: the Linear workflow state names any route can match
-// (CRI-218). The watcher queries Linear for tickets in these states; the
+// declared states: the workflow states any route can match (CRI-218).
+// The watcher queries its ticket source for tickets in these states; the
 // per-route selection itself happens in Resolve.
 func (p *Payload) TicketStates() []string {
 	seen := make(map[string]bool)
@@ -1002,12 +1002,10 @@ func (p *Payload) TicketStates() []string {
 }
 
 // ProjectStates returns the deduplicated, sorted union of the routes'
-// declared states for ONE project. The dual-source watchers share one
-// routes payload: the linear watcher must query Linear only for the states
-// its own project's routes declare (the kanboard columns Backlog/Ready are
-// not Linear state names), and likewise the kanboard watcher for its
-// columns. TicketStates remains the whole-payload union for callers that
-// genuinely want it.
+// declared states for ONE project: the watcher queries its ticket source
+// only for the columns its own project's routes declare, so other
+// projects' column names never reach the query. TicketStates remains the
+// whole-payload union for callers that genuinely want it.
 func (p *Payload) ProjectStates(project string) []string {
 	seen := make(map[string]bool)
 	states := make([]string, 0)
@@ -1028,14 +1026,14 @@ func (p *Payload) ProjectStates(project string) []string {
 
 // Selector carries the ticket-facing inputs to Resolve.
 type Selector struct {
-	// Project is the ticket's Linear project name.
+	// Project is the ticket's project name.
 	Project string
-	// State is the ticket's Linear workflow state name.
+	// State is the ticket's workflow state name.
 	State string
-	// Labels holds the ticket's Linear label names.
+	// Labels holds the ticket's label names.
 	Labels []string
-	// LabelGroups maps a label name to its label group's name (Linear
-	// models label groups as parent labels; absent for ungrouped labels).
+	// LabelGroups maps a label name to its label group's name (a grouped
+	// label's parent; absent for ungrouped labels).
 	LabelGroups map[string]string
 	// WorkflowsLabelGroup is the label group whose labels name workflow
 	// overrides ("workflows" per CRI-217).

@@ -16,7 +16,6 @@ import (
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/binding"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
-	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
@@ -35,8 +34,7 @@ import (
 )
 
 // Board column names the watcher moves tasks between as runs progress.
-// They are the Kanboard analogue of the Linear watcher's automation labels
-// (criteria-automation / criteria-dirty) plus the states the workflows set:
+// They are the automation columns plus the states the workflows set:
 // a run in flight leaves the card's column untouched (KB-302: park-only
 // mechanics — the watcher fires runs from the route trigger columns and
 // parks failed runs in reviewColumnName for a human; it owns no other
@@ -200,7 +198,7 @@ func main() {
 		workflowsTagGroup: *workflowsTagGroup,
 		configsTagGroup:   *configsTagGroup,
 		routingTags:       parseTagList(*routingTags),
-		repoValidator:     linear.DefaultRepoValidator(nil, githubToken, ""),
+		repoValidator:     DefaultRepoValidator(nil, githubToken, ""),
 		log:               logger,
 	}
 
@@ -509,10 +507,10 @@ func (w *watcher) reportBindingDeprecations(p *routes.Payload) {
 		"surfaces", strings.Join(warnings, " | "))
 }
 
-// poll mirrors the linear watcher's structure: routes fail closed, one
+// poll: routes fail closed, one
 // listing read per poll, the runs index gates firing, in-flight duplicates
-// suppressed. Kanboard tags are the analogue of Linear labels; the trigger
-// tag gates cluster compute exactly like LINEAR_TRIGGER_LABEL.
+// suppressed. Kanboard tags drive the workflow override; the trigger
+// tag gates cluster compute.
 func (w *watcher) poll(ctx context.Context) error {
 	routesPayload, err := routes.LoadFile(w.routesFile)
 	if err != nil {
@@ -522,9 +520,9 @@ func (w *watcher) poll(ctx context.Context) error {
 		return fmt.Errorf("load routes payload: %w", err)
 	}
 	w.reportBindingDeprecations(routesPayload)
-	// Dual-source scoping (mirrors the linear watcher): query only the
-	// watched project's routes' columns, so linear state names never reach
-	// the Kanboard query.
+	// Project scoping: query only the
+	// watched project's routes' declared columns; other projects' column
+	// names never reach the Kanboard query.
 	states := routesPayload.ProjectStates(w.projectName)
 	w.log.V(1).Info("polling kanboard for task columns declared by routes", "states", states)
 
@@ -550,8 +548,8 @@ func (w *watcher) poll(ctx context.Context) error {
 
 	// Runs index: one CriteriaRun list per poll backs both the firing gate
 	// and phase reconciliation. Only this watcher's runs (source=kanboard)
-	// are indexed, so the Linear watcher's runs never collide. Post-cutover
-	// runs live in the project namespace, so both listings are indexed.
+	// are indexed. Runs live in the project namespace, so both listings
+	// are indexed.
 	runs, err := w.indexRunPhases(ctx, bindingNS)
 	if err != nil {
 		return err
@@ -616,7 +614,7 @@ func (w *watcher) poll(ctx context.Context) error {
 			continue
 		}
 		// Route lookup: project name, column (state analogue), tags. Kanboard
-		// has no Linear-style label groups, so a tag is treated as a workflow
+		// has no label groups, so a tag is treated as a workflow
 		// override candidate only when it sits in the configured tag group —
 		// enforced here by filtering the task's tags against the group before
 		// Resolve sees them. WorkflowsLabelGroup is always passed as the
@@ -702,7 +700,7 @@ func (w *watcher) poll(ctx context.Context) error {
 // become a workflow-override candidate:
 //   - triggerTag: the cluster-compute gate tag (k8s-run);
 //   - internal-reproduced: the triage bypass signal kanboard_triage_v1
-//     reads (Kanboard analogue of the Linear internal-reproduced label);
+//     reads (the bypass exemption label);
 //   - Bug / Feature: classification tags the workflows set via
 //     set_classification_label — without the exemption the bypass path's
 //     own tag write makes the next poll fail closed;
@@ -727,11 +725,10 @@ func (w *watcher) isRoutingSignal(tag string) bool {
 // is in play (KB-311) — that namespace too, groups them by ticket, and
 // returns the phase summary poll() needs to reconcile Kanboard columns and
 // gate firing: whether any run of the ticket is still in flight, and the
-// most recent run's phase/final state. The KB source label isolates them
-// from the Linear watcher's runs so both watchers coexist in one
-// namespace. The ticket's most recent run (creation time, name tiebreak —
-// the linear watcher's runNewer) is the reconciliation authority, so its
-// phase and admission class drive the column moves.
+// most recent run's phase/final state. The KB source label isolates runs
+// by ticket source so coexisting watchers never collide. The ticket's
+// most recent run (creation time, name tiebreak) is the reconciliation
+// authority, so its phase and admission class drive the column moves.
 func (w *watcher) indexRunPhases(ctx context.Context, bindingNS string) (map[string]runPhases, error) {
 	type ticketRuns struct {
 		active bool
@@ -806,7 +803,7 @@ func (w *watcher) indexRunPhases(ctx context.Context, bindingNS string) (map[str
 
 // runNewer reports whether run sorts after cur (creation time, with the
 // name as a deterministic tiebreak), used to pick a ticket's most recent
-// CriteriaRun. Identical to the linear watcher's runNewer.
+// CriteriaRun.
 func runNewer(run, cur *criteriav1.CriteriaRun) bool {
 	if !run.CreationTimestamp.Equal(&cur.CreationTimestamp) {
 		return cur.CreationTimestamp.Before(&run.CreationTimestamp)
@@ -839,8 +836,7 @@ type runPhases struct {
 }
 
 // reconcileTaskColumn moves the Kanboard task between board columns as its
-// latest run progresses — the Kanboard analogue of the Linear watcher's
-// automation labels:
+// latest run progresses:
 //   - run in flight        -> column untouched: wait (KB-302 park-only —
 //     nothing mutates the card while the run runs)
 //   - dev run Succeeded    -> task per the workflow verdict; the Done move
@@ -1037,7 +1033,7 @@ func (w *watcher) postFailureParkComment(ctx context.Context, task kanboard.Task
 
 // buildCriteriaRun stamps a CriteriaRun for a Kanboard task. TicketID is
 // KB-<id>; the workflow and its volumes/secrets are stamped from the routes
-// selection exactly as the linear watcher stamps them (CRI-222 contract);
+// selection (CRI-222 contract);
 // the per-repo config pin consults the pinned CM at stamping time so
 // spec.configRef carries its resourceVersion when it exists.
 //
@@ -1139,7 +1135,7 @@ func (w *watcher) columnNameFor(ctx context.Context, projectID, columnID int) st
 }
 
 // convertWorkflow deep-copies a resolved routes workflow object into the
-// CriteriaRun spec, identical to the linear watcher's stamping (CRI-222).
+// CriteriaRun spec (CRI-222).
 func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 	out := &criteriav1.RunWorkflow{
 		Name:      name,
@@ -1356,9 +1352,8 @@ func copyInterfaceConfigSlots(slots []routes.WorkflowInterfaceConfigSlot) []crit
 }
 
 // repoTagPrefix marks the tag that binds a task to a repository: a
-// "repo:<owner>/<name>" tag is the per-ticket repo binding (the Kanboard
-// analogue of the Linear repo-label fallback) and wins over any repo
-// reference found in the title/description and over the configured
+// "repo:<owner>/<name>" tag is the per-ticket repo binding and wins over
+// any repo reference found in the title/description and over the configured
 // default. Without it a ticket's description text decides the repo, which
 // mis-scoped KB-1 to the engine repo when its work belonged to
 // workflow-example.

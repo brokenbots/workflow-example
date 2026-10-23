@@ -1,7 +1,7 @@
 // Package kanboard provides a minimal JSON-RPC client for polling Kanboard
-// tasks. It mirrors the shape of the Linear client (internal/linear): the
-// watcher treats it as the ticket source of record for Kanboard-backed
-// tickets, with the same fail-closed conventions (CRI-217/218) and the same
+// tasks. The watcher treats it as the ticket source of record for
+// Kanboard-backed tickets, with the same fail-closed conventions
+// (CRI-217/218) and the same
 // consumer discipline (one listing read per poll, no per-ticket reads on the
 // steady-state path).
 package kanboard
@@ -47,9 +47,8 @@ type Task struct {
 	ColumnID    int    `json:"column_id"`
 	ColumnName  string `json:"column_name"`
 	SwimlaneID  int    `json:"swimlane_id"`
-	// Tags holds the task's tag names. Tags are the Kanboard analogue of
-	// Linear labels: routes match on them, and the workflows tag group
-	// overrides the project default workflow.
+	// Tags holds the task's tag names. Routes match on them, and the
+	// workflows tag group overrides the project default workflow.
 	Tags []string `json:"tags,omitempty"`
 	// Creator/Owner ids are reserved for future per-identity mapping; the
 	// watcher does not use them.
@@ -57,9 +56,9 @@ type Task struct {
 }
 
 // Identifier is the ticket identity the rest of the platform keys on. The
-// KB- prefix namespaces Kanboard tickets from Linear ones so both watchers
-// can coexist in one namespace without TicketID collisions (per-repo
-// serialization and run-dir paths key off TicketID).
+// KB- prefix namespaces Kanboard tickets from other ticket sources so
+// multiple watchers can coexist in one namespace without TicketID
+// collisions (per-repo serialization and run-dir paths key off TicketID).
 func (t Task) Identifier() string {
 	return fmt.Sprintf("KB-%d", t.ID)
 }
@@ -188,8 +187,8 @@ type taskResult struct {
 // are fetched with getTaskTags. The per-project name/column lookups are
 // cached (immutable after first resolution), so the per-poll request budget
 // is 1 listing + N tag reads for N tasks — bounded by the watched project's
-// open-task count, the same frugality contract as the Linear watcher's
-// steady state (CRI-252 discipline applied to Kanboard).
+// open-task count (the steady-state request-frugality contract, CRI-252
+// discipline applied to Kanboard).
 func (c *Client) GetAllTasks(ctx context.Context, projectID int) ([]Task, error) {
 	var raw []taskResult
 	if err := c.call(ctx, "getAllTasks", map[string]interface{}{"project_id": projectID}, &raw); err != nil {
@@ -363,7 +362,7 @@ func (c *Client) GetTask(ctx context.Context, taskID int) (*Task, error) {
 }
 
 // MoveTaskToColumn moves a task to the named column of its project. It backs
-// the workflow-side state moves (the analogue of Linear's set_review_state).
+// the workflow-side state moves (the ticket bookkeeping contract).
 func (c *Client) MoveTaskToColumn(ctx context.Context, taskID int, columnName string) (int, error) {
 	var t struct {
 		ProjectID  int `json:"project_id"`
@@ -400,7 +399,7 @@ func (c *Client) MoveTaskToColumn(ctx context.Context, taskID int, columnName st
 }
 
 // AddComment posts a comment on a task. It backs the workflow-side
-// comment steps (the analogue of Linear's commentCreate).
+// comment steps (the ticket-comment contract).
 func (c *Client) AddComment(ctx context.Context, taskID int, body string) error {
 	return c.call(ctx, "createComment", map[string]interface{}{
 		"task_id": taskID,

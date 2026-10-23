@@ -65,13 +65,3 @@ adapter "shell" "repo" {
         GH_TOKEN = var.workflow_github_token
     }
 }
-
-// Linear status updates do not receive either GitHub token.
-adapter "shell" "linear" {
-    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
-    version     = "0.5.5"
-    environment = remote.worktree
-    secrets {
-        LINEAR_API_KEY = var.linear_api_key
-    }
-}

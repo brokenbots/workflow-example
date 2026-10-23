@@ -31,7 +31,9 @@ echo "Checking OpenBao CSI provider pods..."
 wait_for_daemonset "${CSI_NAMESPACE}" "openbao-csi-provider"
 
 echo "Checking per-adapter SecretProviderClasses..."
-for spc in linear-spc copilot-spc shell-spc; do
+# KB-304: linear-spc went with the retired linear_s intake trees; KB-281
+# removed its SecretProviderClass from the shipped manifests.
+for spc in copilot-spc shell-spc; do
     if ! kubectl get secretproviderclass "${spc}" -n "${JOB_NAMESPACE}" >/dev/null 2>&1; then
         echo "SecretProviderClass ${JOB_NAMESPACE}/${spc} is missing" >&2
         exit 1

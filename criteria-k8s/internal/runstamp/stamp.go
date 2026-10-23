@@ -1,5 +1,5 @@
-// Package runstamp holds the CriteriaRun spec-stamping helpers the linear
-// and kanboard watchers share: the KB-103 per-repo config fields
+// Package runstamp holds the CriteriaRun spec-stamping helpers the intake
+// watchers share: the KB-103 per-repo config fields
 // (entry-by-entry outranking of the watcher-level fallback flags and the
 // spec.configRef pin) plus the CRI-231 source-mode stamp both watchers
 // carried as duplicated main-package helpers before KB-103.

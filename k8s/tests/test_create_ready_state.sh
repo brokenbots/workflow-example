@@ -2,11 +2,12 @@
 # Regression test for k8s/create-ready-for-development-state.sh (CRI-241).
 #
 # The state creation is the deploy-time pairing half required before the
-# criteria-cleanup route and the watcher rollout can go live: tickets move to
+# cleanup flow can consume rework handbacks: tickets move to
 # "Ready for Development" when a workstream hands a card back for rework
 # (CRI-240-era wiring), which only works once the state exists on the Linear
-# team. KB-281: the linear triage tree is retired; the state name stays
-# identical to what the kept cleanup route and constant expect.
+# team. KB-281: the linear triage tree is retired; KB-304 retires the
+# criteria-cleanup route, so the cross-file check now guards the script's
+# constant against the shipped example's retired-route absence.
 #
 # shellcheck disable=SC2016
 
@@ -379,25 +380,23 @@ printf '%s' "$(cat "$OUT_FILE")" | grep -q "LINEAR_API_KEY is not set" || \
 ok "missing LINEAR_API_KEY: loud failure, zero requests"
 
 # ── 10. cross-file consistency of the state name (CRI-241) ────────────────
-# The state name is written in two places that must never drift apart: the
-# script's STATE_NAME constant (creates it) and the criteria-cleanup route's
-# states list (fires on it). KB-281: the linear triage tree that held the
-# third copy of the name is retired.
+# The script's STATE_NAME constant (creates the state) is the only shipped
+# copy left. KB-281 retired the linear triage tree that held another copy;
+# KB-304 retired the criteria-cleanup route whose states list held the
+# third — the example must not carry that route back.
 STATE_NAME_EXPECTED="Ready for Development"
 
 routes_json="$(awk '/^  routes.json: \|$/ {flag=1; next} flag && !/^    / {exit} flag {print substr($0, 5)}' \
     "$REPO_ROOT/k8s/examples/routes-configmap.yaml")"
 [ -n "$routes_json" ] || fail "consistency: could not extract routes.json from the shipped example"
-if ! jq -e --arg s "$STATE_NAME_EXPECTED" \
-    '.routes[] | select(.name == "criteria-cleanup") | .states == [$s]' \
-    >/dev/null <<<"$routes_json"; then
-    fail "consistency: criteria-cleanup route states do not match '$STATE_NAME_EXPECTED'"
+if jq -e '.routes[] | select(.name == "criteria-cleanup")' >/dev/null <<<"$routes_json"; then
+    fail "consistency: the retired criteria-cleanup route returned to the shipped example (KB-304)"
 fi
 
 if ! grep -Fq 'readonly STATE_NAME="Ready for Development"' "$SCRIPT"; then
     fail "consistency: script STATE_NAME constant drifted from '$STATE_NAME_EXPECTED'"
 fi
 
-ok "consistency: state name identical across script constant and route states"
+ok "consistency: STATE_NAME constant held; retired cleanup route absent (KB-304)"
 
 echo "PASS: create-ready-for-development-state regression tests"

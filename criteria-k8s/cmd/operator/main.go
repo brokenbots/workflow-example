@@ -46,13 +46,14 @@ var (
 	// a cluster property, so it is operator config (env CRITERIA_JOB_ARCH,
 	// Helm operator.jobArch), never per-workflow state.
 	jobArch = flag.String("job-arch", getenv(jobbuilder.EnvJobArch, jobbuilder.JobArchDefault), "kubernetes.io/arch nodeSelector value stamped on child Job/pod templates (cluster property)")
-	// KB-3: the built-in linear-spc/copilot-spc secret volumes a
-	// workflow-less (legacy) run mounts require the Secrets Store CSI
-	// driver and those SecretProviderClasses, so they are opt-in operator
-	// config. Default off keeps the legacy pod mountable on clusters
-	// without OpenBao CSI; set true to restore the pre-KB-3 delivery on an
-	// OpenBao-equipped cluster.
-	legacySecretVolumes = flag.Bool("legacy-secret-volumes", getBool(jobbuilder.EnvLegacySecretVolumes, false), "Mount the built-in linear-spc/copilot-spc CSI secret volumes on runs without a stamped workflow (requires the OpenBao Secrets Store CSI driver)")
+	// KB-3: the built-in copilot-spc secret volume a workflow-less
+	// (legacy) run mounts requires the Secrets Store CSI driver and that
+	// SecretProviderClass, so it is opt-in operator config. Default off
+	// keeps the legacy pod mountable on clusters without OpenBao CSI; set
+	// true to restore the pre-KB-3 delivery on an OpenBao-equipped
+	// cluster. (KB-304: the second built-in legacy volume went with its
+	// retired SecretProviderClass.)
+	legacySecretVolumes = flag.Bool("legacy-secret-volumes", getBool(jobbuilder.EnvLegacySecretVolumes, false), "Mount the built-in copilot-spc CSI secret volume on runs without a stamped workflow (requires the OpenBao Secrets Store CSI driver)")
 	dataPVC             = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")
 	castleAddr          = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")

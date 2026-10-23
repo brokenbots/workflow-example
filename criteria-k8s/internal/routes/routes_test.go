@@ -96,143 +96,130 @@ func TestParseAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
-	if len(p.WorkflowLibrary) != 10 {
-		t.Errorf("workflowLibrary size = %d, want 10", len(p.WorkflowLibrary))
+	if len(p.WorkflowLibrary) != 9 {
+		t.Errorf("workflowLibrary size = %d, want 9 (KB-304: the linear-intake-v1 image object is removed)", len(p.WorkflowLibrary))
 	}
-	if len(p.Routes) != 10 {
-		t.Errorf("routes size = %d, want 10", len(p.Routes))
-		if len(p.WorkflowLibrary) != 6 {
-			t.Errorf("workflowLibrary size = %d, want 6", len(p.WorkflowLibrary))
-		}
-		if len(p.Routes) != 4 {
-			t.Errorf("routes size = %d, want 4", len(p.Routes))
-		}
-		// KB-281: the retired criteria-triage / criteria-develop routes are gone.
-		// Surviving route order: the criteria project's cleanup-only route, the
-		// two kanboard routes, then the KB-311 per-project develop pair and the
-		// harness legs (also on the criteria project; those fire under tag
-		// gates).
-		if n := p.Routes[0].Name; n != "criteria-cleanup" {
-			t.Errorf("routes[0] = %q, want %q (criteria project: cleanup only)", n, "criteria-cleanup")
-		}
-		if p.Routes[0].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("cleanup route project = %q, want %q", p.Routes[0].Project, "Criteria K8s Workflow Runner")
-		}
-		if p.Routes[1].Project != "Kanboard Tickets" || p.Routes[2].Project != "Kanboard Tickets" {
-			t.Errorf("routes[1:3] projects = %q/%q, want the kanboard pair on %q", p.Routes[1].Project, p.Routes[2].Project, "Kanboard Tickets")
-		}
-		// KB-277: harness-contracts, then the KB-278 composition leg and the
-		// KB-279 failures leg — the criteria project's dave-go tag-gated harness
-		// series legs (each firing its own *-url object). KB-311: the two
-		// per-project develop routes ride routes[3]/routes[4] (the acceptance
-		// pair, both on the same kanboard-develop-url object), so the harness
-		// series legs shift to routes[5:9] and the wire leg closes at [9].
-		// KB-311: the acceptance pair first — two distinct projects running
-		// THE SAME workflow object (identical tree digest) by binding.
-		if p.Routes[3].Project != "Criteria Go Dev" || p.Routes[4].Project != "TypeScript SDK" {
-			t.Errorf("routes[3:5] projects = %q/%q, want the KB-311 acceptance pair", p.Routes[3].Project, p.Routes[4].Project)
-		}
-		if p.Routes[3].Workflow != "kanboard-develop-url" || p.Routes[4].Workflow != "kanboard-develop-url" {
-			t.Errorf("routes[3:5] workflows = %q/%q, want BOTH on kanboard-develop-url (same tree, different bindings)", p.Routes[3].Workflow, p.Routes[4].Workflow)
-		}
-		for _, r := range p.Routes[3:5] {
-			if !slices.Equal(r.States, []string{"Ready"}) {
-				t.Errorf("route %s states = %v, want [Ready]", r.Name, r.States)
-			}
-		}
-		if n := p.Routes[5].Name; n != "harness-contracts" {
-			t.Errorf("routes[5] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
-		}
-		if p.Routes[5].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("harness-contracts route project = %q, want %q", p.Routes[5].Project, "Criteria K8s Workflow Runner")
-		}
-		if p.Routes[5].Workflow != "harness-contracts-url" {
-			t.Errorf("harness-contracts route workflow = %q, want %q", p.Routes[5].Workflow, "harness-contracts-url")
-		}
-		if _, ok := p.WorkflowLibrary["harness-contracts-url"]; !ok {
-			t.Errorf("workflowLibrary missing the harness-contracts-url object (KB-277)")
-		}
-		// KB-278: the harness-composition leg rides routes[6].
-		if n := p.Routes[6].Name; n != "harness-composition" {
-			t.Errorf("routes[6] = %q, want %q (KB-278 harness composition route)", n, "harness-composition")
-		}
-		if p.Routes[6].Workflow != "harness-composition-url" {
-			t.Errorf("harness-composition route workflow = %q, want %q", p.Routes[6].Workflow, "harness-composition-url")
-		}
-		// KB-278: the object must stay url-ONLY — no commit ref/refKey may bind
-		// the pinless-at-close harness series (CRI-260 three-way check).
-		comp, ok := p.WorkflowLibrary["harness-composition-url"]
-		if !ok {
-			t.Fatalf("workflowLibrary missing harness-composition-url (KB-278)")
-		}
-		if comp.Type != TypeURL || comp.Class != ClassTriage || comp.Namespace != "criteria-jobs" ||
-			comp.Ref != "" || len(comp.Volumes) != 3 || len(comp.Secrets) != 1 {
-			t.Errorf("harness-composition-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-278)", comp)
-		}
-		// KB-279: the harness-failures leg rides routes[7] — the failures leg
-		// fires harness_failures_v1 (engineered failure-path fixtures, matrix
-		// E24-E32 + G12) with the same pinless-at-close convention.
-		if n := p.Routes[7].Name; n != "harness-failures" {
-			t.Errorf("routes[7] = %q, want %q (KB-279 harness failures route)", n, "harness-failures")
-		}
-		if p.Routes[7].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("harness-failures route project = %q, want %q", p.Routes[7].Project, "Criteria K8s Workflow Runner")
-		}
-		if p.Routes[7].Workflow != "harness-failures-url" {
-			t.Errorf("harness-failures route workflow = %q, want %q", p.Routes[7].Workflow, "harness-failures-url")
-		}
-		fail, ok := p.WorkflowLibrary["harness-failures-url"]
-		if !ok {
-			t.Fatalf("workflowLibrary missing harness-failures-url (KB-279)")
-		}
-		if fail.Type != TypeURL || fail.Class != ClassTriage || fail.Namespace != "criteria-jobs" ||
-			fail.Ref != "" || len(fail.Volumes) != 3 || len(fail.Secrets) != 1 {
-			t.Errorf("harness-failures-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-279)", fail)
-		}
-		if len(p.Routes[7].Tags) == 0 || p.Routes[7].Tags[0] != "harness-validation" {
-			t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[7].Tags)
-		}
-		// KB-280: the harness-fleet-smoke leg rides routes[8] — the series'
-		// fast-feedback canary (harness_fleet_smoke_v1, ~90s deterministic
-		// no-agent pre-leg gate) with the same pinless-at-close convention.
-		if n := p.Routes[8].Name; n != "harness-fleet-smoke" {
-			t.Errorf("routes[8] = %q, want %q (KB-280 harness fleet-smoke route)", n, "harness-fleet-smoke")
-		}
-		if p.Routes[8].Project != "Criteria K8s Workflow Runner" {
-			t.Errorf("harness-fleet-smoke route project = %q, want %q", p.Routes[8].Project, "Criteria K8s Workflow Runner")
-		}
-		if p.Routes[8].Workflow != "harness-fleet-smoke-url" {
-			t.Errorf("harness-fleet-smoke route workflow = %q, want %q", p.Routes[8].Workflow, "harness-fleet-smoke-url")
-		}
-		fsmoke, ok := p.WorkflowLibrary["harness-fleet-smoke-url"]
-		if !ok {
-			t.Fatalf("workflowLibrary missing harness-fleet-smoke-url (KB-280)")
-		}
-		if fsmoke.Type != TypeURL || fsmoke.Class != ClassTriage || fsmoke.Namespace != "criteria-jobs" ||
-			fsmoke.Ref != "" || len(fsmoke.Volumes) != 3 || len(fsmoke.Secrets) != 1 {
-			t.Errorf("harness-fleet-smoke-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret, no pin (KB-280)", fsmoke)
-		}
-		// KB-280 is the no-agent slice: the object pins the Shell adapter ONLY
-		// (no copilot identity to image — the canary declares no copilot member).
-		if fsmoke.AdapterImages == nil {
-			t.Errorf("harness-fleet-smoke-url adapterImages missing — want the shell-only surface (KB-280)")
-		} else if _, hasCopilot := fsmoke.AdapterImages["copilot"]; hasCopilot {
-			t.Errorf("harness-fleet-smoke-url adapterImages pins copilot — the canary is the no-agent slice (KB-280)")
-		} else if fsmoke.AdapterImages["shell"] != "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.51-1" {
-			t.Errorf("harness-fleet-smoke-url shell pin = %q, want the recorded fleet pin set (KB-280)", fsmoke.AdapterImages["shell"])
+	if len(p.Routes) != 9 {
+		t.Fatalf("routes size = %d, want 9 (KB-281 retired the criteria triage/develop split routes; KB-304 removed the criteria-cleanup route)", len(p.Routes))
+	}
+	// KB-281/KB-304: the criteria project's cleanup route is gone. Surviving
+	// route order: the two kanboard routes, the KB-311 per-project develop
+	// pair, then the tag-gated harness legs on the criteria project.
+	if n := p.Routes[0].Name; n != "kanboard-triage" {
+		t.Errorf("routes[0] = %q, want %q", n, "kanboard-triage")
+	}
+	if p.Routes[0].Project != "Kanboard Tickets" || p.Routes[1].Project != "Kanboard Tickets" {
+		t.Errorf("routes[0:2] projects = %q/%q, want the kanboard pair on %q", p.Routes[0].Project, p.Routes[1].Project, "Kanboard Tickets")
+	}
+	// KB-311: the acceptance pair — two distinct projects running THE SAME
+	// workflow object (identical tree digest) by binding.
+	if p.Routes[2].Project != "Criteria Go Dev" || p.Routes[3].Project != "TypeScript SDK" {
+		t.Errorf("routes[2:4] projects = %q/%q, want the KB-311 acceptance pair", p.Routes[2].Project, p.Routes[3].Project)
+	}
+	if p.Routes[2].Workflow != "kanboard-develop-url" || p.Routes[3].Workflow != "kanboard-develop-url" {
+		t.Errorf("routes[2:4] workflows = %q/%q, want BOTH on kanboard-develop-url (same tree, different bindings)", p.Routes[2].Workflow, p.Routes[3].Workflow)
+	}
+	for _, r := range p.Routes[2:4] {
+		if !slices.Equal(r.States, []string{"Ready"}) {
+			t.Errorf("route %s states = %v, want [Ready]", r.Name, r.States)
 		}
 	}
-	// KB-276: the wire/transport leg routes after the harness series legs and
-	// the KB-311 acceptance pair (develop-go/develop-ts) — the wire route is
-	// routes[9]; its url object ships in the same payload (routes count 8 -> 10).
-	if n := p.Routes[9].Name; n != "harness-wire" {
-		t.Errorf("routes[9] = %q, want %q (KB-276 harness wire/transport route)", n, "harness-wire")
+	// KB-277..KB-280 + KB-276: the criteria project's dave-go tag-gated harness
+	// series legs (each firing its own *-url object), routes[4]..routes[8]
+	// after the KB-304 cleanup-route retirement shifted the indices.
+	if n := p.Routes[4].Name; n != "harness-contracts" {
+		t.Errorf("routes[4] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
 	}
-	if p.Routes[9].Project != "Criteria K8s Workflow Runner" {
-		t.Errorf("harness-wire route project = %q, want %q", p.Routes[9].Project, "Criteria K8s Workflow Runner")
+	if p.Routes[4].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-contracts route project = %q, want %q", p.Routes[4].Project, "Criteria K8s Workflow Runner")
 	}
-	if p.Routes[9].Workflow != "harness-wire-url" {
-		t.Errorf("harness-wire route workflow = %q, want %q", p.Routes[9].Workflow, "harness-wire-url")
+	if p.Routes[4].Workflow != "harness-contracts-url" {
+		t.Errorf("harness-contracts route workflow = %q, want %q", p.Routes[4].Workflow, "harness-contracts-url")
+	}
+	hc, ok := p.WorkflowLibrary["harness-contracts-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-contracts-url (KB-277)")
+	}
+	if hc.Type != TypeURL || hc.Class != ClassTriage || hc.Namespace != "criteria-jobs" ||
+		hc.Ref != "" || len(hc.Volumes) != 3 || len(hc.Secrets) != 1 {
+		t.Errorf("harness-contracts-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret (github-tokens), no pin (KB-277)", hc)
+	}
+	// KB-278: the harness-composition leg rides routes[5].
+	if n := p.Routes[5].Name; n != "harness-composition" {
+		t.Errorf("routes[5] = %q, want %q (KB-278 harness composition route)", n, "harness-composition")
+	}
+	if p.Routes[5].Workflow != "harness-composition-url" {
+		t.Errorf("harness-composition route workflow = %q, want %q", p.Routes[5].Workflow, "harness-composition-url")
+	}
+	// The object must stay url-ONLY — no commit ref may bind the
+	// pinless-at-close harness series (CRI-260 three-way check).
+	comp, ok := p.WorkflowLibrary["harness-composition-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-composition-url (KB-278)")
+	}
+	if comp.Type != TypeURL || comp.Class != ClassTriage || comp.Namespace != "criteria-jobs" ||
+		comp.Ref != "" || len(comp.Volumes) != 3 || len(comp.Secrets) != 0 {
+		t.Errorf("harness-composition-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, no secrets, no pin (KB-278)", comp)
+	}
+	// KB-279: the harness-failures leg rides routes[6] — the failures leg
+	// fires harness_failures_v1 (engineered failure-path fixtures, matrix
+	// E24-E32 + G12) with the same pinless-at-close convention.
+	if n := p.Routes[6].Name; n != "harness-failures" {
+		t.Errorf("routes[6] = %q, want %q (KB-279 harness failures route)", n, "harness-failures")
+	}
+	if p.Routes[6].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-failures route project = %q, want %q", p.Routes[6].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[6].Workflow != "harness-failures-url" {
+		t.Errorf("harness-failures route workflow = %q, want %q", p.Routes[6].Workflow, "harness-failures-url")
+	}
+	fail, ok := p.WorkflowLibrary["harness-failures-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-failures-url (KB-279)")
+	}
+	if fail.Type != TypeURL || fail.Class != ClassTriage || fail.Namespace != "criteria-jobs" ||
+		fail.Ref != "" || len(fail.Volumes) != 3 || len(fail.Secrets) != 0 {
+		t.Errorf("harness-failures-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, no secrets, no pin (KB-279)", fail)
+	}
+	if len(p.Routes[6].Tags) == 0 || p.Routes[6].Tags[0] != "harness-validation" {
+		t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[6].Tags)
+	}
+	// KB-280: the harness-fleet-smoke leg rides routes[7] — the series'
+	// fast-feedback canary (harness_fleet_smoke_v1, ~90s deterministic
+	// no-agent pre-leg gate) with the same pinless-at-close convention.
+	if n := p.Routes[7].Name; n != "harness-fleet-smoke" {
+		t.Errorf("routes[7] = %q, want %q (KB-280 harness fleet-smoke route)", n, "harness-fleet-smoke")
+	}
+	if p.Routes[7].Workflow != "harness-fleet-smoke-url" {
+		t.Errorf("harness-fleet-smoke route workflow = %q, want %q", p.Routes[7].Workflow, "harness-fleet-smoke-url")
+	}
+	fsmoke, ok := p.WorkflowLibrary["harness-fleet-smoke-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-fleet-smoke-url (KB-280)")
+	}
+	if fsmoke.Type != TypeURL || fsmoke.Class != ClassTriage || fsmoke.Namespace != "criteria-jobs" ||
+		fsmoke.Ref != "" || len(fsmoke.Volumes) != 3 || len(fsmoke.Secrets) != 0 {
+		t.Errorf("harness-fleet-smoke-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, no secrets, no pin (KB-280)", fsmoke)
+	}
+	// KB-280 is the no-agent slice: the object pins the Shell adapter ONLY
+	// (no copilot identity to image — the canary declares no copilot member).
+	if fsmoke.AdapterImages == nil {
+		t.Errorf("harness-fleet-smoke-url adapterImages missing — want the shell-only surface (KB-280)")
+	} else if _, hasCopilot := fsmoke.AdapterImages["copilot"]; hasCopilot {
+		t.Errorf("harness-fleet-smoke-url adapterImages pins copilot — the canary is the no-agent slice (KB-280)")
+	} else if fsmoke.AdapterImages["shell"] != "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1" {
+		t.Errorf("harness-fleet-smoke-url shell pin = %q, want the recorded fleet pin set (KB-280)", fsmoke.AdapterImages["shell"])
+	}
+	// KB-276: the wire/transport leg closes the routes at [8]; its url object
+	// ships in the same payload.
+	if n := p.Routes[8].Name; n != "harness-wire" {
+		t.Errorf("routes[8] = %q, want %q (KB-276 harness wire/transport route)", n, "harness-wire")
+	}
+	if p.Routes[8].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-wire route project = %q, want %q", p.Routes[8].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[8].Workflow != "harness-wire-url" {
+		t.Errorf("harness-wire route workflow = %q, want %q", p.Routes[8].Workflow, "harness-wire-url")
 	}
 	wurl, ok := p.WorkflowLibrary["harness-wire-url"]
 	if !ok {
@@ -241,21 +228,22 @@ func TestParseAndValidate(t *testing.T) {
 	if wurl.Class != ClassTriage {
 		t.Errorf("harness-wire-url class = %q, want triage (tag-gated dave-go gate (KB-276))", wurl.Class)
 	}
-	// Absence regressions (KB-281): the retired linear url objects must not
-	// return in the shipped example.
-	for _, gone := range []string{"linear-intake-url", "linear-triage-url", "linear-develop-url"} {
+	// Absence regressions (KB-281/KB-304): the retired linear objects must
+	// not return in the shipped example.
+	for _, gone := range []string{"linear-intake-url", "linear-triage-url", "linear-develop-url", "linear-intake-v1"} {
 		if _, still := p.WorkflowLibrary[gone]; still {
-			t.Errorf("workflowLibrary still has the retired object %q (KB-281)", gone)
+			t.Errorf("workflowLibrary still has the retired object %q (KB-281/KB-304)", gone)
 		}
 	}
 	for _, r := range p.Routes {
 		if r.Workflow == "linear-intake-url" || r.Workflow == "linear-triage-url" || r.Workflow == "linear-develop-url" {
 			t.Errorf("route %q still fires the retired linear workflow %q (KB-281)", r.Name, r.Workflow)
 		}
+		if r.Name == "criteria-triage" || r.Name == "criteria-develop" || r.Name == "criteria-cleanup" {
+			t.Errorf("route %q is a retired Criteria K8s Workflow Runner zombie rule (KB-304); only the tag-gated harness legs may match that project", r.Name)
+		}
 	}
-	// The retained linear-intake-v1 image object coexists with the live
-	// kanboard objects: no route assigns it by default; the override
-	// resolution is exercised in TestShippedExampleResolvesKanboardRoutes.
+	// The live kanboard objects survive KB-304 untouched.
 	kb, ok := p.WorkflowLibrary["kanboard-triage-url"]
 	if !ok {
 		t.Fatalf("workflowLibrary missing kanboard-triage-url")
@@ -283,22 +271,16 @@ func TestParseAndValidate(t *testing.T) {
 	if kbRoutes != 2 {
 		t.Errorf("kanboard routes = %d, want 2 (triage + develop on the Kanboard Tickets project)", kbRoutes)
 	}
-	wf, ok := p.WorkflowLibrary["linear-intake-v1"]
-	if !ok {
-		t.Fatalf("workflowLibrary missing linear-intake-v1")
-	}
-	if wf.Type != TypeImage || wf.Image == "" || len(wf.Volumes) != 2 || len(wf.Secrets) != 2 {
-		t.Errorf("linear-intake-v1 = %+v, want image workflow with 2 volumes and 2 secrets", wf)
-	}
 }
 
-// KB-281: the shipped example's live routing is the kanboard pair. A ticket
-// in "Backlog" on the Kanboard Tickets project resolves to the
+// KB-281 + KB-304: the shipped example's live routing is the kanboard pair.
+// A ticket in "Backlog" on the Kanboard Tickets project resolves to the
 // kanboard-triage-url object (kanboard_triage_v1, url-only with the ADR-0005
 // D7 commit pin, triage class), a ticket in "Ready" resolves to the
-// kanboard-develop-url object (kanboard_develop_v1, pinned likewise), the
-// retired criteria-project routes resolve errNoRoute, and the
-// watcher-facing TicketStates union shrinks to kanboard + cleanup states.
+// kanboard-develop-url object (kanboard_develop_v1, pinned likewise), every
+// retired criteria-project route fails closed, and the watcher-facing
+// TicketStates union holds the kanboard states plus Ready for Development
+// (carried solely by the criteria project's tag-gated harness legs).
 func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
@@ -361,34 +343,32 @@ func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 		t.Errorf("kanboard-develop-url = %+v, want 3 volumes and 2 secrets", developWf)
 	}
 
-	// KB-281 absence regressions: the retireed criteria-project routes must
-	// fail closed (the watcher's routes fail closed on unmapped shapes).
+	// KB-281/KB-304 absence regressions: every retired criteria-project
+	// route fails closed (the watcher's routes fail closed on unmapped
+	// shapes).
 	for _, tc := range []struct{ name, state string }{
-		{"Triage state (criteria-triage retired)", "Triage"},
+		{"Triage state (criteria-triage retired, KB-281)", "Triage"},
 		{"Backlog state (criteria routes never covered it)", "Backlog"},
-		{"Ready without the dirty label (develop route retired)", "Ready"},
+		{"Ready without the dirty label (develop route retired KB-281; cleanup route retired KB-304)", "Ready"},
 	} {
 		if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", tc.state, []string{"k8s-run"}, nil)); !errors.Is(err, ErrNoRoute) {
 			t.Errorf("Resolve(Criteria project, %s) err = %v, want ErrNoRoute (%s)", tc.state, err, tc.name)
 		}
 	}
 
-	// The retained linear-intake-v1 image object is override-reachable (via
-	// the workflows label group) but no route assigns it by default: the same
-	// Ready-for-Development resolution with the object override selects the
-	// image workflow, the plain one above fails closed.
-	overridden, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run", "criteria-dirty", "linear-intake-v1"},
-		map[string]string{"linear-intake-v1": "workflows"}))
-	if err != nil {
-		t.Fatalf("Resolve(Ready for Development, linear-intake-v1 override): %v", err)
-	}
-	if overridden.Name != "linear-intake-v1" || overridden.Workflow.Type != TypeImage {
-		t.Errorf("override resolution = %q/%s, want the linear-intake-v1 image object", overridden.Name, overridden.Workflow.Type)
+	// KB-304: with the cleanup route retired nothing covers Ready for
+	// Development without the harness-validation tag, so a RfD ticket
+	// carrying the legacy linear override group fails closed — the
+	// workflows-label override only remaps the object on a MATCHED route,
+	// and the retired linear object it used to name is gone.
+	if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run", "criteria-dirty", "linear-intake-v1"},
+		map[string]string{"linear-intake-v1": "workflows"})); !errors.Is(err, ErrNoRoute) {
+		t.Errorf("Resolve(Ready for Development, linear override) err = %v, want ErrNoRoute (cleanup route retired, linear override unreachable)", err)
 	}
 
-	// The union of declared states is what the kanboard watcher queries for
-	// (the criteria-cleanup route carries Ready for Development; the linear
-	// watcher filters per-project at Resolve time).
+	// The union of declared states is what the watcher queries for (the
+	// criteria project's tag-gated harness legs carry Ready for Development;
+	// each watcher filters per-project at Resolve time).
 	want := []string{"Backlog", "Ready", "Ready for Development"}
 	if got := p.TicketStates(); !slices.Equal(got, want) {
 		t.Errorf("TicketStates() = %v, want %v", got, want)
@@ -463,19 +443,14 @@ func TestShippedExampleCastleGatePinsNode20ParapetSuite(t *testing.T) {
 	}
 }
 
-// CRI-310 (plan CRI-214 M10.4, carrier for CRI-246, validation run C): the
-// dirty label is a ROUTING SURFACE. A ticket carrying the watcher's sticky
-// "criteria-dirty" label in "Ready for Development" resolves to the
-// criteria-cleanup route and the ticket-cleanup-url object — (KB-281: the
-// tag-less general develop route the cleanup route used to out-prioritize is
-// retired, so without the dirty label nothing matches and the watcher fails
-// closed; specific-over-general priority still governs multi-candidate
-// shapes). The object ships url-only, on the triage (read-only) admission
-// class, pinned (this repository squash merges — every shipped pin names a
-// main-landed squash commit set in a follow-up change, CRI-241/CRI-243
-// convention) and credential-free beyond the Linear API key (the cleanup
-// pass does zero git operations).
-func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
+// KB-304: the criteria-cleanup route (CRI-310's dirty-label routing surface)
+// is retired — the Linear-era cleanup pass is dead and the example carries
+// only the tag-gated harness legs on the criteria project. Every dirty-label
+// resolution on the criteria project fails closed, and the surviving
+// ticket-cleanup-url object is checked directly in the library (unreferenced
+// library objects are legal; the tree's ticket_cleanup_v1 interface keeps
+// the linear-api-key binding, so the object shape is unchanged).
+func TestShippedExampleRetiredCleanupRoute(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
 	if err != nil {
 		t.Fatalf("reading shipped example: %v", err)
@@ -485,61 +460,56 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 		t.Fatalf("Parse(shipped example) failed: %v", err)
 	}
 
-	// The dirty-labeled ticket routes to the cleanup workflow — this is the
-	// validation run C path.
-	sel, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"criteria-dirty"}, nil))
-	if err != nil {
-		t.Fatalf("Resolve(Ready for Development, criteria-dirty): %v", err)
+	// KB-304: the dirty label no longer routes anywhere — the criteria-cleanup
+	// route is retired, so the validation run C path fails closed.
+	if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"criteria-dirty"}, nil)); !errors.Is(err, ErrNoRoute) {
+		t.Errorf("dirty RfD ticket err = %v, want ErrNoRoute (the cleanup route is retired, KB-304)", err)
 	}
-	if sel.Route.Name != "criteria-cleanup" {
-		t.Errorf("dirty ticket matched route = %q, want %q (the tag-based specific route must beat the tag-less develop route)", sel.Route.Name, "criteria-cleanup")
+
+	// The retired route's ticket-cleanup-url object survives in the
+	// workflowLibrary and keeps its tree-contract shape: url-only, pinned to
+	// the squash-merge commit, triage (read-only) admission, the github-tokens
+	// CSI mount for the base entrypoint's repo-clone init, and linear-api-key
+	// riding at /home/criteria/linear-secrets (the runner script's hardcoded
+	// file: OriginRef path, lstat-checked before any step).
+	cleanupWf, ok := p.WorkflowLibrary["ticket-cleanup-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing ticket-cleanup-url")
 	}
-	if sel.Name != "ticket-cleanup-url" {
-		t.Errorf("dirty ticket resolved workflow = %q, want %q", sel.Name, "ticket-cleanup-url")
+	if cleanupWf.Type != TypeURL {
+		t.Errorf("cleanup workflow type = %q, want %q (url-only, minimal criteria base runtime)", cleanupWf.Type, TypeURL)
 	}
-	wf := sel.Workflow
-	if wf.Type != TypeURL {
-		t.Errorf("cleanup workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
+	if !strings.HasPrefix(cleanupWf.URL, "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1") {
+		t.Errorf("cleanup workflow url = %q, want the ticket_cleanup_v1 subtree", cleanupWf.URL)
 	}
-	// Validation run C corrected two assumptions from the original landing:
-	// the pinless fetch fails to resolve the subtree, so the object pins the
-	// squash-merge commit a84ef55; and the base entrypoint's repo-clone init
-	// unconditionally requires WORKFLOW_GITHUB_TOKEN, so the object binds the
-	// github-tokens CSI surface (the cleanup pass itself performs zero git
-	// operations — the mount exists for the entrypoint, not the workflow).
-	// linear-api-key rides at /home/criteria/linear-secrets: the runner
-	// script's hardcoded file: OriginRef path (lstat-checked before any step).
-	if !strings.HasPrefix(wf.URL, "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1") {
-		t.Errorf("cleanup workflow url = %q, want the ticket_cleanup_v1 subtree", wf.URL)
+	if cleanupWf.Ref != "0b8136650d5622381bf18a597ed93b8c272ba19b" {
+		t.Errorf("cleanup workflow ref = %q, want the ticket_cleanup_v1 squash-merge commit 0b813665 (pinless HEAD resolution fails on the subtree; CRI-241/CRI-243 follow-up re-pin convention)", cleanupWf.Ref)
 	}
-	if wf.Ref != "0b8136650d5622381bf18a597ed93b8c272ba19b" {
-		t.Errorf("cleanup workflow ref = %q, want the ticket_cleanup_v1 squash-merge commit 0b813665 (pinless HEAD resolution fails on the subtree; CRI-241/CRI-243 follow-up re-pin convention)", wf.Ref)
+	if cleanupWf.Image != "" {
+		t.Errorf("cleanup workflow image = %q, want empty (url-only must not declare a process image)", cleanupWf.Image)
 	}
-	if wf.Image != "" {
-		t.Errorf("cleanup workflow image = %q, want empty (url-only must not declare a process image)", wf.Image)
+	if cleanupWf.Class != ClassTriage {
+		t.Errorf("cleanup workflow class = %q, want %q (CRI-242 read-only admission)", cleanupWf.Class, ClassTriage)
 	}
-	if wf.Class != ClassTriage {
-		t.Errorf("cleanup workflow class = %q, want %q (CRI-242 read-only admission)", wf.Class, ClassTriage)
+	if len(cleanupWf.Volumes) != 2 || len(cleanupWf.Secrets) != 2 {
+		t.Errorf("ticket-cleanup-url = %+v, want 2 volumes (data + repo — scratch is not declared by the tree interface, KB-310) and 2 secrets (linear-api-key + the github-tokens CSI mount: the entrypoint's repo-clone requires the token surface, the cleanup pass itself does not consume its env)", cleanupWf)
 	}
-	if len(wf.Volumes) != 2 || len(wf.Secrets) != 2 {
-		t.Errorf("ticket-cleanup-url = %+v, want 2 volumes (data + repo — scratch is not declared by the tree interface, KB-310) and 2 secrets (linear-api-key + the github-tokens CSI mount: the entrypoint's repo-clone requires the token surface, the cleanup pass itself does not consume its env)", wf)
-	}
-	for _, s := range wf.Secrets {
+	for _, s := range cleanupWf.Secrets {
 		if s.Name == "linear-api-key" && s.MountPath != "/home/criteria/linear-secrets" {
 			t.Errorf("ticket-cleanup-url linear-api-key mountPath = %q, want /home/criteria/linear-secrets (the runner's file: OriginRef path)", s.MountPath)
 		}
 	}
 
 	// KB-281: the tag-less general develop route is retired, so a ticket
-	// WITHOUT the dirty label fails closed (nothing matches).
+	// WITHOUT the dirty label still fails closed (nothing matches).
 	if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Ready for Development", []string{"k8s-run"}, nil)); !errors.Is(err, ErrNoRoute) {
 		t.Errorf("non-dirty ticket err = %v, want ErrNoRoute (the general develop route is retired)", err)
 	}
 
-	// The state gate still applies: a dirty ticket in "Backlog" (never a
-	// cleanup-route state) fails closed.
+	// KB-304: the dirty label no longer opens any state gate — a dirty ticket
+	// in "Backlog" fails closed (no criteria route covers Backlog at all).
 	if _, err := p.Resolve(selectorFor("Criteria K8s Workflow Runner", "Backlog", []string{"criteria-dirty"}, nil)); !errors.Is(err, ErrNoRoute) {
-		t.Errorf("dirty Backlog ticket err = %v, want ErrNoRoute (the cleanup route is declared for Ready for Development only)", err)
+		t.Errorf("dirty Backlog ticket err = %v, want ErrNoRoute (no criteria route covers Backlog)", err)
 	}
 
 	// KB-103's configRef lived on the retired criteria-develop route; no
@@ -550,9 +520,9 @@ func TestShippedExampleResolvesDirtyCleanupRoute(t *testing.T) {
 		}
 	}
 
-	// The cleanup route declares no new linear states, so CRI-310 held the
-	// union at the linear estate's states; KB-281 retired those routes and
-	// the union shrank to kanboard + cleanup states.
+	// KB-281/KB-304 retired every linear-era criteria route; the union now
+	// holds only the kanboard states plus Ready for Development (carried by
+	// the criteria project's tag-gated harness legs).
 	want := []string{"Backlog", "Ready", "Ready for Development"}
 	if got := p.TicketStates(); !slices.Equal(got, want) {
 		t.Errorf("TicketStates() = %v, want %v (the union holds only the surviving routes' states)", got, want)

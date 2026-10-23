@@ -148,9 +148,9 @@ func TestBuildRunnerJob(t *testing.T) {
 
 	// Verify volumes: a workflow-less (legacy) run mounts only the run-state
 	// data volume and the scripts ConfigMap by default — the built-in
-	// linear-spc/copilot-spc CSI secret volumes are opt-in operator config
-	// (KB-3), because a cluster without the OpenBao CSI driver cannot mount
-	// them (FailedMount).
+	// copilot-spc CSI secret volume is opt-in operator config (KB-3),
+	// because a cluster without the OpenBao CSI driver cannot mount it
+	// (FailedMount).
 	volNames := make(map[string]bool)
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		volNames[v.Name] = true
@@ -161,7 +161,7 @@ func TestBuildRunnerJob(t *testing.T) {
 	}
 	assert.False(t, volNames["repo"], "runner must not mount the shared repo PVC; it clones into /data/intake/<ticket>/repo")
 	assert.True(t, volNames["data"])
-	assert.False(t, volNames["linear-secrets"], "built-in secret volume is opt-in operator config (KB-3); default off")
+	assert.False(t, volNames["linear-secrets"], "the orphaned linear-spc volume must not return (KB-304: the retired linear-spc SPC ships nowhere)")
 	assert.False(t, volNames["copilot-secrets"], "built-in secret volume is opt-in operator config (KB-3); default off")
 	assert.False(t, volNames["shell-secrets"], "runner pod must not mount shell-secrets")
 
@@ -211,8 +211,8 @@ func TestBuildRunnerJob(t *testing.T) {
 
 // KB-3: a workflow-less (legacy) run must produce a pod spec free of CSI
 // secret volumes by default — on a cluster without the Secrets Store CSI
-// driver the built-in linear-spc/copilot-spc volumes can never mount
-// (FailedMount) and the pod never leaves ContainerCreating. Both runner
+// driver the built-in copilot-spc volume can never mount (FailedMount)
+// and the pod never leaves ContainerCreating. Both runner
 // modes (image and source) build from the nil plan, so both must be
 // covered; the same default applies to the runner and repo-clone mounts.
 func TestLegacyRunnerWithoutWorkflowHasNoCSISecretVolumes(t *testing.T) {
@@ -259,9 +259,11 @@ func TestLegacyRunnerWithoutWorkflowHasNoCSISecretVolumes(t *testing.T) {
 }
 
 // KB-3: Defaults.LegacySecretVolumes opts the built-in legacy secret
-// volumes back in for OpenBao-equipped clusters that still run
-// workflow-less runs: the runner and repo-clone mount the linear-spc /
-// copilot-spc CSI volumes exactly as before the default changed.
+// volume back in for OpenBao-equipped clusters that still run
+// workflow-less runs: the runner and repo-clone mount the copilot-spc
+// CSI volume exactly as before the default changed. KB-304: the paired
+// linear-spc volume is gone — the retired linear-spc SPC ships nowhere
+// since KB-281, so a restored linear mount would always FailedMount.
 func TestLegacyRunnerSecretVolumesOperatorOptIn(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "kb3-legacy-optin"},
@@ -282,20 +284,14 @@ func TestLegacyRunnerSecretVolumesOperatorOptIn(t *testing.T) {
 	for _, v := range spec.Volumes {
 		volNames[v.Name] = true
 	}
-	assert.True(t, volNames["linear-secrets"], "opted-in built-in secret volume present")
-	assert.True(t, volNames["copilot-secrets"])
+	assert.False(t, volNames["linear-secrets"], "the orphaned linear-spc volume must not return (KB-304)")
+	assert.True(t, volNames["copilot-secrets"], "opted-in built-in secret volume present")
 
-	linear := findVolume(t, spec.Volumes, "linear-secrets")
-	require.NotNil(t, linear.CSI)
-	assert.Equal(t, "linear-spc", linear.CSI.VolumeAttributes["secretProviderClass"])
 	copilot := findVolume(t, spec.Volumes, "copilot-secrets")
 	require.NotNil(t, copilot.CSI)
 	assert.Equal(t, "copilot-spc", copilot.CSI.VolumeAttributes["secretProviderClass"])
 
 	runner := spec.Containers[0]
-	linearMount := findMount(t, runner.VolumeMounts, "linear-secrets")
-	assert.Equal(t, "/secrets/linear_api_key", linearMount.MountPath)
-	assert.Equal(t, "linear_api_key", linearMount.SubPath)
 	copilotMount := findMount(t, runner.VolumeMounts, "copilot-secrets")
 	assert.Equal(t, "/home/criteria/secrets", copilotMount.MountPath)
 

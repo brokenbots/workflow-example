@@ -161,16 +161,18 @@ type Defaults struct {
 	// built-in amd64 default.
 	JobArch string
 	// LegacySecretVolumes opts workflow-less (legacy) runs back into the
-	// built-in linear-spc/copilot-spc OpenBao CSI secret volumes and their
-	// mounts (KB-3). Those volumes hard-require the Secrets Store CSI
-	// driver and the two SecretProviderClasses, which a cluster without
-	// OpenBao CSI cannot mount (FailedMount), so they are opt-in operator
-	// config (flag --legacy-secret-volumes / env
+	// built-in copilot-spc OpenBao CSI secret volume and its mounts
+	// (KB-3). That volume hard-requires the Secrets Store CSI driver and
+	// the copilot-spc SecretProviderClass, which a cluster without OpenBao
+	// CSI cannot mount (FailedMount), so it is opt-in operator config
+	// (flag --legacy-secret-volumes / env
 	// CRITERIA_LEGACY_SECRET_VOLUMES / Helm operator.legacySecretVolumes):
 	// default false keeps the legacy fallback mountable everywhere, and an
 	// OpenBao-equipped cluster that still runs workflow-less runs sets it
 	// to restore the pre-KB-3 delivery. Runs with a stamped workflow
-	// declare their own secrets and are never affected.
+	// declare their own secrets and are never affected. (KB-304: the
+	// second built-in legacy volume went with its retired
+	// SecretProviderClass.)
 	LegacySecretVolumes bool
 }
 
@@ -548,10 +550,6 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		{Name: "REPO_DIR", Value: repoDir},
 		{Name: "INTAKE_ROOT", Value: intakeRoot},
 		{Name: "TRIAGE_ROOT", Value: triageRoot},
-		{Name: "LINEAR_REVIEW_STATE", Value: "In Review"},
-		{Name: "LINEAR_TRIAGE_STATE", Value: "Triage"},
-		{Name: "LINEAR_WORK_STATE", Value: "In Progress"},
-		{Name: "LINEAR_DONE_STATE", Value: "Done"},
 		{Name: "BASE_BRANCH", Value: baseBranchOrDefault(run.Spec.BaseBranch)},
 		{Name: "BUILD_CMD", Value: run.Spec.BuildCmd},
 		{Name: "TEST_CMD", Value: run.Spec.TestCmd},

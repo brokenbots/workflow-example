@@ -50,7 +50,7 @@ spec:
               properties:
                 ticketId:
                   type: string
-                  description: Linear ticket identifier to process.
+                  description: Intake ticket identifier to process.
                   pattern: '^[A-Za-z0-9_-]+$'
                   maxLength: 64
                 repoUrl:
@@ -89,8 +89,7 @@ spec:
                   type: object
                   description: >-
                     Resolved workflow-library object stamped by the
-                    kanboard-watcher (CRI-217: the retired linear-watcher
-                    introduced the field) from the criteria-routes
+                    kanboard-watcher (CRI-217) from the criteria-routes
                     ConfigMap. Consumed by the jobbuilder (CRI-222). Empty
                     means the operator defaults apply.
                   required:
@@ -442,10 +441,10 @@ spec:
                 ticketState:
                   type: string
                   description: >-
-                    Final Linear ticket state (CRI-132 semantics). The castle
-                    path leaves it unset: castle carries no Linear
-                    ticket-state source (RunCompleted.final_state is the
-                    engine's workflow terminal state, not the Linear state).
+                    Final ticket state (CRI-132 semantics). The castle
+                    path leaves it unset: castle carries no ticket-state
+                    source (RunCompleted.final_state is the engine's
+                    workflow terminal state).
                     Not part of the terminal-completion gate.
                 eventsPath:
                   type: string
