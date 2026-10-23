@@ -171,7 +171,8 @@ type Defaults struct {
 	// OpenBao-equipped cluster that still runs workflow-less runs sets it
 	// to restore the pre-KB-3 delivery. Runs with a stamped workflow
 	// declare their own secrets and are never affected. (KB-304: the
-	// paired linear-spc volume went with the retired linear-spc SPC.)
+	// second built-in legacy volume went with its retired
+	// SecretProviderClass.)
 	LegacySecretVolumes bool
 }
 

@@ -239,6 +239,9 @@ func TestParseAndValidate(t *testing.T) {
 		if r.Workflow == "linear-intake-url" || r.Workflow == "linear-triage-url" || r.Workflow == "linear-develop-url" {
 			t.Errorf("route %q still fires the retired linear workflow %q (KB-281)", r.Name, r.Workflow)
 		}
+		if r.Name == "criteria-triage" || r.Name == "criteria-develop" || r.Name == "criteria-cleanup" {
+			t.Errorf("route %q is a retired Criteria K8s Workflow Runner zombie rule (KB-304); only the tag-gated harness legs may match that project", r.Name)
+		}
 	}
 	// The live kanboard objects survive KB-304 untouched.
 	kb, ok := p.WorkflowLibrary["kanboard-triage-url"]

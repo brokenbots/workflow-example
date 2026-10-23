@@ -51,8 +51,8 @@ var (
 	// SecretProviderClass, so it is opt-in operator config. Default off
 	// keeps the legacy pod mountable on clusters without OpenBao CSI; set
 	// true to restore the pre-KB-3 delivery on an OpenBao-equipped
-	// cluster. (KB-304: the paired linear-spc volume went with the
-	// retired linear-spc SPC.)
+	// cluster. (KB-304: the second built-in legacy volume went with its
+	// retired SecretProviderClass.)
 	legacySecretVolumes = flag.Bool("legacy-secret-volumes", getBool(jobbuilder.EnvLegacySecretVolumes, false), "Mount the built-in copilot-spc CSI secret volume on runs without a stamped workflow (requires the OpenBao Secrets Store CSI driver)")
 	dataPVC             = flag.String("data-pvc", getenv("CRITERIA_DATA_PVC", "criteria-data"), "PVC mounted at /data")
 	providerBaseURL     = flag.String("provider-base-url", getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"), "Default provider base URL")

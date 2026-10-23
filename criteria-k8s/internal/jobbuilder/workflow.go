@@ -243,8 +243,9 @@ func (p *workflowPlan) applyHostAffinity(labels map[string]string, spec *corev1.
 // (FailedMount). legacySecretVolumes (operator config) opts the built-in
 // secret volume back in for OpenBao-equipped clusters that still run
 // workflow-less runs; a stamped workflow declares its own secrets and
-// replaces them. (KB-304: the paired linear-spc volume went with the
-// retired linear-spc SPC — no shipped manifest carries it anymore.)
+// replaces them. (KB-304: the second built-in legacy volume was dropped
+// along with its retired SecretProviderClass — no shipped manifest
+// defines that class anymore.)
 func (p *workflowPlan) runnerVolumes(dataPVC string, legacySecretVolumes bool) []corev1.Volume {
 	volumes := p.podVolumes(dataPVC, true)
 	if p == nil && legacySecretVolumes {
