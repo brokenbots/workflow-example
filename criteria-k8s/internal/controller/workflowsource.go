@@ -3,8 +3,8 @@
 // declares type "url" but carries no spec.workflowSource has no workflow
 // source to fetch — the url contract says the URL is the source — and the
 // image-mode fallback would silently run it on the operator's baked
-// workflow image (observed: runner and repo-clone both pulled the baked
-// Linear image and ImagePullBackOff'd on a cluster without it). Admission
+// workflow image (observed: runner and repo-clone both pulled a baked
+// image and ImagePullBackOff'd on a cluster without it). Admission
 // refuses such runs with an explicit reason instead of letting them fall
 // through to the baked image. Runs without a stamped workflow keep the
 // genuinely legacy (non-url) image-mode path, including its KB-3 legacy

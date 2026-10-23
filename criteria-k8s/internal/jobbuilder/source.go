@@ -149,9 +149,6 @@ set -- apply "$workflow_url" \
     --var "repo_dir=${REPO_DIR:-/data/intake/${TICKET_ID:-}/repo}" \
     --var "intake_root=${INTAKE_ROOT:-/data/intake}" \
     --var "triage_root=${TRIAGE_ROOT:-/data/triage}" \
-    --var "linear_review_state=${LINEAR_REVIEW_STATE:-In Review}" \
-    --var "linear_work_state=${LINEAR_WORK_STATE:-In Progress}" \
-    --var "linear_done_state=${LINEAR_DONE_STATE:-Done}" \
     --var "base_branch=${BASE_BRANCH:-main}" \
     --var "build_cmd=${BUILD_CMD:-}" \
     --var "test_cmd=${TEST_CMD:-}" \
@@ -184,7 +181,7 @@ fi
 # only mount paths appear in argv, values reach adapters over OpenSession.
 # The pair set is derived from the declared secrets (CRITERIA_SECRET_VARS,
 # newline-separated varname=absfile) so every workflow's secret vars arrive,
-# not just the linear ones the entrypoint used to hardcode. The loop runs in
+# not just the ones a maintained hardcoded list would cover. The loop runs in
 # a subshell and appends into the vars file read back below: a piped while
 # cannot mutate the parent's argv.
 secret_vars="${CRITERIA_SECRET_VARS-}"

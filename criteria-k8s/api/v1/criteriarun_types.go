@@ -21,8 +21,7 @@ const (
 // triage-class runs are read-only against the repo and may run
 // concurrently with any run on the same repoURL (per-ticket PVC clones
 // isolate state). The class is declared on the routes workflow-library
-// object and stamped onto the run by the kanboard-watcher (the retired
-// linear-watcher stamped it until the 2026-10-09 Linear retirement);
+// object and stamped onto the run by the watcher;
 // runs without a stamped workflow behave as dev.
 const (
 	RunClassDev    = "dev"
@@ -31,7 +30,7 @@ const (
 
 // CriteriaRunSpec defines the desired state of a CriteriaRun.
 type CriteriaRunSpec struct {
-	// TicketID is the Linear ticket identifier (e.g. CRI-104).
+	// TicketID is the intake ticket identifier (e.g. CRI-104).
 	TicketID string `json:"ticketId"`
 
 	// RepoURL is the GitHub repository to clone and work on (e.g. brokenbots/workflow-example).
@@ -70,8 +69,8 @@ type CriteriaRunSpec struct {
 	PerScopeSessions bool `json:"perScopeSessions,omitempty"`
 
 	// Workflow is the resolved workflow-library object stamped onto the
-	// run by the kanboard-watcher (CRI-217: the retired linear-watcher
-	// introduced the field) from the criteria-routes ConfigMap.
+	// run by the kanboard-watcher (CRI-217) from the criteria-routes
+	// ConfigMap.
 	// Nil means no workflow was assigned and the operator defaults apply.
 	// Consumed by the jobbuilder (CRI-222).
 	Workflow *RunWorkflow `json:"workflow,omitempty"`
@@ -469,11 +468,11 @@ type CriteriaRunStatus struct {
 	// the run behaves exactly as before KB-103.
 	ConfigRender *RunConfigRender `json:"configRender,omitempty"`
 
-	// TicketState records the final Linear ticket state (CRI-132 semantics).
-	// The castle path leaves it unset: castle carries no Linear ticket-state
+	// TicketState records the final ticket state (CRI-132 semantics).
+	// The castle path leaves it unset: castle carries no ticket-state
 	// source (the engine's RunCompleted.final_state is the workflow terminal
-	// state name, not the Linear state), so this field is reserved until a
-	// ticket-state producer exists. Not part of the terminal-completion gate.
+	// state name, not the ticket source's state), so this field is reserved
+	// until a ticket-state producer exists. Not part of the terminal-completion gate.
 	TicketState string `json:"ticketState,omitempty"`
 
 	// EventsPath is the debug-only events.ndjson mirror path (CRI-136) the
