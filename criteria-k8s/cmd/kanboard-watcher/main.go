@@ -16,7 +16,6 @@ import (
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/binding"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
-	"github.com/brokenbots/workflow-example/criteria-k8s/internal/linear"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
@@ -200,7 +199,7 @@ func main() {
 		workflowsTagGroup: *workflowsTagGroup,
 		configsTagGroup:   *configsTagGroup,
 		routingTags:       parseTagList(*routingTags),
-		repoValidator:     linear.DefaultRepoValidator(nil, githubToken, ""),
+		repoValidator:     DefaultRepoValidator(nil, githubToken, ""),
 		log:               logger,
 	}
 
