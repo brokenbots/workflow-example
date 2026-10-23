@@ -203,8 +203,8 @@ jq -e '.steps[] | select(.name == "create_pr") | ([.outcomes[] | select(.name ==
     || fail "create_pr failure must route through route_created_pr"
 
 echo "==> route_created_pr: empty pr_url retries (bounded), then fails loudly"
-jq -e '.switches[] | select(.name == "route_created_pr") | ([.conditions[] | select(.match == "data.internal.pr_url.value != \"\"" and .next == "route_reviewer_creds")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "route_created_pr must hand a non-empty pr_url to the reviewer routing"
+jq -e '.switches[] | select(.name == "route_created_pr") | ([.conditions[] | select(.match == "data.internal.pr_url.value != \"\"" and .next == "run_pr_reviewer_loop")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "route_created_pr must hand a non-empty pr_url to the reviewer loop"
 jq -e '.switches[] | select(.name == "route_created_pr") | ([.conditions[] | select((.match | contains("pr_url_retries")) and .next == "retry_create_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
     || fail "route_created_pr must retry create_pr while the retry budget lasts"
 jq -e '.switches[] | select(.name == "route_created_pr") | .default_next == "fail_missing_pr_url"' "${COMPILE_OUT}" >/dev/null \

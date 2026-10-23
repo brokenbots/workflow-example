@@ -467,7 +467,7 @@ switch "route_pr_action" {
     }
     match {
         condition = startswith(steps.check_pr.stdout, "status:open")
-        next      = switch.route_reviewer_creds
+        next      = step.run_pr_reviewer_loop
     }
     // needs_work or checks_failed: skip developer, straight to coordinator triage
     default { next = step.triage_pr_feedback }
@@ -553,7 +553,7 @@ step "create_pr" {
 switch "route_created_pr" {
     match {
         condition = data.internal.pr_url.value != ""
-        next      = switch.route_reviewer_creds
+        next      = step.run_pr_reviewer_loop
     }
     match {
         condition = data.internal.pr_url_retries.value < var.max_pr_url_retries
@@ -620,31 +620,6 @@ step "fail_missing_pr_url" {
 
 // Entry point for all reviewer invocations: initial review and re-review after
 // fixes. The child workflow's adapters receive only REVIEWER_GITHUB_TOKEN.
-switch "route_reviewer_creds" {
-    match {
-        condition = var.ticket_id != ""
-        next      = step.set_linear_review_state
-    }
-    default { next = step.run_pr_reviewer_loop }
-}
-
-// Keep Linear aligned with the delivery lifecycle. This step is idempotent and
-// runs before initial review and every re-review after developer changes.
-step "set_linear_review_state" {
-    target = adapter.shell.linear
-    input {
-        command = templatefile("./scripts/set_linear_review_state.sh.tftpl", {
-            criteria_value_1 = var.ticket_id
-            criteria_value_2 = var.linear_review_state
-        })
-    }
-    outcome "success" { next = step.run_pr_reviewer_loop }
-    outcome "failure" { next = state.failed }
-}
-
-// Restore coordinator credentials on both outcomes before routing the review
-// result. A failed child has no actionable review verdict and falls through to
-// the terminal failure route below.
 step "run_pr_reviewer_loop" {
     target = subworkflow.pr_reviewer_loop
     outcome "success" {
@@ -1277,7 +1252,7 @@ step "push_and_respond" {
 
     outcome "success" {
         schema = object({ reason = string })
-        next = switch.route_reviewer_creds
+        next = step.run_pr_reviewer_loop
     }
     outcome "failed" {
         schema = object({ reason = string })

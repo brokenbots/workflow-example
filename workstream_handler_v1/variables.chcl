@@ -3,18 +3,6 @@ variable "workstream_file" {
     type        = string
 }
 
-variable "ticket_id" {
-    description = "Linear ticket identifier associated with this workstream. When set, the ticket is moved to linear_review_state before each PR review. Empty disables Linear updates for standalone runs."
-    type        = string
-    default     = ""
-}
-
-variable "linear_review_state" {
-    description = "Linear workflow state to set before PR review, resolved by name against the ticket's team."
-    type        = string
-    default     = "In Review"
-}
-
 variable "repo_dir" {
     description = "Absolute path of the repo's primary working tree. Worktree lifecycle steps (git fetch / worktree add / worktree remove) run here. The operator's main checkout is fine — git worktree add only reads its .git. Empty = run in the process working directory (no isolation)."
     type        = string
@@ -130,11 +118,6 @@ variable "max_pr_url_retries" {
     description = "KB-49: budget of retries for a PR step that completed without a PR URL. Exhaustion fails the run loudly at the PR step."
     type        = number
     default     = 2
-}
-
-variable "linear_api_key" {
-    type   = string
-    secret = true
 }
 
 variable "workflow_github_token" {
