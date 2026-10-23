@@ -1,0 +1,183 @@
+func TestParseAndValidate(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "k8s", "examples", "routes-configmap.yaml"))
+	if err != nil {
+		t.Fatalf("reading shipped example: %v", err)
+	}
+	block := extractRoutesJSON(t, string(data))
+	p, err := Parse([]byte(block))
+	if err != nil {
+		t.Fatalf("Parse(shipped example) failed: %v", err)
+	}
+	if len(p.WorkflowLibrary) != 9 {
+		t.Errorf("workflowLibrary size = %d, want 9 (KB-304: the linear-intake-v1 image object is removed)", len(p.WorkflowLibrary))
+	}
+	if len(p.Routes) != 9 {
+		t.Fatalf("routes size = %d, want 9 (KB-281 retired the criteria triage/develop split routes; KB-304 removed the criteria-cleanup route)", len(p.Routes))
+	}
+	// KB-281/KB-304: the criteria project's cleanup route is gone. Surviving
+	// route order: the two kanboard routes, the KB-311 per-project develop
+	// pair, then the tag-gated harness legs on the criteria project.
+	if n := p.Routes[0].Name; n != "kanboard-triage" {
+		t.Errorf("routes[0] = %q, want %q", n, "kanboard-triage")
+	}
+	if p.Routes[0].Project != "Kanboard Tickets" || p.Routes[1].Project != "Kanboard Tickets" {
+		t.Errorf("routes[0:2] projects = %q/%q, want the kanboard pair on %q", p.Routes[0].Project, p.Routes[1].Project, "Kanboard Tickets")
+	}
+	// KB-311: the acceptance pair — two distinct projects running THE SAME
+	// workflow object (identical tree digest) by binding.
+	if p.Routes[2].Project != "Criteria Go Dev" || p.Routes[3].Project != "TypeScript SDK" {
+		t.Errorf("routes[2:4] projects = %q/%q, want the KB-311 acceptance pair", p.Routes[2].Project, p.Routes[3].Project)
+	}
+	if p.Routes[2].Workflow != "kanboard-develop-url" || p.Routes[3].Workflow != "kanboard-develop-url" {
+		t.Errorf("routes[2:4] workflows = %q/%q, want BOTH on kanboard-develop-url (same tree, different bindings)", p.Routes[2].Workflow, p.Routes[3].Workflow)
+	}
+	for _, r := range p.Routes[2:4] {
+		if !slices.Equal(r.States, []string{"Ready"}) {
+			t.Errorf("route %s states = %v, want [Ready]", r.Name, r.States)
+		}
+	}
+	// KB-277..KB-280 + KB-276: the criteria project's dave-go tag-gated harness
+	// series legs (each firing its own *-url object), routes[4]..routes[8]
+	// after the KB-304 cleanup-route retirement shifted the indices.
+	if n := p.Routes[4].Name; n != "harness-contracts" {
+		t.Errorf("routes[4] = %q, want %q (KB-277 harness contracts route)", n, "harness-contracts")
+	}
+	if p.Routes[4].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-contracts route project = %q, want %q", p.Routes[4].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[4].Workflow != "harness-contracts-url" {
+		t.Errorf("harness-contracts route workflow = %q, want %q", p.Routes[4].Workflow, "harness-contracts-url")
+	}
+	hc, ok := p.WorkflowLibrary["harness-contracts-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-contracts-url (KB-277)")
+	}
+	if hc.Type != TypeURL || hc.Class != ClassTriage || hc.Namespace != "criteria-jobs" ||
+		hc.Ref != "" || len(hc.Volumes) != 3 || len(hc.Secrets) != 1 {
+		t.Errorf("harness-contracts-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, 1 secret (github-tokens), no pin (KB-277)", hc)
+	}
+	// KB-278: the harness-composition leg rides routes[5].
+	if n := p.Routes[5].Name; n != "harness-composition" {
+		t.Errorf("routes[5] = %q, want %q (KB-278 harness composition route)", n, "harness-composition")
+	}
+	if p.Routes[5].Workflow != "harness-composition-url" {
+		t.Errorf("harness-composition route workflow = %q, want %q", p.Routes[5].Workflow, "harness-composition-url")
+	}
+	// The object must stay url-ONLY — no commit ref may bind the
+	// pinless-at-close harness series (CRI-260 three-way check).
+	comp, ok := p.WorkflowLibrary["harness-composition-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-composition-url (KB-278)")
+	}
+	if comp.Type != TypeURL || comp.Class != ClassTriage || comp.Namespace != "criteria-jobs" ||
+		comp.Ref != "" || len(comp.Volumes) != 3 || len(comp.Secrets) != 0 {
+		t.Errorf("harness-composition-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, no secrets, no pin (KB-278)", comp)
+	}
+	// KB-279: the harness-failures leg rides routes[6] — the failures leg
+	// fires harness_failures_v1 (engineered failure-path fixtures, matrix
+	// E24-E32 + G12) with the same pinless-at-close convention.
+	if n := p.Routes[6].Name; n != "harness-failures" {
+		t.Errorf("routes[6] = %q, want %q (KB-279 harness failures route)", n, "harness-failures")
+	}
+	if p.Routes[6].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-failures route project = %q, want %q", p.Routes[6].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[6].Workflow != "harness-failures-url" {
+		t.Errorf("harness-failures route workflow = %q, want %q", p.Routes[6].Workflow, "harness-failures-url")
+	}
+	fail, ok := p.WorkflowLibrary["harness-failures-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-failures-url (KB-279)")
+	}
+	if fail.Type != TypeURL || fail.Class != ClassTriage || fail.Namespace != "criteria-jobs" ||
+		fail.Ref != "" || len(fail.Volumes) != 3 || len(fail.Secrets) != 0 {
+		t.Errorf("harness-failures-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, no secrets, no pin (KB-279)", fail)
+	}
+	if len(p.Routes[6].Tags) == 0 || p.Routes[6].Tags[0] != "harness-validation" {
+		t.Errorf("harness-failures route tags = %v, want the tag-gated harness pair (KB-279)", p.Routes[6].Tags)
+	}
+	// KB-280: the harness-fleet-smoke leg rides routes[7] — the series'
+	// fast-feedback canary (harness_fleet_smoke_v1, ~90s deterministic
+	// no-agent pre-leg gate) with the same pinless-at-close convention.
+	if n := p.Routes[7].Name; n != "harness-fleet-smoke" {
+		t.Errorf("routes[7] = %q, want %q (KB-280 harness fleet-smoke route)", n, "harness-fleet-smoke")
+	}
+	if p.Routes[7].Workflow != "harness-fleet-smoke-url" {
+		t.Errorf("harness-fleet-smoke route workflow = %q, want %q", p.Routes[7].Workflow, "harness-fleet-smoke-url")
+	}
+	fsmoke, ok := p.WorkflowLibrary["harness-fleet-smoke-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing harness-fleet-smoke-url (KB-280)")
+	}
+	if fsmoke.Type != TypeURL || fsmoke.Class != ClassTriage || fsmoke.Namespace != "criteria-jobs" ||
+		fsmoke.Ref != "" || len(fsmoke.Volumes) != 3 || len(fsmoke.Secrets) != 0 {
+		t.Errorf("harness-fleet-smoke-url = %+v, want triage-class criteria-jobs url workflow with 3 volumes, no secrets, no pin (KB-280)", fsmoke)
+	}
+	// KB-280 is the no-agent slice: the object pins the Shell adapter ONLY
+	// (no copilot identity to image — the canary declares no copilot member).
+	if fsmoke.AdapterImages == nil {
+		t.Errorf("harness-fleet-smoke-url adapterImages missing — want the shell-only surface (KB-280)")
+	} else if _, hasCopilot := fsmoke.AdapterImages["copilot"]; hasCopilot {
+		t.Errorf("harness-fleet-smoke-url adapterImages pins copilot — the canary is the no-agent slice (KB-280)")
+	} else if fsmoke.AdapterImages["shell"] != "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1" {
+		t.Errorf("harness-fleet-smoke-url shell pin = %q, want the recorded fleet pin set (KB-280)", fsmoke.AdapterImages["shell"])
+	}
+	// KB-276: the wire/transport leg closes the routes at [8]; its url object
+	// ships in the same payload.
+	if n := p.Routes[8].Name; n != "harness-wire" {
+		t.Errorf("routes[8] = %q, want %q (KB-276 harness wire/transport route)", n, "harness-wire")
+	}
+	if p.Routes[8].Project != "Criteria K8s Workflow Runner" {
+		t.Errorf("harness-wire route project = %q, want %q", p.Routes[8].Project, "Criteria K8s Workflow Runner")
+	}
+	if p.Routes[8].Workflow != "harness-wire-url" {
+		t.Errorf("harness-wire route workflow = %q, want %q", p.Routes[8].Workflow, "harness-wire-url")
+	}
+	wurl, ok := p.WorkflowLibrary["harness-wire-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing the harness-wire-url object (KB-276)")
+	}
+	if wurl.Class != ClassTriage {
+		t.Errorf("harness-wire-url class = %q, want triage (tag-gated dave-go gate (KB-276))", wurl.Class)
+	}
+	// Absence regressions (KB-281/KB-304): the retired linear objects must
+	// not return in the shipped example.
+	for _, gone := range []string{"linear-intake-url", "linear-triage-url", "linear-develop-url", "linear-intake-v1"} {
+		if _, still := p.WorkflowLibrary[gone]; still {
+			t.Errorf("workflowLibrary still has the retired object %q (KB-281/KB-304)", gone)
+		}
+	}
+	for _, r := range p.Routes {
+		if r.Workflow == "linear-intake-url" || r.Workflow == "linear-triage-url" || r.Workflow == "linear-develop-url" {
+			t.Errorf("route %q still fires the retired linear workflow %q (KB-281)", r.Name, r.Workflow)
+		}
+	}
+	// The live kanboard objects survive KB-304 untouched.
+	kb, ok := p.WorkflowLibrary["kanboard-triage-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing kanboard-triage-url")
+	}
+	if kb.Type != TypeURL || kb.Class != ClassTriage || len(kb.Volumes) != 3 || len(kb.Secrets) != 2 {
+		t.Errorf("kanboard-triage-url = %+v, want triage-class url workflow with 3 volumes and 2 secrets", kb)
+	}
+	// decision-demo-url (KB-205) is route prep only: a url workflow with no
+	// route/ref/volumes/secrets yet — KB-207 wires those in one coherent
+	// change when the validation run starts gating the demo.
+	dec, ok := p.WorkflowLibrary["decision-demo-url"]
+	if !ok {
+		t.Fatalf("workflowLibrary missing decision-demo-url")
+	}
+	if dec.Type != TypeURL || dec.URL == "" || dec.Namespace != "criteria-jobs" ||
+		dec.Class != "" || dec.Ref != "" || len(dec.Volumes) != 0 || len(dec.Secrets) != 0 {
+		t.Errorf("decision-demo-url = %+v, want plain criteria-jobs url workflow with route-facing fields left for KB-207", dec)
+	}
+	kbRoutes := 0
+	for _, r := range p.Routes {
+		if r.Project == "Kanboard Tickets" {
+			kbRoutes++
+		}
+	}
+	if kbRoutes != 2 {
+		t.Errorf("kanboard routes = %d, want 2 (triage + develop on the Kanboard Tickets project)", kbRoutes)
+	}
+}

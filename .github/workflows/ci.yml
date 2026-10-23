@@ -120,8 +120,8 @@ jobs:
           bash kanboard_triage_v1/tests/test_triage_standalone.sh
 
       # CRI-310: the dirty-label cleanup workflow (carrier for CRI-246,
-      # validation run C) — minimal single-adapter tree, fired through the
-      # criteria-cleanup route on a criteria-dirty ticket.
+      # validation run C) — minimal single-adapter tree, gated standalone
+      # (KB-304 retired the criteria-cleanup route that used to fire it).
       - name: Run ticket_cleanup_v1 standalone regression test (CRI-310)
         run: |
           bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh

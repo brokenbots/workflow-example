@@ -238,17 +238,17 @@ func (p *workflowPlan) applyHostAffinity(labels map[string]string, spec *corev1.
 // data volume, the declared volumes and CSI secret volumes, and the
 // pod-adapter scripts ConfigMap. Runs without a stamped workflow object
 // mount only the data and scripts volumes by default (KB-3): the built-in
-// linear-spc/copilot-spc secret volumes need the Secrets Store CSI driver
-// and those SecretProviderClasses, which a cluster without OpenBao CSI
-// cannot mount (FailedMount). legacySecretVolumes (operator config) opts
-// the built-in secret volumes back in for OpenBao-equipped clusters that
-// still run workflow-less runs; a stamped workflow declares its own
-// secrets and replaces them.
+// copilot-spc secret volume needs the Secrets Store CSI driver and that
+// SecretProviderClass, which a cluster without OpenBao CSI cannot mount
+// (FailedMount). legacySecretVolumes (operator config) opts the built-in
+// secret volume back in for OpenBao-equipped clusters that still run
+// workflow-less runs; a stamped workflow declares its own secrets and
+// replaces them. (KB-304: the paired linear-spc volume went with the
+// retired linear-spc SPC — no shipped manifest carries it anymore.)
 func (p *workflowPlan) runnerVolumes(dataPVC string, legacySecretVolumes bool) []corev1.Volume {
 	volumes := p.podVolumes(dataPVC, true)
 	if p == nil && legacySecretVolumes {
 		volumes = append(volumes,
-			csiVolume("linear-secrets", "linear-spc"),
 			csiVolume("copilot-secrets", "copilot-spc"),
 		)
 	}
@@ -375,7 +375,6 @@ func (p *workflowPlan) runnerMounts(legacySecretVolumes bool) []corev1.VolumeMou
 		}
 		return []corev1.VolumeMount{
 			{Name: dataVolumeName, MountPath: dataMountPath},
-			{Name: "linear-secrets", MountPath: "/secrets/linear_api_key", SubPath: "linear_api_key"},
 			{Name: "copilot-secrets", MountPath: "/home/criteria/secrets"},
 			{Name: scriptsVolumeName, MountPath: scriptsMountPath},
 		}

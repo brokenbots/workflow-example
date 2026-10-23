@@ -7,11 +7,12 @@ set -euo pipefail
 # proves the ADR-0005 D1/D2 modes (image-only, url-only, url+image + expected
 # pin) and the pvc/nfs/tmp volumes with env mapping and OpenBao/CSI secret
 # name references are representable. Also asserts the example is secret-free
-# and carries the KB-281 post-retirement shape: the retired linear estate
-# (linear-intake-url / linear-triage-url / linear-develop-url objects and the
-# criteria-triage / criteria-develop routes) is gone, the criteria project is
-# cleanup-only, the kanboard routes fire the pinned kanboard_triage_v1 /
-# kanboard_develop_v1 trees, the git-ref pin duality (url '?ref=' vs the
+# and carries the KB-281/KB-304 post-retirement shape: the retired linear
+# estate (linear-intake-url / linear-triage-url / linear-develop-url objects,
+# the criteria-triage / criteria-develop routes, the linear-intake-v1 image
+# object and the criteria-cleanup route) is gone, the criteria project
+# carries only its tag-gated harness legs, the kanboard routes fire the
+# pinned kanboard_triage_v1 / kanboard_develop_v1 trees, the git-ref pin duality (url '?ref=' vs the
 # separate "ref" key) agrees per entry, and the adapterImages pins agree
 # three ways: shipped example == RECORDED_PIN_SET == live criteria-routes CM
 # (the live leg skips when no kubectl/cluster is reachable, e.g. CI).
@@ -586,19 +587,57 @@ def validate_registry(registry, errs):
 # --------------------------------------------------------- example variants
 base = load_example(example_path)
 LIB = "workflowLibrary"
-BAKED = "linear-intake-v1"
 URLWF = "kanboard-develop-url"
+
+# KB-304: the shipped workflowLibrary no longer carries a type=image object
+# (the linear-intake-v1 image object is retired), so the image-mode schema
+# variants below mutate a synthetic fixture entry injected into the variant
+# copy only — the shipped-shape assertions keep reading the pristine payload.
+variant_base = copy.deepcopy(base)
+variant_base[LIB]["fixture-image-v1"] = {
+    "type": "image",
+    "image": "localhost:5000/criteria-runtime:k8s-tooling-v1",
+    "namespace": "criteria-jobs",
+    "volumes": [
+        {
+            "name": "data",
+            "kind": "pvc",
+            "claim": "criteria-data",
+            "mountPath": "/data",
+            "env": {"CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs"}
+        },
+        {
+            "name": "repo",
+            "kind": "pvc",
+            "claim": "criteria-repo",
+            "mountPath": "/repo"
+        }
+    ],
+    "secrets": [
+        {
+            "name": "github-tokens",
+            "secretProviderClass": "copilot-spc",
+            "mountPath": "/home/criteria/secrets",
+            "env": {"WORKFLOW_GITHUB_TOKEN": "workflow_github_token"}
+        }
+    ],
+    "adapterImages": {
+        "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
+        "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+    }
+}
+BAKED = "fixture-image-v1"
 
 
 def mutate(fn):
-    doc = copy.deepcopy(base)
+    doc = copy.deepcopy(variant_base)
     fn(doc)
     return doc
 
 
 positive = [
     ("url-workflow-with-image-and-ref", mutate(lambda d: d[LIB][URLWF].update(
-        image="localhost:5000/linear-intake-remote:dev",
+        image="localhost:5000/criteria-runtime:k8s-tooling-v1",
         ref="0123456789abcdef0123456789abcdef01234567"))),
     ("route-with-tag-subset-all", mutate(lambda d: d["routes"][0].update(
         tags=["intake", "triage"], tagMatch="all"))),
@@ -984,12 +1023,13 @@ walk_strings(base, "payload", cred_hits)
 if cred_hits:
     failures.append(f"example payload is not secret-free: {'; '.join(cred_hits)}")
 
-# -------------------------------------------------- KB-281: shipped example
+# ------------------------------------------- KB-281/KB-304: shipped example
 # shape — the linear estate (the criteria project's split triage/develop
-# routes firing the linear_* trees) is RETIRED: the criteria project is
-# cleanup-only, the kanboard routes cover their own watcher's project and
-# states with full ADR-0005 D7 commit pins, and the retired linear-* url
-# objects must not return.
+# routes firing the linear_* trees) is RETIRED, and KB-304 removes the last
+# residue: the criteria-cleanup route and the linear-intake-v1 image object.
+# The criteria project carries only its tag-gated harness legs now, the
+# kanboard routes cover their own watcher's project and states with full
+# ADR-0005 D7 commit pins, and the retired linear-* objects must not return.
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -998,24 +1038,25 @@ def shipped_err(cond, message):
         failures.append(message)
 
 
-shipped_err(len(base["routes"]) == 10,
-            f"shipped example routes = {len(base['routes'])}, want the CRI-310 cleanup route, "
+shipped_err(len(base["routes"]) == 9,
+            f"shipped example routes = {len(base['routes'])}, want "
             "the two kanboard routes plus the KB-311 acceptance pair (kanboard-develop-go/"
             "kanboard-develop-ts: two projects, same tree, different bindings), and the "
             "KB-277/KB-278/KB-279/KB-280/KB-276 harness legs "
-            "(contracts/composition/failures/fleet-smoke/wire; the criteria split routes are retired, KB-281)")
+            "(contracts/composition/failures/fleet-smoke/wire; the criteria split routes are "
+            "retired KB-281, the criteria-cleanup route KB-304)")
 route_names = {r.get("name") for r in base["routes"] if isinstance(r, dict)}
-shipped_err(route_names == {"criteria-cleanup", "kanboard-triage", "kanboard-develop",
+shipped_err(route_names == {"kanboard-triage", "kanboard-develop",
                             "kanboard-develop-go", "kanboard-develop-ts",
                             "harness-contracts", "harness-composition", "harness-failures",
                             "harness-fleet-smoke", "harness-wire"},
-            f"shipped example route names = {sorted(route_names)}, want cleanup + kanboard pair"
+            f"shipped example route names = {sorted(route_names)}, want the kanboard pair"
             " + KB-311 acceptance pair + harness-contracts + harness-composition"
             " + harness-failures + harness-fleet-smoke + harness-wire")
-for retired_route in ("criteria-triage", "criteria-develop"):
+for retired_route in ("criteria-triage", "criteria-develop", "criteria-cleanup"):
     shipped_err(retired_route not in route_names,
-                f"shipped example: the retired {retired_route} route returned (KB-281)")
-cleanup_route = next((r for r in base["routes"] if r.get("name") == "criteria-cleanup"), None)
+                f"shipped example: the retired {retired_route} route returned"
+                " (KB-281 for triage/develop, KB-304 for cleanup)")
 kanboard_triage_route = next((r for r in base["routes"] if r.get("name") == "kanboard-triage"), None)
 kanboard_develop_route = next((r for r in base["routes"] if r.get("name") == "kanboard-develop"), None)
 harness_contracts_route = next((r for r in base["routes"] if r.get("name") == "harness-contracts"), None)
@@ -1023,20 +1064,20 @@ harness_composition_route = next((r for r in base["routes"] if r.get("name") == 
 harness_failures_route = next((r for r in base["routes"] if r.get("name") == "harness-failures"), None)
 harness_fleet_smoke_route = next((r for r in base["routes"] if r.get("name") == "harness-fleet-smoke"), None)
 harness_wire_route = next((r for r in base["routes"] if r.get("name") == "harness-wire"), None)
-shipped_err(cleanup_route is not None, "shipped example: routes missing the criteria-cleanup route (CRI-310)")
+
 shipped_err(kanboard_triage_route is not None,
             "shipped example: routes missing the kanboard-triage route (dual-source coexistence)")
 shipped_err(kanboard_develop_route is not None,
             "shipped example: routes missing the kanboard-develop route (dual-source coexistence)")
-shipped_err(all(r.get("project") == "Criteria K8s Workflow Runner"
-                for r in base["routes"] if r.get("name", "").startswith("criteria-")),
-            "shipped example: every criteria-* route must target the criteria project")
 
-# KB-281 absence regressions: the retired linear url objects and any route
-# firing them must not return.
-for retired_wf in ("linear-intake-url", "linear-triage-url", "linear-develop-url"):
+# KB-281/KB-304 absence regressions: the retired linear url objects, the
+# linear-intake-v1 image object, and any route firing a linear workflow must
+# not return.
+for retired_wf in ("linear-intake-url", "linear-triage-url", "linear-develop-url",
+                   "linear-intake-v1"):
     shipped_err(retired_wf not in base[LIB],
-                f"shipped example: workflowLibrary still carries the retired {retired_wf} object (KB-281)")
+                f"shipped example: workflowLibrary still carries the retired {retired_wf} object"
+                " (KB-281/KB-304)")
 for r in base["routes"]:
     wf_name = r.get("workflow")
     shipped_err(not str(wf_name).startswith("linear-"),
@@ -1054,22 +1095,13 @@ if isinstance(config_library, dict):
 shipped_err(all("configRef" not in r for r in base["routes"]),
             "shipped example: a surviving route still binds configRef (KB-103's binding rode the retired criteria-develop route)")
 
-# CRI-310 (validation run C): the dirty label is a routing surface. The
-# cleanup route selects on the watcher's sticky criteria-dirty tag for the
-# criteria project's Ready for Development state. (KB-281: the tag-less
-# general develop route it used to out-prioritize is retired, so a
-# dirty-label-free ticket matches nothing and the watcher fails closed.)
-if cleanup_route is not None:
-    if cleanup_route.get("workflow") != "ticket-cleanup-url":
-        failures.append("shipped example: criteria-cleanup must fire ticket-cleanup-url")
-    if cleanup_route.get("tags") != ["criteria-dirty"]:
-        failures.append(f"shipped example: criteria-cleanup tags = {cleanup_route.get('tags')}, want [criteria-dirty]")
-    if cleanup_route.get("states") != ["Ready for Development"]:
-        failures.append(
-            f"shipped example: criteria-cleanup states = {cleanup_route.get('states')}, want [Ready for Development]"
-        )
-    if "tagMatch" in cleanup_route:
-        failures.append("shipped example: criteria-cleanup must keep the tagMatch=all default")
+# KB-304 (2026-10-19, Dave ruling: the Linear integration is dead): the
+# criteria-cleanup route (CRI-310's dirty-label carrier) is retired — its
+# absence is asserted by the retired-route sweep above. The
+# ticket-cleanup-url object stays (schema-validated, pinned, and asserted
+# below in the CRI-310 object section); no route names it anymore, so the
+# tree is reachable only via a ticket's workflows-label-group workflow
+# override.
 
 # Dual-source coexistence: the kanboard routes fire their own watcher's
 # project and states (Kanboard Tickets / Backlog and Ready), url-only, with
@@ -1366,8 +1398,9 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
 # everywhere to k8s-0.5.16 (verified 2026-10-09) while this file lagged at
 # 0.5.15 — exactly the drift class both legs below fail on. Version drift of
 # one pin family is caught per kind present; the objects that declare no
-# adapterImages (the retained linear-intake-v1 image object and the
-# decision-demo-url placeholder, KB-205/KB-281) skip the check.
+# adapterImages (the decision-demo-url placeholder, KB-205) skip the check
+# (KB-304 retired the linear-intake-v1 image object, the other former
+# no-pin object).
 RECORDED_PIN_SET = {
     "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
     "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1",

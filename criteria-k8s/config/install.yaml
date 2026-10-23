@@ -1,6 +1,6 @@
 # Install manifest for the criteria-k8s operator.
 # Applies namespace, CRD, RBAC, and the operator deployment.
-# The SecretProviderClasses (linear-spc, copilot-spc, shell-spc) and the
+# The SecretProviderClasses (copilot-spc, shell-spc) and the
 # criteria-data PVC must already exist in the target namespace.
 ---
 apiVersion: v1

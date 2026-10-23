@@ -161,16 +161,17 @@ type Defaults struct {
 	// built-in amd64 default.
 	JobArch string
 	// LegacySecretVolumes opts workflow-less (legacy) runs back into the
-	// built-in linear-spc/copilot-spc OpenBao CSI secret volumes and their
-	// mounts (KB-3). Those volumes hard-require the Secrets Store CSI
-	// driver and the two SecretProviderClasses, which a cluster without
-	// OpenBao CSI cannot mount (FailedMount), so they are opt-in operator
-	// config (flag --legacy-secret-volumes / env
+	// built-in copilot-spc OpenBao CSI secret volume and its mounts
+	// (KB-3). That volume hard-requires the Secrets Store CSI driver and
+	// the copilot-spc SecretProviderClass, which a cluster without OpenBao
+	// CSI cannot mount (FailedMount), so it is opt-in operator config
+	// (flag --legacy-secret-volumes / env
 	// CRITERIA_LEGACY_SECRET_VOLUMES / Helm operator.legacySecretVolumes):
 	// default false keeps the legacy fallback mountable everywhere, and an
 	// OpenBao-equipped cluster that still runs workflow-less runs sets it
 	// to restore the pre-KB-3 delivery. Runs with a stamped workflow
-	// declare their own secrets and are never affected.
+	// declare their own secrets and are never affected. (KB-304: the
+	// paired linear-spc volume went with the retired linear-spc SPC.)
 	LegacySecretVolumes bool
 }
 

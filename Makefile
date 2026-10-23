@@ -168,9 +168,9 @@ validate: pincheck
 #      required, it is built and pushed on the host too and its
 #      $(CRITERIA_BASE_IMAGE):$(BUILD_TAG) tag is set on the operator
 #      deployment by deploy-images.
-#   3. Apply this ConfigMap so the watcher resolves the split routes
-#      (criteria-triage: [Triage] -> kanboard_triage_v1;
-#      criteria-develop: [Ready] -> kanboard_develop_v1):
+#   3. Apply this ConfigMap so the watcher resolves the live routes
+#      (kanboard-triage: [Backlog] -> kanboard_triage_v1;
+#      kanboard-develop: [Ready] -> kanboard_develop_v1):
 #        make apply-routes
 # Steps 2 and 3 can be run in either order for older payloads, but step 2
 # MUST precede this apply for the CRI-243 payload: a pre-CRI-242 watcher
@@ -178,8 +178,8 @@ validate: pincheck
 # triage runs would fall back to the dev queue and serialize per repoURL
 # instead of admitting concurrently -- degraded concurrency, not a failure.
 # CAUTION: this applies k8s/examples/routes-configmap.yaml WHOLESALE; the
-# config source only carries the criteria-cleanup, kanboard-triage and
-# kanboard-develop routes, so diff the live criteria-routes ConfigMap first
+# config source only carries the kanboard pair plus the tag-gated harness
+# legs (KB-304), so diff the live criteria-routes ConfigMap first
 # -- any live-only routes added out of band would be dropped by this apply.
 apply-routes:
 	kubectl -n criteria-jobs apply -f k8s/examples/routes-configmap.yaml
