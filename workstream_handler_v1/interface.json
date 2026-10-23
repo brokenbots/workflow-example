@@ -2,10 +2,10 @@
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "WorkflowInterface",
   "workflow": "workstream_handler_v1",
-  "description": "Workstream handler (develop-lane subworkflow; direct routing supported from this declaration). Manager/worker pair-programming over a per-run worktree under repo_dir, plus the manager intake lane against Linear. Mounts: repo worktree lane, data for run bookkeeping, scratch for worktree/log staging. Secret lanes: Linear review-state moves plus workflow and reviewer GitHub identities.",
+  "description": "Workstream handler (develop-lane subworkflow; direct routing supported from this declaration). Manager/worker pair-programming over a per-run worktree under repo_dir. Mounts: repo worktree lane, data for run bookkeeping, scratch for worktree/log staging. Secret lanes: workflow and reviewer GitHub identities.",
   "adapters": ["copilot","shell"],
   "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
-  "secretEnv": ["LINEAR_API_KEY","WORKFLOW_GITHUB_TOKEN","REVIEWER_GITHUB_TOKEN"],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN","REVIEWER_GITHUB_TOKEN"],
   "env": [],
   "configSlots": [{"slot":"baseBranch","variable":"base_branch","target":"branch_manager/checkout + PR base","description":"Branch the workstream run forks from, validates against, and opens its PR against."},{"slot":"ciGateCmd","variable":"ci_gate_cmd","target":"pair_programming_loop developer CI gate","description":"Command the developer step uses as its CI gate before review."}]
 }

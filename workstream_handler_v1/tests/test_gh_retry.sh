@@ -253,11 +253,11 @@ assert_grep_count "devops_triage root steps wrapped" 2 \
     "${REPO_ROOT}/devops_triage_v1/main.chcl"
 assert_grep_count "devops_triage open_pr script wrapped" 2 \
     "${REPO_ROOT}/devops_triage_v1/scripts/open_pr.sh.tftpl"
-# KB-281: the linear_intake_v1 entrypoint assertion and its CI registration
-# leg retired with the tree.
+# KB-281: the retired intake entrypoint assertion and its CI registration
+# leg went with its tree.
 # KB-281: the job-cri-27 example Job group (job-cri-27.yaml[.tmpl] +
-# examples/ticket-job.yaml) retired with the linear estate; jobbuilder.go is
-# the only surviving repo-clone probe fixture.
+# examples/ticket-job.yaml) retired with the same estate (d23088d);
+# jobbuilder.go is the only surviving repo-clone probe fixture.
 for f in criteria-k8s/internal/jobbuilder/jobbuilder.go; do
     assert_grep_count "jobbuilder fixture wrapped: ${f}" 1 "${REPO_ROOT}/${f}" \
         "gh_retry gh repo clone"

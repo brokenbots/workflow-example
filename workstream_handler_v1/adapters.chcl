@@ -65,5 +65,3 @@ adapter "shell" "repo" {
         GH_TOKEN = var.workflow_github_token
     }
 }
-
-
