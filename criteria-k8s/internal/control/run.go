@@ -32,8 +32,11 @@ import (
 // config selector — a documented divergence source compareSpec reports).
 //
 // A nil Routes keeps the builder in decision-only degrade: BuildRun fails
-// with a reason instead of guessing a spec, and the watchdog keeps its
-// decision-granularity comparison.
+// with a reason instead of guessing a spec — which is why wiring callers
+// gate on Configured and skip wiring the builder entirely on the
+// no-routes deployment posture (a missing routes file is a deployment
+// posture, not a lane disagreement; the degrade reason must never reach
+// the divergence log).
 type RunBuilder struct {
 	// Defaults are the run-shape defaults both lanes stamp
 	// (runspec.Defaults).
@@ -49,6 +52,15 @@ type RunBuilder struct {
 	Client client.Client
 	// Log receives the pin-read failures (no secret material).
 	Log logr.Logger
+}
+
+// Configured reports whether the builder can actually derive a spec: a
+// routes payload is loaded. Wiring callers (the operator main, the
+// watchdog) treat an unconfigured builder as "spec mirror off" — the
+// decision-granularity comparison stays, and BuildRun's not-configured
+// degrade reason never enters any divergence set.
+func (b *RunBuilder) Configured() bool {
+	return b != nil && b.Routes != nil
 }
 
 // BuildRun derives the assignment's would-be CriteriaRun in memory.

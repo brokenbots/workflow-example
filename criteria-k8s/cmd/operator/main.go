@@ -390,12 +390,10 @@ func main() {
 			logger.Error(routesErr, "shadow-run watchdog: routes payload unreadable; the mirror degrades to decision-only",
 				"routesFile", *shadowRoutesFile)
 		}
-		watchdog.Builder = &control.RunBuilder{
-			Defaults:  shadowRunnerDefaults(),
-			Namespace: *namespaceFlag,
-			Routes:    routesPayload,
-			Client:    directClient,
-			Log:       logger,
+		watchdog.Builder = newShadowRunBuilder(routesPayload, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
+		if watchdog.Builder == nil && routesErr == nil {
+			logger.Info("shadow-run spec mirror disabled: no routes payload configured (--shadow-routes-file empty); the watchdog stays decision-only",
+				"routesFile", *shadowRoutesFile)
 		}
 		stream := control.StartStream(shadowCfg, watchdog, logger)
 		go func() {
@@ -465,6 +463,25 @@ func shadowRunAddr() string {
 		return *shadowCastleAddr
 	}
 	return *castleAddr
+}
+
+// newShadowRunBuilder wires the assignment lane's spec mirror. A deployment
+// without a routes payload is decision-only posture, not a lane
+// disagreement: the builder stays unwired (nil) so BuildRun's
+// "routes payload not configured" degrade never enters the divergence log;
+// the caller logs that posture once at startup (a routes-file READ ERROR
+// keeps its own louder Error-level log).
+func newShadowRunBuilder(routesPayload *routes.Payload, defaults runspec.Defaults, ns string, cl client.Client, log logr.Logger) *control.RunBuilder {
+	if routesPayload == nil {
+		return nil
+	}
+	return &control.RunBuilder{
+		Defaults:  defaults,
+		Namespace: ns,
+		Routes:    routesPayload,
+		Client:    cl,
+		Log:       log,
+	}
 }
 
 // shadowRunnerDefaults mirrors the watcher's flag-resolution onto the

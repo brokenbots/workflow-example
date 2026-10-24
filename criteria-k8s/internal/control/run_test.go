@@ -337,6 +337,61 @@ func TestWatchdogCheckDecisionWithoutBuilder(t *testing.T) {
 	assert.Contains(t, div.Reasons[0], "repoURL")
 }
 
+// WatchdogUnconfiguredBuilderStaysClean pins the no-routes deployment
+// posture: a builder wired WITHOUT a routes payload never runs the spec
+// mirror, so the "routes payload not configured" degrade never enters the
+// divergence log — agreeing lanes log clean and a missing config file
+// stays distinguishable from a real lane disagreement.
+func TestWatchdogUnconfiguredBuilderStaysClean(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, criteriav1.AddToScheme(scheme))
+	watcherRun := watcherStamp("kb-319-1770000011", &routes.Selection{
+		Name:           "kanboard-develop-url",
+		Workflow:       parityWorkflow(),
+		ConflictPolicy: criteriav1.ImageConflictPolicyFailClosed,
+	}, parityDefaults(), "criteria-jobs")
+	unconfigured := &RunBuilder{Defaults: parityDefaults(), Namespace: "criteria-jobs", Log: logr.Discard()}
+	assert.False(t, unconfigured.Configured(), "a builder without a routes payload must report unconfigured")
+	wd := &Watchdog{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).WithObjects(watcherRun).Build(),
+		Namespace: "criteria-jobs",
+		Builder:   unconfigured,
+	}
+	div := wd.CheckDecision(ctx, parityDecision())
+	assert.True(t, div.Clean)
+	assert.Empty(t, div.Reasons)
+}
+
+// WatchdogUnconfiguredBuilderKeepsDecisionDivergence: the no-routes
+// posture must not blind the decision comparison — a repoURL disagreement
+// still reports through the decision-granularity fields.
+func TestWatchdogUnconfiguredBuilderKeepsDecisionDivergence(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, criteriav1.AddToScheme(scheme))
+	watcherRun := watcherStamp("kb-319-1770000012", &routes.Selection{
+		Name:           "kanboard-develop-url",
+		Workflow:       parityWorkflow(),
+		ConflictPolicy: criteriav1.ImageConflictPolicyFailClosed,
+	}, parityDefaults(), "criteria-jobs")
+	unconfigured := &RunBuilder{Defaults: parityDefaults(), Namespace: "criteria-jobs", Log: logr.Discard()}
+	wd := &Watchdog{
+		Client:    fake.NewClientBuilder().WithScheme(scheme).WithObjects(watcherRun).Build(),
+		Namespace: "criteria-jobs",
+		Builder:   unconfigured,
+	}
+	// Same ticket, different repo: the decision-granularity identity
+	// disagreement the no-routes posture must keep reporting.
+	different := parityDecision()
+	different.RepoURL = "https://github.com/brokenbots/other.git"
+	div := wd.CheckDecision(ctx, different)
+	assert.False(t, div.Clean)
+	require.Len(t, div.Reasons, 1)
+	assert.Contains(t, div.Reasons[0], "repoURL",
+		"the decision comparison must stay live on the no-routes deployment posture")
+}
+
 // CompareSpecAdapterImagesDivergence: a per-kind adapter pin that exists on
 // one lane only names the kind in the reason (the metadata lane divergence
 // the conflict enforcement arbitrates).
