@@ -239,6 +239,18 @@ type RunWorkflow struct {
 	// configured registry/tag defaults.
 	AdapterImages map[string]string `json:"adapterImages,omitempty"`
 
+	// ImageConflictPolicy is the KB-319 adapter-image conflict policy for
+	// the run: what a reconcile does when the metadata lane
+	// (spec.workflow.adapterImages — the route-declared pin pre-cutover,
+	// or the materialized project binding's pin post-cutover, which share
+	// the slot) and a digest-verified castle provision event carry
+	// DIFFERENT pinned references for the same adapter kind. One of:
+	// ImageConflictPolicyFailClosed (the default when empty), or
+	// ImageConflictPolicyPreferEvent / ImageConflictPolicyPreferMetadata.
+	// The policy arbitrates only the disagreement — it never displaces a
+	// lane the other one is missing.
+	ImageConflictPolicy string `json:"imageConflictPolicy,omitempty"`
+
 	// Interface is the workflow tree's machine-readable interface
 	// declaration (KB-310, ADR 307): what a run needs from a project
 	// binding (adapter kinds, mount paths, secret env lanes, env names)
@@ -596,6 +608,36 @@ const (
 	// requeued with backoff so reaping and finalizer removal wait until a
 	// retry lands the record.
 	ConditionTerminalArchivePending = "TerminalArchivePending"
+
+	// ConditionAdapterImageConflict is stamped when a run is failed under
+	// the KB-319 fail-closed conflict policy: the metadata lane
+	// (spec.workflow.adapterImages) and a digest-verified castle provision
+	// event name DIFFERENT pinned references for the same adapter kind,
+	// and the run's stamped policy does not pick a side.
+	ConditionAdapterImageConflict = "AdapterImageConflict"
+)
+
+// Adapter-image conflict policies (KB-319): how a run arbitrates a pinned
+// metadata-vs-digest-verified-event disagreement on one adapter kind.
+// The chain of record is target_metadata > digest-verified event > binding
+// > operator defaults; the conflict exists only between the first two
+// (the binding materialization REPLACES the workflow's adapterImages slot,
+// KB-311, so it is never a third contender beside them), and the policy
+// fires only when BOTH lanes are pinned and differ. An empty policy keeps
+// the fail-closed default. The routes registry (workflow entries and
+// project-registry entries) is where a project chooses the value; the
+// watcher stamps the resolved value onto run ImageConflictPolicy.
+const (
+	// ImageConflictPolicyFailClosed refuses the run fast (parked failed
+	// with ConditionAdapterImageConflict naming both pins): no side wins a
+	// disagreement without the project saying so.
+	ImageConflictPolicyFailClosed = "fail-closed"
+	// ImageConflictPolicyPreferEvent gives the digest-verified event's pin
+	// the precedence (the CRI-214/KB-306 pre-KB-319 behavior).
+	ImageConflictPolicyPreferEvent = "prefer-event"
+	// ImageConflictPolicyPreferMetadata gives the target metadata's pin
+	// the precedence.
+	ImageConflictPolicyPreferMetadata = "prefer-metadata"
 )
 
 // +kubebuilder:object:root=true

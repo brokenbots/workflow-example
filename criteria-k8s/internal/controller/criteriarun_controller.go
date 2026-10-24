@@ -569,6 +569,9 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, err
 			}
 		default:
+			if detail := adapterImageConflictDetail(&run, obs.Lifecycle); detail != "" {
+				return r.failAdapterImageConflict(ctx, &run, update, detail, logger)
+			}
 			var err error
 			activeAdapters, err = r.reconcilePerScopeAdapters(ctx, &run, obs.RunID, obs.Lifecycle, obs.WorkflowGraphs, logger)
 			if err != nil {

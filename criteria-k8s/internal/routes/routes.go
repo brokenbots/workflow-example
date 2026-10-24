@@ -150,6 +150,14 @@ type Workflow struct {
 	// post-cutover (KB-313): adapter images are a per-project binding
 	// concern.
 	AdapterImages map[string]string `json:"adapterImages,omitempty"`
+	// ImageConflictPolicy is the workflow's KB-319 adapter-image conflict
+	// policy ("fail-closed", "prefer-event", or "prefer-metadata"):
+	// what a run does when a digest-verified provision event and this
+	// workflow's pinned adapterImages metadata disagree for one adapter
+	// kind. Default fail-closed. A project-registry entry's
+	// ImageConflictPolicy outranks the workflow's (the per-project policy
+	// is the final authority "configurable per project").
+	ImageConflictPolicy string `json:"imageConflictPolicy,omitempty"`
 	// Interface is the workflow tree's machine-readable interface
 	// declaration (KB-310, ADR 307) embedded in the workflow object: the
 	// schema of record is k8s/workflow-interface.schema.json, and the
@@ -305,6 +313,14 @@ type ProjectEntry struct {
 	// references only into the project namespace. Absent keeps the
 	// pre-cutover behavior (binding-first, deletion second, KB-311).
 	Cutover string `json:"cutover,omitempty"`
+	// ImageConflictPolicy is the project's KB-319 adapter-image conflict
+	// policy (ImageConflictPolicy*): the per-project policy "configurable
+	// per project" is the FINAL authority over its workflowLibrary
+	// entries' policies. Empty keeps the workflow entry's policy (and
+	// both empty keep the fail-closed default). The value vocabulary
+	// matches the workflow entries': fail-closed, prefer-event,
+	// prefer-metadata.
+	ImageConflictPolicy string `json:"imageConflictPolicy,omitempty"`
 }
 
 // IsCutoverDone reports whether the project's namespace serves its own
@@ -454,6 +470,13 @@ func (p *Payload) Validate() error {
 		default:
 			return fmt.Errorf("projectRegistry[%q]: cutover must be %q or absent, got %q (binding-first, deletion second)", name, CutoverDone, entry.Cutover)
 		}
+		// KB-319: the project's conflict policy carries the same closed
+		// vocabulary the workflow entries do.
+		switch entry.ImageConflictPolicy {
+		case "", v1.ImageConflictPolicyFailClosed, v1.ImageConflictPolicyPreferEvent, v1.ImageConflictPolicyPreferMetadata:
+		default:
+			return fmt.Errorf("projectRegistry[%q]: imageConflictPolicy must be %q, %q or %q, got %q", name, v1.ImageConflictPolicyFailClosed, v1.ImageConflictPolicyPreferEvent, v1.ImageConflictPolicyPreferMetadata, entry.ImageConflictPolicy)
+		}
 	}
 	// KB-313 (ADR 307): the post-cutover gate — see DeprecationWarnings.
 	// Fail closed here so the shipped CM cannot keep project-shaped run
@@ -527,6 +550,23 @@ func (p *Payload) Validate() error {
 func (p *Payload) Project(name string) (ProjectEntry, bool) {
 	entry, ok := p.ProjectRegistry[name]
 	return entry, ok
+}
+
+// EffectiveImageConflictPolicy resolves the KB-319 adapter-image conflict
+// policy a run for `wf` executing for `project` stamps onto its
+// spec.workflow. The per-project policy is the FINAL authority when the
+// project's registry entry declares one ("configurable per project"); the
+// workflow entry's policy is the fallback; empty everywhere resolves to
+// the fail-closed default (api/v1.ImageConflictPolicyFailClosed), so runs
+// whose config never mentions the policy stay fail-closed.
+func (p *Payload) EffectiveImageConflictPolicy(wf Workflow, project string) string {
+	if entry, ok := p.Project(project); ok && entry.ImageConflictPolicy != "" {
+		return entry.ImageConflictPolicy
+	}
+	if wf.ImageConflictPolicy != "" {
+		return wf.ImageConflictPolicy
+	}
+	return v1.ImageConflictPolicyFailClosed
 }
 
 // PostCutover reports whether the payload's migration window (KB-311,
@@ -642,6 +682,13 @@ func validateWorkflow(name string, wf Workflow) error {
 	case "", ClassDev, ClassTriage:
 	default:
 		return fmt.Errorf("class must be %q or %q, got %q", ClassDev, ClassTriage, wf.Class)
+	}
+	// KB-319: the workflow's adapter-image conflict policy vocabulary is
+	// closed; an empty value keeps the fail-closed default.
+	switch wf.ImageConflictPolicy {
+	case "", v1.ImageConflictPolicyFailClosed, v1.ImageConflictPolicyPreferEvent, v1.ImageConflictPolicyPreferMetadata:
+	default:
+		return fmt.Errorf("imageConflictPolicy must be %q, %q or %q, got %q", v1.ImageConflictPolicyFailClosed, v1.ImageConflictPolicyPreferEvent, v1.ImageConflictPolicyPreferMetadata, wf.ImageConflictPolicy)
 	}
 	// Namespace is optional since KB-313 (ADR 307): cutover-done entries
 	// route into their project's registry namespace and a namespace-less

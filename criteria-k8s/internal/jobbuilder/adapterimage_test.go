@@ -21,14 +21,14 @@ func adapterImageDefaults() Defaults {
 	}
 }
 
-// CRI-214 M14, KB-306 flip: the resolution order is event image_reference
-// (digest-verified, pin-qualified) → workflow-object override → configured
+// CRI-214 M14, KB-306 flip, KB-319 re-flip: the resolution order is the
+// KB-319 chain — pinned metadata (spec.workflow.adapterImages) →
+// digest-verified event image_reference → unpinned metadata → configured
 // registry/tag defaults. These tests pin each branch and the interactions
 // between them.
-func TestResolveAdapterImageDigestVerifiedReferenceWins(t *testing.T) {
-	// KB-306: the event's digest-verified reference is the version
-	// authority — it displaces the workflow override and the configured
-	// default.
+func TestResolveAdapterImageMetadataLaneLeads(t *testing.T) {
+	// KB-319: the pinned metadata lane is the version authority — it
+	// displaces a digest-verified event and the configured default.
 	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}
 	scope := events.LifecycleEvent{
 		Event:          events.EventProvisionWanted,
@@ -37,15 +37,34 @@ func TestResolveAdapterImageDigestVerifiedReferenceWins(t *testing.T) {
 	}
 
 	img := resolveAdapterImage(plan, scope, "shell", adapterImageDefaults())
-	assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:abc", img,
-		"a digest-verified image_reference outranks the workflow override and the configured defaults")
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2", img,
+		"the pinned metadata lane outranks a digest-verified event")
+}
+
+func TestResolveAdapterImageUnpinnedMetadataDoesNotDisplaceVerifiedEvent(t *testing.T) {
+	// KB-319: an UNPINNED metadata value is not a target declaration (e.g.
+	// a KB-253 artifact source copied through) and must not displace a
+	// digest-verified event reference.
+	plan := &workflowPlan{adapterImages: map[string]string{"shell": "registry.example:5000/criteria-adapter-shell"}}
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
+		ImageReference: "registry.example:5000/criteria-adapter-shell@sha256:abc",
+	}
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:abc",
+		resolveAdapterImage(plan, scope, "shell", adapterImageDefaults()),
+		"unpinned metadata fills in only where the event lane has nothing pinned")
+
+	// Without the event the unpinned metadata is still the image for the
+	// kind (it is the only declaration the run has).
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell",
+		resolveAdapterImage(plan, events.LifecycleEvent{}, "shell", adapterImageDefaults()))
 }
 
 func TestResolveAdapterImageOverrideWinsWithoutEventPin(t *testing.T) {
-	// The override is per-kind and now applies whenever the event lane
-	// cannot verify its reference (no digest, or a bare/absent reference):
-	// it is the optional escape hatch beneath the lockfile, not the primary
-	// pin (KB-306).
+	// The override is per-kind and applies whenever the event lane cannot
+	// verify its reference (no digest, or a bare/absent reference) — CRI-214
+	// M14 behavior preserved where the chain has no earlier lane.
 	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell:k8s-0.5.4-2"}}
 
 	// A zero event (no digest, no reference) falls through to the override,
@@ -117,6 +136,111 @@ func TestResolveAdapterImageBareArtifactSourceIsNotAPodImage(t *testing.T) {
 	assert.False(t, pinnedImageReference(""))
 }
 
+// KB-319: the adapter-image conflict policy matrix — a PINNED metadata
+// pin and a digest-verified pinned event pin that DISAGREE on one kind.
+// The policy arbitrates only that disagreement; agreement (or one lane
+// missing) is resolved by the chain regardless of policy.
+func TestResolveAdapterImageConflictPolicyMatrix(t *testing.T) {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		Digest:         digest,
+		ImageReference: "registry.example:5000/criteria-adapter-shell@sha256:eventpin",
+	}
+	metaPinned := func(policy string) *workflowPlan {
+		return &workflowPlan{
+			adapterImages:       map[string]string{"shell": "registry.example:5000/criteria-adapter-shell@sha256:metapin"},
+			imageConflictPolicy: policy,
+		}
+	}
+
+	t.Run("no policy fails closed at the controller", func(t *testing.T) {
+		// The resolver falls back to the metadata pin (never an empty pod
+		// image); enforcing the refusal is the controller's consult.
+		conflict := DetectAdapterImageConflict(&criteriav1.RunWorkflow{
+			AdapterImages: map[string]string{"shell": "registry.example:5000/criteria-adapter-shell@sha256:metapin"},
+		}, scope, "shell")
+		require.NotNil(t, conflict)
+		assert.Equal(t, "shell", conflict.Kind)
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:metapin", conflict.MetadataRef)
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:eventpin", conflict.EventRef)
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:metapin",
+			resolveAdapterImage(metaPinned(""), scope, "shell", adapterImageDefaults()))
+		assert.Equal(t, criteriav1.ImageConflictPolicyFailClosed, (&workflowPlan{}).conflictPolicy())
+	})
+
+	t.Run("prefer-event gives the digest-verified pin the precedence", func(t *testing.T) {
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:eventpin",
+			resolveAdapterImage(metaPinned(criteriav1.ImageConflictPolicyPreferEvent), scope, "shell", adapterImageDefaults()))
+	})
+
+	t.Run("prefer-metadata keeps the target declaration", func(t *testing.T) {
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:metapin",
+			resolveAdapterImage(metaPinned(criteriav1.ImageConflictPolicyPreferMetadata), scope, "shell", adapterImageDefaults()))
+	})
+
+	t.Run("agreeing pins resolve by the chain, policy blind", func(t *testing.T) {
+		agree := events.LifecycleEvent{
+			Event:          events.EventProvisionWanted,
+			Digest:         digest,
+			ImageReference: "registry.example:5000/criteria-adapter-shell:metapin",
+		}
+		pin := &workflowPlan{adapterImages: map[string]string{"shell": "registry.example:5000/criteria-adapter-shell:metapin"}}
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell:metapin",
+			resolveAdapterImage(pin, agree, "shell", adapterImageDefaults()),
+			"an agreeing digest-verified event never conflicts")
+		assert.Nil(t, DetectAdapterImageConflict(&criteriav1.RunWorkflow{
+			AdapterImages: map[string]string{"shell": "registry.example:5000/criteria-adapter-shell:metapin"},
+		}, agree, "shell"))
+	})
+
+	t.Run("a missing lane never conflicts, policy blind", func(t *testing.T) {
+		noMeta := &workflowPlan{}
+		assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:eventpin",
+			resolveAdapterImage(noMeta, scope, "shell", adapterImageDefaults()))
+		assert.Nil(t, DetectAdapterImageConflict(noEventWorkflow(), events.LifecycleEvent{}, "shell"))
+	})
+}
+
+// noEventWorkflow is a run workflow with a pinned metadata value whose
+// conflict detection is checked against an eventless resolution.
+func noEventWorkflow() *criteriav1.RunWorkflow {
+	return &criteriav1.RunWorkflow{AdapterImages: map[string]string{"shell": "registry.example:5000/criteria-adapter-shell@sha256:metapin"}}
+}
+
+// KB-319: the peer container resolves the same conflict policy — the
+// matrix spot-checks the peer path so the peer-shaped default can never
+// shadow a policy outcome.
+func TestResolvePeerAdapterImageConflictPolicy(t *testing.T) {
+	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
+	scope := events.LifecycleEvent{
+		Event:          events.EventProvisionWanted,
+		Digest:         digest,
+		ImageReference: "registry.example:5000/criteria-adapter-shell-peer@sha256:eventpin",
+	}
+	plan := func(policy string) *workflowPlan {
+		return &workflowPlan{
+			adapterImages:       map[string]string{"shell": "registry.example:5000/criteria-adapter-shell-peer@sha256:metapin"},
+			imageConflictPolicy: policy,
+		}
+	}
+
+	// KB-319 chain: the peer-shaped pinned metadata lane leads.
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:metapin",
+		resolvePeerAdapterImage(plan(""), scope, "shell", adapterImageDefaults()))
+	// prefer-event hands the digest-verified pin the precedence.
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:eventpin",
+		resolvePeerAdapterImage(plan(criteriav1.ImageConflictPolicyPreferEvent), scope, "shell", adapterImageDefaults()))
+	// An unpinned metadata value must not displace the verified event,
+	// still resolving on the -peer default shape only when nothing else
+	// declares the image.
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:eventpin",
+		resolvePeerAdapterImage(&workflowPlan{adapterImages: map[string]string{"shell": "registry.example:5000/criteria-adapter-shell-peer"}}, scope, "shell", adapterImageDefaults()))
+	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer:k8s-9",
+		resolvePeerAdapterImage(nil, events.LifecycleEvent{}, "shell", adapterImageDefaults()),
+		"the peer-shaped default is preserved")
+}
+
 func TestResolveAdapterImageDefaultsFromConfiguredRegistryAndTag(t *testing.T) {
 	// Legacy adapter Jobs have no lifecycle event at all.
 	img := resolveAdapterImage(nil, events.LifecycleEvent{}, "shell", adapterImageDefaults())
@@ -132,9 +256,9 @@ func TestResolveAdapterImageDefaultsFromConfiguredRegistryAndTag(t *testing.T) {
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell:k8s-9", tagOnly)
 }
 
-// CRI-214 M14: BuildPerScopeAdapterPod consumes the whole resolution order,
-// not just the defaults branch — the (now leading) digest-verified event
-// lane wins and an unverified reference must not leak into the pod.
+// CRI-214 M14: BuildPerScopeAdapterPod consumes the whole resolution chain,
+// not just the defaults branch — the KB-319 chain decides and an
+// unverified reference must not leak into the pod.
 func TestBuildPerScopeAdapterPodResolvesImageReference(t *testing.T) {
 	digest := "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635"
 
@@ -209,17 +333,18 @@ func TestResolvePeerAdapterImageDefaultsToPeerRepo(t *testing.T) {
 }
 
 func TestResolvePeerAdapterImageDigestVerifiedReferenceWins(t *testing.T) {
-	// KB-306: the digest-verified event lane leads the override lane.
-	plan := &workflowPlan{adapterImages: map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}}
+	// KB-319: with the digest-verified event as the ONLY pinned lane — no
+	// pinned metadata — the event reference resolves the peer image. (The
+	// pinned-metadata-differs case is the conflict policy's, tested above.)
 	scope := events.LifecycleEvent{
 		Event:          events.EventProvisionWanted,
 		Digest:         "sha256:d9f306c29f4145da8bcc44187c9e4ae0f69ed30db3b3edac6e9b6350469bc635",
 		ImageReference: "registry.example:5000/criteria-adapter-shell@sha256:abc",
 	}
 
-	img := resolvePeerAdapterImage(plan, scope, "shell", adapterImageDefaults())
+	img := resolvePeerAdapterImage(nil, scope, "shell", adapterImageDefaults())
 	assert.Equal(t, "registry.example:5000/criteria-adapter-shell@sha256:abc", img,
-		"a digest-verified image_reference outranks the workflow override")
+		"a digest-verified image_reference with no pinned metadata resolves the peer image")
 }
 
 func TestResolvePeerAdapterImageOverrideWinsWithoutEventPin(t *testing.T) {
@@ -308,10 +433,16 @@ func TestBuildPerScopePeerPodResolvesPeerImage(t *testing.T) {
 	got = mkPod(peerImageTestRun(nil), []events.LifecycleEvent{unverified})
 	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-5", got.Image)
 
-	// The digest-verified reference outranks the workflow override (KB-306
-	// flip; the override survives only when the event lane cannot verify).
+	// The pinned metadata lane outranks the digest-verified reference
+	// (KB-319 chain; the digest-verified pin survives as the resolution
+	// only under the prefer-event conflict policy).
 	got = mkPod(peerImageTestRun(map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"}),
 		[]events.LifecycleEvent{verified})
+	assert.Equal(t, "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4", got.Image)
+
+	run := peerImageTestRun(map[string]string{"shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.4"})
+	run.Spec.Workflow.ImageConflictPolicy = criteriav1.ImageConflictPolicyPreferEvent
+	got = mkPod(run, []events.LifecycleEvent{verified})
 	assert.Equal(t, "registry.example:5000/criteria-adapter-shell-peer@sha256:abc", got.Image)
 
 	// An override still resolves the pod when the event lane cannot verify

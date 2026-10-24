@@ -54,6 +54,12 @@ type workflowPlan struct {
 	// override (CRI-214 M14): kind -> full image reference, preferred over
 	// the event's image_reference and the operator's registry/tag defaults.
 	adapterImages map[string]string
+	// imageConflictPolicy is the run's stamped KB-319 conflict policy
+	// (criteriav1.ImageConflictPolicy*): what a resolution does when this
+	// lane's pinned reference and a digest-verified event's pinned
+	// reference disagree on one adapter kind. Empty keeps the fail-closed
+	// default; the controller consults it BEFORE any builder runs.
+	imageConflictPolicy string
 	// runName scopes the same-host affinity labels to this run (CRI-235).
 	runName string
 }
@@ -64,7 +70,7 @@ func newWorkflowPlan(run *criteriav1.CriteriaRun) *workflowPlan {
 	if wf == nil {
 		return nil
 	}
-	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env, adapterImages: wf.AdapterImages, runName: run.Name}
+	return &workflowPlan{volumes: wf.Volumes, secrets: wf.Secrets, env: wf.Env, adapterImages: wf.AdapterImages, imageConflictPolicy: wf.ImageConflictPolicy, runName: run.Name}
 }
 
 // adapterImageOverride returns the workflow object's image override for the
