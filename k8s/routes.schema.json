@@ -297,6 +297,13 @@
                 }
               },
               "uniqueItems": true
+            },
+            "lockKey": {
+              "type": "string",
+              "description": "KB-319 dev-class serialization: the identity the tree's dev-class runs serialize on. The vocabulary admits exactly one value — 'repoUrl' — whose admission derivation is the per-repo URL key the operator has always used, so declaring it is declaration-made-explicit with no behavior change; an absent lockKey keeps that derivation. Mirrors k8s/workflow-interface.schema.json (the schema of record).",
+              "enum": [
+                "repoUrl"
+              ]
             }
           }
         }

@@ -194,6 +194,13 @@ type WorkflowInterface struct {
 	Env []string `json:"env,omitempty"`
 	// ConfigSlots are the config keys the tree honors.
 	ConfigSlots []WorkflowInterfaceConfigSlot `json:"configSlots,omitempty"`
+	// LockKey declares which identity the tree's runs serialize on
+	// (KB-319 dev-class serialization). The vocabulary admits exactly one
+	// value — "repoUrl" — whose derivation is the admission queue's
+	// existing per-repo key, byte-identical; an absent lockKey keeps the
+	// derivation the operator has always used. The constraint is
+	// declaration-made-explicit, not a behavior change.
+	LockKey string `json:"lockKey,omitempty"`
 }
 
 // WorkflowInterfaceMount is one required mount path of an interface
@@ -822,6 +829,16 @@ func validateInterface(iface *WorkflowInterface) error {
 		if s.Target == "" {
 			return fmt.Errorf("configSlots[%d] (%s): target is required", i, s.Slot)
 		}
+	}
+	// KB-319 dev-class serialization: the tree may declare the identity
+	// its runs serialize on. The vocabulary is exactly one value today —
+	// the admission queue's per-repo key — so declaring it is
+	// declaration-made-explicit with no behavior change, and any other
+	// value fails closed.
+	switch iface.LockKey {
+	case "", v1.InterfaceLockKeyRepoURL:
+	default:
+		return fmt.Errorf("lockKey must be %q or absent, got %q", v1.InterfaceLockKeyRepoURL, iface.LockKey)
 	}
 	return nil
 }

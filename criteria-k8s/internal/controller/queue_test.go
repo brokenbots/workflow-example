@@ -294,3 +294,40 @@ func TestRunQueueRecoverClassKeyed(t *testing.T) {
 	assert.Equal(t, "repo-triage", status.Running)
 	assert.Equal(t, 1, status.Length)
 }
+
+// KB-319 dev-class serialization: an interface that declares the repoUrl
+// lock key derives the run's queue identity from spec.repoURL — the same
+// per-repo key a declaration-less run lands in, so a declared interface
+// reproduces per-repo admission exactly (no behavior change). Both orders
+// of the pair must serialize behind one admitted head.
+func TestRunQueueInterfaceLockKeyReproducesPerRepoAdmission(t *testing.T) {
+	repo := "https://github.com/org/repo.git"
+	declared := queueRun("repo-a-declared", repo, "")
+	declared.Spec.Workflow = &criteriav1.RunWorkflow{
+		Name:      "wf",
+		Type:      "image",
+		Namespace: "criteria-jobs",
+		Interface: &criteriav1.RunWorkflowInterface{LockKey: criteriav1.InterfaceLockKeyRepoURL},
+	}
+	undeclared := queueRun("repo-a-undeclared", repo, "")
+
+	t.Run("declared run queues behind a running undeclared run", func(t *testing.T) {
+		q := controller.NewRunQueue()
+		admitted, _, _ := q.Enqueue(undeclared)
+		require.True(t, admitted)
+		admitted, status, _ := q.Enqueue(declared)
+		require.False(t, admitted, "the declared interface must serialize per repoURL, not split the queue")
+		require.Equal(t, 2, status.Length)
+		require.Equal(t, "repo-a-undeclared", status.Running)
+	})
+
+	t.Run("declared run running gates an undeclared run", func(t *testing.T) {
+		q := controller.NewRunQueue()
+		admitted, _, _ := q.Enqueue(declared)
+		require.True(t, admitted)
+		admitted, status, _ := q.Enqueue(undeclared)
+		require.False(t, admitted)
+		require.Equal(t, 2, status.Length)
+		require.Equal(t, "repo-a-declared", status.Running)
+	})
+}

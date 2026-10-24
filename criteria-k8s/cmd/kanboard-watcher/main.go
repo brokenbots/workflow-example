@@ -1215,6 +1215,10 @@ func convertWorkflowInterface(in *routes.WorkflowInterface) *criteriav1.RunWorkf
 		SecretEnv:   copyStringSlice(in.SecretEnv),
 		Env:         copyStringSlice(in.Env),
 		ConfigSlots: copyInterfaceConfigSlots(in.ConfigSlots),
+		// KB-319: the declared admission-lock key rides the stamped
+		// interface so the operator's derivation reads the tree's
+		// declaration, not a default.
+		LockKey: in.LockKey,
 	}
 }
 

@@ -28,6 +28,15 @@ const (
 	RunClassTriage = "triage"
 )
 
+// InterfaceLockKeyRepoURL is the interface's declared admission-lock key
+// (KB-319, dev-class serialization): "repoUrl" declares that the tree's
+// runs serialize per repository URL — the admission queue's derivation
+// becomes interface-DECLARED rather than derived from the operator's
+// defaults, while producing the same per-repo key as before (no behavior
+// change). This is the only value the vocabulary admits; an absent
+// lockKey keeps the pre-KB-319 derivation.
+const InterfaceLockKeyRepoURL = "repoUrl"
+
 // CriteriaRunSpec defines the desired state of a CriteriaRun.
 type CriteriaRunSpec struct {
 	// TicketID is the intake ticket identifier (e.g. CRI-104).
@@ -307,6 +316,13 @@ type RunWorkflowInterface struct {
 	// A binding config key outside this set (and outside the rendered
 	// platform core the tree honors) rejects as unknown-slot.
 	ConfigSlots []RunWorkflowInterfaceConfigSlot `json:"configSlots,omitempty"`
+
+	// LockKey is the interface's declared admission-lock key (KB-319
+	// dev-class serialization), stamped from the routes interface
+	// declaration. The vocabulary admits exactly one value — repoUrl —
+	// whose queue-key derivation is the per-repo URL the operator has
+	// always used; an absent value keeps that derivation.
+	LockKey string `json:"lockKey,omitempty"`
 }
 
 // RunWorkflowInterfaceMount is one required mount path of an interface

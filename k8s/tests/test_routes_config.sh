@@ -113,7 +113,7 @@ WORKFLOW_CLASSES = ("dev", "triage")
 # pattern-constrained fields; SLOT_RE is the config-slot name surface ("the
 # tree decides what may be overridden" — camelCase slot names, lowercase
 # first letter), and VAR_RE/ENV_RE are tree-variable and secret-env lanes.
-INTERFACE_KEYS = {"apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots"}
+INTERFACE_KEYS = {"apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots", "lockKey"}
 MOUNT_KEYS = {"name", "mountPath", "kind"}
 SLOT_KEYS = {"slot", "variable", "target", "description"}
 INTERFACE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -255,6 +255,8 @@ def validate_interface(iface, where, errs):
         errs.append(f"{where}.apiVersion must be criteria.brokenbots.dev/v1")
     if iface.get("kind") != "WorkflowInterface":
         errs.append(f"{where}.kind must be WorkflowInterface")
+    if "lockKey" in iface and iface["lockKey"] != "repoUrl":
+        errs.append(f"{where}.lockKey must be 'repoUrl' or absent (got {iface['lockKey']!r})")
     for key in ("workflow", "description"):
         if key in iface and (not isinstance(iface[key], str) or not iface[key]):
             errs.append(f"{where}.{key} must be a non-empty string")

@@ -575,6 +575,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 				{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
 					Description: "Command the developer step uses as its CI gate before review."},
 			},
+			LockKey: "repoUrl",
 		}
 		routesWf := routes.Workflow{
 			Type:      routes.TypeURL,
@@ -601,6 +602,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 				{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
 					Description: "Command the developer step uses as its CI gate before review."},
 			},
+			LockKey: "repoUrl",
 		}, out.Interface)
 
 		// The copy is deep: mutating the CR's interface must not leak into

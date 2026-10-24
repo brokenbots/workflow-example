@@ -1036,12 +1036,21 @@ func TestValidateWorkflowInterfaceShape(t *testing.T) {
 		"non-canonical slot var": func(i *WorkflowInterface) {
 			i.ConfigSlots[0].Variable = "gate_cmd"
 		},
+		// KB-319: the lockKey vocabulary admits exactly one value — the
+		// declared "repoUrl" derivation is the per-repo admission key the
+		// operator has always used, so anything else is a typo, not a spec.
+		"junk lockKey": func(i *WorkflowInterface) { i.LockKey = "repo" },
 	} {
 		iface := valid()
 		mutate(iface)
 		if err := validateInterface(iface); err == nil {
 			t.Errorf("validateInterface(%s) succeeded, want rejection", label)
 		}
+	}
+	iface := valid()
+	iface.LockKey = "repoUrl"
+	if err := validateInterface(iface); err != nil {
+		t.Errorf("validateInterface(declared lockKey) failed: %v", err)
 	}
 	if err := validateInterface(valid()); err != nil {
 		t.Errorf("validateInterface(valid) failed: %v", err)

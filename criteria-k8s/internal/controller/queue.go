@@ -176,8 +176,27 @@ func (q *RunQueue) statusLocked(qk queueKey, key types.NamespacedName, entries [
 
 // queueKeyOf resolves the run's admission queue key (CRI-242): the repoURL
 // plus the admission class derived from the stamped workflow object.
+// queueKeyOf identifies the (lockKey, class) queue the run serializes on.
+// The lock identity is KB-319's interface-declared key: an interface that
+// declares the repoUrl lock key (the vocabulary's only value) derives the
+// run's serialization identity from spec.repoURL — the same per-repo key
+// the operator has always used, so a declared interface reproduces
+// per-repo admission exactly (no behavior change); an absent declaration
+// keeps the pre-KB-319 derivation.
 func queueKeyOf(run *criteriav1.CriteriaRun) queueKey {
-	return queueKey{repo: run.Spec.RepoURL, class: admissionClass(run)}
+	return queueKey{repo: admissionLockKey(run), class: admissionClass(run)}
+}
+
+// admissionLockKey resolves the run's serialization identity per the
+// stamped interface's lockKey declaration (KB-319): repoUrl → spec.repoURL
+// (identical to the pre-KB-319 key), otherwise spec.repoURL (the
+// derivation that predates the declaration).
+func admissionLockKey(run *criteriav1.CriteriaRun) string {
+	if run.Spec.Workflow != nil && run.Spec.Workflow.Interface != nil &&
+		run.Spec.Workflow.Interface.LockKey == criteriav1.InterfaceLockKeyRepoURL {
+		return run.Spec.RepoURL
+	}
+	return run.Spec.RepoURL
 }
 
 // admissionClass resolves the run's queue class (CRI-242): "triage" only
