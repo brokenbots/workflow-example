@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	sdk "github.com/brokenbots/criteria/sdk"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -163,7 +164,10 @@ func PodStateEventEnvelope(runID string, report events.PodStateReport) (*v1.Enve
 		return nil, errors.New("pod-state event: empty run_id")
 	}
 	return &v1.Envelope{
-		SchemaVersion: int32(1),
+		// The SDK's protocol-version constant, not a literal: castle's
+		// SubmitEvents gate requires exactly criteria.SchemaVersion, and a
+		// version bump must not strand this builder on a stale literal.
+		SchemaVersion: int32(sdk.SchemaVersion),
 		RunId:         runID,
 		Payload: &v1.Envelope_AdapterEvent{
 			AdapterEvent: &v1.AdapterEvent{

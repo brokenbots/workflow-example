@@ -188,9 +188,13 @@ func queueKeyOf(run *criteriav1.CriteriaRun) queueKey {
 }
 
 // admissionLockKey resolves the run's serialization identity per the
-// stamped interface's lockKey declaration (KB-319): repoUrl → spec.repoURL
-// (identical to the pre-KB-319 key), otherwise spec.repoURL (the
-// derivation that predates the declaration).
+// stamped interface's lockKey declaration (KB-319). Both branches return
+// spec.repoURL BY DESIGN: the declaration branch documents that the
+// interface explicitly requests repo-URL serialization, and the fallback
+// branch is the derivation that predates the declaration — the two are
+// behaviorally identical (dev-class serialization reproduces per-repo
+// admission exactly with no behavior change), so collapsing them would
+// erase the declaration's readability value, not its behavior.
 func admissionLockKey(run *criteriav1.CriteriaRun) string {
 	if run.Spec.Workflow != nil && run.Spec.Workflow.Interface != nil &&
 		run.Spec.Workflow.Interface.LockKey == criteriav1.InterfaceLockKeyRepoURL {

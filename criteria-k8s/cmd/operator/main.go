@@ -65,7 +65,7 @@ var (
 	// divergence against the watcher's CriteriaRuns without creating or
 	// admitting anything (the watcher keeps deciding; castle dispatch also
 	// decides; the divergence log reconciles the two). See internal/control.
-	shadowRunWatchdog = flag.Bool("shadow-run-watchdog", getBool("SHADOW_RUN_WATCHDOG", true), "Shadow-run window kill switch (KB-319): log assignment-driven run decisions vs the watcher's runs; the lane never writes")
+	shadowRunWatchdog = flag.Bool("shadow-run-watchdog", getBool("SHADOW_RUN_WATCHDOG", true), "Shadow-run window kill switch (KB-319): log assignment-driven run decisions vs the watcher's runs; the lane never writes. DEFAULTS ON — the only writer-less lane; set --shadow-run-watchdog=0 to close the window entirely")
 	shadowCastleAddr  = flag.String("shadow-castle-addr", getenv("SHADOW_CASTLE_ADDR", ""), "Castle Connect endpoint for the shadow-run assignment consumer (KB-319); empty rides --castle-addr")
 	shadowCriteriaID  = flag.String("shadow-criteria-id", getenv("SHADOW_CRITERIA_ID", "criteria-k8s-operator"), "Criteria id presented on the shadow-run Control subscribe (KB-319)")
 	debugEventsFile   = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
@@ -350,9 +350,16 @@ func main() {
 	} else if shadowAddr := shadowRunAddr(); shadowAddr == "" {
 		logger.Info("shadow-run watchdog disabled (no castle address)")
 	} else {
+		shadowToken, err := shadowCastleTokenFromEnv()
+		if err != nil {
+			// Cause + path only (never the token body): a silently
+			// missing file would make the lane's disable undiagnosable.
+			logger.Error(err, "shadow-run watchdog: token file unreadable; falling back to the shared CASTLE_TOKEN")
+			shadowToken = castleTokenFromEnv()
+		}
 		shadowCfg := control.Config{
 			Addr:       shadowAddr,
-			Token:      shadowCastleTokenFromEnv(),
+			Token:      shadowToken,
 			CriteriaID: *shadowCriteriaID,
 		}
 		watchdog := &control.Watchdog{
@@ -436,19 +443,21 @@ func shadowRunAddr() string {
 // CASTLE_TOKEN / CASTLE_TOKEN_FILE resolution when neither shadow var is
 // wired. An orchestrator-only shared token cannot subscribe — the consumer
 // logs the rejection once and disables itself rather than retrying forever.
-func shadowCastleTokenFromEnv() string {
+// A shadow-token-file read error is returned to the caller so the fallback
+// is diagnosable (path and cause only — never the secret material).
+func shadowCastleTokenFromEnv() (string, error) {
 	token := getenv("SHADOW_CASTLE_TOKEN", "")
 	if file := getenv("SHADOW_CASTLE_TOKEN_FILE", ""); token == "" && file != "" {
 		data, err := os.ReadFile(file)
 		if err != nil {
-			return ""
+			return "", fmt.Errorf("reading %s: %w", file, err)
 		}
 		token = strings.TrimSpace(string(data))
 	}
 	if token == "" {
-		return castleTokenFromEnv()
+		return castleTokenFromEnv(), nil
 	}
-	return token
+	return token, nil
 }
 
 func getenv(key, fallback string) string {

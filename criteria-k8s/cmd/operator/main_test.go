@@ -260,3 +260,44 @@ func TestCastleTokenFromEnv(t *testing.T) {
 		require.Empty(t, castleTokenFromEnv())
 	})
 }
+
+func TestShadowCastleTokenFromEnv(t *testing.T) {
+	t.Run("SHADOW_CASTLE_TOKEN wins over file", func(t *testing.T) {
+		t.Setenv("SHADOW_CASTLE_TOKEN", "shadow-token")
+		path := filepath.Join(t.TempDir(), "missing")
+		os.Unsetenv("SHADOW_CASTLE_TOKEN_FILE")
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", path)
+		token, err := shadowCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shadow-token", token)
+	})
+	t.Run("file token trimmed", func(t *testing.T) {
+		os.Unsetenv("SHADOW_CASTLE_TOKEN")
+		t.Setenv("SHADOW_CASTLE_TOKEN", "")
+		path := filepath.Join(t.TempDir(), "token")
+		require.NoError(t, os.WriteFile(path, []byte("shadow-file-token\n"), 0o400))
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", path)
+		token, err := shadowCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shadow-file-token", token)
+	})
+	t.Run("unreadable file errors and names the path", func(t *testing.T) {
+		os.Unsetenv("SHADOW_CASTLE_TOKEN")
+		t.Setenv("SHADOW_CASTLE_TOKEN", "")
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
+		token, err := shadowCastleTokenFromEnv()
+		require.Error(t, err)
+		require.Empty(t, token)
+		require.Contains(t, err.Error(), "missing", "the read error names the path so the lane's disable is diagnosable")
+	})
+	t.Run("no shadow vars falls back to the shared token", func(t *testing.T) {
+		t.Setenv("CASTLE_TOKEN", "shared-token")
+		os.Unsetenv("SHADOW_CASTLE_TOKEN")
+		os.Unsetenv("SHADOW_CASTLE_TOKEN_FILE")
+		t.Setenv("SHADOW_CASTLE_TOKEN", "")
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", "")
+		token, err := shadowCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shared-token", token)
+	})
+}

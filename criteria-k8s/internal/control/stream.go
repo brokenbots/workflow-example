@@ -105,6 +105,12 @@ func (s *Stream) Run(ctx context.Context) error {
 	backoff := backoffBase
 	for {
 		sink, err := s.dial(ctx)
+		if err == nil && sink == nil {
+			// A dialer returning neither stream nor error is the dialer's
+			// bug; retrying through the transport-failure path beats a nil
+			// dereference, and the log makes the half-broken dialer visible.
+			err = errors.New("dial returned no stream and no error")
+		}
 		if err != nil {
 			if !isLaneRejected(err) {
 				if ctxErr := ctx.Err(); ctxErr != nil {

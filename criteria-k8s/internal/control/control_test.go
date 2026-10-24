@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -433,40 +434,90 @@ func TestStreamPermanentDisableOnPermissionDenied(t *testing.T) {
 	assert.True(t, found, "disable log must name the lane, got %v", messages)
 }
 
+// replaySink is an assignSink that yields queued messages then a clean
+// EOF — the minimal live stream a scripted dialer hands back after a
+// non-lethal failure, so the test can prove Run actually consumed the
+// retry dial's sink (the delivered assignment reaches the comparator)
+// instead of merely counting dial attempts.
+type replaySink struct {
+	msgs []*v1.ControlMessage
+}
+
+func (s *replaySink) next() (*v1.ControlMessage, error) {
+	if len(s.msgs) == 0 {
+		return nil, io.EOF
+	}
+	m := s.msgs[0]
+	s.msgs = s.msgs[1:]
+	return m, nil
+}
+
+func (s *replaySink) close() {}
+
 func TestStreamRetriesNonLethalDialFailures(t *testing.T) {
+	// Resilience contract: one non-lethal dial failure (Unavailable) must
+	// NOT permanently disable the lane — Run dials again, and the retry's
+	// sink is CONSUMED: an assignment delivered on the second dial reaches
+	// the comparator. Both sides are asserted observable-side, so a Run
+	// that gives up after the first failure or leaks a nil sink fails here.
 	prevBase, prevMax := backoffBase, backoffMax
 	backoffBase, backoffMax = 5*time.Millisecond, 10*time.Millisecond
 	t.Cleanup(func() { backoffBase, backoffMax = prevBase, prevMax })
 
-	dials := 0
 	var mu sync.Mutex
-	stream := &Stream{compare: &captureComparator{}, log: logr.Discard()}
+	dials := 0
+	compare := &captureComparator{}
+	stream := &Stream{compare: compare, log: logr.Discard()}
 	stream.dial = func(ctx context.Context) (assignSink, error) {
 		mu.Lock()
-		dials++
 		n := dials
+		dials++
 		mu.Unlock()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if n < 2 {
+		switch n {
+		case 0:
 			return nil, connect.NewError(connect.CodeUnavailable, errors.New("castle down"))
+		case 1:
+			// The retry dial: one live assignment, then a clean EOF;
+			// consumption is proven by the comparator receiving it.
+			return &replaySink{msgs: []*v1.ControlMessage{{
+				Command: &v1.ControlMessage_WorkflowAssignment{WorkflowAssignment: &v1.WorkflowAssignment{
+					RunId:        "run-retry",
+					WorkflowName: "triage_v1",
+					Labels: map[string]string{
+						"ticket":                           "kb-319-retry",
+						"criteria.brokenbots.dev/repo-url": "https://github.com/org/repo",
+						"criteria.brokenbots.dev/class":    "dev",
+					},
+				}},
+			}}}, nil
+		default:
+			return &replaySink{}, nil
 		}
-		return nil, nil // never reached: ctx canceled between dials
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- stream.Run(ctx) }()
+
+	require.Eventually(t, func() bool {
+		compare.mu.Lock()
+		defer compare.mu.Unlock()
+		return len(compare.decisions) == 1
+	}, 5*time.Second, 10*time.Millisecond,
+		"the assignment delivered on the retry dial must reach the comparator (the sink was consumed)")
+	assert.Equal(t, Decision{Ticket: "kb-319-retry", RepoURL: "https://github.com/org/repo",
+		Class: "dev", WorkflowName: "triage_v1"}, compare.decisions[0])
+
+	mu.Lock()
+	count := dials
+	mu.Unlock()
+	assert.GreaterOrEqual(t, count, 2, "the non-lethal failure must be retried, not permanently disable the lane")
+
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		cancel()
 		t.Fatal("consumer did not stop after context cancel")
 	}
-	mu.Lock()
-	count := dials
-	mu.Unlock()
-	assert.GreaterOrEqual(t, count, 1, "unavailable dials must retry, not permanently disable")
 }

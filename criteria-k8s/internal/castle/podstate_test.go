@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/encoding/protojson"
 
+	sdk "github.com/brokenbots/criteria/sdk"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	criteriav1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -143,7 +144,7 @@ func TestPodStateEventEnvelopeValidation(t *testing.T) {
 func TestPodStateEventEnvelopeSchemaVersion(t *testing.T) {
 	env, err := PodStateEventEnvelope("run-1", podStateTestReport(events.PodPhaseRunning, "CrashLoopBackOff"))
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), env.SchemaVersion)
+	assert.Equal(t, int32(sdk.SchemaVersion), env.SchemaVersion)
 }
 
 func podStateEmitTestFeed(t *testing.T, url, token string, shrinkRetry bool) *PodStateFeed {
