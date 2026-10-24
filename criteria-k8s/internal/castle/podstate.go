@@ -136,6 +136,11 @@ func (f *PodStateFeed) Disabled() bool {
 // report is validated first (via events.MarshalPodStateEvent's contract) and
 // the data keys are the exact pinned set from events.PodStateReport, so the
 // typed proto and the pinned JSON line cannot grow apart in shape.
+//
+// The envelope carries the event protocol version (1, mirroring the
+// archive-record stamp): castle's SubmitEvents gate rejects envelopes whose
+// SchemaVersion is not the protocol version, so an unstamped envelope
+// (version 0) fails precondition on every submit.
 func PodStateEventEnvelope(runID string, report events.PodStateReport) (*v1.Envelope, error) {
 	data, err := structpb.NewStruct(map[string]any{
 		"adapter":           report.AdapterName,
@@ -158,7 +163,8 @@ func PodStateEventEnvelope(runID string, report events.PodStateReport) (*v1.Enve
 		return nil, errors.New("pod-state event: empty run_id")
 	}
 	return &v1.Envelope{
-		RunId: runID,
+		SchemaVersion: int32(1),
+		RunId:         runID,
 		Payload: &v1.Envelope_AdapterEvent{
 			AdapterEvent: &v1.AdapterEvent{
 				Adapter: report.AdapterName,

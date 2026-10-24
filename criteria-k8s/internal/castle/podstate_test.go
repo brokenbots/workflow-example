@@ -135,6 +135,17 @@ func TestPodStateEventEnvelopeValidation(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestPodStateEventEnvelopeSchemaVersion pins the envelope's event protocol
+// version: castle's SubmitEvents gate rejects any envelope whose
+// SchemaVersion is not the protocol version ("failed_precondition:
+// schema_version mismatch"), so the builder must stamp 1 explicitly and
+// never regress to a zero value.
+func TestPodStateEventEnvelopeSchemaVersion(t *testing.T) {
+	env, err := PodStateEventEnvelope("run-1", podStateTestReport(events.PodPhaseRunning, "CrashLoopBackOff"))
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), env.SchemaVersion)
+}
+
 func podStateEmitTestFeed(t *testing.T, url, token string, shrinkRetry bool) *PodStateFeed {
 	t.Helper()
 	// The connect bidi stream requires HTTP/2; negotiate it explicitly
