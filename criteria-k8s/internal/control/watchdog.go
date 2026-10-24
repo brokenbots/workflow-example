@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"sort"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -37,15 +38,17 @@ type Watchdog struct {
 // ticket (refires) compare against the newest run (name's unix suffix is
 // the tiebreaker — deterministic); one mismatching run is a divergence even
 // when a sibling matches.
-func (w *Watchdog) CheckDecision(d Decision) Divergence {
+func (w *Watchdog) CheckDecision(ctx context.Context, d Decision) Divergence {
 	if w == nil || w.Client == nil || d.Ticket == "" {
-		return Divergence{
-			Reasons: []string{"watchdog disabled or ticket unattributable",
-				"assignment decision lacks a ticket label; cannot locate the watcher's run"},
+		div := Divergence{Reasons: []string{
+			"watchdog disabled or ticket unattributable: missing ticket label — cannot locate the watcher's run"}}
+		for _, miss := range d.Missing {
+			div.Reasons = append(div.Reasons, "assignment-labels missing: "+miss)
 		}
+		return div
 	}
 	var runs criteriav1.CriteriaRunList
-	if err := w.Client.List(nil, &runs, client.InNamespace(w.Namespace),
+	if err := w.Client.List(ctx, &runs, client.InNamespace(w.Namespace),
 		client.MatchingLabels{w.TicketLabel(): d.Ticket}); err != nil {
 		return Divergence{Reasons: []string{"listing watcher runs failed: " + err.Error()}}
 	}

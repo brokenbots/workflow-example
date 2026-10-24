@@ -18,7 +18,7 @@ import (
 // Comparator is the divergence checker between one assignment's derived
 // decision and the watcher's stamped CriteriaRuns.
 type Comparator interface {
-	CheckDecision(Decision) Divergence
+	CheckDecision(ctx context.Context, d Decision) Divergence
 }
 
 // Reconnect cadence for the observation stream. Backoff is exponential from
@@ -26,7 +26,6 @@ type Comparator interface {
 var (
 	backoffBase = time.Second
 	backoffMax  = 30 * time.Second
-	dialTimeout = 10 * time.Second
 )
 
 // errDivergence marks a divergent decision in the log stream (a signal, not
@@ -71,14 +70,18 @@ func (s connectSink) next() (*v1.ControlMessage, error) {
 
 func (s connectSink) close() { _ = s.stream.Close() }
 
-// defaultDialer opens one Control subscribe stream per call, bounded by
-// dialTimeout so a hung dial cannot pin the watch loop.
+// defaultDialer opens one Control subscribe stream per call. The stream's
+// lifetime is governed by ctx (connect streams are lazy: the call context
+// outlives establishment), so it stays the caller's context — connect-go
+// returns the stream immediately and resolves the server stream at the
+// first Receive; a per-dial WithTimeout would cancel the freshly opened
+// stream the moment this function returns. sink.close() (connectSink.close)
+// ends the stream when consume finishes; the transport dial itself
+// propagates ctx cancellation.
 func defaultDialer(cfg Config) func(ctx context.Context) (assignSink, error) {
 	return func(ctx context.Context) (assignSink, error) {
 		client := castle.NewControlClient(castle.Config{Addr: cfg.Addr, Token: cfg.Token}, nil)
-		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-		defer cancel()
-		stream, err := client.Control(dialCtx, connect.NewRequest(
+		stream, err := client.Control(ctx, connect.NewRequest(
 			&v1.ControlSubscribeRequest{CriteriaId: cfg.CriteriaID}))
 		if err != nil {
 			return nil, err
@@ -123,7 +126,21 @@ func (s *Stream) Run(ctx context.Context) error {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			s.log.Error(err, "shadow-run watchdog stream dropped; reconnecting", "addr", s.cfg.Addr)
+			// The subscribe itself is lazy: connect resolves the server
+			// stream at the first Receive, so an identity rejection
+			// surfaces HERE, not at dial — both phases must classify it.
+			if isLaneRejected(err) {
+				s.log.Error(err, "shadow-run watchdog disabled: castle rejected this identity on the Control stream (agent-owned lane); an orchestrator token cannot subscribe — wire a criteria token for the shadow identity, or flip the kill-switch off")
+				return err
+			}
+			// io.EOF is castle ending the stream cleanly — reconnect, but
+			// only as Info: a closed stream is transport routine, not a
+			// failure worth an Error-level scrape match.
+			if errors.Is(err, io.EOF) {
+				s.log.Info("castle control stream ended; reconnecting", "addr", s.cfg.Addr)
+			} else {
+				s.log.Error(err, "shadow-run watchdog stream dropped; reconnecting", "addr", s.cfg.Addr)
+			}
 			if !sleepCtx(ctx, backoff) {
 				return ctx.Err()
 			}
@@ -148,7 +165,7 @@ func (s *Stream) consume(ctx context.Context, sink assignSink) error {
 		if asg == nil {
 			continue
 		}
-		s.logAssignment(Translate(s.cfg, Assignment{
+		s.logAssignment(ctx, Translate(s.cfg, Assignment{
 			RunID:          asg.GetRunId(),
 			WorkflowName:   asg.GetWorkflowName(),
 			WorkflowSource: asg.GetWorkflowSource(),
@@ -161,8 +178,8 @@ func (s *Stream) consume(ctx context.Context, sink assignSink) error {
 // logAssignment emits the divergence verdict: an Info when the dispatch
 // lane's decision matches the watcher's run, an Error carrying the reasons
 // (scrapeable via errDivergence) when it does not.
-func (s *Stream) logAssignment(d Decision) {
-	div := s.compare.CheckDecision(d)
+func (s *Stream) logAssignment(ctx context.Context, d Decision) {
+	div := s.compare.CheckDecision(ctx, d)
 	kv := []any{
 		"ticket", d.Ticket, "project", d.Project, "workflow", d.WorkflowName,
 		"class", d.Class, "watcherRun", div.CRName, "missing", d.Missing,

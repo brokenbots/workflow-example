@@ -63,6 +63,11 @@ type Config struct {
 	LabelProject string
 }
 
+// Disabled reports whether the shadow lane is configured off (empty Addr —
+// no castle endpoint to consume from). The kill switch flag is the other
+// gate; callers check both.
+func Disabled(cfg Config) bool { return cfg.Addr == "" }
+
 // TicketLabel resolves the ticket-label key ( defaulted to DefaultLabelTicket).
 func (c Config) TicketLabel() string { return labelKey(c.LabelTicket, DefaultLabelTicket) }
 
