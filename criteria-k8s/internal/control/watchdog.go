@@ -31,6 +31,12 @@ type Watchdog struct {
 	// CRLabelTicket is the watcher's ticket label key on a CriteriaRun
 	// ("ticket" — the buildCriteriaRun stamp).
 	CRLabelTicket string
+	// Builder (optional) is the assignment lane's spec-level mirror: when
+	// set, CheckDecision additionally derives the would-be assignment-driven
+	// CriteriaRun in memory and compares it field-for-field against the
+	// watcher's CR (RunBuilder.CompareSpec — no API writes on either lane).
+	// nil keeps the decision-granularity comparison only.
+	Builder *RunBuilder
 }
 
 // CheckDecision compares one assignment-derived decision against the live
@@ -67,6 +73,17 @@ func (w *Watchdog) CheckDecision(ctx context.Context, d Decision) Divergence {
 		if f.want != f.got {
 			div.Reasons = append(div.Reasons,
 				f.field+": assignment="+f.want+" watcher="+f.got)
+		}
+	}
+	// Spec-level comparison (KB-319 rem1): the decision comparison above
+	// only sees the label-derived identity fields; with a builder wired,
+	// the would-be assignment-driven CR is stamped through the shared
+	// runspec path and compared field-for-field against the watcher's CR.
+	if w.Builder != nil {
+		if wouldBe, buildReasons := w.Builder.BuildRun(ctx, d); wouldBe == nil {
+			div.Reasons = append(div.Reasons, buildReasons...)
+		} else {
+			div.Reasons = append(div.Reasons, CompareSpec(wouldBe, run)...)
 		}
 	}
 	div.Clean = len(div.Reasons) == 0
