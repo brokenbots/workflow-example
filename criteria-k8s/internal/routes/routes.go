@@ -1109,6 +1109,11 @@ type Selection struct {
 	// Config is the resolved configLibrary entry (zero value when no
 	// config was selected).
 	Config ConfigEntry
+	// ConflictPolicy (KB-319) is the adapter-image conflict policy the
+	// run must stamp: the project entry's policy is the final authority
+	// when set, else the workflow entry's, else the fail-closed default
+	// from api/v1 (EffectiveImageConflictPolicy).
+	ConflictPolicy string
 }
 
 // Resolve applies the CRI-217 lookup rules: find the route for the ticket's
@@ -1164,6 +1169,11 @@ func (p *Payload) Resolve(sel Selector) (*Selection, error) {
 		Workflow:   wf,
 		ConfigName: configName,
 		Config:     config,
+		// ConflictPolicy is the KB-319 adapter-image conflict policy the run
+		// must stamp (EffectiveImageConflictPolicy): the project entry's
+		// policy is the final authority when set, else the workflow entry's,
+		// else the fail-closed default from api/v1.
+		ConflictPolicy: p.EffectiveImageConflictPolicy(wf, sel.Project),
 	}, nil
 }
 

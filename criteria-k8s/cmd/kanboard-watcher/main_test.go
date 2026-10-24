@@ -549,7 +549,9 @@ func TestConvertWorkflowInterface(t *testing.T) {
 		out := convertWorkflow("kanboard-intake", routes.Workflow{
 			Type:  routes.TypeImage,
 			Image: "localhost:5000/linear-intake-remote:dev",
-		})
+		}, criteriav1.ImageConflictPolicyFailClosed)
+		require.Equal(t, criteriav1.ImageConflictPolicyFailClosed, out.ImageConflictPolicy,
+			"the KB-319 conflict policy is stamped on the run's workflow")
 		require.NotNil(t, out)
 		require.Nil(t, out.Interface)
 	})
@@ -580,7 +582,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 			Interface: src,
 		}
 
-		out := convertWorkflow("kanboard-develop-url", routesWf)
+		out := convertWorkflow("kanboard-develop-url", routesWf, criteriav1.ImageConflictPolicyPreferEvent)
 		require.Equal(t, &criteriav1.RunWorkflowInterface{
 			APIVersion:  routes.InterfaceAPIVersion,
 			Kind:        routes.InterfaceKind,
@@ -613,7 +615,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 
 	t.Run("nil url interface stays nil", func(t *testing.T) {
 		routesWf := routes.Workflow{Type: routes.TypeURL, URL: "git::x?ref=abc"}
-		out := convertWorkflow("wf-url", routesWf)
+		out := convertWorkflow("wf-url", routesWf, criteriav1.ImageConflictPolicyFailClosed)
 		require.NotNil(t, out)
 		require.Nil(t, out.Interface)
 	})

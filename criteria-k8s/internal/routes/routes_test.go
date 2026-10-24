@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	v1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 )
 
 // marshalPayload renders a payload the way the operator would author it.
@@ -1098,6 +1100,87 @@ func TestParseAndResolveCarryWorkflowClass(t *testing.T) {
 // CRI-214 M14: the workflow-library object carries the per-adapter-kind
 // image override. An omitted or populated map validates; bad adapter kinds,
 // empty values, and whitespace in values fail closed.
+// KB-319: the adapter-image conflict policy validates against its
+// vocabulary on BOTH surfaces (workflow entry, project entry), and
+// effective policy resolution is project > workflow > fail-closed.
+func TestValidateImageConflictPolicy(t *testing.T) {
+	bad := []struct {
+		name    string
+		wfSet   string
+		prjSet  string
+		wantSub string
+	}{
+		{"workflow entry junk", "last-writer-wins", "", `workflowLibrary["wf-default"]: imageConflictPolicy must be`},
+		{"project entry junk", "", "silent", `projectRegistry["Runner"]: imageConflictPolicy must be`},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPayload()
+			wf := p.WorkflowLibrary["wf-default"]
+			wf.ImageConflictPolicy = tc.wfSet
+			p.WorkflowLibrary["wf-default"] = wf
+			p.ProjectRegistry = map[string]ProjectEntry{"Runner": {Namespace: "criteria-jobs", ImageConflictPolicy: tc.prjSet}}
+			if err := p.Validate(); err == nil {
+				t.Fatalf("Validate accepted imageConflictPolicy %q/%q", tc.wfSet, tc.prjSet)
+			} else if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantSub)
+			}
+		})
+	}
+
+	for _, policy := range []string{v1.ImageConflictPolicyFailClosed, v1.ImageConflictPolicyPreferEvent, v1.ImageConflictPolicyPreferMetadata} {
+		p := validPayload()
+		wf := p.WorkflowLibrary["wf-default"]
+		wf.ImageConflictPolicy = policy
+		p.WorkflowLibrary["wf-default"] = wf
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate(imageConflictPolicy=%q) failed: %v", policy, err)
+		}
+	}
+}
+
+func TestEffectiveImageConflictPolicyPrecedence(t *testing.T) {
+	// Project policy outranks the workflow entry's.
+	p := validPayload()
+	wf := p.WorkflowLibrary["wf-default"]
+	wf.ImageConflictPolicy = v1.ImageConflictPolicyPreferEvent
+	p.WorkflowLibrary["wf-default"] = wf
+	p.ProjectRegistry = map[string]ProjectEntry{"Runner": {ImageConflictPolicy: v1.ImageConflictPolicyPreferMetadata}}
+	if got := p.EffectiveImageConflictPolicy(wf, "Runner"); got != v1.ImageConflictPolicyPreferMetadata {
+		t.Errorf("policy = %q, want the project entry's %q", got, v1.ImageConflictPolicyPreferMetadata)
+	}
+	// A project entry with no policy (or a project outside the registry)
+	// leaves the workflow entry's policy effective.
+	p2 := validPayload()
+	wf2 := p2.WorkflowLibrary["wf-default"]
+	wf2.ImageConflictPolicy = v1.ImageConflictPolicyPreferEvent
+	p2.WorkflowLibrary["wf-default"] = wf2
+	if got := p2.EffectiveImageConflictPolicy(wf2, "Unknown-Project"); got != v1.ImageConflictPolicyPreferEvent {
+		t.Errorf("policy = %q, want the workflow entry's %q", got, v1.ImageConflictPolicyPreferEvent)
+	}
+	if got := p2.EffectiveImageConflictPolicy(wf2, "Runner"); got != v1.ImageConflictPolicyPreferEvent {
+		t.Errorf("policy = %q, want the workflow entry's %q", got, v1.ImageConflictPolicyPreferEvent)
+	}
+	// Neither surface stamped → the fail-closed default (KB-319).
+	if got := validPayload().EffectiveImageConflictPolicy(Workflow{}, "Nobody"); got != v1.ImageConflictPolicyFailClosed {
+		t.Errorf("policy = %q, want default %q", got, v1.ImageConflictPolicyFailClosed)
+	}
+}
+
+func TestResolveCarriesConflictPolicy(t *testing.T) {
+	p := validPayload()
+	wf := p.WorkflowLibrary["wf-default"]
+	wf.ImageConflictPolicy = v1.ImageConflictPolicyPreferEvent
+	p.WorkflowLibrary["wf-default"] = wf
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", nil, nil))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.ConflictPolicy != v1.ImageConflictPolicyPreferEvent {
+		t.Errorf("Selection.ConflictPolicy = %q, want %q", sel.ConflictPolicy, v1.ImageConflictPolicyPreferEvent)
+	}
+}
+
 func TestValidateAdapterImages(t *testing.T) {
 	for _, images := range []map[string]string{
 		nil,

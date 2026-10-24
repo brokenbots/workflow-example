@@ -87,7 +87,7 @@ SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 NOSPACE_RE = re.compile(r"^\S+$")
 MOUNT_RE = re.compile(r"^/")
 
-WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages", "interface"}
+WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages", "interface", "imageConflictPolicy"}
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
@@ -96,7 +96,10 @@ TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes", 
 # Entries mirror routes.schema.json's projectEntry: closed key set, DNS-1123
 # namespace, advisory owner/name repo members, cutover marker vocabulary of
 # one value ("done"). Route projects must exist here when the key is present.
-PROJECT_ENTRY_KEYS = {"namespace", "repos", "cutover"}
+PROJECT_ENTRY_KEYS = {"namespace", "repos", "cutover", "imageConflictPolicy"}
+# KB-319: the adapter-image conflict policy vocabulary — the workflow-level
+# per-ticket policy stamp and the project's override share it.
+WORKFLOW_IMAGE_POLICIES = ("fail-closed", "prefer-event", "prefer-metadata")
 REPO_REF_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 CONFIG_KEYS = {"buildCmd", "testCmd", "ciGateCmd", "baseBranch", "tags", "tagMatch"}
 CONFIG_TAG_MATCHES = {"", "all", "any"}
@@ -360,6 +363,11 @@ def validate_workflow(name, workflow, where, errs):
     wclass = workflow.get("class")
     if "class" in workflow and wclass not in WORKFLOW_CLASSES:
         errs.append(f"{where}.class {wclass!r} must be one of dev, triage")
+    # KB-319: the adapter-image conflict policy vocabulary is closed on the
+    # workflow entry too; absent keeps the fail-closed default.
+    ipolicy = workflow.get("imageConflictPolicy")
+    if "imageConflictPolicy" in workflow and ipolicy not in WORKFLOW_IMAGE_POLICIES:
+        errs.append(f"{where}.imageConflictPolicy {ipolicy!r} must be one of fail-closed, prefer-event, prefer-metadata")
     for key in ("image", "url", "ref"):
         if key in workflow and (not isinstance(workflow[key], str) or NOSPACE_RE.match(workflow[key]) is None):
             errs.append(f"{where}.{key} must be a non-blank string")
@@ -580,6 +588,11 @@ def validate_registry(registry, errs):
                 not isinstance(r, str) or REPO_REF_RE.match(r) is None for r in repos)):
             errs.append(f"payload.projectRegistry.{project}.repos must be an array of owner/name repository references")
         cutover = entry.get("cutover")
+        # KB-319: the project's override of the adapter-image conflict
+        # policy (the per-project configurability of the conflict stance)
+        # validates against the same closed vocabulary.
+        if "imageConflictPolicy" in entry and entry["imageConflictPolicy"] not in WORKFLOW_IMAGE_POLICIES:
+            errs.append(f"payload.projectRegistry.{project}.imageConflictPolicy {entry['imageConflictPolicy']!r} must be one of fail-closed, prefer-event, prefer-metadata")
         if "cutover" in entry and cutover not in ("done",):
             errs.append(f"payload.projectRegistry.{project}.cutover {cutover!r} must be \"done\" or absent (binding-first, deletion second)")
 

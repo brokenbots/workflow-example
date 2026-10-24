@@ -1049,7 +1049,7 @@ func (w *watcher) buildCriteriaRun(ctx context.Context, task kanboard.Task, repo
 		TicketID:         ticketID,
 		RepoURL:          repoURL,
 		PerScopeSessions: true,
-		Workflow:         convertWorkflow(sel.Name, sel.Workflow),
+		Workflow:         convertWorkflow(sel.Name, sel.Workflow, sel.ConflictPolicy),
 		BuildCmd:         w.buildCmd,
 		TestCmd:          w.testCmd,
 		CIGateCmd:        w.ciGateCmd,
@@ -1135,8 +1135,10 @@ func (w *watcher) columnNameFor(ctx context.Context, projectID, columnID int) st
 }
 
 // convertWorkflow deep-copies a resolved routes workflow object into the
-// CriteriaRun spec (CRI-222).
-func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
+// CriteriaRun spec (CRI-222). conflictPolicy is the KB-319
+// adapter-image conflict policy the resolver selected for the ticket's
+// project (Selection.ConflictPolicy).
+func convertWorkflow(name string, wf routes.Workflow, conflictPolicy string) *criteriav1.RunWorkflow {
 	out := &criteriav1.RunWorkflow{
 		Name:      name,
 		Type:      wf.Type,
@@ -1146,6 +1148,11 @@ func convertWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
 		URL:       wf.URL,
 		Ref:       wf.Ref,
 		Interface: convertWorkflowInterface(wf.Interface),
+		// The conflict policy is STAMPED AS-SELECTED, unconditionally: the
+		// conflict vocabulary is non-empty by construction (the resolver
+		// always fills it, fail-closed included), so an empty value would
+		// only be a silent skip of the KB-319 consult.
+		ImageConflictPolicy: conflictPolicy,
 	}
 	if wf.Env != nil {
 		out.Env = make(map[string]string, len(wf.Env))
@@ -1221,16 +1228,20 @@ func convertWorkflowInterface(in *routes.WorkflowInterface) *criteriav1.RunWorkf
 // The workflow declaration's namespace is deliberately not stamped: the
 // run executes in the project namespace, so jobbuilder.TargetNamespace
 // must resolve through the run's own namespace, not the global
-// workflow-library one.
-func convertBindingRefWorkflow(name string, wf routes.Workflow) *criteriav1.RunWorkflow {
+// workflow-library one. conflictPolicy is the KB-319 adapter-image
+// conflict policy (Selection.ConflictPolicy); the binding materialization
+// replaces the adapter-image lane post-cutover, but the policy governs
+// the pinned-vs-verified disagreement the same way on both lanes.
+func convertBindingRefWorkflow(name string, wf routes.Workflow, conflictPolicy string) *criteriav1.RunWorkflow {
 	return &criteriav1.RunWorkflow{
-		Name:      name,
-		Type:      wf.Type,
-		Class:     workflowClass(wf),
-		Image:     wf.Image,
-		URL:       wf.URL,
-		Ref:       wf.Ref,
-		Interface: convertWorkflowInterface(wf.Interface),
+		Name:                name,
+		Type:                wf.Type,
+		Class:               workflowClass(wf),
+		Image:               wf.Image,
+		URL:                 wf.URL,
+		Ref:                 wf.Ref,
+		Interface:           convertWorkflowInterface(wf.Interface),
+		ImageConflictPolicy: conflictPolicy,
 	}
 }
 
@@ -1263,7 +1274,7 @@ func (w *watcher) buildBindingFirstRun(ctx context.Context, task kanboard.Task, 
 		PerScopeSessions:  true,
 		MaxAgentVisits:    w.maxAgentVisits,
 		ProviderBaseURL:   w.providerBaseURL,
-		Workflow:          convertBindingRefWorkflow(sel.Name, sel.Workflow),
+		Workflow:          convertBindingRefWorkflow(sel.Name, sel.Workflow, sel.ConflictPolicy),
 		ProjectBindingRef: &criteriav1.CriteriaRunProjectBindingRef{Name: binding.CMName},
 	}
 	var cm corev1.ConfigMap
