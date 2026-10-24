@@ -55,8 +55,10 @@ type RunBuilder struct {
 // Returns (run, nil) on success and (nil, reasons) when the assignment
 // cannot build a spec: the reasons are divergence-log fodder the watchdog
 // appends. The run's name uses the watcher's "<lower(ticket)>-<unix>"
-// seam (mirrored), so the like-for-like compare in compareSpec skips the
-// name; namespace, labels, and the full spec are compared.
+// seam (mirrored), so the like-for-like compare in CompareSpec skips the
+// name; namespace, labels, and the full spec are compared. The reasons
+// come from the exported CompareSpec (kept separately so callers' parity
+// tests can drive both halves).
 func (b *RunBuilder) BuildRun(ctx context.Context, d Decision) (*criteriav1.CriteriaRun, []string) {
 	if b == nil || b.Routes == nil {
 		return nil, []string{"routes payload not configured: spec-level comparison unavailable"}
@@ -249,7 +251,7 @@ func addLabelDiffs(reasons *[]string, want, got map[string]string) {
 func compareConfigRef(want, got *criteriav1.CriteriaRunConfigRef) []string {
 	if (want == nil) != (got == nil) {
 		return []string{fmt.Sprintf("spec.configRef: assignment=%s watcher=%s",
-			refShape(want != nil, nameOnly(want)), refShape(got != nil, nameOnly(got)))}
+			refShape(want != nil), refShape(got != nil))}
 	}
 	if want == nil {
 		return nil
@@ -267,7 +269,7 @@ func compareConfigRef(want, got *criteriav1.CriteriaRunConfigRef) []string {
 func compareBindingRef(want, got *criteriav1.CriteriaRunProjectBindingRef) []string {
 	if (want == nil) != (got == nil) {
 		return []string{fmt.Sprintf("spec.projectBindingRef: assignment=%s watcher=%s",
-			refShape(want != nil, nameOnly(want)), refShape(got != nil, nameOnly(got)))}
+			refShape(want != nil), refShape(got != nil))}
 	}
 	if want == nil {
 		return nil
@@ -359,9 +361,7 @@ func compareInterface(want, got *criteriav1.RunWorkflowInterface) []string {
 	return nil
 }
 
-func nameOnly(ref any) string { return "ref" }
-
-func refShape(present bool, _ string) string {
+func refShape(present bool) string {
 	if !present {
 		return "unset"
 	}
