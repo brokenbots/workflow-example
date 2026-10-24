@@ -190,6 +190,15 @@
             "pattern": "^\\S+$"
           }
         },
+        "imageConflictPolicy": {
+          "type": "string",
+          "description": "KB-319: how the operator arbitrates a PINNED adapter-image conflict — the workflow's pinned per-kind pin and the digest-verified provision_wanted event's pin disagree on one kind. 'fail-closed' (the default, and the posture for any unregistered value) parks the run Failed with the AdapterImageConflict condition instead of silently executing one lane's choice; 'prefer-event' hands the digest-verified event pin the precedence; 'prefer-metadata' keeps the target declaration. The conflict policy never arbitrates agreeing pins or a missing lane. A projectRegistry entry's imageConflictPolicy (when set) outranks this value.",
+          "enum": [
+            "fail-closed",
+            "prefer-event",
+            "prefer-metadata"
+          ]
+        },
         "interface": {
           "type": "object",
           "description": "KB-310 (ADR 307): the tree's machine-readable workflow interface — what the composed run requires from a binding (adapter kinds, mount paths, secret env lanes) and the config it honors (config slots). Required for type=url entries resolving to a repo tree; the watcher stamps it onto the run CR (spec.workflow.interface) and the operator validates the binding against it BEFORE job creation, fail closed. The schema of record is k8s/workflow-interface.schema.json (same shape; this inline copy keeps the payload self-contained so structural validators need no resolver).",
@@ -288,6 +297,13 @@
                 }
               },
               "uniqueItems": true
+            },
+            "lockKey": {
+              "type": "string",
+              "description": "KB-319 dev-class serialization: the identity the tree's dev-class runs serialize on. The vocabulary admits exactly one value — 'repoUrl' — whose admission derivation is the per-repo URL key the operator has always used, so declaring it is declaration-made-explicit with no behavior change; an absent lockKey keeps that derivation. Mirrors k8s/workflow-interface.schema.json (the schema of record).",
+              "enum": [
+                "repoUrl"
+              ]
             }
           }
         }
@@ -760,6 +776,15 @@
           "description": "Cutover marker (KB-311 migration sequencing): 'done' when this project's namespace serves its own criteria-binding — after cutover the intake stamps binding references only (the global workflowLibrary entries keep binding-shaped data until their deletion, binding-first then deletion). Absent (or any value other than 'done' — rejected) keeps the pre-cutover behavior: routes select binding-shaped data from the global payload.",
           "enum": [
             "done"
+          ]
+        },
+        "imageConflictPolicy": {
+          "type": "string",
+          "description": "KB-319: the project-level adapter-image conflict policy — how the operator arbitrates a PINNED conflict (the workflow's pinned per-kind pin vs the digest-verified event pin disagreeing on one kind). When set, this entry's policy outranks the resolved workflow entry's (the per-project configurability of the conflict stance); 'fail-closed' (the default when neither surface stamps one) parks the run failed instead of silently executing one lane's choice; 'prefer-event' hands the verified pin the precedence; 'prefer-metadata' keeps the target declaration.",
+          "enum": [
+            "fail-closed",
+            "prefer-event",
+            "prefer-metadata"
           ]
         }
       }

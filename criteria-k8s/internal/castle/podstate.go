@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/types/known/structpb"
 
+	sdk "github.com/brokenbots/criteria/sdk"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -136,6 +137,11 @@ func (f *PodStateFeed) Disabled() bool {
 // report is validated first (via events.MarshalPodStateEvent's contract) and
 // the data keys are the exact pinned set from events.PodStateReport, so the
 // typed proto and the pinned JSON line cannot grow apart in shape.
+//
+// The envelope carries the event protocol version (1, mirroring the
+// archive-record stamp): castle's SubmitEvents gate rejects envelopes whose
+// SchemaVersion is not the protocol version, so an unstamped envelope
+// (version 0) fails precondition on every submit.
 func PodStateEventEnvelope(runID string, report events.PodStateReport) (*v1.Envelope, error) {
 	data, err := structpb.NewStruct(map[string]any{
 		"adapter":           report.AdapterName,
@@ -158,7 +164,11 @@ func PodStateEventEnvelope(runID string, report events.PodStateReport) (*v1.Enve
 		return nil, errors.New("pod-state event: empty run_id")
 	}
 	return &v1.Envelope{
-		RunId: runID,
+		// The SDK's protocol-version constant, not a literal: castle's
+		// SubmitEvents gate requires exactly criteria.SchemaVersion, and a
+		// version bump must not strand this builder on a stale literal.
+		SchemaVersion: int32(sdk.SchemaVersion),
+		RunId:         runID,
 		Payload: &v1.Envelope_AdapterEvent{
 			AdapterEvent: &v1.AdapterEvent{
 				Adapter: report.AdapterName,

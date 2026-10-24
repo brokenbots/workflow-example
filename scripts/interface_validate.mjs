@@ -102,7 +102,7 @@ function validateInterface(iface, where) {
     fail(where, "interface must be a JSON object");
     return;
   }
-  const allowed = ["apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots"];
+  const allowed = ["apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots", "lockKey"];
   for (const key of Object.keys(iface))
     if (!allowed.includes(key)) fail(where, `unknown field "${key}" (schema: additionalProperties false)`);
   if (iface.apiVersion !== "criteria.brokenbots.dev/v1") fail(where, `apiVersion must be "criteria.brokenbots.dev/v1"`);
@@ -165,6 +165,13 @@ function validateInterface(iface, where) {
         fail(where, `env[] must be a SCREAMING_SNAKE env name (got ${JSON.stringify(e)})`);
     });
     unique(env, "env", where, (e) => e);
+  }
+  // KB-319 dev-class serialization: the tree's declared admission-lock
+  // key. One admitted value today ("repoUrl", the per-repo URL key the
+  // operator has always derived); anything else fails closed.
+  if (typeof iface.lockKey !== "undefined") {
+    if (iface.lockKey !== "repoUrl")
+      fail(where, `lockKey must be "repoUrl" or absent (got ${JSON.stringify(iface.lockKey)})`);
   }
   const slots = arr(iface.configSlots, "configSlots", where);
   if (slots) {

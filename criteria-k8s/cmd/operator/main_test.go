@@ -36,8 +36,11 @@ import (
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
 )
 
 // The production scheme must resolve every kind the operator's clients Get
@@ -259,4 +262,69 @@ func TestCastleTokenFromEnv(t *testing.T) {
 		t.Setenv("CASTLE_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
 		require.Empty(t, castleTokenFromEnv())
 	})
+}
+
+func TestShadowCastleTokenFromEnv(t *testing.T) {
+	t.Run("SHADOW_CASTLE_TOKEN wins over file", func(t *testing.T) {
+		t.Setenv("SHADOW_CASTLE_TOKEN", "shadow-token")
+		path := filepath.Join(t.TempDir(), "missing")
+		os.Unsetenv("SHADOW_CASTLE_TOKEN_FILE")
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", path)
+		token, err := shadowCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shadow-token", token)
+	})
+	t.Run("file token trimmed", func(t *testing.T) {
+		os.Unsetenv("SHADOW_CASTLE_TOKEN")
+		t.Setenv("SHADOW_CASTLE_TOKEN", "")
+		path := filepath.Join(t.TempDir(), "token")
+		require.NoError(t, os.WriteFile(path, []byte("shadow-file-token\n"), 0o400))
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", path)
+		token, err := shadowCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shadow-file-token", token)
+	})
+	t.Run("unreadable file errors and names the path", func(t *testing.T) {
+		os.Unsetenv("SHADOW_CASTLE_TOKEN")
+		t.Setenv("SHADOW_CASTLE_TOKEN", "")
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
+		token, err := shadowCastleTokenFromEnv()
+		require.Error(t, err)
+		require.Empty(t, token)
+		require.Contains(t, err.Error(), "missing", "the read error names the path so the lane's disable is diagnosable")
+	})
+	t.Run("no shadow vars falls back to the shared token", func(t *testing.T) {
+		t.Setenv("CASTLE_TOKEN", "shared-token")
+		os.Unsetenv("SHADOW_CASTLE_TOKEN")
+		os.Unsetenv("SHADOW_CASTLE_TOKEN_FILE")
+		t.Setenv("SHADOW_CASTLE_TOKEN", "")
+		t.Setenv("SHADOW_CASTLE_TOKEN_FILE", "")
+		token, err := shadowCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shared-token", token)
+	})
+}
+
+// TestNewShadowRunBuilderWiring pins the operator's spec-mirror wiring
+// seam: a deployment without a routes payload wires NO builder
+// (decision-only posture — the "routes payload not configured" degrade
+// must never reach the divergence log), and a configured payload wires the
+// builder the watchdog's Configured() gate runs.
+func TestNewShadowRunBuilderWiring(t *testing.T) {
+	assert.False(t, (&control.RunBuilder{}).Configured(), "a nil-Routes builder is unconfigured")
+	var absentBuilder *control.RunBuilder
+	assert.False(t, absentBuilder.Configured(), "nil builder must not panic the gate")
+
+	assert.Nil(t, newShadowRunBuilder(nil, runspec.Defaults{}, "criteria-jobs", nil, logr.Discard()),
+		"no routes payload => no spec mirror; the shadow lane stays decision-only")
+
+	payload := &routes.Payload{
+		WorkflowLibrary: map[string]routes.Workflow{"kanboard-develop-url": {}},
+	}
+	b := newShadowRunBuilder(payload, runspec.Defaults{TestCmd: "make test"}, "criteria-jobs", nil, logr.Discard())
+	require.NotNil(t, b, "a routes payload wires the spec mirror")
+	assert.True(t, b.Configured())
+	assert.Same(t, payload, b.Routes)
+	assert.Equal(t, "criteria-jobs", b.Namespace)
+	assert.Equal(t, "make test", b.Defaults.TestCmd)
 }

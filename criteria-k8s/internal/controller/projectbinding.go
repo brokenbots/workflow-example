@@ -24,6 +24,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 )
+
 // readProjectBinding reads the run's project binding ConfigMap (KB-311),
 // verifies the stamped resourceVersion pin, and parses + validates the
 // payload, fail closed. Returns (payload, checksum, "", nil) on success;

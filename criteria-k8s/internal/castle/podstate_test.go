@@ -20,6 +20,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/encoding/protojson"
 
+	sdk "github.com/brokenbots/criteria/sdk"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	criteriav1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
@@ -133,6 +134,17 @@ func TestPodStateEventEnvelopeValidation(t *testing.T) {
 	require.Error(t, err)
 	_, err = PodStateEventEnvelope("", podStateTestReport(events.PodPhaseRunning, ""))
 	require.Error(t, err)
+}
+
+// TestPodStateEventEnvelopeSchemaVersion pins the envelope's event protocol
+// version: castle's SubmitEvents gate rejects any envelope whose
+// SchemaVersion is not the protocol version ("failed_precondition:
+// schema_version mismatch"), so the builder must stamp 1 explicitly and
+// never regress to a zero value.
+func TestPodStateEventEnvelopeSchemaVersion(t *testing.T) {
+	env, err := PodStateEventEnvelope("run-1", podStateTestReport(events.PodPhaseRunning, "CrashLoopBackOff"))
+	require.NoError(t, err)
+	assert.Equal(t, int32(sdk.SchemaVersion), env.SchemaVersion)
 }
 
 func podStateEmitTestFeed(t *testing.T, url, token string, shrinkRetry bool) *PodStateFeed {

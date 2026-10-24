@@ -31,6 +31,11 @@ import (
 // own references stable.
 const ConditionConfigRenderDrift = criteriav1.ConditionConfigRenderDrift
 
+// ConditionAdapterImageConflict is the CriteriaRun condition type and
+// reason stamped when a run is failed on a fail-closed adapter-image
+// conflict (KB-319). Alias of the api/v1 const.
+const ConditionAdapterImageConflict = criteriav1.ConditionAdapterImageConflict
+
 // renderRunConfig renders the run's per-repo config the way KB-103
 // prescribes and hands the rendered values to the child-Job builders:
 //

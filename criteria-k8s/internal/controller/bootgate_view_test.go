@@ -31,7 +31,7 @@ func TestBootgateViewJobFirstRegression(t *testing.T) {
 	booting := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{
 		Name: "kb-42-1000", Namespace: "ns",
 		// Realistic watcher stamping: the ticket label only — no job label.
-		Labels: map[string]string{"ticket": "kb-42"},
+		Labels:            map[string]string{"ticket": "kb-42"},
 		CreationTimestamp: early},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Pending"}}
 	// The shadow: a NEWER, different-class (higher unix suffix) family row
@@ -40,13 +40,13 @@ func TestBootgateViewJobFirstRegression(t *testing.T) {
 	// shape of that selection.
 	shadow := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{
 		Name: "kb-42-2000", Namespace: "ns",
-		Labels: map[string]string{"ticket": "kb-42"},
+		Labels:            map[string]string{"ticket": "kb-42"},
 		CreationTimestamp: late},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Failed"}}
 	labeledNS := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{
 		// The job label's path: the CR name differs from the job param.
 		Name: "cri-77", Namespace: "ns",
-		Labels: map[string]string{"criteria.brokenbots.dev/job": "cri-77-runner"},
+		Labels:            map[string]string{"criteria.brokenbots.dev/job": "cri-77-runner"},
 		CreationTimestamp: early},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Running"}}
 	// Decoy: same job label, same name suffix trick, but in the namespace
@@ -55,7 +55,7 @@ func TestBootgateViewJobFirstRegression(t *testing.T) {
 	// authoritative row.
 	decoy := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{
 		Name: "cri-77", Namespace: "other",
-		Labels: map[string]string{"criteria.brokenbots.dev/job": "cri-77-runner"},
+		Labels:            map[string]string{"criteria.brokenbots.dev/job": "cri-77-runner"},
 		CreationTimestamp: late},
 		Status: criteriav1.CriteriaRunStatus{Phase: "Failed"}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(booting, shadow, labeledNS, decoy).Build()

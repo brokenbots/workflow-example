@@ -13,8 +13,11 @@ import (
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -59,9 +62,18 @@ var (
 	castleAddr          = flag.String("castle-addr", getenv("CASTLE_ADDR", ""), "Castle control plane Connect endpoint; empty disables run observation (read-only)")
 	backfillRunArchives = flag.Bool("backfill-run-archives", getBool("BACKFILL_RUN_ARCHIVES", false), "One-shot run-archive backfill (KB-314): archive every terminal CriteriaRun into castle's run archive, then exit; the operator mode flag runs the normal reconciler loop instead")
 	castleToken         = castleTokenFromEnv()
-	debugEventsFile     = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
-	retentionPeriod     = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
-	sweepInterval       = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
+	// KB-319 shadow-run window: while open, an observational consumer
+	// watches castle's Control-stream WorkflowAssignments and logs decision
+	// divergence against the watcher's CriteriaRuns without creating or
+	// admitting anything (the watcher keeps deciding; castle dispatch also
+	// decides; the divergence log reconciles the two). See internal/control.
+	shadowRunWatchdog = flag.Bool("shadow-run-watchdog", getBool("SHADOW_RUN_WATCHDOG", true), "Shadow-run window kill switch (KB-319): log assignment-driven run decisions vs the watcher's runs; the lane never writes. DEFAULTS ON — the only writer-less lane; set --shadow-run-watchdog=0 to close the window entirely")
+	shadowCastleAddr  = flag.String("shadow-castle-addr", getenv("SHADOW_CASTLE_ADDR", ""), "Castle Connect endpoint for the shadow-run assignment consumer (KB-319); empty rides --castle-addr")
+	shadowCriteriaID  = flag.String("shadow-criteria-id", getenv("SHADOW_CRITERIA_ID", "criteria-k8s-operator"), "Criteria id presented on the shadow-run Control subscribe (KB-319)")
+	shadowRoutesFile  = flag.String("shadow-routes-file", getenv("SHADOW_ROUTES_FILE", ""), "Routes payload file for the shadow-run spec mirror (KB-319); one startup read; empty keeps the watchdog decision-only")
+	debugEventsFile   = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
+	retentionPeriod   = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
+	sweepInterval     = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	// KB-24: the stall watchdog's step-progress window. A Running run whose
 	// castle stream shows no step progress (lifecycle envelopes plus the
 	// copilot adapter's agent-activity AdapterEvents; heartbeats, terminal
@@ -323,6 +335,75 @@ func main() {
 		logger.Info("boot gate operator view disabled (bootgate-view-addr empty)")
 	}
 
+	// KB-319 shadow-run window: while open, an observational consumer
+	// watches castle's Control-stream WorkflowAssignments and logs whether
+	// the dispatch lane's decision matches the watcher's run. It decides
+	// nothing and emits nothing: no CR, no admission, no lease — castle's
+	// lease path skips a never-online identity and this lane never
+	// heartbeats (NewControlClient's lease-safety posture). Divergence
+	// rides the scrapeable "assignment divergence" Error log; the kill
+	// switch (--shadow-run-watchdog=0) closes the window entirely. The
+	// token resolves from SHADOW_CASTLE_TOKEN / SHADOW_CASTLE_TOKEN_FILE
+	// (falling back to the shared CASTLE_TOKEN): Control is agent-owned, so
+	// an orchestrator-only token cannot subscribe — castle rejects it once
+	// and the consumer permanently disables itself with a loud log naming
+	// the fix.
+	//
+	// Run step events are proxied, not re-consumed (KB-319 "proxy
+	// principle"): castle streams step envelopes to the operator's run
+	// observation lane (internal/castle — SubmitEvents consumption,
+	// drainedSteps, Observe stamping obs.Steps), and the reconcile mirrors
+	// those observed steps into the CriteriaRun's terminal archive
+	// (internal/controller/terminalarchive.go, iterating obs.Steps). The
+	// operator never subscribes to raw step events from a second lane; the
+	// assignment consumer stays decision- and spec-comparison only.
+	if !*shadowRunWatchdog {
+		logger.Info("shadow-run watchdog disabled (kill switch)")
+	} else if shadowAddr := shadowRunAddr(); shadowAddr == "" {
+		logger.Info("shadow-run watchdog disabled (no castle address)")
+	} else {
+		shadowToken, err := shadowCastleTokenFromEnv()
+		if err != nil {
+			// Cause + path only (never the token body): a silently
+			// missing file would make the lane's disable undiagnosable.
+			logger.Error(err, "shadow-run watchdog: token file unreadable; falling back to the shared CASTLE_TOKEN")
+			shadowToken = castleTokenFromEnv()
+		}
+		shadowCfg := control.Config{
+			Addr:       shadowAddr,
+			Token:      shadowToken,
+			CriteriaID: *shadowCriteriaID,
+		}
+		watchdog := &control.Watchdog{
+			Client:    directClient,
+			Namespace: *namespaceFlag,
+		}
+		// KB-319 rem1 spec mirror: with a routes payload, the watchdog also
+		// derives the would-be assignment-driven CriteriaRun in memory
+		// (shared runspec stamping, no API writes) and compares it
+		// field-for-field against the watcher's CR — spec-level divergence
+		// detection on top of the decision-level compare. The routes read
+		// failure degrades to decision-only rather than crashing the
+		// operator (the mirror is observational; never a boot blocker).
+		routesPayload, routesErr := loadShadowRoutes(*shadowRoutesFile)
+		if routesErr != nil {
+			logger.Error(routesErr, "shadow-run watchdog: routes payload unreadable; the mirror degrades to decision-only",
+				"routesFile", *shadowRoutesFile)
+		}
+		watchdog.Builder = newShadowRunBuilder(routesPayload, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
+		if watchdog.Builder == nil && routesErr == nil {
+			logger.Info("shadow-run spec mirror disabled: no routes payload configured (--shadow-routes-file empty); the watchdog stays decision-only",
+				"routesFile", *shadowRoutesFile)
+		}
+		stream := control.StartStream(shadowCfg, watchdog, logger)
+		go func() {
+			if err := stream.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error(err, "shadow-run watchdog exited")
+			}
+		}()
+		logger.Info("shadow-run watchdog enabled (observational)", "addr", shadowAddr, "criteriaId", *shadowCriteriaID)
+	}
+
 	logger.Info("starting criteria-k8s operator")
 	if err := mgr.Start(ctx); err != nil {
 		logger.Error(err, "operator exited")
@@ -372,6 +453,87 @@ func castleTokenFromEnv() string {
 		token = strings.TrimSpace(string(data))
 	}
 	return token
+}
+
+// shadowRunAddr resolves the shadow-run consumer's castle endpoint: the
+// dedicated flag first, the shared --castle-addr as fallback. Empty keeps
+// the lane off entirely.
+func shadowRunAddr() string {
+	if *shadowCastleAddr != "" {
+		return *shadowCastleAddr
+	}
+	return *castleAddr
+}
+
+// newShadowRunBuilder wires the assignment lane's spec mirror. A deployment
+// without a routes payload is decision-only posture, not a lane
+// disagreement: the builder stays unwired (nil) so BuildRun's
+// "routes payload not configured" degrade never enters the divergence log;
+// the caller logs that posture once at startup (a routes-file READ ERROR
+// keeps its own louder Error-level log).
+func newShadowRunBuilder(routesPayload *routes.Payload, defaults runspec.Defaults, ns string, cl client.Client, log logr.Logger) *control.RunBuilder {
+	if routesPayload == nil {
+		return nil
+	}
+	return &control.RunBuilder{
+		Defaults:  defaults,
+		Namespace: ns,
+		Routes:    routesPayload,
+		Client:    cl,
+		Log:       log,
+	}
+}
+
+// shadowRunnerDefaults mirrors the watcher's flag-resolution onto the
+// operator's env: the same env keys the watcher's flags read
+// (BUILD_CMD/TEST_CMD/CI_GATE_CMD/BASE_BRANCH/MAX_AGENT_VISITS/
+// PROVIDER_BASE_URL, same fallback constants), so real deployment drift
+// between the two deciders' environments surfaces as spec divergence —
+// which is exactly what the shadow window exists to catch.
+func shadowRunnerDefaults() runspec.Defaults {
+	return runspec.Defaults{
+		BuildCmd:        getenv("BUILD_CMD", ""),
+		TestCmd:         getenv("TEST_CMD", ""),
+		CIGateCmd:       getenv("CI_GATE_CMD", ""),
+		BaseBranch:      getenv("BASE_BRANCH", ""),
+		MaxAgentVisits:  getInt("MAX_AGENT_VISITS", 2),
+		ProviderBaseURL: getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"),
+	}
+}
+
+// loadShadowRoutes reads and validates the routes payload the spec mirror
+// resolves against. A nil/empty path returns (nil, nil) — decision-only
+// posture; a real file failure returns the error for the caller's loud
+// degrade log.
+func loadShadowRoutes(path string) (*routes.Payload, error) {
+	if path == "" {
+		return nil, nil
+	}
+	return routes.LoadFile(path)
+}
+
+// shadowCastleTokenFromEnv resolves the criteria token for the shadow-run
+// Control subscribe: SHADOW_CASTLE_TOKEN first, else the file
+// SHADOW_CASTLE_TOKEN_FILE points at (the chart-p posture delivers
+// credential material as mounted files), falling back to the shared
+// CASTLE_TOKEN / CASTLE_TOKEN_FILE resolution when neither shadow var is
+// wired. An orchestrator-only shared token cannot subscribe — the consumer
+// logs the rejection once and disables itself rather than retrying forever.
+// A shadow-token-file read error is returned to the caller so the fallback
+// is diagnosable (path and cause only — never the secret material).
+func shadowCastleTokenFromEnv() (string, error) {
+	token := getenv("SHADOW_CASTLE_TOKEN", "")
+	if file := getenv("SHADOW_CASTLE_TOKEN_FILE", ""); token == "" && file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("reading %s: %w", file, err)
+		}
+		token = strings.TrimSpace(string(data))
+	}
+	if token == "" {
+		return castleTokenFromEnv(), nil
+	}
+	return token, nil
 }
 
 func getenv(key, fallback string) string {

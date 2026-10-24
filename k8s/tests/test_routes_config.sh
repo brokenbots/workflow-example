@@ -87,7 +87,7 @@ SECRET_KEY_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 NOSPACE_RE = re.compile(r"^\S+$")
 MOUNT_RE = re.compile(r"^/")
 
-WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages", "interface"}
+WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes", "secrets", "env", "adapterImages", "interface", "imageConflictPolicy"}
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
@@ -96,7 +96,10 @@ TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes", 
 # Entries mirror routes.schema.json's projectEntry: closed key set, DNS-1123
 # namespace, advisory owner/name repo members, cutover marker vocabulary of
 # one value ("done"). Route projects must exist here when the key is present.
-PROJECT_ENTRY_KEYS = {"namespace", "repos", "cutover"}
+PROJECT_ENTRY_KEYS = {"namespace", "repos", "cutover", "imageConflictPolicy"}
+# KB-319: the adapter-image conflict policy vocabulary — the workflow-level
+# per-ticket policy stamp and the project's override share it.
+WORKFLOW_IMAGE_POLICIES = ("fail-closed", "prefer-event", "prefer-metadata")
 REPO_REF_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 CONFIG_KEYS = {"buildCmd", "testCmd", "ciGateCmd", "baseBranch", "tags", "tagMatch"}
 CONFIG_TAG_MATCHES = {"", "all", "any"}
@@ -110,7 +113,7 @@ WORKFLOW_CLASSES = ("dev", "triage")
 # pattern-constrained fields; SLOT_RE is the config-slot name surface ("the
 # tree decides what may be overridden" — camelCase slot names, lowercase
 # first letter), and VAR_RE/ENV_RE are tree-variable and secret-env lanes.
-INTERFACE_KEYS = {"apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots"}
+INTERFACE_KEYS = {"apiVersion", "kind", "workflow", "description", "adapters", "mounts", "secretEnv", "env", "configSlots", "lockKey"}
 MOUNT_KEYS = {"name", "mountPath", "kind"}
 SLOT_KEYS = {"slot", "variable", "target", "description"}
 INTERFACE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -252,6 +255,8 @@ def validate_interface(iface, where, errs):
         errs.append(f"{where}.apiVersion must be criteria.brokenbots.dev/v1")
     if iface.get("kind") != "WorkflowInterface":
         errs.append(f"{where}.kind must be WorkflowInterface")
+    if "lockKey" in iface and iface["lockKey"] != "repoUrl":
+        errs.append(f"{where}.lockKey must be 'repoUrl' or absent (got {iface['lockKey']!r})")
     for key in ("workflow", "description"):
         if key in iface and (not isinstance(iface[key], str) or not iface[key]):
             errs.append(f"{where}.{key} must be a non-empty string")
@@ -360,6 +365,11 @@ def validate_workflow(name, workflow, where, errs):
     wclass = workflow.get("class")
     if "class" in workflow and wclass not in WORKFLOW_CLASSES:
         errs.append(f"{where}.class {wclass!r} must be one of dev, triage")
+    # KB-319: the adapter-image conflict policy vocabulary is closed on the
+    # workflow entry too; absent keeps the fail-closed default.
+    ipolicy = workflow.get("imageConflictPolicy")
+    if "imageConflictPolicy" in workflow and ipolicy not in WORKFLOW_IMAGE_POLICIES:
+        errs.append(f"{where}.imageConflictPolicy {ipolicy!r} must be one of fail-closed, prefer-event, prefer-metadata")
     for key in ("image", "url", "ref"):
         if key in workflow and (not isinstance(workflow[key], str) or NOSPACE_RE.match(workflow[key]) is None):
             errs.append(f"{where}.{key} must be a non-blank string")
@@ -580,6 +590,11 @@ def validate_registry(registry, errs):
                 not isinstance(r, str) or REPO_REF_RE.match(r) is None for r in repos)):
             errs.append(f"payload.projectRegistry.{project}.repos must be an array of owner/name repository references")
         cutover = entry.get("cutover")
+        # KB-319: the project's override of the adapter-image conflict
+        # policy (the per-project configurability of the conflict stance)
+        # validates against the same closed vocabulary.
+        if "imageConflictPolicy" in entry and entry["imageConflictPolicy"] not in WORKFLOW_IMAGE_POLICIES:
+            errs.append(f"payload.projectRegistry.{project}.imageConflictPolicy {entry['imageConflictPolicy']!r} must be one of fail-closed, prefer-event, prefer-metadata")
         if "cutover" in entry and cutover not in ("done",):
             errs.append(f"payload.projectRegistry.{project}.cutover {cutover!r} must be \"done\" or absent (binding-first, deletion second)")
 
@@ -646,6 +661,10 @@ positive = [
     ("route-with-default-tagmatch", mutate(lambda d: d["routes"][0].update(tags=["intake"]))),
     ("workflow-class-dev", mutate(lambda d: d[LIB][BAKED].update(**{"class": "dev"}))),
     ("workflow-class-triage", mutate(lambda d: d[LIB][URLWF].update(**{"class": "triage"}))),
+    # KB-319: a stamped adapter-image conflict policy validates on both the
+    # workflow entry and the project entry (the project's outranks).
+    ("workflow-conflict-policy-prefer-event", mutate(lambda d: d[LIB][BAKED].update(**{"imageConflictPolicy": "prefer-event"}))),
+    ("project-entry-conflict-policy-prefer-metadata", mutate(lambda d: d["projectRegistry"]["Criteria K8s Workflow Runner"].update(**{"imageConflictPolicy": "prefer-metadata"}))),
     ("route-without-states-defaults-triage", mutate(lambda d: d["routes"][0].pop("states"))),
     ("route-with-custom-states", mutate(lambda d: d["routes"][0].update(
         states=["Triage", "In Progress"]))),
@@ -726,6 +745,10 @@ negative = [
     ("url-workflow-without-url", True, mutate(lambda d: d[LIB][URLWF].pop("url"))),
     ("workflow-unknown-type", True, mutate(lambda d: d[LIB][BAKED].update(type="baked"))),
     ("workflow-unknown-class", True, mutate(lambda d: d[LIB][BAKED].update(**{"class": "concurrent"}))),
+    # KB-319: the adapter-image conflict policy vocabulary is closed on
+    # both surfaces, and the project's override outranks the workflow's.
+    ("workflow-unknown-conflict-policy", True, mutate(lambda d: d[LIB][BAKED].update(**{"imageConflictPolicy": "last-writer-wins"}))),
+    ("project-entry-unknown-conflict-policy", True, mutate(lambda d: d["projectRegistry"]["Criteria K8s Workflow Runner"].update(**{"imageConflictPolicy": "silent"}))),
     ("pvc-volume-without-claim", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].pop("claim"))),
     ("nfs-volume-without-server", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
         2, {"name": "wf-cache", "kind": "nfs", "path": "/export/workflow-cache", "mountPath": "/mnt/workflow-cache", "readOnly": True}))),

@@ -30,6 +30,7 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/binding"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 )
 
@@ -546,10 +547,12 @@ func TestPollStampsWorkflowInterface(t *testing.T) {
 // aliasing the source.
 func TestConvertWorkflowInterface(t *testing.T) {
 	t.Run("image workflow has nil interface", func(t *testing.T) {
-		out := convertWorkflow("kanboard-intake", routes.Workflow{
+		out := runspec.StampWorkflowSpec("kanboard-intake", routes.Workflow{
 			Type:  routes.TypeImage,
 			Image: "localhost:5000/linear-intake-remote:dev",
-		})
+		}, criteriav1.ImageConflictPolicyFailClosed)
+		require.Equal(t, criteriav1.ImageConflictPolicyFailClosed, out.ImageConflictPolicy,
+			"the KB-319 conflict policy is stamped on the run's workflow")
 		require.NotNil(t, out)
 		require.Nil(t, out.Interface)
 	})
@@ -573,6 +576,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 				{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
 					Description: "Command the developer step uses as its CI gate before review."},
 			},
+			LockKey: "repoUrl",
 		}
 		routesWf := routes.Workflow{
 			Type:      routes.TypeURL,
@@ -580,7 +584,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 			Interface: src,
 		}
 
-		out := convertWorkflow("kanboard-develop-url", routesWf)
+		out := runspec.StampWorkflowSpec("kanboard-develop-url", routesWf, criteriav1.ImageConflictPolicyPreferEvent)
 		require.Equal(t, &criteriav1.RunWorkflowInterface{
 			APIVersion:  routes.InterfaceAPIVersion,
 			Kind:        routes.InterfaceKind,
@@ -599,6 +603,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 				{Slot: "ciGateCmd", Variable: "ci_gate_cmd", Target: "pair_programming_loop developer CI gate",
 					Description: "Command the developer step uses as its CI gate before review."},
 			},
+			LockKey: "repoUrl",
 		}, out.Interface)
 
 		// The copy is deep: mutating the CR's interface must not leak into
@@ -613,7 +618,7 @@ func TestConvertWorkflowInterface(t *testing.T) {
 
 	t.Run("nil url interface stays nil", func(t *testing.T) {
 		routesWf := routes.Workflow{Type: routes.TypeURL, URL: "git::x?ref=abc"}
-		out := convertWorkflow("wf-url", routesWf)
+		out := runspec.StampWorkflowSpec("wf-url", routesWf, criteriav1.ImageConflictPolicyFailClosed)
 		require.NotNil(t, out)
 		require.Nil(t, out.Interface)
 	})
