@@ -659,6 +659,10 @@ positive = [
     ("route-with-default-tagmatch", mutate(lambda d: d["routes"][0].update(tags=["intake"]))),
     ("workflow-class-dev", mutate(lambda d: d[LIB][BAKED].update(**{"class": "dev"}))),
     ("workflow-class-triage", mutate(lambda d: d[LIB][URLWF].update(**{"class": "triage"}))),
+    # KB-319: a stamped adapter-image conflict policy validates on both the
+    # workflow entry and the project entry (the project's outranks).
+    ("workflow-conflict-policy-prefer-event", mutate(lambda d: d[LIB][BAKED].update(**{"imageConflictPolicy": "prefer-event"}))),
+    ("project-entry-conflict-policy-prefer-metadata", mutate(lambda d: d["projectRegistry"]["Criteria K8s Workflow Runner"].update(**{"imageConflictPolicy": "prefer-metadata"}))),
     ("route-without-states-defaults-triage", mutate(lambda d: d["routes"][0].pop("states"))),
     ("route-with-custom-states", mutate(lambda d: d["routes"][0].update(
         states=["Triage", "In Progress"]))),
@@ -739,6 +743,10 @@ negative = [
     ("url-workflow-without-url", True, mutate(lambda d: d[LIB][URLWF].pop("url"))),
     ("workflow-unknown-type", True, mutate(lambda d: d[LIB][BAKED].update(type="baked"))),
     ("workflow-unknown-class", True, mutate(lambda d: d[LIB][BAKED].update(**{"class": "concurrent"}))),
+    # KB-319: the adapter-image conflict policy vocabulary is closed on
+    # both surfaces, and the project's override outranks the workflow's.
+    ("workflow-unknown-conflict-policy", True, mutate(lambda d: d[LIB][BAKED].update(**{"imageConflictPolicy": "last-writer-wins"}))),
+    ("project-entry-unknown-conflict-policy", True, mutate(lambda d: d["projectRegistry"]["Criteria K8s Workflow Runner"].update(**{"imageConflictPolicy": "silent"}))),
     ("pvc-volume-without-claim", True, mutate(lambda d: d[LIB][BAKED]["volumes"][0].pop("claim"))),
     ("nfs-volume-without-server", True, mutate(lambda d: d[LIB][URLWF]["volumes"].insert(
         2, {"name": "wf-cache", "kind": "nfs", "path": "/export/workflow-cache", "mountPath": "/mnt/workflow-cache", "readOnly": True}))),
