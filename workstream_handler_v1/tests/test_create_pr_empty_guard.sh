@@ -213,8 +213,8 @@ jq -e '.steps[] | select(.name == "retry_create_pr") | ([.outcomes[] | select(.n
     || fail "retry_create_pr must loop back to create_pr and bail out on failure"
 
 echo "==> fail_missing_pr_url terminally fails the run"
-jq -e '.steps[] | select(.name == "fail_missing_pr_url") | ([.outcomes[] | select(.next == "failed")] | length) == 2' "${COMPILE_OUT}" >/dev/null \
-    || fail "fail_missing_pr_url must fail the run on both outcomes"
+jq -e '.steps[] | select(.name == "fail_missing_pr_url") | ([.outcomes[] | select(.next == "failed")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "fail_missing_pr_url must fail the run (KB-328 durable form: one loud success arm)"
 
 echo "==> delivery_fingerprint owns PR identity (KB-328 durable fix, 2026-10-25)"
 jq -e '.steps[] | select(.name == "run_branch_manager") | ([.outcomes[] | select(.name == "success" and .next == "delivery_fingerprint")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
