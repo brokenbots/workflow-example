@@ -39,7 +39,7 @@ chmod +x "${RENDERED}"
 mkdir -p "${WORK_ROOT}/bin"
 cat >"${WORK_ROOT}/bin/gh" <<'STUB'
 #!/bin/sh
-if [ "$(printf '%s ' "$@" | grep -c '\-\-json url')" -eq 1 ]; then
+if [ "$(printf '%s ' "$@" | grep -c -- '--json url')" -eq 1 ]; then
     echo 'https://github.com/org/repo/pull/42'
     exit 0
 fi

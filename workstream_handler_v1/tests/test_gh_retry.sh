@@ -248,8 +248,10 @@ assert_grep_count() {
 # recovery arm adds 3 render args (recover_merged_pr +
 # recover_merged_pr_store_url + recover_merged_pr_store_protocol); the
 # recovery leg's gh_retry fix adds one more (sync_head_branch renders the
-# wrapper to gate resolve_head_branch's MERGED-state gh call) -> 15.
-assert_grep_count "workstream_handler_v1 root steps wrapped" 15 \
+# wrapper to gate resolve_head_branch's MERGED-state gh call); the stored-pr
+# identity check adds one more (check_stored_pr renders foreign_pr_check
+# with the wrapper) -> 16.
+assert_grep_count "workstream_handler_v1 root steps wrapped" 16 \
     "${REPO_ROOT}/workstream_handler_v1/main.chcl"
 assert_grep_count "pr_reviewer_loop steps wrapped" 6 \
     "${REPO_ROOT}/workstream_handler_v1/workflows/pr_reviewer_loop/main.chcl"
