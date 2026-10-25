@@ -2,10 +2,10 @@
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "WorkflowInterface",
   "workflow": "ts_smoke_v1",
-  "description": "TypeScript-SDK isolation smoke (clone of labs_smoke_v1 asserting ns typescript-sdk): single shell adapter, data + repo PVC mounts, scratch tmp, no secrets, no config slots.",
+  "description": "TypeScript-SDK isolation smoke (clone of labs_smoke_v1 asserting ns typescript-sdk): single shell adapter, data + repo PVC mounts, scratch tmp, no secrets. Declares the binding's config slots (baseBranch, ciGateCmd) as tolerated overrides; the tree itself uses neither.",
   "adapters": ["shell"],
   "mounts": [{"name":"data","mountPath":"/data","kind":"pvc"},{"name":"repo","mountPath":"/repo","kind":"pvc"},{"name":"scratch","mountPath":"/tmp/scratch","kind":"tmp"}],
   "secretEnv": [],
   "env": [],
-  "configSlots": []
+  "configSlots": [{"name":"baseBranch","type":"string","description":"base branch override tolerated from the ts binding config","required":false},{"name":"ciGateCmd","type":"string","description":"ci gate command tolerated from the ts binding config; unused by this tree","required":false}]
 }
