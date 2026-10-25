@@ -61,13 +61,13 @@ printf '%s\n' "$out" | grep -q '^pr_number=543 pr_url=https://github.com/brokenb
 pass "MERGED PR emits marker + status + full field line"
 
 # 2. Negative arm: OPEN PR -> rc=2, no marker (caller falls through).
-uout=$(PATH="$TMP:$PATH" sh "$RENDERED" KB-open 2>/dev/null); urc=$?
+uout=$(PATH="$TMP:$PATH" bash "$RENDERED" KB-open 2>/dev/null); urc=$?
 [ "$urc" = "2" ] || fail "rc=$urc on OPEN PR, want 2"
 printf '%s\n' "$uout" | grep -q 'marker=' && fail "marker leaked on OPEN PR"
 pass "OPEN PR exits 2 without marker"
 
 # 3. Negative arm: gh finds nothing -> rc=2, no marker.
-nout=$(PATH="$TMP:$PATH" sh "$RENDERED" KB-ghost 2>/dev/null); nrc=$?
+nout=$(PATH="$TMP:$PATH" bash "$RENDERED" KB-ghost 2>/dev/null); nrc=$?
 [ "$nrc" = "2" ] || fail "rc=$nrc on unknown branch, want 2"
 printf '%s\n' "$nout" | grep -q 'marker=' && fail "marker leaked on unknown branch"
 pass "unknown branch exits 2 without marker"

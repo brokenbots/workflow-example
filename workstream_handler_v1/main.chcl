@@ -124,6 +124,21 @@ data "internal" "merged_recovery" {
     value = ""
 }
 
+// KB-328: foreign-PR marker from check_stored_pr (run 3 class): the stored
+// pr_url pointed at a MERGED/foreign-branch PR, so pr_url is invalid and the
+// run must re-classify from branch state (route_pr) instead of adopting it.
+data "internal" "foreign_pr" {
+    type  = string
+    value = ""
+}
+
+// KB-328: the pr_url value BEFORE the foreign check stripped it — the
+// evidence goes into the recovery/failure diagnostics.
+data "internal" "pr_url_prior" {
+    type  = string
+    value = ""
+}
+
 subworkflow "branch_manager" {
     source = "./workflows/branch_manager"
     input = {
@@ -425,7 +440,7 @@ step "store_pr_url" {
         })
     }
     outcome "success" {
-        next = switch.route_stored_pr
+        next = step.check_stored_pr
         write {
             target = data.internal.pr_url.value
             value  = output.stdout
@@ -438,7 +453,46 @@ step "store_pr_url" {
 // number of times — its reuse branch fetches an existing OPEN PR by URL, so a
 // flaky gh call or a PR created late self-heals here — and keep the run OFF
 // every review/reconcile path until data.internal.pr_url is non-empty.
+step "check_stored_pr" {
+    target = adapter.shell.sh
+    // KB-219: bounded-backoff on the gh call; the timeout covers the wrapper.
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/foreign_pr_check.sh.tftpl", {
+            criteria_value_1 = data.internal.pr_url.value
+            criteria_value_2 = data.internal.branch.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
+        })
+    }
+    outcome "success" {
+        next = switch.route_stored_pr
+        write {
+            target = data.internal.foreign_pr.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    // A transport collapse INSIDE the check must not skip the identity
+    // verification: fail loudly instead of adopting an unverified pr_url.
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "foreign_pr_check step failed before the stored pr_url could be verified (branch ${data.internal.branch.value}) — refusing identity-blind adoption: ${trimspace(output.stderr)}"
+        }
+    }
+}
+
 switch "route_stored_pr" {
+    // KB-328 run-3 class: the stored pr_url failed the identity check — it
+    // points at a MERGED PR or a PR on a foreign branch. Strip it and let the
+    // branch-state classification decide (our own merged PR re-enters through
+    // check_pr's status:merged arm -> recover_merged_pr; a genuinely absent
+    // PR goes to no_pr -> develop as usual). The evidence travels in
+    // pr_url_prior for the diagnostics downstream.
+    match {
+        condition = startswith(data.internal.foreign_pr.value, "status:foreign_pr")
+        next      = step.clear_stored_pr
+    }
     match {
         condition = data.internal.pr_url.value != ""
         next      = switch.route_pr_action
@@ -448,6 +502,38 @@ switch "route_stored_pr" {
         next      = step.retry_store_pr_url
     }
     default { next = step.fail_missing_pr_url }
+}
+
+// KB-328: strip the poisoned pr_url (evidence moves to pr_url_prior) and
+// re-classify from the worktree's actual branch state.
+step "clear_stored_pr" {
+    target  = adapter.shell.sh
+    timeout = "30s"
+    input {
+        command = "echo 'stored pr_url failed the identity check — clearing it for branch-state re-classification'"
+    }
+    outcome "success" {
+        next = step.check_pr
+        write {
+            target = data.internal.pr_url_prior.value
+            value  = data.internal.pr_url.value
+        }
+        write {
+            target = data.internal.pr_url.value
+            value  = ""
+        }
+    }
+    outcome "failure" {
+        next = step.check_pr
+        write {
+            target = data.internal.pr_url_prior.value
+            value  = data.internal.pr_url.value
+        }
+        write {
+            target = data.internal.pr_url.value
+            value  = ""
+        }
+    }
 }
 
 // KB-49: bookkeeping step that re-views the branch for its existing PR before
