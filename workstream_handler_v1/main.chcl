@@ -20,7 +20,7 @@ data "internal" "pr_url" {
     value = ""
 }
 
-// KB-49: count of PR-step retries for a create_pr/store_pr_url result that
+// KB-49: count of PR-step retries for a create_pr result that
 // carried no PR URL. The PR guard spends this budget before failing the run
 // loudly at the PR step; the counter resets never — the budget covers the
 // whole handler run.
@@ -115,26 +115,27 @@ data "internal" "merge_pr_result" {
     value = ""
 }
 
-// KB-328: merged-PR recovery marker. Set by recover_merged_pr when check_pr
-// found the branch's PR already MERGED — route_pr_action then reconciles
-// straight through the standing merge gate instead of re-running the
-// developer loop over shipped work.
+// KB-328 durable fix (2026-10-25): ONE delivery fingerprint for the card's
+// PR, classified by ticket identity over ALL PRs (delivery_fingerprint.sh).
+// Every PR-identity decision in this tree consumes this stdout instead of
+// re-deriving a PR from the worktree's current branch — the re-derivations
+// are what broke in runs 1-4 (post-merge states resolve foreign PRs).
+data "internal" "delivery_fingerprint" {
+    type  = string
+    value = ""
+}
+
+// The fingerprint's own PR number (open/merged/closed shapes), for the
+// classifier and diagnostics. Empty on state:none.
+data "internal" "delivery_pr_number" {
+    type  = string
+    value = ""
+}
+
+// KB-328: merged-PR recovery marker. Set by the fingerprint's merged arm —
+// the run reconciles straight through the standing merge gate instead of
+// re-running the developer loop over shipped work.
 data "internal" "merged_recovery" {
-    type  = string
-    value = ""
-}
-
-// KB-328: foreign-PR marker from check_stored_pr (run 3 class): the stored
-// pr_url pointed at a MERGED/foreign-branch PR, so pr_url is invalid and the
-// run must re-classify from branch state (route_pr) instead of adopting it.
-data "internal" "foreign_pr" {
-    type  = string
-    value = ""
-}
-
-// KB-328: the pr_url value BEFORE the foreign check stripped it — the
-// evidence goes into the recovery/failure diagnostics.
-data "internal" "pr_url_prior" {
     type  = string
     value = ""
 }
@@ -266,7 +267,7 @@ step "read_workstream" {
 step "run_branch_manager" {
     target = subworkflow.branch_manager
     outcome "success" {
-        next = step.check_pr
+        next = step.delivery_fingerprint
         write {
             target = data.internal.branch.value
             value  = subworkflow.branch
@@ -368,6 +369,177 @@ step "exhausted_branch_scope" {
 //   status:needs_work    — CHANGES_REQUESTED or unresolved threads; triage
 //   status:open          — PR exists, CI green, not yet reviewed
 
+// Delivery fingerprint (KB-328 durable fix): classify the card's PR by
+// ticket identity ONCE, by number over all states. Everything downstream
+// consumes this: no branch-name PR re-derivations anywhere in the tree.
+step "delivery_fingerprint" {
+    target = adapter.shell.sh
+    // KB-219: the wrapper can burn ~210s on backoff; the timeout covers it.
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/delivery_fingerprint.sh.tftpl", {
+            criteria_value_1 = basename(var.workstream_file)
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
+        })
+    }
+    // The PR number rides the same stdout; stamp it first (route_delivery
+    // and the classifier both key on it). One extraction per step keeps each
+    // write's source a single stdout.
+    outcome "success" {
+        next = step.stamp_delivery_pr_number
+        write {
+            target = data.internal.delivery_fingerprint.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    // A fingerprint that cannot be computed must never classify on nothing:
+    // fail loudly and let the typed reason carry the transport evidence.
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "delivery_fingerprint failed before the card's PR identity could be established — refusing identity-blind routing: ${trimspace(output.stderr)}"
+        }
+    }
+}
+
+step "stamp_delivery_pr_number" {
+    target  = adapter.shell.sh
+    timeout = "15s"
+    input {
+        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
+            criteria_value_1 = data.internal.delivery_fingerprint.value
+            pattern          = "pr_number"
+        })
+    }
+    outcome "failure" { next = step.route_delivery_none }
+    outcome "success" {
+        next = switch.route_delivery
+        write {
+            target = data.internal.delivery_pr_number.value
+            value  = trimspace(output.stdout)
+        }
+    }
+}
+
+// state:none has no pr-number (recover_extract fails loudly on it) — the
+// dedicated none terminal keeps fresh development as the recovery path.
+step "route_delivery_none" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'delivery fingerprint: no PR carries the ticket identity'"
+    }
+    outcome "success" { next = step.run_pair_programming_loop }
+}
+
+switch "route_delivery" {
+    // OPEN: live PR in flight — stamp pr_url by identity, classify gates.
+    match {
+        condition = startswith(data.internal.delivery_fingerprint.value, "state:open")
+        next      = step.stamp_open_url
+    }
+    // MERGED: delivered — reconcile through the standing merge gate.
+    match {
+        condition = startswith(data.internal.delivery_fingerprint.value, "state:merged")
+        next      = step.stamp_merged_url
+    }
+    // closed (unmerged): nothing live, nothing delivered -> fresh dev.
+    match {
+        condition = startswith(data.internal.delivery_fingerprint.value, "state:closed")
+        next      = step.run_pair_programming_loop
+    }
+    default { next = step.route_delivery_none }
+}
+
+// Stamp the OPEN PR's URL into pr_url from the fingerprint (identity by
+// number — branch-derived lookups are retired), then classify.
+step "stamp_open_url" {
+    target  = adapter.shell.sh
+    timeout = "15s"
+    input {
+        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
+            criteria_value_1 = data.internal.delivery_fingerprint.value
+            pattern          = "open_url"
+        })
+    }
+    outcome "success" {
+        next = step.check_pr
+        write {
+            target = data.internal.pr_url.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "stamp_open_url could not extract the open-PR URL from the fingerprint: ${trimspace(data.internal.delivery_fingerprint.value)}"
+        }
+    }
+}
+
+// Merged recovery, stamp 1/2: pr_url from the fingerprint's merged line
+// (diagnostics + closing comments); then the protocol + gate.
+step "stamp_merged_url" {
+    target  = adapter.shell.sh
+    timeout = "15s"
+    input {
+        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
+            criteria_value_1 = data.internal.delivery_fingerprint.value
+            pattern          = "merged_url"
+        })
+    }
+    outcome "success" {
+        next = step.stamp_merged_protocol
+        write {
+            target = data.internal.pr_url.value
+            value  = trimspace(output.stdout)
+        }
+        write {
+            target = data.internal.merged_recovery.value
+            value  = "merged"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "stamp_merged_url could not extract the merged-PR URL from the fingerprint: ${trimspace(data.internal.delivery_fingerprint.value)}"
+        }
+    }
+}
+
+// Merged recovery, stamp 2/2: merge_pr_result in the gate's exact protocol
+// shape (pr=<n>, merge_sha=<squash sha>) — recover_merged_ci parses it
+// verbatim, sharing the fresh-merge path's single sha source.
+step "stamp_merged_protocol" {
+    target  = adapter.shell.sh
+    timeout = "15s"
+    input {
+        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
+            criteria_value_1 = data.internal.delivery_fingerprint.value
+            pattern          = "merge_protocol"
+        })
+    }
+    outcome "success" {
+        next = step.recover_merged_ci
+        write {
+            target = data.internal.merge_pr_result.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "stamp_merged_protocol could not extract the merge protocol from the fingerprint: ${trimspace(data.internal.delivery_fingerprint.value)}"
+        }
+    }
+}
+
+// Classify the OPEN PR's gates BY NUMBER (the fingerprint's PR): CI/review
+// status of the card's own PR, never whatever resolves from a branch name.
 step "check_pr" {
     target     = adapter.shell.sh
     // KB-235: backoff budget doubled (30/60/120s => ~210s worst case) so the
@@ -376,28 +548,26 @@ step "check_pr" {
     max_visits = var.max_pr_poll_visits
     input {
         command = templatefile("./scripts/check_pr.sh.tftpl", {
-            gh_retry = file("./scripts/gh_retry.sh.tftpl")
+            criteria_value_1 = data.internal.delivery_pr_number.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" { next = switch.route_pr }
     outcome "failure" { next = state.failed }
 }
 
-// Merge-gate verification with `gh` — branch-head CI arrives on the PR's
-// statusCheckRollup in the reviewer loop; here we only classify the PR.
+// The OPEN-PR classification switch. No merged arm lives here anymore — a
+// merged delivery is decided by the fingerprint (route_delivery) before this
+// switch is ever reached, and its classifier is fed our own PR's number.
 switch "route_pr" {
+    // Defensive race windows (PR state moved between fingerprint and check):
     match {
         condition = startswith(steps.check_pr.stdout, "status:no_pr")
         next      = step.run_pair_programming_loop
     }
     match {
         condition = startswith(steps.check_pr.stdout, "status:merged")
-        // KB-328: the branch's PR is already MERGED. Reconcile at the
-        // standing merge gate instead of re-running development — the
-        // developer loop over shipped work re-derived the branch from the
-        // worktree scan and hijacked an unrelated open branch (observed:
-        // dependabot #534 adopted while the card's PR #543 sat merged).
-        next      = step.recover_merged_pr
+        next      = step.stamp_merged_url
     }
     match {
         condition = startswith(steps.check_pr.stdout, "status:closed")
@@ -407,8 +577,9 @@ switch "route_pr" {
         condition = startswith(steps.check_pr.stdout, "status:pending")
         next      = step.backoff_pr
     }
-    // ready / open / needs_work / checks_failed — load URL then re-route
-    default { next = step.store_pr_url }
+    // ready / open / needs_work / checks_failed — pr_url already stamped,
+    // straight to the action router.
+    default { next = switch.route_pr_action }
 }
 
 // Back off while CI is running, then re-check.
@@ -423,143 +594,23 @@ step "backoff_pr" {
     outcome "failure" { next = step.check_pr }
 }
 
-// Fetch and store the PR URL. Kept separate from check_pr so that
-// steps.check_pr.stdout remains readable by route_pr_action.
-// KB-49: the command must not mask a failed gh call as success — capture the
-// view result directly so a gh failure fails the step, and let the route
-// guard below reject an empty URL loudly.
-step "store_pr_url" {
-    target = adapter.shell.sh
-    // KB-219: bounded-backoff retries on the gh call — worst case ~210s extra
-    // inside the wrapper (KB-235 doubled the schedule to 30/60/120s), so the
-    // timeout leaves room for it.
-    timeout = "600s"
-    input {
-        command = templatefile("./scripts/store_pr_url.sh.tftpl", {
-            gh_retry = file("./scripts/gh_retry.sh.tftpl")
-        })
-    }
-    outcome "success" {
-        next = step.check_stored_pr
-        write {
-            target = data.internal.pr_url.value
-            value  = output.stdout
-        }
-    }
-    outcome "failure" { next = state.failed }
-}
-
-// KB-49: the PR step completed without a PR URL. Retry create_pr a bounded
-// number of times — its reuse branch fetches an existing OPEN PR by URL, so a
-// flaky gh call or a PR created late self-heals here — and keep the run OFF
-// every review/reconcile path until data.internal.pr_url is non-empty.
-step "check_stored_pr" {
-    target = adapter.shell.sh
-    // KB-219: bounded-backoff on the gh call; the timeout covers the wrapper.
-    timeout = "600s"
-    input {
-        command = templatefile("./scripts/foreign_pr_check.sh.tftpl", {
-            criteria_value_1 = data.internal.pr_url.value
-            criteria_value_2 = data.internal.branch.value
-            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
-        })
-    }
-    outcome "success" {
-        next = switch.route_stored_pr
-        write {
-            target = data.internal.foreign_pr.value
-            value  = trimspace(output.stdout)
-        }
-    }
-    // A transport collapse INSIDE the check must not skip the identity
-    // verification: fail loudly instead of adopting an unverified pr_url.
-    outcome "failure" {
-        next = state.failed
-        write {
-            target = data.internal.failure_reason.value
-            value  = "foreign_pr_check step failed before the stored pr_url could be verified (branch ${data.internal.branch.value}) — refusing identity-blind adoption: ${trimspace(output.stderr)}"
-        }
-    }
-}
-
-switch "route_stored_pr" {
-    // KB-328 run-3 class: the stored pr_url failed the identity check — it
-    // points at a MERGED PR or a PR on a foreign branch. Strip it and let the
-    // branch-state classification decide (our own merged PR re-enters through
-    // check_pr's status:merged arm -> recover_merged_pr; a genuinely absent
-    // PR goes to no_pr -> develop as usual). The evidence travels in
-    // pr_url_prior for the diagnostics downstream.
-    match {
-        condition = startswith(data.internal.foreign_pr.value, "status:foreign_pr")
-        next      = step.clear_stored_pr
-    }
-    match {
-        condition = data.internal.pr_url.value != ""
-        next      = switch.route_pr_action
-    }
-    match {
-        condition = data.internal.pr_url_retries.value < var.max_pr_url_retries
-        next      = step.retry_store_pr_url
-    }
-    default { next = step.fail_missing_pr_url }
-}
-
-// KB-328: strip the poisoned pr_url (evidence moves to pr_url_prior) and
-// re-classify from the worktree's actual branch state.
-step "clear_stored_pr" {
+step "fail_missing_pr_url" {
     target  = adapter.shell.sh
     timeout = "30s"
     input {
-        command = "echo 'stored pr_url failed the identity check — clearing it for branch-state re-classification'"
+        command = "echo 'no PR URL after the bounded create_pr retries'"
     }
     outcome "success" {
-        next = step.check_pr
+        next = state.failed
         write {
-            target = data.internal.pr_url_prior.value
-            value  = data.internal.pr_url.value
-        }
-        write {
-            target = data.internal.pr_url.value
-            value  = ""
-        }
-    }
-    outcome "failure" {
-        next = step.check_pr
-        write {
-            target = data.internal.pr_url_prior.value
-            value  = data.internal.pr_url.value
-        }
-        write {
-            target = data.internal.pr_url.value
-            value  = ""
+            target = data.internal.failure_reason.value
+            value  = "no PR URL after the bounded create_pr retries (KB-49) — refusing to continue without a PR identity: pr_url='${data.internal.pr_url.value}', branch='${data.internal.branch.value}'"
         }
     }
 }
 
 // KB-49: bookkeeping step that re-views the branch for its existing PR before
 // failing the run. Bounded by the same pr_url retry budget as create_pr.
-step "retry_store_pr_url" {
-    target  = adapter.shell.sh
-    timeout = "30s"
-    input {
-        command = "echo 'PR step completed without a pr_url (KB-49) — retrying the PR URL resolution (bounded)'"
-    }
-    outcome "success" {
-        next = step.store_pr_url
-        write {
-            target = data.internal.pr_url_retries.value
-            value  = data.internal.pr_url_retries.value + 1
-        }
-    }
-    outcome "failure" {
-        next = step.fail_missing_pr_url
-        write {
-            target = data.internal.pr_url_retries.value
-            value  = data.internal.pr_url_retries.value + 1
-        }
-    }
-}
-
 // Re-read check_pr.stdout (still in scope) to choose the action now that
 // pr_url is available.
 switch "route_pr_action" {
@@ -706,28 +757,6 @@ step "retry_create_pr" {
 // steps; the operator-only refire with a fresh create was the only recovery).
 // The typed reason names the missing pr_url so the parent tree's failure
 // comment and the run record carry something actionable.
-step "fail_missing_pr_url" {
-    target  = adapter.shell.sh
-    timeout = "10s"
-    input {
-        command = "echo 'pr_url_missing=true (KB-49) — the PR step completed without a PR URL; failing the run loudly instead of continuing to review/reconcile'"
-    }
-    outcome "success" {
-        next = state.failed
-        write {
-            target = data.internal.failure_reason.value
-            value  = "KB-49: the PR step completed with an empty pr_url (${var.max_pr_url_retries} retries exhausted) — failing loudly at the PR step instead of continuing to review/reconcile without a PR"
-        }
-    }
-    outcome "failure" {
-        next = state.failed
-        write {
-            target = data.internal.failure_reason.value
-            value  = "KB-49: the PR step completed with an empty pr_url (retry bookkeeping failed) — failing loudly at the PR step instead of continuing to review/reconcile without a PR"
-        }
-    }
-}
-
 // ── PR review loop ────────────────────────────────────────────────────────────
 
 // Entry point for all reviewer invocations: initial review and re-review after
@@ -865,70 +894,12 @@ step "exhausted_reviewer_scope" {
 // branch is squash-deleted) and stamp the recovery blob. rc=2 (unknown /
 // not merged) is a fall-through, never an error: the run returns to check_pr,
 // which re-classifies with its own eyes.
-step "recover_merged_pr" {
-    target = adapter.shell.sh
-    // KB-219: gh_retry can add ~210s worst case; the timeout covers it.
-    timeout = "600s"
-    input {
-        command = templatefile("./scripts/merged_pr_status.sh.tftpl", {
-            criteria_value_1 = data.internal.branch.value
-            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
-        })
-    }
-    outcome "success" {
-        next = step.recover_merged_pr_store_url
-        write {
-            target = data.internal.merged_recovery.value
-            value  = trimspace(output.stdout)
-        }
-    }
-    outcome "failure" { next = step.check_pr }
-}
-
 // KB-328 recovery: peel the URL line off the recovery blob into pr_url (the
 // parent's route_handler_pr requires a non-empty pr_url and the closing
 // comment carries it). Shell-side parsing — the DSL has no regex extract.
-step "recover_merged_pr_store_url" {
-    target  = adapter.shell.sh
-    timeout = "15s"
-    input {
-        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
-            criteria_value_1 = data.internal.merged_recovery.value
-            pattern          = "url"
-        })
-    }
-    outcome "success" {
-        next = step.recover_merged_pr_store_protocol
-        write {
-            target = data.internal.pr_url.value
-            value  = trimspace(output.stdout)
-        }
-    }
-    outcome "failure" { next = state.failed }
-}
-
 // KB-328 recovery: rebuild the merge_pr-shaped protocol (pr=<n>, merge_sha=)
 // so the standing merge gate's wait_merge_ci parses recovery exactly like a
 // fresh merge — one sha source, one gate.
-step "recover_merged_pr_store_protocol" {
-    target  = adapter.shell.sh
-    timeout = "15s"
-    input {
-        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
-            criteria_value_1 = data.internal.merged_recovery.value
-            pattern          = "merge_protocol"
-        })
-    }
-    outcome "success" {
-        next = step.recover_merged_ci
-        write {
-            target = data.internal.merge_pr_result.value
-            value  = trimspace(output.stdout)
-        }
-    }
-    outcome "failure" { next = state.failed }
-}
-
 // KB-253 (KB-328 recovery leg): close the SAME standing merge gate the
 // fresh-merge path closes — the squash commit's own CI must be green before
 // the parent reconciles Done. wait_merge_ci receives the merge_pr-shaped

@@ -30,15 +30,20 @@
 #   failed_check=<name>=<conclusion>   (at most 3, failed verdict only)
 #   merge_error=<why>                  (timeout verdict only, when known)
 #
-# Gate semantics (fail closed):
-#   * all check runs completed, none with a failing conclusion   -> green
-#   * any completed run failed/timed_out/cancelled/startup...    -> failed
-#   * runs still queued/in_progress, or CI not yet registered... -> keep polling
-#   * deadline reached before a completed-green rollup           -> timeout
-#   * commit has no check runs and the repo has no workflows     -> green
-#     (nothing to wait for — CRI-90 semantics, mirroring check_pr.sh: a repo
-#     that never registers Actions would otherwise hang every merge)
-#   * the merge sha never materializes within the deadline       -> timeout
+# Gate semantics (fail closed) — KB-328 gap-4 durable fix (2026-10-25):
+#   * verdict surface = the repo's CANONICAL push CI: actions-runs API
+#     (repos/{o}/{r}/actions/runs?head_sha=) filtered to event=push. The
+#     check-runs surface mixes in bot-surface runs (observed: Dependabot's
+#     dynamic graph-update runs turned the gate red while canonical CI was
+#     green, and their mass false-timed budgets); the runs API carries the
+#     event identity, so bot runs are out of the verdict by construction.
+#   * all canonical push runs completed, none failing            -> green
+#   * any canonical run completed failing                        -> failed
+#   * canonical runs queued/in_progress                          -> keep polling
+#   * no canonical run on the sha yet (incl. dynamic-only)       -> keep polling
+#   * repo registers zero Actions workflows                      -> green (CRI-90)
+#   * deadline before a completed-green canonical set            -> timeout
+#   * merge sha never materializes within the deadline           -> timeout
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 set -uo pipefail
 {{ .gh_retry }}
@@ -99,45 +104,62 @@ while :; do
         fi
     fi
     echo "merge_ci_poll=squash sha ${sha}" >&2
-
     runs_rc=0
-    runs=$(gh api "repos/$owner/$repo/commits/$sha/check-runs") || runs_rc=$?
+    runs=$(gh_retry gh api "repos/$owner/$repo/actions/runs?head_sha=$sha&per_page=40") || runs_rc=$?
     if [ "$runs_rc" -ne 0 ]; then
         # Transport or hard API failure on this poll: do not verdict on a
         # dead poll — keep polling until the deadline (gh_retry already
         # burned its bounded backoff inside the call).
-        echo "merge_ci_poll=check-runs poll failed (rc=$runs_rc) — retrying" >&2
+        echo "merge_ci_poll=actions-runs poll failed (rc=$runs_rc) — retrying" >&2
         if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
         continue
     fi
 
-    total=$(printf '%s' "$runs" | jq -r '.total_count // 0' 2>/dev/null || echo 0)
-    case "$total" in ''|*[!0-9]*) total=0 ;; esac
-    if [ "$total" -le 0 ]; then
-        # No check runs registered for the squash commit yet. Distinguish
-        # "CI hasn't arrived" from "repo has no Actions at all" (CRI-90).
-        # gh_retry captures gh's raw stdout, so the reduce happens here, not
-        # though gh's --jq (which the wrapper path can silently bypass).
-        wf_count=$(gh api "repos/$owner/$repo/actions/workflows" 2>/dev/null | jq -r '.total_count // -1' 2>/dev/null || echo -1)
+    # KB-328 gap-4 (durable fix): verdict on the repo's CANONICAL push CI
+    # only. Check-runs on a merge sha mix in bot-surface runs that carry the
+    # repo's identity markers but are NOT its CI (observed: Dependabot
+    # dynamic graph-update runs made the gate red while the canonical CI was
+    # green, and their 14-pending mass false-timed a budget). The check-runs
+    # API carries neither event nor workflow identity; the actions-runs API
+    # carries both (event, name). Canonical = event=push on this sha.
+    # (event=url|dynamic|schedule|manual|workflow_dispatch etc. are excluded
+    # by construction; so are name-based special cases — repo-agnostic.)
+    canonical=$(printf '%s' "$runs" | jq -c '
+        [.workflow_runs[]? | select(.event == "push")]
+        | sort_by(.created_at) | reverse' 2>/dev/null || echo '[]')
+    case "$canonical" in ''|null) canonical='[]' ;; esac
+
+    push_total=$(printf '%s' "$canonical" | jq -r 'length')
+    case "$push_total" in ''|*[!0-9]*) push_total=0 ;; esac
+    if [ "$push_total" -le 0 ]; then
+        # No canonical push run on this sha yet: "CI hasn't arrived" vs
+        # "repo has no Actions at all" (CRI-90). Dynamic-only presence
+        # (dependabot et al) counts as not-yet, never as pending or failed.
+        wf_count=$(gh_retry gh api "repos/$owner/$repo/actions/workflows" 2>/dev/null | jq -r '.total_count // -1' 2>/dev/null || echo -1)
         case "$wf_count" in ''|*[!0-9]*) wf_count=-1 ;; esac
         if [ "$wf_count" = "0" ]; then
             emit_verdict "merge_ci=green" "sha=$sha" \
                 "merge_error=repo registers no GitHub Actions workflows — no CI to wait for (CRI-90 semantics)"
         fi
-        echo "merge_ci_poll=no check runs for ${sha:-} yet — retrying" >&2
+        echo "merge_ci_poll=no canonical push run for ${sha:-} yet — retrying" >&2
         if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
         continue
     fi
 
-    pending=$(printf '%s' "$runs" | jq '[.check_runs[]? | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+    # Verdict over the canonical set: every push run completed, none failed.
+    # (A repo may legitimately carry several push-workflows — criteria runs
+    # CI plus Code Quality — ALL of them gate; a failed one names itself.)
+    pending=$(printf '%s' "$canonical" | jq -r '[.[] | select(.status != "completed")] | length')
     case "$pending" in ''|*[!0-9]*) pending=0 ;; esac
     if [ "$pending" -gt 0 ]; then
-        echo "merge_ci_poll=${pending} check run(s) still running — retrying" >&2
+        echo "merge_ci_poll=${pending} canonical push run(s) still running — retrying" >&2
         if [ "$poll_seconds" -gt 0 ]; then sleep "$poll_seconds"; fi
         continue
     fi
 
-    failing=$(printf '%s' "$runs" | jq -r '[.check_runs[]? | select(.status == "completed")] | map(select((.conclusion // "") != "success" and (.conclusion // "") != "skipped" and (.conclusion // "") != "neutral")) | .[0:3] | .[] | "failed_check=\(.name)=\(.conclusion // "unknown")"' 2>/dev/null || true)
+    failing=$(printf '%s' "$canonical" | jq -r '
+        [.[] | select(((.conclusion // "") != "success") and ((.conclusion // "") != "skipped") and ((.conclusion // "") != "neutral"))]
+        | .[0:3] | .[] | "failed_check=\(.name)=\(.conclusion // "unknown")"' 2>/dev/null || true)
 
     if [ -n "$failing" ]; then
         emit_verdict "merge_ci=failed" "sha=$sha" "$failing"

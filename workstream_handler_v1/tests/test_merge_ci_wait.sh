@@ -102,7 +102,7 @@ case "$args" in
     *"repo view"*"--json owner"*)            class=owner ;;
     *"repo view"*"--json name"*)             class=name ;;
     *"pr view"*"--json mergeCommit"*)        class=merge_commit ;;
-    *"/check-runs"*)                         class=checks ;;
+    *"actions/runs?head_sha="*)              class=checks ;;
     *"actions/workflows"*)                   class=workflows ;;
     *)                                       class=other ;;
 esac
@@ -161,10 +161,15 @@ fail() {
 }
 
 SHA="abc123def456abc123def456abc123def456ab12"
-GREEN='{"total_count":2,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"success"}]}'
-IN_PROGRESS='{"total_count":2,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"},{"name":"lint","status":"in_progress"}]}'
-ONE_FAILED='{"total_count":2,"check_runs":[{"name":"unit tests","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"}]}'
-EMPTY_RUNS='{"total_count":0,"check_runs":[]}'
+# KB-328 gap-4 durable fix: gate fixtures are canonical actions-runs
+# payloads (event=push carries name+event; dependabot dynamic runs are
+# excluded by construction). A failing dynamic run rides in GREEN: it must
+# never flip the verdict.
+DYN_FAIL='{"name":"Dependabot","event":"dynamic","status":"completed","conclusion":"failure","created_at":"2026-10-24T23:24:10Z"}'
+GREEN='{"total_count":2,"workflow_runs":[{"name":"ci","event":"push","status":"completed","conclusion":"success","created_at":"2026-10-24T23:23:10Z"},{"name":"lint","event":"push","status":"completed","conclusion":"success","created_at":"2026-10-24T23:23:05Z"},'"$DYN_FAIL"']}'
+IN_PROGRESS='{"total_count":3,"workflow_runs":[{"name":"ci","event":"push","status":"completed","conclusion":"success","created_at":"2026-10-24T23:23:10Z"},{"name":"lint","event":"push","status":"in_progress","conclusion":null,"created_at":"2026-10-24T23:23:05Z"},'"$DYN_FAIL"']}'
+ONE_FAILED='{"total_count":2,"workflow_runs":[{"name":"unit tests","event":"push","status":"completed","conclusion":"failure","created_at":"2026-10-24T23:23:10Z"},{"name":"lint","event":"push","status":"completed","conclusion":"success","created_at":"2026-10-24T23:23:05Z"}]}'
+EMPTY_RUNS='{"total_count":0,"workflow_runs":[]}'
 
 # ── Scenario A (acceptance): completed-green on the first poll => done arm ────
 render_case "merged=true pr=42 merge_sha=${SHA}"

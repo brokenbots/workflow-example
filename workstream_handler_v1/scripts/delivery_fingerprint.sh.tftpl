@@ -1,0 +1,90 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+{{ .gh_retry }}
+set -euo pipefail
+
+# KB-328 (2026-10-25): one delivery fingerprint for the card's PR, replacing
+# every branch-named re-derivation (store_pr_url branch lookup, check_pr
+# branch lookup, branch-scan recovery guesses, the foreign-PR patch).
+#
+# Invariant: a card's PR is identified by TICKET IDENTITY, never by which
+# branch the worktree stands on. Scans ALL PRs (every state); matches by
+# boundary-aware ticket id in head branch name OR title (space/dash/underscore
+# normalized both sides — 'KB 328'/'kb-328'/'KB_328' match; CRI-27 never
+# matches CRI-273; dependabot PRs cannot match by construction).
+#
+# Priority: OPEN > MERGED > CLOSED > none (newest-updated first in class):
+# OPEN = live work, MERGED = delivered work to reconcile, CLOSED(unmerged) =
+# abandoned -> fresh development.
+#
+# stdout protocol (switch keyed on the first line):
+#   state:none
+#   state:open pr=<n> url=<url>
+#   state:merged pr=<n> url=<url> merge_sha=<oid>
+#   state:closed pr=<n> url=<url>
+# Exit 0 on every classified shape; exit 1 only on a gh transport collapse
+# past gh_retry (a fingerprint that cannot be computed must fail loudly).
+
+# criteria_value_1 arrives as the workstream FILE (KB-<n>.md); the ticket id
+# is the basename without extension. Handle a bare id too.
+ticket="${criteria_value_1%.md}"
+ticket="${ticket##*/}"
+ticket_lc=$(printf '%s' "$ticket" | tr '[:upper:]_ ' '[:lower:]-')
+ticket_re=$(printf '%s' "$ticket_lc" | sed 's/[^a-z0-9-]/\\&/g')
+
+ticket_json=$(gh_retry gh pr list --state all --limit 60 \
+    --json number,state,headRefName,title,url,mergeCommit,updatedAt)
+
+# TSV: state \t number \t head \t url \t sha \t updatedAt (sorted newest first)
+rows=$(printf '%s' "$ticket_json" | jq -r '
+    .[]
+    | [.state, (.number|tostring), (.headRefName // ""), (.url // ""),
+      ((.mergeCommit // {}) | (.oid // "")), (.updatedAt // "")]
+    | @tsv' | sort -t$'\t' -k6,6r)
+
+open_row=""
+merged_row=""
+closed_row=""
+
+matches_ticket() {
+    _norm=$(printf '%s' "$1" | tr '[:upper:]_ ' '[:lower:]-')
+    printf '%s' "$_norm" | grep -qE "(^|[^0-9a-z])${ticket_re}([^0-9a-z]|$)"
+}
+
+title_of() {
+    printf '%s' "$ticket_json" | jq -r --argjson n "$1" '
+        .[] | select(.number == $n) | (.title // "")' | head -1
+}
+
+while IFS="$(printf '\t')" read -r st num head url sha ts; do
+    [ -n "$st" ] || continue
+    if matches_ticket "$head" || matches_ticket "$(title_of "$num")"; then
+        case "$st" in
+            OPEN)   [ -n "$open_row" ]   || open_row="$num|$url" ;;
+            MERGED) [ -n "$merged_row" ] || { [ -n "$sha" ] && merged_row="$num|$url|$sha"; } ;;
+            CLOSED) [ -n "$closed_row" ] || closed_row="$num|$url" ;;
+        esac
+    fi
+done <<EOF2
+$rows
+EOF2
+
+if [ -n "$open_row" ]; then
+    num="${open_row%%|*}"; url="${open_row#*|}"
+    echo "delivery-fingerprint: OPEN PR #$num on the ticket identity" >&2
+    printf 'state:open pr=%s url=%s\n' "$num" "$url"
+    exit 0
+fi
+if [ -n "$merged_row" ]; then
+    num="${merged_row%%|*}"; rest="${merged_row#*|}"; url="${rest%%|*}"; sha="${rest#*|}"
+    echo "delivery-fingerprint: PR #$num already MERGED (sha ${sha}) — delivery on the mainline" >&2
+    printf 'state:merged pr=%s url=%s merge_sha=%s\n' "$num" "$url" "$sha"
+    exit 0
+fi
+if [ -n "$closed_row" ]; then
+    num="${closed_row%%|*}"; url="${closed_row#*|}"
+    echo "delivery-fingerprint: only a CLOSED (unmerged) PR #$num exists — fresh development recovers" >&2
+    printf 'state:closed pr=%s url=%s\n' "$num" "$url"
+    exit 0
+fi
+echo "delivery-fingerprint: no PR carries the ticket identity" >&2
+printf 'state:none\n' 
