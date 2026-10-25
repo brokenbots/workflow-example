@@ -49,7 +49,8 @@ fail() {
 # a local bare repo and needs no token.
 sed -e "s|^criteria_value_1=.*|criteria_value_1='main'|" \
     -e "s|^criteria_value_2=.*|criteria_value_2='${WORKSTREAM_FILE}'|" \
-    -e "s|^{{ *\.helper *}}\$|. \"${SCRIPT_DIR}/../scripts/_github_token_git_credentials.sh.tftpl\"|" \
+    -e "s|^{{ *\\.helper *}}\$|. \"${SCRIPT_DIR}/../scripts/_github_token_git_credentials.sh.tftpl\"|" \
+    -e "/^{{ *\\.gh_retry *}}\$/d" \
     "${TEMPLATE}" > "${SCRIPT}"
 chmod +x "${SCRIPT}"
 

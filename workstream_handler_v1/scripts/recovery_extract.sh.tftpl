@@ -1,0 +1,40 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .pattern | shellquote }}
+set -euo pipefail
+# KB-328 recovery extract: pull one field out of the merged_pr_status blob
+# (criteria_value_1 = its stdout: marker/status/field lines). Shell-side
+# parsing — the DSL has no regex extract.
+#   pattern=url            -> stdout is exactly the PR URL (lands in pr_url)
+#   pattern=merge_protocol -> stdout is merge_pr-shaped: "pr=<n>" then
+#                             "merge_sha=<oid>" — the SAME protocol lines
+#                             merge_pr.sh emits, so wait_merge_ci's
+#                             'pr=[0-9]+' / 'merge_sha=[0-9a-fA-F]+' greps
+#                             parse recovery exactly like a fresh merge.
+# Unknown pattern is a template wiring error -> exit 1 loudly.
+blob="$criteria_value_1"
+mode="$criteria_value_2"
+
+num=$(printf '%s\n' "$blob" | sed -n 's/^pr_number=\([0-9]*\) .*$/\1/p')
+url=$(printf '%s\n' "$blob" | sed -n 's/^pr_number=[0-9]* pr_url=\([^ ]*\) merge_sha=.*$/\1/p')
+sha=$(printf '%s\n' "$blob" | sed -n 's/^pr_number=.* merge_sha=\([0-9a-fA-F]\{7,\}\)$/\1/p')
+
+case "$mode" in
+    url)
+        if [ -z "$url" ]; then
+            echo "recovery_extract: no pr_url field in the recovery blob: '$blob'" >&2
+            exit 1
+        fi
+        printf '%s' "$url"
+        ;;
+    merge_protocol)
+        if [ -z "$num" ] || [ -z "$sha" ]; then
+            echo "recovery_extract: recovery blob missing pr_number or merge_sha: '$blob'" >&2
+            exit 1
+        fi
+        printf 'pr=%s\nmerge_sha=%s' "$num" "$sha"
+        ;;
+    *)
+        echo "recovery_extract: unknown pattern '$mode'" >&2
+        exit 1
+        ;;
+esac

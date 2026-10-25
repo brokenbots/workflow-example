@@ -33,6 +33,12 @@ variable "ci_gate_cmd" {
     default     = ""
 }
 
+variable "merge_ci_max_seconds" {
+    description = "merge-gate wait budget in seconds for wait_merge_ci: the post-merge deadline for the squash commit's own CI to complete green (the standing KB-272 gate) and, after a KB-328 merged-PR recovery, the same wait for the already-merged PR. Default 600 covers fast CI; repos with long squash-CI envelopes (observed 13-78m on criteria) raise it. Values above 3540 exceed the wait step's 3600s timeout envelope and the step fails closed before the deadline. Env MERGE_CI_MAX_SECONDS still overrides it for test/ops."
+    type        = number
+    default     = 600
+}
+
 variable "log_file" {
     description = "path the workstream log file, if not set its equivalent to `{replace(var.workstream_file, '.md', '.log')}`"
     type        = string
