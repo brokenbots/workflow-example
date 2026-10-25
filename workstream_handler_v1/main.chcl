@@ -115,6 +115,15 @@ data "internal" "merge_pr_result" {
     value = ""
 }
 
+// KB-328: merged-PR recovery marker. Set by recover_merged_pr when check_pr
+// found the branch's PR already MERGED — route_pr_action then reconciles
+// straight through the standing merge gate instead of re-running the
+// developer loop over shipped work.
+data "internal" "merged_recovery" {
+    type  = string
+    value = ""
+}
+
 subworkflow "branch_manager" {
     source = "./workflows/branch_manager"
     input = {
@@ -359,6 +368,8 @@ step "check_pr" {
     outcome "failure" { next = state.failed }
 }
 
+// Merge-gate verification with `gh` — branch-head CI arrives on the PR's
+// statusCheckRollup in the reviewer loop; here we only classify the PR.
 switch "route_pr" {
     match {
         condition = startswith(steps.check_pr.stdout, "status:no_pr")
@@ -366,7 +377,12 @@ switch "route_pr" {
     }
     match {
         condition = startswith(steps.check_pr.stdout, "status:merged")
-        next      = step.run_pair_programming_loop
+        // KB-328: the branch's PR is already MERGED. Reconcile at the
+        // standing merge gate instead of re-running development — the
+        // developer loop over shipped work re-derived the branch from the
+        // worktree scan and hijacked an unrelated open branch (observed:
+        // dependabot #534 adopted while the card's PR #543 sat merged).
+        next      = step.recover_merged_pr
     }
     match {
         condition = startswith(steps.check_pr.stdout, "status:closed")
@@ -461,6 +477,15 @@ step "retry_store_pr_url" {
 // Re-read check_pr.stdout (still in scope) to choose the action now that
 // pr_url is available.
 switch "route_pr_action" {
+    // The recovery arm is terminal by design: its PR is already merged, its
+    // squash CI was verified green by recover_merged_ci (same standing gate),
+    // and pr_url is stamped — nothing left for review/merge loops to do.
+    // This match MUST sit above the stdout-based matches: a recovery run's
+    // stale check_pr stdout would otherwise route it back into them.
+    match {
+        condition = data.internal.merged_recovery.value != ""
+        next      = state.done
+    }
     match {
         condition = startswith(steps.check_pr.stdout, "status:ready")
         next      = step.merge_pr
@@ -748,6 +773,118 @@ step "exhausted_reviewer_scope" {
     }
 }
 
+// KB-328: the branch names an already-MERGED PR. Verify the PR state
+// authoritatively by branch name (gh keeps PRs resolvable after the head
+// branch is squash-deleted) and stamp the recovery blob. rc=2 (unknown /
+// not merged) is a fall-through, never an error: the run returns to check_pr,
+// which re-classifies with its own eyes.
+step "recover_merged_pr" {
+    target = adapter.shell.sh
+    // KB-219: gh_retry can add ~210s worst case; the timeout covers it.
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/merged_pr_status.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
+        })
+    }
+    outcome "success" {
+        next = step.recover_merged_pr_store_url
+        write {
+            target = data.internal.merged_recovery.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" { next = step.check_pr }
+}
+
+// KB-328 recovery: peel the URL line off the recovery blob into pr_url (the
+// parent's route_handler_pr requires a non-empty pr_url and the closing
+// comment carries it). Shell-side parsing — the DSL has no regex extract.
+step "recover_merged_pr_store_url" {
+    target  = adapter.shell.sh
+    timeout = "15s"
+    input {
+        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
+            criteria_value_1 = data.internal.merged_recovery.value
+            pattern          = "url"
+        })
+    }
+    outcome "success" {
+        next = step.recover_merged_pr_store_protocol
+        write {
+            target = data.internal.pr_url.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// KB-328 recovery: rebuild the merge_pr-shaped protocol (pr=<n>, merge_sha=)
+// so the standing merge gate's wait_merge_ci parses recovery exactly like a
+// fresh merge — one sha source, one gate.
+step "recover_merged_pr_store_protocol" {
+    target  = adapter.shell.sh
+    timeout = "15s"
+    input {
+        command = templatefile("./scripts/recovery_extract.sh.tftpl", {
+            criteria_value_1 = data.internal.merged_recovery.value
+            pattern          = "merge_protocol"
+        })
+    }
+    outcome "success" {
+        next = step.recover_merged_ci
+        write {
+            target = data.internal.merge_pr_result.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// KB-253 (KB-328 recovery leg): close the SAME standing merge gate the
+// fresh-merge path closes — the squash commit's own CI must be green before
+// the parent reconciles Done. wait_merge_ci receives the merge_pr-shaped
+// protocol above, so recovery shares its sha source and poll logic verbatim.
+step "recover_merged_ci" {
+    target = adapter.shell.sh
+    // Recovery usually verdicts on the first poll (squash CI already
+    // completed); the step timeout is the same static 3600s envelope as the
+    // fresh-merge wait — the configurable budget renders into the script.
+    timeout = "3600s"
+    input {
+        command = templatefile("./scripts/wait_merge_ci.sh.tftpl", {
+            criteria_value_1    = data.internal.merge_pr_result.value
+            merge_ci_max        = format("%d", var.merge_ci_max_seconds)
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
+        })
+    }
+    outcome "success" {
+        next = switch.route_recovery_merge_ci
+        write {
+            target = data.internal.merge_ci_verdict.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            // KB-328 run1 crash class: HCL '+' is arithmetic only — template
+            // interpolation instead of string concatenation.
+            value  = "merge_ci_failed: recovery arm for ${data.internal.branch.value} — wait_merge_ci failed before reaching a verdict: ${trimspace(output.stderr)}"
+        }
+    }
+}
+
+switch "route_recovery_merge_ci" {
+    match {
+        condition = startswith(steps.recover_merged_ci.stdout, "merge_ci=green")
+        next      = state.done
+    }
+    default { next = step.fail_merge_ci }
+}
+
 // ── Merge ─────────────────────────────────────────────────────────────────────
 
 step "merge_pr" {
@@ -797,13 +934,15 @@ step "merge_pr" {
 // merge_pr's output, so the wait never re-derives it.
 step "wait_merge_ci" {
     target = adapter.shell.sh
-    // KB-219: gh_retry can add up to ~210s of backoff inside the wait script
-    // on top of its own deadline; the step timeout covers the worst case.
-    timeout = "900s"
+    // KB-328: the budget is project-configurable via var.merge_ci_max_seconds
+    // (rendered into the script's default); the step timeout is a static
+    // 3600s ceiling that must exceed any sane budget + gh_retry backoff.
+    timeout = "3600s"
     input {
         command = templatefile("./scripts/wait_merge_ci.sh.tftpl", {
-            criteria_value_1 = data.internal.merge_pr_result.value
-            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
+            criteria_value_1    = data.internal.merge_pr_result.value
+            merge_ci_max        = format("%d", var.merge_ci_max_seconds)
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
         })
     }
     outcome "success" {
@@ -817,7 +956,11 @@ step "wait_merge_ci" {
         next = state.failed
         write {
             target = data.internal.failure_reason.value
-            value  = "merge_ci_failed: " + data.internal.pr_url.value + " — wait_merge_ci failed before reaching a verdict: " + trimspace(output.stderr)
+            // KB-328 run1 crash class: HCL '+' is arithmetic only — a string
+            // concat here died at runtime ('Invalid operand; a number is
+            // required') AFTER wait_merge_ci produced a verdict, so
+            // failure_reason never landed. Template interpolation instead.
+            value  = "merge_ci_failed: ${data.internal.pr_url.value} — wait_merge_ci failed before reaching a verdict: ${trimspace(output.stderr)}"
         }
     }
 }
@@ -852,14 +995,22 @@ step "fail_merge_ci" {
         next = state.failed
         write {
             target = data.internal.failure_reason.value
-            value  = "merge_ci_failed: " + data.internal.pr_url.value + " — the squash commit's own CI did not complete green after the merge; Done reconcile withheld (KB-272 standing merge gate): " + data.internal.merge_ci_verdict.value
+            // KB-328 run1 crash class: HCL '+' is arithmetic only — string
+            // concatenation in BOTH arms died at runtime ('Invalid operand;
+            // a number is required') and failure_reason never landed even
+            // though the merge gate had reached a typed verdict. Template
+            // interpolation is the concatenation mechanism.
+            value  = "merge_ci_failed: ${data.internal.pr_url.value} — the squash commit's own CI did not complete green after the merge; Done reconcile withheld (KB-272 standing merge gate): ${data.internal.merge_ci_verdict.value}"
         }
     }
     outcome "failure" {
         next = state.failed
         write {
             target = data.internal.failure_reason.value
-            value  = "merge_ci_failed: " + data.internal.pr_url.value + " — the squash commit's own CI did not complete green after the merge; Done reconcile withheld (KB-272 standing merge gate): " + data.internal.merge_ci_verdict.value
+            // Same crash class as the success arm — keep the two arms
+            // expression-identical so a failure-arm crash can never mask the
+            // typed verdict again.
+            value  = "merge_ci_failed: ${data.internal.pr_url.value} — the squash commit's own CI did not complete green after the merge; Done reconcile withheld (KB-272 standing merge gate): ${data.internal.merge_ci_verdict.value}"
         }
     }
 }
@@ -1048,7 +1199,9 @@ step "increment_hand_off_count" {
         next = state.failed
         write {
             target = data.internal.failure_reason.value
-            value  = "increment_hand_off_count failed: " + output.stderr
+            // KB-328 run1 crash class: HCL '+' is arithmetic only — template
+            // interpolation instead of string concatenation.
+            value  = "increment_hand_off_count failed: ${output.stderr}"
         }
     }
 }
@@ -1161,7 +1314,9 @@ step "validate_round_check" {
         // parent's failure comment interpolates failure_reason.
         write {
             target = data.internal.failure_reason.value
-            value  = "validate_round_check failed: "+output.stderr
+            // KB-328 run1 crash class: HCL '+' is arithmetic only — template
+            // interpolation instead of string concatenation.
+            value  = "validate_round_check failed: ${output.stderr}"
         }
     }
 }

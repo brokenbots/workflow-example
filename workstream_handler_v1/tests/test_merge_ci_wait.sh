@@ -51,7 +51,12 @@ gh_retry_line="$(grep -n '{{ *\.gh_retry *}}' "${TEMPLATE}" | head -1 | cut -d: 
 } > "${WORK_DIR}/body.pre"
 render_case() {
     local criteria_value="$1"
-    sed -e "s#{{ *\.criteria_value_1 *| *shellquote *}}#\"${criteria_value}\"#g" \
+    # KB-328: the merge-CI budget renders from the tree var as a plain
+    # go-template action (no shell expansion — the default lands via the
+    # max_seconds assignment); MERGE_CI_MAX_TEMPLATE lets scenarios verify a
+    # non-default rendered budget.
+    sed -e "s#{{ *\\.criteria_value_1 *| *shellquote *}}#\"${criteria_value}\"#g" \
+        -e "s#{{ *\\.merge_ci_max *}}#${MERGE_CI_MAX_TEMPLATE:-600}#g" \
         "${WORK_DIR}/body.pre" > "${SCRIPT}"
     chmod +x "${SCRIPT}"
 }
@@ -238,8 +243,8 @@ printf '%s\n' "$merge_block" | grep -q "next = step.wait_merge_ci" || \
     fail "merge_pr must not reach teardown_worktree directly anymore"
 
 wait_block="$(sed -n '/^step "wait_merge_ci" {/,/^}/p' "${MAIN}")"
-printf '%s\n' "$wait_block" | grep -q 'timeout = "900s"' || \
-    fail "wait_merge_ci needs a step timeout above the script's bounded wait"
+printf '%s\n' "$wait_block" | grep -q 'timeout = "3600s"' || \
+    fail "wait_merge_ci step timeout must be the 3600s envelope above any sane budget (KB-328)"
 printf '%s\n' "$wait_block" | grep -q "next = switch.route_merge_ci" || \
     fail "wait_merge_ci success must route through the verdict switch"
 printf '%s\n' "$wait_block" | grep -q "data.internal.merge_ci_verdict.value" || \
@@ -268,12 +273,18 @@ printf '%s\n' "$fail_block" | grep -q "data.internal.pr_url.value" || \
 # merge_pr.sh emits the squash sha on both success arms (fresh + already-merged).
 [ "$(grep -c 'echo "merge_sha=' "${MERGE_TEMPLATE}")" -eq 2 ] || \
     fail "merge_pr.sh must emit merge_sha on both success arms (fresh and already merged)"
-[ "$(grep -c '\-\-json mergeCommit' "${MERGE_TEMPLATE}")" -eq 2 ] || \
+[ "$(grep -c -- '--json mergeCommit' "${MERGE_TEMPLATE}")" -eq 2 ] || \
     fail "merge_pr.sh must resolve the sha via gh pr view --json mergeCommit"
 
-# The bound is the spec's: 10 minutes, 30s cadence, env knobs only for tests.
+# The bound is project-configurable (KB-328): the script's deadline default
+# renders from the tree var merge_ci_max_seconds; env MERGE_CI_MAX_SECONDS
+# remains the test/ops override. Main.chcl must bind the rendered var.
 grep -q 'MERGE_CI_POLL_SECONDS:-30' "${SCRIPT}" || fail "poll cadence must default to 30s"
-grep -q 'MERGE_CI_MAX_SECONDS:-600' "${SCRIPT}" || fail "wait deadline must default to 600s"
+grep -Eq '^max_seconds=[0-9]+' "${SCRIPT}" || fail "wait deadline default must render from the tree var (KB-328 project config)"
+grep -Eq 'merge_ci_max[[:space:]]+= format\("%d", var\.merge_ci_max_seconds\)' "${MAIN}" || \
+    fail "wait_merge_ci must render the budget via format(%d) from var.merge_ci_max_seconds (numeric vars die in templatefile at runtime)"
 grep -q 'criteria_value_1' "${SCRIPT}" || fail "the sha source must be merge_pr's output, not a re-derivation"
+MERGE_CI_MAX_TEMPLATE=1200 render_case "merged=true pr=42 merge_sha=${SHA}"
+grep -Eq '^max_seconds=1200' "${SCRIPT}" || fail "a non-default tree budget must render into the script default (1200 expected)"
 
 echo "==> All checks passed."

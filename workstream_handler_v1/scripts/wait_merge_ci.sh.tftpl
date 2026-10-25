@@ -17,7 +17,10 @@
 #
 # Env knobs (test/ops only; production runs on the defaults):
 #   MERGE_CI_POLL_SECONDS — poll cadence (default 30).
-#   MERGE_CI_MAX_SECONDS  — wait deadline (default 600). Never extended.
+#   MERGE_CI_MAX_SECONDS  — wait deadline override (test/ops). The production
+#                           default is the tree var merge_ci_max_seconds
+#                           (KB-328: project-configurable), rendered at the
+#                           max_seconds assignment below; env still wins.
 #
 # Protocol stdout (first line is the typed verdict; the shell adapter only
 # emits success/failure over exit_code/stdout/stderr, so the verdict rides
@@ -43,9 +46,19 @@ pr=$(printf '%s' "$criteria_value_1" | grep -oE 'pr=[0-9]+' | head -1 | cut -d= 
 sha=$(printf '%s' "$criteria_value_1" | grep -oE 'merge_sha=[0-9a-fA-F]+' | head -1 | cut -d= -f2 | tr -d '\n')
 
 poll_seconds=${MERGE_CI_POLL_SECONDS:-30}
-max_seconds=${MERGE_CI_MAX_SECONDS:-600}
+# KB-328: production budget renders from the tree var (format("%d") at the
+# call site guarantees digits); the env override applies flat AFTER render —
+# no nested shell expansion (the previous :- nesting corrupts the braces).
+max_seconds={{ .merge_ci_max }}
+case "$max_seconds" in
+    ''|*[!0-9]*) echo "wait_merge_ci: rendered merge_ci_max is not numeric (template wiring defect): '$max_seconds'" >&2; exit 1 ;;
+esac
+case "${MERGE_CI_MAX_SECONDS:-}" in
+    '') : ;;
+    *[!0-9]*) echo "wait_merge_ci: MERGE_CI_MAX_SECONDS must be numeric, got '$MERGE_CI_MAX_SECONDS'" >&2; exit 1 ;;
+    *) max_seconds="$MERGE_CI_MAX_SECONDS" ;;
+esac
 case "$poll_seconds" in ''|*[!0-9]*) poll_seconds=30 ;; esac
-case "$max_seconds" in ''|*[!0-9]*) max_seconds=600 ;; esac
 deadline=$(( $(date +%s) + max_seconds ))
 
 owner=$(gh repo view --json owner --jq '.owner.login' || echo "")

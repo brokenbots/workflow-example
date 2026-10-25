@@ -56,9 +56,15 @@ variable "base_branch" {
 }
 
 variable "ci_gate_cmd" {
-    description = "workstream_handler_v1: command the pair programming loop runs as its CI gate (exit 0 = clean). Empty skips the gate. Set it to mirror what the remote CI actually runs (e.g. 'make ci && make vuln-scan')."
+    description = "Command the pair programming loop runs as its CI gate (exit 0 = clean). Empty (the default) skips the gate. Set it to mirror what the remote CI actually runs — a repo's aggregate target often omits gates CI runs separately (e.g. a vulnerability scan), and any gate missing here is one the developer only discovers after the PR is already red (e.g. 'make ci && make vuln-scan')."
     type        = string
     default     = ""
+}
+
+variable "merge_ci_max_seconds" {
+    description = "merge-gate wait budget in seconds forwarded to workstream_handler_v1: post-merge deadline for the squash commit's own CI to complete green (the standing KB-272 gate). Default 600 covers fast CI; repos with long squash-CI envelopes (observed 13-78m on criteria) raise it. Values above 3540 exceed the wait step's 3600s timeout envelope and fail closed before the deadline."
+    type        = number
+    default     = 600
 }
 
 variable "allow_dirty" {

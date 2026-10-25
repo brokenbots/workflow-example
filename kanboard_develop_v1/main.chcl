@@ -103,6 +103,7 @@ subworkflow "handler" {
         worktree_dir         = "${var.intake_root}/${var.ticket_id}/worktree"
         base_branch          = var.base_branch
         ci_gate_cmd          = var.ci_gate_cmd
+        merge_ci_max_seconds = var.merge_ci_max_seconds
         allow_dirty          = var.allow_dirty
         provider_base_url    = var.provider_base_url
         workflow_github_token = var.workflow_github_token

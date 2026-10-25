@@ -104,6 +104,16 @@ while IFS= read -r ref; do
     [ "$(ahead_of_base "origin/$br")" -gt 0 ] || continue
 
     br_norm=$(printf '%s' "$br" | tr '[:upper:]_' '[:lower:]-')
+    # KB-328 (2026-10-25): an UNMERGED branch that names this ticket is a
+    # legit recovery candidate, but a MERGED one is not — its work already
+    # shipped and its name is only a historical residue. Adopting a merged
+    # branch re-opens development over nothing (observed live: the re-fire
+    # of an already-merged card adopted an unrelated branch and resolved the
+    # wrong PR). Verify the PR state before adopting; not-verify-able
+    # (unknown/empty) keeps the old conservative behavior.
+    if [ "$(gh pr view "$br" --json state --jq '.state' 2>/dev/null | tr -d '\n')" = "MERGED" ]; then
+        continue
+    fi
     if printf '%s' "$br_norm" | grep -qE "(^|[^0-9a-z])${ticket_re}([^0-9a-z]|\$)"; then
         if [ -z "$name_match" ]; then
             name_match="$br"
