@@ -64,7 +64,9 @@ awk '
 ' "$TPL" > "$TMP/rendered.sh" || fail "render"
 
 run_case() {
-    PATH="$TMP:$PATH" sh "$TMP/rendered.sh" "$1" "$2" 2>/dev/null
+    # bash, not sh: the template is bash-family (set -o pipefail); dash
+    # (CI /bin/sh) exits 2 at that line before any gh call.
+    PATH="$TMP:$PATH" bash "$TMP/rendered.sh" "$1" "$2" 2>/dev/null
 }
 
 # 1. The live run-3 shape: MERGED PR (even on our own branch name) is never
