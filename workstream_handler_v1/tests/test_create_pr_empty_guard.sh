@@ -217,10 +217,18 @@ jq -e '.steps[] | select(.name == "fail_missing_pr_url") | ([.outcomes[] | selec
     || fail "fail_missing_pr_url must fail the run on both outcomes"
 
 echo "==> store_pr_url (the gh-empty-stdout masking path) is guarded identically"
-jq -e '.steps[] | select(.name == "store_pr_url") | ([.outcomes[] | select(.name == "success" and .next == "route_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "store_pr_url success must route through route_stored_pr"
+jq -e '.steps[] | select(.name == "store_pr_url") | ([.outcomes[] | select(.name == "success" and .next == "check_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "store_pr_url success must route through check_stored_pr (KB-328: identity gate before any adoption)"
+jq -e '.steps[] | select(.name == "check_stored_pr") | ([.outcomes[] | select(.name == "success" and .next == "route_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "check_stored_pr success must route through route_stored_pr"
+jq -e '.steps[] | select(.name == "check_stored_pr") | ([.outcomes[] | select(.name == "failure" and .next == "failed")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "check_stored_pr must fail the run loudly when the identity check itself dies (no identity-blind adoption)"
 jq -e '.switches[] | select(.name == "route_stored_pr") | ([.conditions[] | select(.match == "data.internal.pr_url.value != \"\"" and .next == "route_pr_action")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
     || fail "route_stored_pr must keep the valid-pr_url routing to route_pr_action"
+jq -e '.switches[] | select(.name == "route_stored_pr") | ([.conditions[] | select((.match | contains("foreign_pr")) and .next == "clear_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "route_stored_pr must strip a foreign pr_url and re-classify (KB-328 run-3 class)"
+jq -e '.steps[] | select(.name == "clear_stored_pr") | ([.outcomes[] | select(.next == "check_pr")] | length) == 2' "${COMPILE_OUT}" >/dev/null \
+    || fail "clear_stored_pr must re-enter branch-state classification (check_pr) on both outcomes"
 jq -e '.switches[] | select(.name == "route_stored_pr") | ([.conditions[] | select((.match | contains("pr_url_retries")) and .next == "retry_store_pr_url")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
     || fail "route_stored_pr must retry store_pr_url while the budget lasts"
 jq -e '.switches[] | select(.name == "route_stored_pr") | .default_next == "fail_missing_pr_url"' "${COMPILE_OUT}" >/dev/null \
