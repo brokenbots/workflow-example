@@ -50,7 +50,9 @@ awk '
 chmod +x "$RENDERED"
 
 # 1. Positive arm: MERGED PR -> rc=0, marker + status + protocol fields.
-out=$(PATH="$TMP:$PATH" sh "$RENDERED" KB-328 2>/dev/null); rc=$?
+# bash, not sh: the template carries `set -o pipefail` like every sibling —
+# under dash (CI's /bin/sh) that line exits 2 before any gh call.
+out=$(PATH="$TMP:$PATH" bash "$RENDERED" KB-328 2>/dev/null); rc=$?
 [ "$rc" = "0" ] || fail "rc=$rc on MERGED PR, want 0"
 printf '%s\n' "$out" | grep -q '^marker=merged_recovery$' || fail "missing marker line"
 printf '%s\n' "$out" | grep -q '^status:merged$' || fail "missing status:merged"
