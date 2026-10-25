@@ -1,5 +1,6 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
+{{ .gh_retry }}
 set -euo pipefail
 
 {{ .helper }}
@@ -111,7 +112,7 @@ while IFS= read -r ref; do
     # of an already-merged card adopted an unrelated branch and resolved the
     # wrong PR). Verify the PR state before adopting; not-verify-able
     # (unknown/empty) keeps the old conservative behavior.
-    if [ "$(gh pr view "$br" --json state --jq '.state' 2>/dev/null | tr -d '\n')" = "MERGED" ]; then
+    if [ "$(gh_retry gh pr view "$br" --json state --jq '.state' 2>/dev/null | tr -d '\n')" = "MERGED" ]; then
         continue
     fi
     if printf '%s' "$br_norm" | grep -qE "(^|[^0-9a-z])${ticket_re}([^0-9a-z]|\$)"; then

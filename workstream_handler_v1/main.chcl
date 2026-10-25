@@ -529,6 +529,7 @@ step "sync_head_branch" {
         command = templatefile("./scripts/resolve_head_branch.sh.tftpl", {
             criteria_value_1 = var.base_branch
             criteria_value_2 = var.workstream_file
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
             helper           = file("./scripts/_github_token_git_credentials.sh.tftpl")
         })
     }

@@ -243,9 +243,13 @@ assert_grep_count() {
         fail "${desc}: expected ${want}, got ${got} in ${file}"
     fi
 }
-# KB-272: 11 - the wait_merge_ci step's render arg plus its two KB-219
-# timeout-context comment lines join the pre-existing 8 matches.
-assert_grep_count "workstream_handler_v1 root steps wrapped" 11 \
+# KB-272: 8 pre-existing matches; KB-272's wait_merge_ci render arg + its two
+# KB-219 timeout-context comment lines raised it to 11; KB-328's merged-PR
+# recovery arm adds 3 render args (recover_merged_pr +
+# recover_merged_pr_store_url + recover_merged_pr_store_protocol); the
+# recovery leg's gh_retry fix adds one more (sync_head_branch renders the
+# wrapper to gate resolve_head_branch's MERGED-state gh call) -> 15.
+assert_grep_count "workstream_handler_v1 root steps wrapped" 15 \
     "${REPO_ROOT}/workstream_handler_v1/main.chcl"
 assert_grep_count "pr_reviewer_loop steps wrapped" 6 \
     "${REPO_ROOT}/workstream_handler_v1/workflows/pr_reviewer_loop/main.chcl"
