@@ -102,7 +102,7 @@ printf '%s\n' "$out" | grep -q '^status:foreign_pr' || fail "boundary: KB-600 he
 pass "ticket-boundary enforced (no CRI-27/CRI-273 class match)"
 
 # 6. Unresolvable URL -> ok (conservative, no guess).
-out="$(PATH="$TMP:$PATH" sh "$TMP/rendered.sh" 'https://github.com/brokenbots/criteria/pull/999' 'KB-328' 2>/dev/null)"
+out="$(PATH="$TMP:$PATH" bash "$TMP/rendered.sh" 'https://github.com/brokenbots/criteria/pull/999' 'KB-328' 2>/dev/null)"
 printf '%s\n' "$out" | grep -q '^status:ok$' || fail "unresolvable pr_url must keep ok: got '$out'"
 pass "unresolvable pr_url -> ok (no guess)"
 
