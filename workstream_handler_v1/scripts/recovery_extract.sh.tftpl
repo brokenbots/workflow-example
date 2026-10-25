@@ -44,13 +44,18 @@ case "$mode" in
         printf '%s' "$url"
         ;;
     merge_protocol)
-        if [ -z "$num" ] || [ -z "$sha" ]; then
-            echo "recovery_extract: recovery blob missing pr_number or merge_sha: '$blob'" >&2
+        # KB-328 durable fix: input is the delivery fingerprint's merged line
+        # ('state:merged pr=<n> url=<u> merge_sha=<oid>') — emit the merge_pr
+        # protocol ('pr=<n>', 'merge_sha=<oid>') so wait_merge_ci's greps
+        # parse recovery exactly like a fresh merge.
+        n=$(printf '%s\n' "$blob" | sed -n 's/^state:merged pr=\([0-9]*\) url=[^ ]* merge_sha=.*$/\1/p')
+        s=$(printf '%s\n' "$blob" | sed -n 's/^state:merged pr=[0-9]* url=[^ ]* merge_sha=\([0-9a-fA-F]\{7,\}\)$/\1/p')
+        if [ -z "$n" ] || [ -z "$s" ]; then
+            echo "recovery_extract: fingerprint blob missing pr_number or merge_sha: '$blob'" >&2
             exit 1
         fi
-        printf 'pr=%s\nmerge_sha=%s' "$num" "$sha"
-        ;;
-    *)
+        printf 'pr=%s\nmerge_sha=%s' "$n" "$s"
+        ;;    *)
         echo "recovery_extract: unknown pattern '$mode'" >&2
         exit 1
         ;;
