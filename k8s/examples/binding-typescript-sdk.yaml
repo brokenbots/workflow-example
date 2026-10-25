@@ -37,7 +37,7 @@ data:
         {
           "name": "data",
           "kind": "pvc",
-          "claim": "typescript-sdk-data",
+          "claim": "criteria-data",
           "mountPath": "/data",
           "env": {
             "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
@@ -48,7 +48,7 @@ data:
         {
           "name": "repo",
           "kind": "pvc",
-          "claim": "typescript-sdk-repo",
+          "claim": "criteria-repo",
           "mountPath": "/repo"
         },
         {
