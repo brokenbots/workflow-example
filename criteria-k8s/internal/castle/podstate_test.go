@@ -137,14 +137,20 @@ func TestPodStateEventEnvelopeValidation(t *testing.T) {
 }
 
 // TestPodStateEventEnvelopeSchemaVersion pins the envelope's event protocol
-// version: castle's SubmitEvents gate rejects any envelope whose
-// SchemaVersion is not the protocol version ("failed_precondition:
-// schema_version mismatch"), so the builder must stamp 1 explicitly and
-// never regress to a zero value.
+// version both ways. The envelope stamp carries the SDK constant (a bump
+// must not strand this builder on a stale literal — castle's gate requires
+// exactly criteria.SchemaVersion, "failed_precondition: schema_version
+// mismatch" otherwise, schema_version 0 re-opens the KB-323 lane outage).
+// The second assertion trips when the pinned SDK constant moves off the
+// value castle's SubmitEvents gate enforces today (1, the v0.1 protocol
+// version — the same pin the SDK's conformance suite applies): a one-sided
+// SDK bump while castle still gates on 1 would otherwise ship silently and
+// take the whole pod-state lane down again.
 func TestPodStateEventEnvelopeSchemaVersion(t *testing.T) {
 	env, err := PodStateEventEnvelope("run-1", podStateTestReport(events.PodPhaseRunning, "CrashLoopBackOff"))
 	require.NoError(t, err)
-	assert.Equal(t, int32(sdk.SchemaVersion), env.SchemaVersion)
+	assert.Equal(t, int32(1), env.SchemaVersion, "castle's SubmitEvents gate accepts exactly protocol version 1; if this changes, re-check the gate the envelope is stamped for")
+	assert.Equal(t, int32(sdk.SchemaVersion), env.SchemaVersion, "the envelope must stamp the SDK protocol constant, not a stale literal")
 }
 
 func podStateEmitTestFeed(t *testing.T, url, token string, shrinkRetry bool) *PodStateFeed {
