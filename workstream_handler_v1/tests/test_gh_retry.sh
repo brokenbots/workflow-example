@@ -244,14 +244,12 @@ assert_grep_count() {
     fi
 }
 # KB-272: 8 pre-existing matches; KB-272's wait_merge_ci render arg + its two
-# KB-219 timeout-context comment lines raised it to 11; KB-328's merged-PR
-# recovery arm adds 3 render args (recover_merged_pr +
-# recover_merged_pr_store_url + recover_merged_pr_store_protocol); the
-# recovery leg's gh_retry fix adds one more (sync_head_branch renders the
-# wrapper to gate resolve_head_branch's MERGED-state gh call); the stored-pr
-# identity check adds one more (check_stored_pr renders foreign_pr_check
-# with the wrapper) -> 16.
-assert_grep_count "workstream_handler_v1 root steps wrapped" 16 \
+# KB-219 timeout-context comment lines raised it to 11; KB-328's durable
+# identity rewrite (2026-10-25) consolidated the PR-identity surface onto one
+# delivery_fingerprint step: the retired store/recover/foreign-PR stamp
+# family went with its render args (11 -> 8), and the canonical-CI gate +
+# fingerprint + classification render args raised it again (8 -> 13).
+assert_grep_count "workstream_handler_v1 root steps wrapped" 13 \
     "${REPO_ROOT}/workstream_handler_v1/main.chcl"
 assert_grep_count "pr_reviewer_loop steps wrapped" 6 \
     "${REPO_ROOT}/workstream_handler_v1/workflows/pr_reviewer_loop/main.chcl"

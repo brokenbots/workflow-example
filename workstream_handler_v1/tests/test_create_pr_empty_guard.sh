@@ -213,28 +213,24 @@ jq -e '.steps[] | select(.name == "retry_create_pr") | ([.outcomes[] | select(.n
     || fail "retry_create_pr must loop back to create_pr and bail out on failure"
 
 echo "==> fail_missing_pr_url terminally fails the run"
-jq -e '.steps[] | select(.name == "fail_missing_pr_url") | ([.outcomes[] | select(.next == "failed")] | length) == 2' "${COMPILE_OUT}" >/dev/null \
-    || fail "fail_missing_pr_url must fail the run on both outcomes"
+jq -e '.steps[] | select(.name == "fail_missing_pr_url") | ([.outcomes[] | select(.next == "failed")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "fail_missing_pr_url must fail the run (KB-328 durable form: one loud success arm)"
 
-echo "==> store_pr_url (the gh-empty-stdout masking path) is guarded identically"
-jq -e '.steps[] | select(.name == "store_pr_url") | ([.outcomes[] | select(.name == "success" and .next == "check_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "store_pr_url success must route through check_stored_pr (KB-328: identity gate before any adoption)"
-jq -e '.steps[] | select(.name == "check_stored_pr") | ([.outcomes[] | select(.name == "success" and .next == "route_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "check_stored_pr success must route through route_stored_pr"
-jq -e '.steps[] | select(.name == "check_stored_pr") | ([.outcomes[] | select(.name == "failure" and .next == "failed")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "check_stored_pr must fail the run loudly when the identity check itself dies (no identity-blind adoption)"
-jq -e '.switches[] | select(.name == "route_stored_pr") | ([.conditions[] | select(.match == "data.internal.pr_url.value != \"\"" and .next == "route_pr_action")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "route_stored_pr must keep the valid-pr_url routing to route_pr_action"
-jq -e '.switches[] | select(.name == "route_stored_pr") | ([.conditions[] | select((.match | contains("foreign_pr")) and .next == "clear_stored_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "route_stored_pr must strip a foreign pr_url and re-classify (KB-328 run-3 class)"
-jq -e '.steps[] | select(.name == "clear_stored_pr") | ([.outcomes[] | select(.next == "check_pr")] | length) == 2' "${COMPILE_OUT}" >/dev/null \
-    || fail "clear_stored_pr must re-enter branch-state classification (check_pr) on both outcomes"
-jq -e '.switches[] | select(.name == "route_stored_pr") | ([.conditions[] | select((.match | contains("pr_url_retries")) and .next == "retry_store_pr_url")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "route_stored_pr must retry store_pr_url while the budget lasts"
-jq -e '.switches[] | select(.name == "route_stored_pr") | .default_next == "fail_missing_pr_url"' "${COMPILE_OUT}" >/dev/null \
-    || fail "route_stored_pr must fail the run loudly once the budget is exhausted"
-jq -e '.steps[] | select(.name == "retry_store_pr_url") | ([.outcomes[] | select(.name == "success" and .next == "store_pr_url")] | length) == 1 and ([.outcomes[] | select(.name == "failure" and .next == "fail_missing_pr_url")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
-    || fail "retry_store_pr_url must loop back to store_pr_url and bail out on failure"
+echo "==> delivery_fingerprint owns PR identity (KB-328 durable fix, 2026-10-25)"
+jq -e '.steps[] | select(.name == "run_branch_manager") | ([.outcomes[] | select(.name == "success" and .next == "delivery_fingerprint")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "run_branch_manager success must fingerprint delivery before any PR routing"
+jq -e '.steps[] | select(.name == "delivery_fingerprint") | ([.outcomes[] | select(.name == "failure" and .next == "failed")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "delivery_fingerprint must fail the run loudly when identity cannot be computed"
+jq -e '.switches[] | select(.name == "route_delivery") | ([.conditions[] | select((.match | contains("state:open")) and .next == "stamp_open_url")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "route_delivery must send open deliveries to the URL stamp"
+jq -e '.switches[] | select(.name == "route_delivery") | ([.conditions[] | select((.match | contains("state:merged")) and .next == "stamp_merged_url")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "route_delivery must send merged deliveries to the recovery stamps"
+jq -e '.switches[] | select(.name == "route_delivery") | ([.conditions[] | select((.match | contains("state:closed")) and .next == "run_pair_programming_loop")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "route_delivery must send closed-unmerged deliveries to fresh development"
+jq -e '.steps[] | select(.name == "stamp_merged_protocol") | ([.outcomes[] | select(.name == "success" and .next == "recover_merged_ci")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "merged recovery must reconcile at the standing merge gate (recover_merged_ci)"
+jq -e '.steps[] | select(.name == "check_pr") | ([.outcomes[] | select(.name == "success" and .next == "route_pr")] | length) == 1' "${COMPILE_OUT}" >/dev/null \
+    || fail "check_pr classifies the OPEN delivery for route_pr"
 
 # criteria compile omits step writes, so pin them in the source, scoped to
 # the step blocks.
@@ -247,18 +243,15 @@ retry_create=$(sed -n '/^step "retry_create_pr" {/,/^}/p' "${ROOT_DIR}/main.chcl
 printf '%s' "${retry_create}" | grep -q 'data.internal.pr_url_retries.value + 1' \
     || fail "retry_create_pr must consume the retry budget"
 fail_step=$(sed -n '/^step "fail_missing_pr_url" {/,/^}/p' "${ROOT_DIR}/main.chcl")
-printf '%s' "${fail_step}" | grep -q 'KB-49: the PR step completed with an empty pr_url' \
+printf '%s' "${fail_step}" | grep -q 'KB-49' \
     || fail "fail_missing_pr_url must record the KB-49 failure reason for the run"
-store_step=$(sed -n '/^step "store_pr_url" {/,/^}/p' "${ROOT_DIR}/main.chcl")
-# KB-219: the gh pipeline moved into scripts/store_pr_url.sh.tftpl (rendered
-# by the step body) so it can sit under the shared gh_retry wrapper; the
-# pipefail contract moves with it.
-printf '%s' "${store_step}" | grep -q 'store_pr_url.sh.tftpl' \
-    || fail "store_pr_url must render scripts/store_pr_url.sh.tftpl (gh retry shim lives there)"
-printf '%s' "${store_step}" | grep -q 'gh_retry' \
-    || fail "store_pr_url render must pass the gh_retry shim into the template"
-grep -q 'set -o pipefail; pr_url=$(gh pr view' "${ROOT_DIR}/scripts/store_pr_url.sh.tftpl" \
-    || fail "store_pr_url script must run its gh pipeline under pipefail (a failed gh may not be masked as success)"
+fp_step=$(sed -n '/^step "delivery_fingerprint" {/,/^}/p' "${ROOT_DIR}/main.chcl")
+printf '%s' "${fp_step}" | grep -q 'delivery_fingerprint.sh.tftpl' \
+    || fail "delivery_fingerprint must render scripts/delivery_fingerprint.sh.tftpl"
+printf '%s' "${fp_step}" | grep -q 'gh_retry' \
+    || fail "delivery_fingerprint render must pass the gh_retry shim into the template"
+grep -q 'gh_retry gh pr list' "${ROOT_DIR}/scripts/delivery_fingerprint.sh.tftpl" \
+    || fail "delivery_fingerprint script must run its PR-list call under the gh_retry wrapper"
 
 echo "==> The retry budget variable exists with a bounded default"
 grep -q 'variable "max_pr_url_retries"' "${ROOT_DIR}/variables.chcl" \

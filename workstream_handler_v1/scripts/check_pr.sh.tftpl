@@ -1,7 +1,16 @@
 set -eu
 {{ .gh_retry }}
-branch=$(git branch --show-current)
-pr_json=$(gh pr view "$branch" --json number,state,reviewDecision,url || echo "")
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+# KB-328 durable fix (2026-10-25): the classifier runs against the card's
+# OWN PR BY NUMBER (from the delivery fingerprint), never by branch name —
+# gh's PR-per-branch lookup is a re-derivation that post-merge/refire states
+# poison (a recreated branch can resolve a foreign PR).
+target="${criteria_value_1}"
+if [ -z "$target" ]; then
+    target="$(git branch --show-current)"
+    echo "check_pr: no fingerprint PR number — falling back to branch '$target'" >&2
+fi
+pr_json=$(gh pr view "$target" --json number,state,reviewDecision,url || echo "")
 if [ -z "$pr_json" ]; then
     echo "status:no_pr"
     exit 0
