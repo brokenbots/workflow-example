@@ -1,0 +1,23 @@
+expected_ns={{ .expected_ns | shellquote }}
+
+set -eu
+# Deterministic labs assertion: the run's /data volume must be present and writable.
+# Namespace identity is additionally echoed from the pod's SA file for the transcript.
+if [ ! -d /data ]; then
+    echo "DATA_ASSERT: missing /data mount"
+    exit 10
+fi
+echo "DATA_WRITE" > /data/labs_smoke_probe.txt
+if [ "$(cat /data/labs_smoke_probe.txt)" != "DATA_WRITE" ]; then
+    echo "DATA_ASSERT: write verification failed"
+    exit 10
+fi
+NS_ACTUAL=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo unknown)
+if [ "$NS_ACTUAL" = "$expected_ns" ]; then
+    echo "NS_ASSERT : ok ($NS_ACTUAL)"
+else
+    echo "NS_ASSERT : mismatch (expected=$expected_ns actual=$NS_ACTUAL)"
+    exit 10
+fi
+echo "DATA_ASSERT: ok (/data writable)"
+exit 0
