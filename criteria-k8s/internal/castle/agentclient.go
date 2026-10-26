@@ -174,6 +174,49 @@ func NewServerClient(cfg Config, httpClient *http.Client) *ServerClient {
 	return &ServerClient{client: v1connect.NewServerServiceClient(httpClient, strings.TrimSuffix(cfg.Addr, "/")), addr: cfg.Addr}
 }
 
+// Submit records one workflow assignment (KB-338 deliverable 4: the
+// adapter's dispatch entry point). The caller MUST authenticate with an
+// agent identity: castle's handler keys the assignment's owner on
+// CallerCriteriaID, which an orchestrator identity never resolves, so
+// submitting rides the adapter's agent token. Ownership is sticky even
+// after a lease moves runs.overseer_id to the executing agent — the same
+// criteria identity keeps reading the disposition for the run's whole life.
+//
+// Required by castle: workflow_name + workflow_source + idempotency_key.
+func (s *ServerClient) Submit(ctx context.Context, req *v1.SubmitWorkflowAssignmentRequest) (*v1.SubmitWorkflowAssignmentResponse, error) {
+	if s == nil || s.addr == "" {
+		return nil, errors.New("castle server client: no address")
+	}
+	if req == nil {
+		return nil, errors.New("castle submit: nil request")
+	}
+	resp, err := s.client.SubmitWorkflowAssignment(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Msg, nil
+}
+
+// WatchRun opens the assignment run's event stream for the adapter's mirror
+// reads (decision 7): the envelopes the executing operator submits
+// (RunStarted, RunCompleted, RunFailed) are the only run-state vocabulary
+// the submitting side can observe, and the adapter maps them onto the board
+// ladder. Read-only observation surface: any authenticated identity may
+// subscribe; the adapter reads with the same submitter identity that owns
+// the assignment.
+func (s *ServerClient) WatchRun(ctx context.Context, runID string, sinceSeq uint64) (*connect.ServerStreamForClient[v1.Envelope], error) {
+	if s == nil || s.addr == "" {
+		return nil, errors.New("castle server client: no address")
+	}
+	if runID == "" {
+		return nil, errors.New("castle watch: run_id required")
+	}
+	return s.client.WatchRun(ctx, connect.NewRequest(&v1.WatchRunRequest{
+		RunId:    runID,
+		SinceSeq: sinceSeq,
+	}))
+}
+
 // Disposition returns the assignment's current queue state (control
 // package DispositionReader).
 func (s *ServerClient) Disposition(ctx context.Context, runID string) (*v1.GetAssignmentDispositionResponse, error) {

@@ -229,6 +229,26 @@ func NewAssignmentAgent(cfg AgentConfig, builder *RunBuilder, ns string, cl clie
 	return a
 }
 
+// AttachIdentity resolves an agent identity for non-Control consumers of
+// the assignment surface (the kanboard watcher's castle adapter,
+// KB-338 P0.3): a pre-provisioned token must carry its criteria id, else a
+// per-boot Register mints one and the returned token is the only credential
+// usable afterward. The identity resolves CallerCriteriaID on castle:
+// SubmitWorkflowAssignment's owner and GetAssignmentDisposition's gate both
+// key on it.
+//
+// The adapter never opens the Control stream, so castle's dispatch
+// (dispatchAssignment over Registered() controls) can never lease work to
+// it — the identity is a submitter, not a consumer. For the same reason no
+// heartbeat loop is required: the heartbeat keeps the agent online for the
+// dispatch gate only, and auth resolution reads the token row directly.
+func AttachIdentity(ctx context.Context, cfg AgentConfig, log logr.Logger) (AgentIdentity, error) {
+	// The attach path touches only cfg, the register seam and the dialer
+	// (for the Register-fallback token swap) — builder/client/events/
+	// dispositions stay unused, so the nils here never dereference.
+	return NewAssignmentAgent(cfg, nil, "", nil, nil, nil, log).attach(ctx)
+}
+
 func (a *AssignmentAgent) defaultRegister(ctx context.Context, req *v1.RegisterRequest) (*v1.RegisterResponse, error) {
 	svc := castle.NewAgentClient(castle.Config{Addr: a.cfg.Addr}, nil)
 	resp, err := svc.Register(ctx, connect.NewRequest(req))
