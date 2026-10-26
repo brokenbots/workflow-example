@@ -42,7 +42,7 @@ printf '#!/bin/sh\n"$@"\n' > "$TMP/gh_retry"; chmod +x "$TMP/gh_retry"
 gh_retry_line="$(grep -n '{{ *\.gh_retry *}}' "$TPL" | head -1 | cut -d: -f1)"
 cat > "$TMP/slots.awk" <<'AWK'
 index($0, "criteria_value_1=") == 1 && index($0, "{{") > 0 { sub(/=.*/, "=\"$1\""); print; next }
-index($0, "max_seconds=") == 1 && index($0, "{{") > 0 { sub(/={{ *\.merge_ci_max *}}/, "=600"); print; next }
+index($0, "max_seconds=") == 1 && index($0, "{{") > 0 { sub(/=\{\{ *\.merge_ci_max *\}\}/, "=600"); print; next }
 { print }
 AWK
 {
