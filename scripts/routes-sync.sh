@@ -6,8 +6,14 @@
 # KB-313 (ADR 307): the CM's run-config surfaces are retired — the sync touches
 # url/ref pins only, never adapterImages/env/volumes/secrets; adapter image tags
 # are per-project binding concerns (binding CMs), not pins this script owns.
+# KB-338 (P0.5 dual-read): per-project dispatch records migrate out of the
+# routes array project by project — --export-dispatch renders the records
+# fragment from the live array so the operator can stage, review, and land them
+# (the criteria-k8s dual-read serves record-carrying projects from their record
+# alone; the 322 follow-up deletes the array once every live lane carries one).
 #   scripts/routes-sync.sh --check   print the diff only (exit 1 if out of sync)
 #   scripts/routes-sync.sh           apply
+#   scripts/routes-sync.sh --export-dispatch   print {dispatch} fragment (stdout) + summary (stderr); never applies
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODE="${1:-apply}"
@@ -40,6 +46,34 @@ doc["data"]["routes.json"] = json.dumps(routes, indent=2)
 print(json.dumps(doc))
 PYEOF
 
+if [ "$MODE" = "--export-dispatch" ]; then
+    python3 - "$CUR" <<'PYEXP'
+import json, sys
+doc = json.loads(sys.argv[1])
+payload = json.loads(doc["data"]["routes.json"])
+dispatch = {}
+registered = set((payload.get("projectRegistry") or {}).keys())
+for route in payload.get("routes") or []:
+    project = route.get("project")
+    rule = {k: v for k, v in route.items() if k != "project"}
+    dispatch.setdefault(project, {"rules": []})["rules"].append(rule)
+    if project not in registered:
+        rule["__unregistered__"] = True
+for project, record in list(dispatch.items()):
+    bad = [r for r in record["rules"] if r.pop("__unregistered__", False)]
+    if bad:
+        print(f"WARNING: {len(bad)} route rule(s) for project {project!r} are not in projectRegistry — landing them as a record will fail validation (KB-311); add the registry entry first", file=sys.stderr)
+if not dispatch:
+    print("no routes to export — the routes array is empty or absent", file=sys.stderr)
+    sys.exit(1)
+print(json.dumps({"dispatch": dispatch}, indent=2))
+for project, record in dispatch.items():
+    names = ", ".join(r.get("name", "?") for r in record["rules"])
+    print(f"exported record {project!r}: {len(record['rules'])} rule(s) [{names}]", file=sys.stderr)
+print("next: review the fragment, merge it into the CM's routes.json payload, apply — the dual-read then serves this project from the record alone (KB-338 P0.5)", file=sys.stderr)
+PYEXP
+    exit 0
+fi
 if [ "$MODE" = "--check" ]; then
     # compare ONLY the rendered routes.json payload (CM metadata churns by itself:
     # resourceVersion/managedFields are not ours to pin)
