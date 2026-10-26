@@ -50,7 +50,7 @@ func assignmentFixture(runID string) *v1.WorkflowAssignment {
 
 // stubEvents records every Submit call.
 type stubEvents struct {
-	mu   sync.Mutex
+	mu    sync.Mutex
 	calls []string // "<runID>|<correlation>|<typeName>"
 }
 
@@ -265,6 +265,63 @@ func TestAgentProcessStampsProvenanceAndTargets(t *testing.T) {
 	assert.Equal(t, 0, events.count(), "stamp-only lane emits nothing, including terminal")
 }
 
+// assignmentWithTarget rebuilds the fixture envelope with one explicit
+// per-card target pin (the metadata rung under test).
+func assignmentWithTarget(runID, kind, ref string) *v1.WorkflowAssignment {
+	asg := assignmentFixture(runID)
+	asg.WorkflowSource = fmt.Sprintf(`{"kind":"criteria-workflow-assignment/1","ticket":"KB-338",`+
+		`"repo":"https://github.com/brokenbots/workflow-example.git","class":"default",`+
+		`"targetImages":{%q:%q}}`, kind, ref)
+	return asg
+}
+
+// TestAgentProcessFailsClosedOnInvalidTargetPin pins the metadata rung's
+// validation (PR #232 review): the envelope's per-card target pins pass
+// the SAME routes adapter-image rules every other lane enforces BEFORE
+// they reach the spec — an invalid kind or ref fails the assignment
+// closed (RunFailed row close, nothing created).
+func TestAgentProcessFailsClosedOnInvalidTargetPin(t *testing.T) {
+	for name, kindRef := range map[string][2]string{
+		"invalid adapter kind":  {"Shell_1", "localhost:5000/shell:pinned"},
+		"whitespace in ref":     {"shell", "localhost:5000/sh ell:pinned"},
+		"empty image reference": {"shell", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent, events, cl := agentFixture(t)
+			agent.process(context.Background(), assignmentWithTarget("run-badpin", kindRef[0], kindRef[1]))
+
+			assert.Empty(t, listCriteriaRuns(t, cl), "an invalid target pin must never stamp a CR")
+			require.Equal(t, 1, events.count(), "an invalid target pin must close the row as RunFailed")
+			runID, correlation, payloadType := splitEventCall(events.recorded()[0])
+			assert.Equal(t, "run-badpin", runID)
+			assert.Equal(t, fmt.Sprintf("%s-failclosed", castle.CorrelationRunTerminal), correlation)
+			assert.Equal(t, fmt.Sprintf("%T", runFailedPayload("x")), payloadType)
+		})
+	}
+}
+
+// TestAgentProcessNilClientNeverPanics pins the lane's ONE nil-client
+// policy (PR #232 review): process on a deployment whose direct cluster
+// client never initialized stamps nothing, closes nothing (castle expiry
+// is the backstop — nil client is infrastructure, not a bad assignment),
+// and above all never panics, the way findRecordedRun/bridgeStep already
+// degraded before the guards.
+func TestAgentProcessNilClientNeverPanics(t *testing.T) {
+	builder := &RunBuilder{Defaults: parityDefaults(), Routes: parityPayload(), Namespace: "criteria-jobs", Log: logr.Discard()}
+	agent := NewAssignmentAgent(AgentConfig{
+		Addr:       "http://castle-test:8080",
+		CriteriaID: "agent-a",
+		Token:      "pre-shared",
+		Name:       "operator-castor",
+		Project:    "castor",
+	}, builder, "criteria-jobs", nil, &stubEvents{}, DispositionReader(&stubDispositions{}), logr.Discard())
+	agent.identity = AgentIdentity{CriteriaID: "agent-a", Token: "pre-shared"}
+
+	assert.NotPanics(t, func() {
+		agent.process(context.Background(), assignmentFixture("run-nilcl"))
+	})
+}
+
 func TestAgentAttachRunRedeliveryReattaches(t *testing.T) {
 	agent, _, cl := agentFixture(t)
 	existing, reasons := agent.builder.BuildRun(context.Background(), decisionFixture())
@@ -345,9 +402,9 @@ func TestAgentBridgeTerminalMappings(t *testing.T) {
 		phase      criteriav1.CriteriaRunPhase
 		finalState string
 	}{
-		"verdict complete":                   {criteriav1.PhaseSucceeded, "handler_complete"},
-		"verdict need assistance":            {criteriav1.PhaseSucceeded, "need_assistance"},
-		"verdict failed":                     {criteriav1.PhaseFailed, "failed"},
+		"verdict complete":                     {criteriav1.PhaseSucceeded, "handler_complete"},
+		"verdict need assistance":              {criteriav1.PhaseSucceeded, "need_assistance"},
+		"verdict failed":                       {criteriav1.PhaseFailed, "failed"},
 		"succeeded without completing verdict": {criteriav1.PhaseSucceeded, ""},
 	}
 	for name, tc := range cases {

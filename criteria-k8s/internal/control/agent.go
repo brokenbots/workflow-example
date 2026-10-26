@@ -42,11 +42,12 @@ import (
 	"sync"
 	"time"
 
-	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	connect "connectrpc.com/connect"
-	"github.com/go-logr/logr"
+	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -542,8 +543,14 @@ func (a *AssignmentAgent) process(ctx context.Context, asg *v1.WorkflowAssignmen
 		return
 	}
 	// The envelope's per-card target pins merge into the stamped workflow
-	// BEFORE admission (the metadata rung lands on the record complete).
-	applyTargetMetadata(run, env.TargetImages)
+	// BEFORE admission (the metadata rung lands on the record complete);
+	// invalid pins fail the assignment closed — the metadata rung is the
+	// ladder's highest-precedence source and must never bypass the routes
+	// image rules straight onto a CR.
+	if err := applyTargetMetadata(run, env.TargetImages); err != nil {
+		a.failAssignmentClosed(ctx, asg, []string{err.Error()})
+		return
+	}
 	if !a.ownedByUs(ctx, runID) {
 		return
 	}
@@ -583,6 +590,18 @@ func (a *AssignmentAgent) ownedByUs(ctx context.Context, runID string) bool {
 // existing CR on a re-delivery (attempts incremented), or the freshly
 // stamped and admitted CR on first delivery.
 func (a *AssignmentAgent) attachRun(ctx context.Context, run *criteriav1.CriteriaRun, asg *v1.WorkflowAssignment) (*criteriav1.CriteriaRun, int, bool) {
+	if a.client == nil {
+		// One nil-client policy for the whole agent (KB-338 review): a
+		// deployment whose direct cluster client never initialized admits
+		// nothing and must not panic — the assignment stays under lease
+		// and castle expiry recovers, the same posture as a Create
+		// failure. No row close here: the lane cannot know the assignment
+		// itself was bad.
+		a.log.Error(errors.New("nil direct client"),
+			"assignment agent: no cluster client; assignment stays under lease (castle expiry recovers)",
+			"run", asg.GetRunId())
+		return nil, 0, false
+	}
 	if existing := a.findRecordedRun(ctx, asg.GetRunId()); existing != nil {
 		attempts := a.markAttempts(ctx, existing)
 		a.log.Info("assignment agent: re-delivered assignment — reattaching to the recorded run",
@@ -644,6 +663,14 @@ func (a *AssignmentAgent) markAttempts(ctx context.Context, run *criteriav1.Crit
 		run.Annotations = map[string]string{}
 	}
 	run.Annotations[AnnAssignmentAttempts] = strconv.Itoa(attempts + 1)
+	if a.client == nil {
+		// Same nil-client policy as attachRun (KB-338 review): the
+		// increment is not written through the API — the bridge continues
+		// on the read-back copy — and the lane never panics.
+		a.log.Error(errors.New("nil direct client"),
+			"assignment agent: attempts annotation not written (no cluster client)", "criteriaRun", run.Name)
+		return attempts + 1
+	}
 	if err := a.client.Update(ctx, run); err != nil {
 		a.log.Error(err, "assignment agent: attempts annotation update failed (bridge continues on the read-back copy)", "criteriaRun", run.Name)
 	}
@@ -654,10 +681,18 @@ func (a *AssignmentAgent) markAttempts(ctx context.Context, run *criteriav1.Crit
 // stamped workflow's adapterImages (the metadata rung of the KB-319
 // resolution chain: target_metadata > digest-verified event > binding >
 // defaults; conflicts gate on the stamped ImageConflictPolicy at
-// admission). Applied inline in the build path so the CR arrives complete.
-func applyTargetMetadata(run *criteriav1.CriteriaRun, targets map[string]string) {
+// admission). The pins validate against the SAME routes rules every other
+// lane's adapterImages enforce (adapter kind is a DNS-1123 label, ref
+// non-empty without whitespace) BEFORE the merge — the highest-precedence
+// source must not be the only unvalidated path into the spec — and a
+// rejected pin leaves the stamped spec untouched. Applied inline in the
+// build path so the CR arrives complete.
+func applyTargetMetadata(run *criteriav1.CriteriaRun, targets map[string]string) error {
 	if run == nil || len(targets) == 0 {
-		return
+		return nil
+	}
+	if err := routes.ValidateAdapterImages(targets); err != nil {
+		return fmt.Errorf("target metadata: %w", err)
 	}
 	if run.Spec.Workflow.AdapterImages == nil {
 		run.Spec.Workflow.AdapterImages = map[string]string{}
@@ -665,4 +700,5 @@ func applyTargetMetadata(run *criteriav1.CriteriaRun, targets map[string]string)
 	for kind, ref := range targets {
 		run.Spec.Workflow.AdapterImages[kind] = ref
 	}
+	return nil
 }

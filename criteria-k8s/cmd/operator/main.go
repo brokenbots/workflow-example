@@ -439,7 +439,8 @@ func main() {
 			logger.Error(agentTokenErr, "assignment agent lane: agent token file unreadable; falling back to the shared CASTLE_TOKEN")
 			agentToken = castleTokenFromEnv()
 		}
-		agentRoutesPayload, agentRoutesErr := loadShadowRoutes(*agentRoutesFile)
+		agentRoutesPath := resolveAgentRoutesPath(*agentRoutesFile, *shadowRoutesFile)
+		agentRoutesPayload, agentRoutesErr := loadShadowRoutes(agentRoutesPath)
 		if agentRoutesPayload == nil && agentRoutesErr == nil {
 			agentRoutesErr = fmt.Errorf("no routes payload configured: set --assignment-routes-file (or --shadow-routes-file); the lane cannot attribute runs without one")
 		}
@@ -448,7 +449,7 @@ func main() {
 			// not a degraded lane, it is an inert consumer — keep the
 			// operator alive, keep the lane off, name the fix in the log.
 			logger.Error(agentRoutesErr, "assignment agent lane disabled: no routes payload configured; set --assignment-routes-file (or --shadow-routes-file)",
-				"routesFile", *agentRoutesFile)
+				"routesFile", agentRoutesPath)
 		} else {
 			agentCfg := control.AgentConfig{
 				Addr:       agentAddr,
@@ -466,7 +467,7 @@ func main() {
 					logger.Error(err, "assignment agent lane exited")
 				}
 			}()
-			logger.Info("assignment agent lane enabled (executing)", "addr", agentAddr, "criteriaId", *agentCriteriaID, "project", *agentProject)
+			logger.Info("assignment agent lane enabled (executing)", "addr", agentAddr, "criteriaId", *agentCriteriaID, "project", *agentProject, "routesFile", agentRoutesPath)
 		}
 	}
 
@@ -621,6 +622,17 @@ func shadowRunnerDefaults() runspec.Defaults {
 		MaxAgentVisits:  getInt("MAX_AGENT_VISITS", 2),
 		ProviderBaseURL: getenv("PROVIDER_BASE_URL", "http://192.168.17.116:11434/v1"),
 	}
+}
+
+// resolveAgentRoutesPath picks the routes payload file the assignment
+// agent lane stamps against: an explicit --assignment-routes-file wins;
+// an empty one rides --shadow-routes-file; neither set leaves the lane
+// off (it cannot attribute runs without a payload).
+func resolveAgentRoutesPath(explicit, shadow string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return shadow
 }
 
 // loadShadowRoutes reads and validates the routes payload the spec mirror

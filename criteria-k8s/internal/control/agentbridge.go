@@ -25,8 +25,8 @@ import (
 	"time"
 
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
-	castle "github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
+	castle "github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
