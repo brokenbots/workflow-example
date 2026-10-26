@@ -764,9 +764,20 @@ func (w *watcher) poll(ctx context.Context) error {
 		}
 	}
 	for ticketID := range w.lastCards {
-		if _, ok := runs[ticketID]; !ok {
-			delete(w.lastCards, ticketID)
+		if _, hasRun := runs[ticketID]; hasRun {
+			continue
 		}
+		// Castle mode (KB-338): between the assignment submit and the
+		// operator's CR landing there is a legit window with no indexed
+		// run — the memo must survive that window, or every poll
+		// re-fires a fresh assignment (a new idempotency key each fire;
+		// the refire churn KB-302 parks, wearing a castle hat).
+		if w.adapter != nil {
+			if entry, ok := w.adapter.runs[ticketID]; ok && !entry.terminal {
+				continue
+			}
+		}
+		delete(w.lastCards, ticketID)
 	}
 
 	for _, task := range tasks {
@@ -845,6 +856,16 @@ func (w *watcher) poll(ctx context.Context) error {
 		if ph, ok := runs[ticketID]; ok && ph.active {
 			w.log.V(1).Info("run already active", "ticket", ticketID)
 			continue
+		}
+		// Castle mode: a submitted-but-not-yet-observed assignment is the
+		// lane's in-flight state — the operator's CR may lag a poll behind
+		// the submit, and the assignment (not the missing CR) is the
+		// activity to gate on (KB-338 deliverable 4).
+		if w.adapter != nil {
+			if entry, ok := w.adapter.runs[ticketID]; ok && !entry.terminal {
+				w.log.V(1).Info("castle assignment in flight", "ticket", ticketID, "run", entry.runID)
+				continue
+			}
 		}
 		// KB-302: fire on entry into the trigger column, not residency. With
 		// park-only reconciliation a settled run with no observable verdict

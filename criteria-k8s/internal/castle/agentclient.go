@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	connect "connectrpc.com/connect"
 	sdk "github.com/brokenbots/criteria/sdk"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	v1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
-	connect "connectrpc.com/connect"
 )
 
 // AssignmentEventFeed emits the assignment bridge's lifecycle events onto an
@@ -149,6 +149,7 @@ func (f *AssignmentEventFeed) retry(ctx context.Context, op string, attempt func
 	}
 	return fmt.Errorf("castle %s: %w", op, lastErr)
 }
+
 // ServerClient is the assignment bridge's disposition reader surface
 // (GetAssignmentDisposition, KB-338 deliverable 3): the desired-run
 // record's state read that gates every lifecycle submit — a run whose
@@ -197,6 +198,16 @@ func (s *ServerClient) Submit(ctx context.Context, req *v1.SubmitWorkflowAssignm
 	return resp.Msg, nil
 }
 
+// EnvelopeStream is the read view over a run's WatchRun stream — the four
+// operations *connect.ServerStreamForClient[v1.Envelope] performs, narrowed
+// so consumers hold a seam instead of the concrete connect type.
+type EnvelopeStream interface {
+	Receive() bool
+	Msg() *v1.Envelope
+	Err() error
+	Close() error
+}
+
 // WatchRun opens the assignment run's event stream for the adapter's mirror
 // reads (decision 7): the envelopes the executing operator submits
 // (RunStarted, RunCompleted, RunFailed) are the only run-state vocabulary
@@ -204,7 +215,7 @@ func (s *ServerClient) Submit(ctx context.Context, req *v1.SubmitWorkflowAssignm
 // ladder. Read-only observation surface: any authenticated identity may
 // subscribe; the adapter reads with the same submitter identity that owns
 // the assignment.
-func (s *ServerClient) WatchRun(ctx context.Context, runID string, sinceSeq uint64) (*connect.ServerStreamForClient[v1.Envelope], error) {
+func (s *ServerClient) WatchRun(ctx context.Context, runID string, sinceSeq uint64) (EnvelopeStream, error) {
 	if s == nil || s.addr == "" {
 		return nil, errors.New("castle server client: no address")
 	}

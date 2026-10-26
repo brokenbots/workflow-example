@@ -38,6 +38,7 @@ import (
 	sdkv1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
@@ -60,8 +61,7 @@ const (
 // rides the workflow_source envelope.
 type castleDispatchClient interface {
 	Submit(ctx context.Context, req *sdkv1.SubmitWorkflowAssignmentRequest) (*sdkv1.SubmitWorkflowAssignmentResponse, error)
-	Disposition(ctx context.Context, runID string) (*sdkv1.GetAssignmentDispositionResponse, error)
-	WatchRun(ctx context.Context, runID string, sinceSeq uint64) (*connect.ServerStreamForClient[sdkv1.Envelope], error)
+	WatchRun(ctx context.Context, runID string, sinceSeq uint64) (castle.EnvelopeStream, error)
 }
 
 // resolveDispatchMode validates the dispatch flag/env pair. Empty means
@@ -88,11 +88,15 @@ type submittedRun struct {
 	workflow string
 	// mirror state: the WatchRun ladder's observations.
 	started bool
-	// terminal marks the run's end observed on the mirror; endState
-	// carries the final state for the parity line.
+	// terminal marks the run's end observed on the mirror; endPhase /
+	// endState seed the synthetic runPhases recordParity feeds through the
+	// SHARED decision() — the parity compare measures divergence between
+	// the two lanes' observations of one run, not between two
+	// implementations of the ladder.
 	terminal bool
-	decision string
+	endPhase criteriav1.CriteriaRunPhase
 	endState string
+	decision string
 }
 
 // castleAdapter is the dispatch lane for one watcher project.
@@ -252,8 +256,10 @@ func isMirrorEnd(err error) bool {
 }
 
 // applyLadder maps one envelope onto the run's mirror state — decision 7's
-// board ladder over castle envelopes. Decision values use the reconcile
-// lane's vocabulary so the parity report compares the same terms.
+// board ladder over castle envelopes. It records only the OBSERVATION
+// (terminal, phase, final state); the decision itself is computed by
+// recordParity through the shared decision() so both lanes' decisions come
+// from the same rule.
 func (a *castleAdapter) applyLadder(entry *submittedRun, env *sdkv1.Envelope) {
 	if env == nil {
 		return
@@ -266,37 +272,34 @@ func (a *castleAdapter) applyLadder(entry *submittedRun, env *sdkv1.Envelope) {
 			return
 		}
 		entry.terminal = true
+		entry.endPhase = criteriav1.PhaseSucceeded
 		entry.endState = p.RunCompleted.GetFinalState()
-		switch {
-		case p.RunCompleted.GetFinalState() == finalStateHandlerComplete:
-			entry.decision = decisionDone
-		case isHumanHandoffFinalState(p.RunCompleted.GetFinalState()) || p.RunCompleted.GetFinalState() == finalStateFailed:
-			entry.decision = decisionReview
-		default:
-			// An empty or unrecognized verdict: abstain (the KB-50
-			// posture — never stamp Done off a verdict the lane cannot
-			// judge).
-			entry.decision = decisionNoop
-		}
 	case *sdkv1.Envelope_RunFailed:
 		if entry.terminal {
 			return
 		}
 		entry.terminal = true
-		entry.decision = decisionReview
+		entry.endPhase = criteriav1.PhaseFailed
+		entry.endState = finalStateFailed
 	}
 }
 
 // recordParity emits the shadow-run parity line once per (ticket, run)
-// when BOTH the mirror and the reconcile lane have terminal decisions.
+// when BOTH the mirror and the reconcile lane have observed a terminal.
+// The castle side's decision is the mirror's observation fed through the
+// SAME decision() the legacy lane uses (synthetic runPhases) — so a
+// mismatch means the two lanes DISAGREED about the run, never that two
+// ladders disagree about one input (the compare would be uninformative in
+// that case: it would just re-test this code against itself).
 func (a *castleAdapter) recordParity(ticketID string, entry *submittedRun, tasks []kanboard.Task, runsIndex map[string]runPhases) {
-	if !entry.terminal || entry.decision == "" {
+	if !entry.terminal || entry.decision != "" {
 		return
 	}
 	ph, ok := runsIndex[ticketID]
-	if !ok || (ph.latestPhase != criteriav1.PhaseSucceeded && ph.latestPhase != criteriav1.PhaseFailed) {
-		// The reconcile lane has no settled run for the ticket: nothing to
-		// compare yet (may be one poll behind).
+	if !ok || !ph.anyRun {
+		// The reconcile lane has no run for the ticket: nothing to compare
+		// yet (the operator's CR may be one poll behind the assignment
+		// flow). Leave the entry undecided; the next poll re-records.
 		return
 	}
 	var currentCol string
@@ -307,20 +310,29 @@ func (a *castleAdapter) recordParity(ticketID string, entry *submittedRun, tasks
 		}
 	}
 	legacy := ph.decision(currentCol)
+	// The synthetic record mirrors the CR's class (both lanes watched the
+	// same workflow; castle envelopes carry no class) and the mirror's
+	// terminal phase + final state.
+	castle := (&runPhases{
+		latestPhase:      entry.endPhase,
+		latestClass:      ph.latestClass,
+		latestFinalState: entry.endState,
+	}).decision(currentCol)
+	entry.decision = castle
 	a.parityDecided++
-	if legacy != entry.decision {
+	if castle != legacy {
 		a.parityMismatch++
-		a.log.Error(fmt.Errorf("legacy decide %s (finalState %q), castle decide %s (finalState %q)",
-			legacy, ph.latestFinalState, entry.decision, entry.endState),
+		a.log.Error(fmt.Errorf("legacy decide %s (phase %s finalState %q), castle decide %s (finalState %q)",
+			legacy, ph.latestPhase, ph.latestFinalState, castle, entry.endState),
 			"shadow parity: lanes disagree",
 			"ticket", ticketID, "run", entry.runID,
-			"legacyDecision", legacy, "castleDecision", entry.decision,
+			"legacyDecision", legacy, "castleDecision", castle,
 			"legacyFinalState", ph.latestFinalState, "castleFinalState", entry.endState)
 		return
 	}
 	a.parityAgreed++
 	a.log.Info("shadow parity: lanes agree",
-		"ticket", ticketID, "run", entry.runID, "decision", entry.decision)
+		"ticket", ticketID, "run", entry.runID, "decision", castle)
 }
 
 // logParityReport writes the per-poll aggregate — the acceptance's parity
