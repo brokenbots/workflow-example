@@ -272,6 +272,7 @@ lint: lint-go
 		k8s/tests/test_kanboard_watcher_watchdog.sh \
 		k8s/tests/test_routes_config.sh \
 		k8s/tests/test_pincheck_routes_class.sh \
+		k8s/tests/test_castle_verify.sh \
 		k8s/tests/test_criteria_binding.sh \
 		k8s/project-lifecycle.sh \
 		k8s/tests/test_project_lifecycle.sh \
