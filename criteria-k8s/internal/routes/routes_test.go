@@ -1909,3 +1909,233 @@ func TestMigrationWindowCoexistence(t *testing.T) {
 		t.Error("PostCutover() = true during the migration window, want false")
 	}
 }
+
+// ---------- KB-338 (P0.5 dual-read): per-project dispatch records ----------
+
+// dispatchPayload adds a "Runner" dispatch record on top of the legacy
+// routes array: the record is the migrated dispatch surface for Runner,
+// while "Other" keeps its legacy route unchanged.
+func dispatchPayload() *Payload {
+	p := validPayload()
+	p.Dispatch = map[string]DispatchEntry{
+		"Runner": {
+			Rules: []Route{
+				{
+					Name:     "runner-record",
+					Workflow: "wf-default",
+					States:   []string{"Triage"},
+				},
+				{
+					Name:     "runner-record-tagged",
+					Workflow: "wf-override",
+					Tags:     []string{"fast"},
+					TagMatch: TagMatchAny,
+					States:   []string{"Triage"},
+				},
+			},
+		},
+	}
+	return p
+}
+
+func TestResolveDispatchRecordServesProject(t *testing.T) {
+	// The record's rules resolve Runner exactly as the array rules would:
+	// tag-specific beats tag-less, project default is the tag-less rule's
+	// workflow.
+	p := dispatchPayload()
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", []string{"k8s-run"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.Name != "wf-default" {
+		t.Errorf("resolved workflow = %q, want record tag-less rule %q", sel.Name, "wf-default")
+	}
+	if sel.Route.Name != "runner-record" {
+		t.Errorf("matched route = %q, want %q", sel.Route.Name, "runner-record")
+	}
+	sel, err = p.Resolve(selectorFor("Runner", "Triage", []string{"k8s-run", "fast"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve(tagged): %v", err)
+	}
+	if sel.Name != "wf-override" {
+		t.Errorf("resolved workflow = %q, want record tag-specific rule %q", sel.Name, "wf-override")
+	}
+}
+
+func TestResolveDispatchRecordWinsOverLegacy(t *testing.T) {
+	// A record makes the record the project's dispatch surface: legacy
+	// array rules for the same project are dead config the resolver
+	// ignores, no matter how they would have matched.
+	p := dispatchPayload()
+	p.Routes = append(p.Routes, Route{
+		Name:     "runner-legacy",
+		Workflow: "wf-override",
+		Project:  "Runner",
+		States:   []string{"Triage"},
+	})
+	p.Dispatch["Runner"] = DispatchEntry{Rules: []Route{
+		{Name: "runner-record", Workflow: "wf-default", States: []string{"Triage"}},
+	}}
+	sel, err := p.Resolve(selectorFor("Runner", "Triage", []string{"k8s-run"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.Name != "wf-default" {
+		t.Errorf("resolved workflow = %q, want the record rule (wf-override is the dead legacy rule)", sel.Name)
+	}
+	if sel.Route.Name != "runner-record" {
+		t.Errorf("matched route = %q, want %q", sel.Route.Name, "runner-record")
+	}
+}
+
+func TestResolveWithoutRecordKeepsLegacyRoutes(t *testing.T) {
+	// Projects without a dispatch record keep the routes array, unchanged
+	// by a record landing on a sibling project.
+	p := dispatchPayload()
+	sel, err := p.Resolve(selectorFor("Other", "In Progress", []string{"k8s-run"}, nil))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if sel.Name != "wf-default" || sel.Route.Name != "other" {
+		t.Errorf("resolved = %q (route %q), want legacy rule other/wf-default", sel.Name, sel.Route.Name)
+	}
+}
+
+func TestProjectStatesFollowsRecord(t *testing.T) {
+	p := dispatchPayload()
+	if got := p.ProjectStates("Runner"); !slices.Equal(got, []string{"Triage"}) {
+		t.Errorf("ProjectStates(Runner) = %v, want the record's states [Triage]", got)
+	}
+	p.Dispatch["Runner"] = DispatchEntry{Rules: []Route{
+		{Name: "runner-ready", Workflow: "wf-default", States: []string{"Ready"}},
+	}}
+	if got := p.ProjectStates("Runner"); !slices.Equal(got, []string{"Ready"}) {
+		t.Errorf("ProjectStates(Runner) = %v, want [Ready] from the record (the watcher only queries the columns its project's dispatch declares)", got)
+	}
+	// TicketStates is the whole-payload union: record rule states join it.
+	if got := p.TicketStates(); !slices.Equal(got, []string{"Other-state"}) && !slices.Contains(got, "Ready") {
+		t.Errorf("TicketStates() = %v, want to include the record's Ready", got)
+	}
+}
+
+func TestValidateDispatchRecords(t *testing.T) {
+	newPayload := func() *Payload {
+		p := validPayload()
+		p.Dispatch = map[string]DispatchEntry{
+			"Runner": {Rules: []Route{
+				{Name: "runner-record", Workflow: "wf-default", States: []string{"Triage"}},
+			}},
+		}
+		return p
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Payload)
+		want   string
+	}{
+		{
+			name:   "empty rules",
+			mutate: func(p *Payload) { p.Dispatch["Runner"] = DispatchEntry{} },
+			want:   "rules must not be empty",
+		},
+		{
+			name: "duplicate rule name within record",
+			mutate: func(p *Payload) {
+				p.Dispatch["Runner"] = DispatchEntry{Rules: []Route{
+					{Name: "dup", Workflow: "wf-default", States: []string{"Triage"}},
+					{Name: "dup", Workflow: "wf-override", States: []string{"Triage"}},
+				}}
+			},
+			want: "not unique within the record",
+		},
+		{
+			name: "unknown workflow",
+			mutate: func(p *Payload) {
+				p.Dispatch["Runner"] = DispatchEntry{Rules: []Route{
+					{Name: "bad", Workflow: "no-such-workflow", States: []string{"Triage"}},
+				}}
+			},
+			want: "not present in workflowLibrary",
+		},
+		{
+			name: "rule project disagrees with record key",
+			mutate: func(p *Payload) {
+				p.Dispatch["Runner"] = DispatchEntry{Rules: []Route{
+					{Name: "mismatched", Workflow: "wf-default", Project: "Other", States: []string{"Triage"}},
+				}}
+			},
+			want: "must not declare project",
+		},
+		{
+			name: "bad tagMatch vocabulary",
+			mutate: func(p *Payload) {
+				p.Dispatch["Runner"] = DispatchEntry{Rules: []Route{
+					{Name: "bad", Workflow: "wf-default", TagMatch: "some", States: []string{"Triage"}},
+				}}
+			},
+			want: "tagMatch must be",
+		},
+	}
+	for _, tc := range cases {
+		p := newPayload()
+		tc.mutate(p)
+		if err := p.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: Validate err = %v, want it to mention %q", tc.name, err, tc.want)
+		}
+	}
+	// The same record set that rejects with mutations validates clean.
+	if err := newPayload().Validate(); err != nil {
+		t.Errorf("Validate(dispatchPayload) = %v, want nil", err)
+	}
+}
+
+func TestParseDispatchDefaultsOmittedStates(t *testing.T) {
+	// A record rule omitting states defaults to [Triage] exactly as an
+	// array rule does; an explicit empty states list still rejects.
+	raw := `{
+		"apiVersion": "criteria.brokenbots.dev/v1",
+		"kind": "Routes",
+		"workflowLibrary": {"wf-default": {"type": "image", "image": "localhost:5000/wf:dev", "namespace": "criteria-jobs"}},
+		"routes": [{"name": "intake", "workflow": "wf-default", "project": "Runner"}],
+		"dispatch": {"Runner": {"rules": [{"name": "runner-record", "workflow": "wf-default"}]}}
+	}`
+	p, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, r := range p.Dispatch["Runner"].Rules {
+		if !slices.Equal(r.States, []string{DefaultState}) {
+			t.Errorf("record rule states = %v, want defaulted [%s]", r.States, DefaultState)
+		}
+	}
+	bad := strings.Replace(raw, `"workflow": "wf-default"}]`, `"workflow": "wf-default", "states": []}]`, 1)
+	if _, err := Parse([]byte(bad)); err == nil || !strings.Contains(err.Error(), "states must not be empty") {
+		t.Errorf("Parse(empty states in record) err = %v, want it to reject the empty list", err)
+	}
+}
+
+func TestDeprecationWarningsFlagDeadLegacyRules(t *testing.T) {
+	// A project with a record and leftover array rules surfaces the dead
+	// config so the KB-322 deletion pass knows the exact size; projects
+	// without records never warn.
+	p := dispatchPayload()
+	warnings := p.DeprecationWarnings()
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, `dispatch["Runner"]`) && strings.Contains(w, "2 routes-array rule(s)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("DeprecationWarnings() = %v, want the Runner dead-rules warning", warnings)
+	}
+	// A record with no legacy rules is not dead config: no dispatch
+	// warning surfaces for it.
+	p2 := dispatchPayload()
+	p2.Routes = slices.DeleteFunc(p2.Routes, func(r Route) bool { return r.Project == "Runner" })
+	for _, w := range p2.DeprecationWarnings() {
+		if strings.Contains(w, `dispatch["Runner"]`) {
+			t.Errorf("DeprecationWarnings() warned on dead rules with none present: %q", w)
+		}
+	}
+}
