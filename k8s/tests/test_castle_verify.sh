@@ -123,6 +123,7 @@ eq('malformed ignored', podstateSeqs([null, {}, { seq: 'x', adapterEvent: { kind
   eq('snake prefix mismatch', snake.expectedCriteriaMatch, false);
   const rejected = dispositionVerdict({ state: 'REJECTED', rejectionReason: 'no eligible agent' });
   eq('rejected reason', rejected.rejectionReason, 'no eligible agent');
+  eq('disposition ts flattened', dispositionVerdict({ state: 'LEASED', updatedAt: { seconds: '1793045493' } }).updatedAt, '2026-10-26T20:11:33Z (unix 1793045493)');
 }
 
 // --- run row: project field absence is an observation, not a failure ---
