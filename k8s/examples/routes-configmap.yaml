@@ -43,10 +43,22 @@
 # k8s/examples/binding-typescript-sdk.yaml — the acceptance pair: THE SAME
 # kanboard_develop_v1 tree executed with different bindings, identical tree
 # digest); the intake stamps only {workflow ref, project binding ref, class,
-# secrets lane} for it. Entries without the marker (the two live projects
-# here) keep the pre-cutover behavior: binding-shaped data still rides the
-# workflowLibrary entries until KB-313 deletes them (binding-first,
-# deletion second).
+# secrets lane} for it. Entries without the marker (the live projects —
+# 'Criteria K8s Workflow Runner', 'Kanboard Tickets', and 'Criteria Go Dev'
+# after KB-338's honest stamp) keep the pre-cutover behavior: binding-shaped
+# data still rides the workflowLibrary entries until KB-313 deletes them
+# (binding-first, deletion second).
+#
+# KB-338 (honest stamp): 'Criteria Go Dev' carried cutover: done with zero
+# runs ever executed through its binding — a claimed cutover without
+# evidence. The marker is withdrawn until the go-dev canary produces a real
+# run (binding-first, KB-311: the binding renders first, the marker flips
+# after the run lands); project-lifecycle verify, which asserts the
+# post-cutover shape, stays red for that project until then. The binding
+# (k8s/examples/binding-criteria-go-dev.yaml) is complete and stays;
+# pre-cutover serving keeps the pinned global workflowLibrary entry
+# (kanboard-develop-url). 'TypeScript SDK' marks done on actual canary
+# evidence.
 #
 # KB-313 (ADR 307): the global CM is a thin catalog — workflow trees +
 # interface refs + projectRegistry + route rules, nothing else. The four
@@ -894,8 +906,7 @@ data:
           "namespace": "criteria-go-dev",
           "repos": [
             "brokenbots/criteria-go-dev"
-          ],
-          "cutover": "done"
+          ]
         },
         "TypeScript SDK": {
           "namespace": "typescript-sdk",

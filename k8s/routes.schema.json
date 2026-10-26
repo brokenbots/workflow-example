@@ -62,6 +62,20 @@
       "items": {
         "$ref": "#/definitions/route"
       }
+    },
+    "dispatch": {
+      "type": "object",
+      "description": "Per-project castle dispatch records (KB-338, P0.5 dual-read): Kanboard project name -> the project's card-firing rules, migrated project-by-project out of the 'routes' array. Presence decides the read path per project — a project with a record is served by its rules alone (the record is the authoritative dispatch surface, matching KB-311's binding-first model), while projects without a record keep the legacy array. Rule vocabulary matches 'route' verbatim (states/tag subsets/configRef), so a migrated project resolves exactly as its array rules did; 'project' must be absent on record rules (the record key is the project — a mismatching member rejects). The KB-322 follow-up deletes the array once every live project carries records.",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "description": "Kanboard project name as the ticket carries it (free-form: spaces allowed).",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/dispatchEntry"
+      }
     }
   },
   "allOf": [
@@ -687,6 +701,82 @@
         "configRef": {
           "$ref": "#/definitions/label",
           "description": "Per-repo config this route's runs execute under (KB-103): a configLibrary entry name whose ConfigMap the operator pins and renders. Must exist in configLibrary. The explicit route binding outranks a config label in the watcher's configured configs label group. KB-154: binding a tag-group entry here makes the route itself the tag selector (its tags match the route's tag subsets via the CRI-217 tag ordering)."
+        }
+      }
+    },
+    "dispatchEntry": {
+      "type": "object",
+      "description": "One project's dispatch record (KB-338, P0.5 dual-read): the project's card-firing rules, in the Route vocabulary verbatim. Its rules are matched by state and tag subset exactly like the routes array (tag-specific beats tag-less); an empty rules list is a dispatch black hole, not a no-op, so it rejects.",
+      "additionalProperties": false,
+      "required": [
+        "rules"
+      ],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "description": "The project's dispatch rules. Names are unique within the record; the record's project must exist in projectRegistry when the registry is present.",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/dispatchRule"
+          }
+        }
+      }
+    },
+    "dispatchRule": {
+      "$comment": "A dispatch record rule (KB-338): Route-shaped, with the project semantics changed — 'project' is NOT required here (the record key is the project) and a member that disagrees with that key rejects at validation time (the shipped jsonschema cannot cross-reference the map key; criteria-k8s/internal/routes' validator enforces it).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "workflow"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/label",
+          "description": "Rule name; unique within the record carrying it."
+        },
+        "workflow": {
+          "$ref": "#/definitions/label",
+          "description": "Name of the workflow-library object this rule assigns to matched tickets. Must exist in workflowLibrary."
+        },
+        "project": {
+          "type": "string",
+          "description": "Not a record-rule member: the record key is the project. May be absent or restate the record key verbatim; anything else rejects.",
+          "minLength": 1
+        },
+        "tags": {
+          "type": "array",
+          "description": "Tag subset a ticket's labels must satisfy for this rule to match. Empty or omitted matches any ticket.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "tagMatch": {
+          "description": "Subset semantics for 'tags': all = the ticket's labels include every listed tag (default); any = the ticket's labels include at least one listed tag.",
+          "enum": [
+            "all",
+            "any"
+          ],
+          "default": "all"
+        },
+        "states": {
+          "type": "array",
+          "description": "Workflow state names a ticket must currently be in for this rule to match. Omitted defaults to [\"Triage\"] (CRI-218, ADR-0005 §3.4); an explicit empty or null list is rejected.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "default": [
+            "Triage"
+          ],
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "configRef": {
+          "$ref": "#/definitions/label",
+          "description": "Per-repo config this rule's runs execute under (KB-103); must exist in configLibrary. Same precedence as the routes array: the explicit rule binding outranks a configs-group label."
         }
       }
     },

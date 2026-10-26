@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/binding"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/kanboard"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
@@ -76,12 +78,89 @@ const (
 	finalStateAwaitingHuman   = "awaiting_human"
 )
 
+// Board decision vocabulary shared by the reconcile lane and the castle
+// mirror (KB-338 shadow-run compare, decision 5): both lanes name their
+// outcome for a settled run in the same terms so the parity report
+// compares apples to apples. decisionNoop covers every "the lane makes no
+// card move" path — in-flight runs, triage-class successes, unverified or
+// unrecognized verdicts.
+const (
+	decisionNoop   = "noop"
+	decisionReview = "review"
+	decisionDone   = "done"
+)
+
 // isHumanHandoffFinalState reports whether a workflow verdict parked the
 // ticket with a human (the work is not complete): the need_assistance
 // terminal or its legacy awaiting_human spelling (old pinned trees still
 // declare awaiting_human until their pins are re-armed; KB-269).
 func isHumanHandoffFinalState(finalState string) bool {
 	return finalState == finalStateNeedAssistance || finalState == finalStateAwaitingHuman
+}
+
+// decision is the reconcile lane's board decision for a ticket's current
+// run state — the mover's switch below, as a pure value so the castle
+// adapter's parity report can derive the legacy lane's decision from the
+// same code instead of re-implementing it (KB-338 shadow-run compare:
+// parity compares two lanes reading one truth, not two implementations of
+// the ladder). currentCol is the task's present column name; the KB-269
+// Done-repair branch keys on it.
+//
+// The branches are the mover's semantics verbatim (KB-23: judge a dev-class
+// success by the workflow's verdict, not the phase; KB-269: both need_assistance
+// spellings mean a human holds the ticket; KB-50: no Done stamp on an
+// unobservable verdict; KB-302: park-only while a run is in flight, and a
+// Failed run's one Review move).
+func (ph runPhases) decision(currentCol string) string {
+	switch ph.latestPhase {
+	case criteriav1.PhaseSucceeded:
+		if ph.latestClass == criteriav1.RunClassTriage {
+			return decisionNoop
+		}
+		switch {
+		case isHumanHandoffFinalState(ph.latestFinalState) || ph.latestFinalState == finalStateFailed:
+			// KB-269: the need_assistance terminal and its legacy
+			// awaiting_human spelling both mean a human holds the ticket.
+			// The work is not complete. A Done stamp that predates the
+			// verdict — applied by a poll that saw the Job-derived
+			// Succeeded phase while the castle observation had not yet
+			// landed the terminal state — must be repaired into the
+			// review column; every other column reflects the workflow's
+			// own bookkeeping or the route's re-fire trigger and is left
+			// untouched.
+			if currentCol != doneColumnName {
+				return decisionNoop
+			}
+			return decisionReview
+		case ph.latestFinalState == finalStateHandlerComplete:
+			// handler_complete delivered the work — and since the KB-49
+			// route guard the workflow itself refuses a handler success
+			// with an empty pr_url (flag_missing_pr_url fails the run
+			// loudly), a handler_complete verdict implies a merged PR.
+			// KB-101 removed Status.PRNumber (the speculative castle
+			// pr_url consumption — no castle build ever published
+			// run.metadata, so the field was permanently empty and could
+			// never gate anything): the verdict plus the workflow's own
+			// KB-49 guard are the PR evidence now.
+			return decisionDone
+		default:
+			// KB-50: an empty verdict is an unverified run — the
+			// workflow's terminal has not been observed yet, or will not
+			// be. An unrecognized terminal is a future terminal this
+			// watcher predates: abstain rather than stamp Done over a
+			// verdict the watcher does not understand.
+			return decisionNoop
+		}
+	case criteriav1.PhaseFailed:
+		// KB-302: the Failed park is the one mutation a failure earns the
+		// card — into Review, once, with one accurate comment. Refire
+		// decisions belong to the shepherd.
+		return decisionReview
+	default:
+		// KB-302: park-only. A run in flight (Pending, Running, or the
+		// phases this watcher predates) means wait.
+		return decisionNoop
+	}
 }
 
 // nowUnix is the run-name timestamp seam; tests override it so two runs
@@ -109,6 +188,15 @@ var (
 	workflowsTagGroup = flag.String("kanboard-workflows-tag-group", getenv("KANBOARD_WORKFLOWS_TAG_GROUP", "workflows"), "Tag group whose tags name a workflow overriding the route's project default (empty disables overrides)")
 	configsTagGroup   = flag.String("kanboard-configs-tag-group", getenv("KANBOARD_CONFIGS_TAG_GROUP", "configs"), "Tag group whose tags name a per-repo config (KB-103 configLibrary entry) for tasks whose route carries no configRef (empty disables the overrides)")
 	routingTags       = flag.String("kanboard-routing-tags", getenv("KANBOARD_ROUTING_TAGS", ""), "Comma-separated task tags that are routing signals (e.g. component tags), never workflow-override candidates; they join the built-in exemption filter (empty disables the extra exemptions)")
+	// KB-338 (P0.3): the dispatch-mode kill switch and its castle
+	// credentials. legacy is today's behavior verbatim; castle submits
+	// assignments to castle Control instead of stamping the CR locally.
+	// Unknown values fail the boot loud (os.Exit(1)); an empty value is
+	// legacy so existing deployments keep running unconfigured.
+	dispatchMode             = flag.String("dispatch-mode", getenv("CRITERIA_DISPATCH_MODE", dispatchModeLegacy), "Dispatch mode: \"legacy\" (default) stamps the CriteriaRun itself; \"castle\" submits a WorkflowAssignment to castle Control and the project's operator agent stamps the CR. The reconcile/mirror lane is unchanged in both modes (shadow-run, decision 5)")
+	castleAddr               = flag.String("castle-addr", getenv("CRITERIA_CASTLE_ADDR", ""), "Castle Connect endpoint (e.g. http://castle.criteria-jobs.svc.cluster.local:8080); required in castle mode")
+	castleAgentTokenFlag     = flag.String("castle-agent-token", getenv("CRITERIA_CASTLE_AGENT_TOKEN", ""), "Castle agent submitter token (pre-provisioned criteria token; the identity the adapter owns assignments with)")
+	castleAgentTokenFileFlag = flag.String("castle-agent-token-file", getenv("CRITERIA_CASTLE_AGENT_TOKEN_FILE", ""), "File holding the castle agent token (single line; overrides the default secret path)")
 )
 
 // watcherScheme builds the scheme main() serves the watcher's k8s client
@@ -203,11 +291,89 @@ func main() {
 		log:               logger,
 	}
 
+	mode, err := resolveDispatchMode(*dispatchMode)
+	if err != nil {
+		logger.Error(err, "invalid dispatch mode; refusing to start")
+		os.Exit(1)
+	}
+
 	ctx := ctrl.SetupSignalHandler()
+
+	if mode == dispatchModeCastle {
+		// Castle dispatch boot (KB-338 deliverable 4): resolve the adapter's
+		// submitter credential, attach the identity (a Register fallback
+		// mints the token if none was pre-provisioned), and hand the run
+		// service client to the adapter. Any failure here exits loud — the
+		// pod restarts and retries, and a half-attached adapter must never
+		// silently fall back to stamping CRs itself (the kill switch is the
+		// env/flag, not a runtime fallback).
+		token, err := castleAgentToken(*castleAgentTokenFlag, *castleAgentTokenFileFlag)
+		if err != nil {
+			logger.Error(err, "resolving castle agent token")
+			os.Exit(1)
+		}
+		identity, err := control.AttachIdentity(ctx, control.AgentConfig{
+			Addr:       *castleAddr,
+			Token:      token,
+			CriteriaID: getenv("CRITERIA_CASTLE_AGENT_CRITERIA_ID", ""),
+			Name:       getenv("CRITERIA_CASTLE_AGENT_NAME", defaultCastleAgentName),
+		}, logger)
+		if err != nil {
+			logger.Error(err, "castle dispatch: attaching agent identity")
+			os.Exit(1)
+		}
+		logger.Info("castle dispatch mode enabled; fires submit assignments through Control (owner id attached)",
+			"addr", *castleAddr, "identity", identity.CriteriaID)
+		w.dispatchMode = mode
+		w.adapter = newCastleAdapter(castle.NewServerClient(castle.Config{
+			Addr:  *castleAddr,
+			Token: identity.Token,
+		}, nil), *projectName, logger)
+	}
+
 	if err := w.run(ctx); err != nil {
 		logger.Error(err, "watcher exited")
 		os.Exit(1)
 	}
+}
+
+// defaultCastleSecretPath mirrors the kanboard token secret convention:
+// the deployment mounts the castle agent token file here when the env/flag
+// carries nothing explicit.
+const (
+	defaultCastleSecretPath = "/secrets/criteria_castle_agent_token"
+	defaultCastleAgentName  = "criteria-kanboard-adapter"
+)
+
+// castleAgentToken resolves the adapter's submitter credential: the
+// explicit token wins, then the named file (trimmed single line), then the
+// mounted default secret, then an error naming every source checked.
+func castleAgentToken(explicit, file string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	readSecret := func(path string) (string, error) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		token := strings.TrimSpace(string(b))
+		if token == "" {
+			return "", fmt.Errorf("file holds no token")
+		}
+		return token, nil
+	}
+	if file != "" {
+		token, err := readSecret(file)
+		if err != nil {
+			return "", fmt.Errorf("castle agent token file %s: %w", file, err)
+		}
+		return token, nil
+	}
+	if token, err := readSecret(defaultCastleSecretPath); err == nil {
+		return token, nil
+	}
+	return "", fmt.Errorf("no castle agent token: set --castle-agent-token (CRITERIA_CASTLE_AGENT_TOKEN) or --castle-agent-token-file (CRITERIA_CASTLE_AGENT_TOKEN_FILE), or mount it at %s", defaultCastleSecretPath)
 }
 
 func getenv(key, fallback string) string {
@@ -306,7 +472,13 @@ type watcher struct {
 	// moving columns again — including the shepherd's re-arm move back to
 	// a trigger column — is what earns a fire. In-memory only.
 	lastCards map[string]int
-	log       logr.Logger
+	// dispatchMode is the resolved kill switch (KB-338 decision 5:
+	// legacy|castle, empty parsed as legacy at boot) and adapter the
+	// castle dispatch client behind it — nil in legacy mode, where every
+	// code path below behaves exactly as before.
+	dispatchMode string
+	adapter      *castleAdapter
+	log          logr.Logger
 }
 
 func (w *watcher) run(ctx context.Context) error {
@@ -592,9 +764,20 @@ func (w *watcher) poll(ctx context.Context) error {
 		}
 	}
 	for ticketID := range w.lastCards {
-		if _, ok := runs[ticketID]; !ok {
-			delete(w.lastCards, ticketID)
+		if _, hasRun := runs[ticketID]; hasRun {
+			continue
 		}
+		// Castle mode (KB-338): between the assignment submit and the
+		// operator's CR landing there is a legit window with no indexed
+		// run — the memo must survive that window, or every poll
+		// re-fires a fresh assignment (a new idempotency key each fire;
+		// the refire churn KB-302 parks, wearing a castle hat).
+		if w.adapter != nil {
+			if entry, ok := w.adapter.runs[ticketID]; ok && !entry.terminal {
+				continue
+			}
+		}
+		delete(w.lastCards, ticketID)
 	}
 
 	for _, task := range tasks {
@@ -674,6 +857,16 @@ func (w *watcher) poll(ctx context.Context) error {
 			w.log.V(1).Info("run already active", "ticket", ticketID)
 			continue
 		}
+		// Castle mode: a submitted-but-not-yet-observed assignment is the
+		// lane's in-flight state — the operator's CR may lag a poll behind
+		// the submit, and the assignment (not the missing CR) is the
+		// activity to gate on (KB-338 deliverable 4).
+		if w.adapter != nil {
+			if entry, ok := w.adapter.runs[ticketID]; ok && !entry.terminal {
+				w.log.V(1).Info("castle assignment in flight", "ticket", ticketID, "run", entry.runID)
+				continue
+			}
+		}
 		// KB-302: fire on entry into the trigger column, not residency. With
 		// park-only reconciliation a settled run with no observable verdict
 		// leaves the card parked on the trigger column; firing on residency
@@ -686,12 +879,27 @@ func (w *watcher) poll(ctx context.Context) error {
 				"ticket", ticketID, "column", task.ColumnName)
 			continue
 		}
+		if w.adapter != nil {
+			// Castle mode (KB-338 deliverable 4): the fire is an assignment
+			// submission, not a local CR stamp. Everything above — the tag
+			// gate, route resolution, repo extraction, the active-run gate
+			// and the KB-302 entry memo — gates the fire exactly as in
+			// legacy mode; the operator's agent owns the CR from here.
+			w.adapter.fire(ctx, task, repoURL, sel)
+			continue
+		}
 		run := w.buildCriteriaRun(ctx, task, repoURL, sel, cutover)
 		if err := w.client.Create(ctx, run); err != nil {
 			w.log.Error(err, "creating CriteriaRun", "ticket", ticketID)
 			continue
 		}
 		w.log.Info("created CriteriaRun", "ticket", ticketID, "name", run.Name, "repoUrl", repoURL, "workflow", sel.Name)
+	}
+	if w.adapter != nil {
+		// Shadow-run compare (delivery decision 5): drain the castle mirror
+		// over every in-flight submitted run and log the parity report
+		// against the reconcile lane's decisions for this poll's index.
+		w.adapter.mirror(ctx, tasks, runs)
 	}
 	return nil
 }
@@ -905,73 +1113,36 @@ type runPhases struct {
 // the column changed. The caller updates its in-memory task copy so the
 // firing loop sees the post-reconciliation column.
 func (w *watcher) reconcileTaskColumn(ctx context.Context, task kanboard.Task, ph runPhases) (int, bool) {
-	var target string
-	switch ph.latestPhase {
-	case criteriav1.PhaseSucceeded:
-		if ph.latestClass == criteriav1.RunClassTriage {
-			return task.ColumnID, false
-		}
-		// KB-23: judge a dev-class success by the workflow's verdict, not
-		// the phase — the runner job exits 0 even when the workflow ended
-		// in its failure terminal.
-		switch {
-		case isHumanHandoffFinalState(ph.latestFinalState) || ph.latestFinalState == finalStateFailed:
-			// KB-269: the need_assistance terminal and its legacy
-			// awaiting_human spelling both mean a human holds the ticket.
-			// The work is not complete. A Done stamp that predates the
-			// verdict — applied by a poll that saw the Job-derived
-			// Succeeded phase while the castle observation had not yet
-			// landed the terminal state — must be repaired into the
-			// review column; every other column reflects the workflow's
-			// own bookkeeping or the route's re-fire trigger and is left
-			// untouched.
-			if task.ColumnName != doneColumnName {
-				return task.ColumnID, false
-			}
-			target = reviewColumnName
-		case ph.latestFinalState == finalStateHandlerComplete:
-			// handler_complete delivered the work — and since the KB-49
-			// route guard the workflow itself refuses a handler success with
-			// an empty pr_url (flag_missing_pr_url fails the run loudly), a
-			// handler_complete verdict implies a merged PR. KB-101 removed
-			// Status.PRNumber (the speculative castle pr_url consumption —
-			// no castle build ever published run.metadata, so the field was
-			// permanently empty and could never gate anything): the verdict
-			// plus the workflow's own KB-49 guard are the PR evidence now.
-			target = doneColumnName
-		case ph.latestFinalState == "":
-			// KB-50: an empty verdict is an unverified run — the workflow's
-			// terminal has not been observed yet (castle observation lag), or
-			// will not be (record-derived terminal, castle observation
-			// disabled). The Job-derived Succeeded phase is exactly the
-			// signal that masks a failure (the engine exits 0 for any
-			// terminal), so the watcher must not stamp Done off the pod
-			// phase alone; the verdict lands on a later poll and re-fires
-			// this reconcile, and a Done stamp predating a failure verdict
-			// is still repaired by the branch above.
-			w.log.Info("workflow verdict not observable on the run; not marking Done",
-				"ticket", task.Identifier(), "run", ph.latestRun)
-			return task.ColumnID, false
-		default:
-			// An unrecognized terminal value (a future terminal this
-			// watcher predates): abstain rather than silently stamp Done
-			// over a verdict the watcher does not understand.
-			return task.ColumnID, false
-		}
-	case criteriav1.PhaseFailed:
-		// KB-302: the Failed park is the one mutation a failure earns the
-		// card — into Review, once, with one accurate comment. There is no
-		// automated refire behind this move: Review matches no route trigger
-		// column, and refire decisions belong to the shepherd.
-		target = reviewColumnName
-	default:
-		// KB-302: park-only. A run in flight (Pending, Running, or the
-		// phases this watcher predates) means wait — the watcher fires runs
-		// from the route trigger columns and owns the failure park, not
-		// in-flight card moves.
+	// KB-50's noisy branch stays at the call site: the abstain on an
+	// observable-but-missing verdict deserves its poll log, while the
+	// mover consumes the shared decision vocabulary (same values the
+	// castle adapter's parity report compares; KB-302 park-only in flight;
+	// one Failed move with one comment; the KB-269 Done repair).
+	if ph.decision(task.ColumnName) == decisionNoop && ph.latestPhase == criteriav1.PhaseSucceeded &&
+		ph.latestClass != criteriav1.RunClassTriage && ph.latestFinalState == "" {
+		// KB-50: an empty verdict is an unverified run — the workflow's
+		// terminal has not been observed yet (castle observation lag), or
+		// will not be (record-derived terminal, castle observation
+		// disabled). The Job-derived Succeeded phase is exactly the
+		// signal that masks a failure (the engine exits 0 for any
+		// terminal), so the watcher must not stamp Done off the pod
+		// phase alone; the verdict lands on a later poll and re-fires
+		// this reconcile, and a Done stamp predating a failure verdict
+		// is still repaired by the branch above.
+		w.log.Info("workflow verdict not observable on the run; not marking Done",
+			"ticket", task.Identifier(), "run", ph.latestRun)
 		return task.ColumnID, false
 	}
-	if target == "" || target == task.ColumnName {
+	var target string
+	switch ph.decision(task.ColumnName) {
+	case decisionReview:
+		target = reviewColumnName
+	case decisionDone:
+		target = doneColumnName
+	default:
+		return task.ColumnID, false
+	}
+	if target == task.ColumnName {
 		return task.ColumnID, false
 	}
 	newCol, err := w.kb.MoveTaskToColumn(ctx, task.ID, target)

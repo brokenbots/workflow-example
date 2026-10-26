@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -305,6 +306,46 @@ func TestShadowCastleTokenFromEnv(t *testing.T) {
 	})
 }
 
+// TestAgentCastleTokenFromEnv pins the assignment agent lane's token
+// resolution (KB-338): agent env first, agent token file second (trimmed,
+// path named on read errors — never the secret material), shared
+// CASTLE_TOKEN last.
+func TestAgentCastleTokenFromEnv(t *testing.T) {
+	t.Run("CRITERIA_AGENT_CASTLE_TOKEN wins over file", func(t *testing.T) {
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "agent-token")
+		path := filepath.Join(t.TempDir(), "missing")
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", path)
+		token, err := agentCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "agent-token", token)
+	})
+	t.Run("file token trimmed", func(t *testing.T) {
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+		path := filepath.Join(t.TempDir(), "token")
+		require.NoError(t, os.WriteFile(path, []byte("agent-file-token\n"), 0o400))
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", path)
+		token, err := agentCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "agent-file-token", token)
+	})
+	t.Run("unreadable file errors and names the path", func(t *testing.T) {
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", filepath.Join(t.TempDir(), "missing"))
+		token, err := agentCastleTokenFromEnv()
+		require.Error(t, err)
+		require.Empty(t, token)
+		require.Contains(t, err.Error(), "missing", "the read error names the path so the lane's disable is diagnosable")
+	})
+	t.Run("no agent vars falls back to the shared token", func(t *testing.T) {
+		t.Setenv("CASTLE_TOKEN", "shared-token")
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", "")
+		token, err := agentCastleTokenFromEnv()
+		require.NoError(t, err)
+		require.Equal(t, "shared-token", token)
+	})
+}
+
 // TestNewShadowRunBuilderWiring pins the operator's spec-mirror wiring
 // seam: a deployment without a routes payload wires NO builder
 // (decision-only posture — the "routes payload not configured" degrade
@@ -327,4 +368,60 @@ func TestNewShadowRunBuilderWiring(t *testing.T) {
 	assert.Same(t, payload, b.Routes)
 	assert.Equal(t, "criteria-jobs", b.Namespace)
 	assert.Equal(t, "make test", b.Defaults.TestCmd)
+	assert.NotNil(t, b.ConfigPinner,
+		"the KB-103 config pinner is wired whenever the payload is (KB-338): a dispatch slot must stamp through to the CR, never silently resolve to lane defaults")
+}
+
+// TestResolveAgentRoutesPath pins the assignment lane's routes-file
+// fallback (PR #232 review): an explicit --assignment-routes-file always
+// wins, an empty one rides --shadow-routes-file (the documented way to
+// enable the lane on a deployment that already runs the KB-319 mirror),
+// and neither leaves the lane off. The second half asserts the resolved
+// path is what actually gets loaded.
+func TestResolveAgentRoutesPath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		explicit string
+		shadow   string
+		want     string
+	}{
+		{name: "explicit wins over empty shadow", explicit: "routes-a.json", shadow: "", want: "routes-a.json"},
+		{name: "explicit wins over set shadow", explicit: "routes-a.json", shadow: "routes-b.json", want: "routes-a.json"},
+		{name: "empty explicit rides shadow", explicit: "", shadow: "routes-b.json", want: "routes-b.json"},
+		{name: "neither set keeps the lane off", explicit: "", shadow: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveAgentRoutesPath(tc.explicit, tc.shadow)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	// The resolved path is the file actually read: a payload written to a
+	// temp file loads through the shadow fallback, while the neither-set
+	// path loads nothing (the lane-off posture).
+	payload := map[string]any{
+		"apiVersion": routes.APIVersion,
+		"kind":       routes.Kind,
+		"workflowLibrary": map[string]any{
+			"smoke-workflow": map[string]any{"type": "image", "image": "localhost:5000/smoke:dev"},
+		},
+		"routes": []any{
+			map[string]any{"name": "smoke-route", "workflow": "smoke-workflow", "project": "smoke-project", "states": []any{"Ready"}},
+		},
+	}
+	data, err := json.Marshal(payload)
+	require.NoError(t, err)
+	tmp := filepath.Join(t.TempDir(), "shadow-routes.json")
+	require.NoError(t, os.WriteFile(tmp, data, 0o644))
+
+	loaded, err := loadShadowRoutes(resolveAgentRoutesPath("", tmp))
+	require.NoError(t, err)
+	require.NotNil(t, loaded, "the shadow path must load the lane's payload")
+	assert.Equal(t, "image", loaded.WorkflowLibrary["smoke-workflow"].Type)
+	assert.Equal(t, "localhost:5000/smoke:dev", loaded.WorkflowLibrary["smoke-workflow"].Image)
+
+	absentPath := resolveAgentRoutesPath("", "")
+	absent, absentErr := loadShadowRoutes(absentPath)
+	require.NoError(t, absentErr, "a neither-set posture is not an error, it is lane-off")
+	assert.Nil(t, absent, "an empty resolved path loads no payload")
 }

@@ -8,12 +8,14 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -144,6 +146,187 @@ func TestBuildRunReportsConfigSelectorDivergence(t *testing.T) {
 	assert.Contains(t, reasons[0], "spec.configRef")
 	assert.Contains(t, reasons[0], "assignment=unset")
 	assert.Contains(t, reasons[0], "watcher=set")
+}
+
+// slotStampingPayload serves the workflow plus the per-repo config entry
+// the dispatch slot names (KB-103 per-repo config, KB-338 envelope).
+func slotStampingPayload() *routes.Payload {
+	p := parityPayload()
+	p.ConfigLibrary = map[string]routes.ConfigEntry{
+		"repo-config": {
+			BuildCmd:   "make build-all",
+			TestCmd:    "make test-all",
+			CIGateCmd:  "make gate-all",
+			BaseBranch: "release-9.1",
+		},
+	}
+	return p
+}
+
+// slotDecision is the assignment decision carrying the dispatch slot.
+func slotDecision() Decision {
+	d := parityDecision()
+	d.Slot = "repo-config"
+	return d
+}
+
+// pinResolverOver resolves the pin through the given client, the same
+// closure shape the operator's configPinResolver wires.
+func pinResolverOver(cl client.Client) runspec.CriteriaRunConfigRefProvider {
+	return func(ns string, sel *routes.Selection) (*criteriav1.CriteriaRunConfigRef, error) {
+		return runstamp.PinConfigRef(context.Background(), cl, ns, sel)
+	}
+}
+
+// slotStampingScheme builds a scheme carrying both fixture types.
+func slotStampingScheme(t *testing.T) *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, criteriav1.AddToScheme(scheme))
+	return scheme
+}
+
+// TestBuildRunSlotsStampConfigEntry proves the envelope's slot lands on
+// the stamped CR (KB-338 reviewer acceptance b): the configurationLibrary
+// ENTRY's spec overrides stamp whenever the slot resolves — with or
+// without a pinner — and with a pinner wired the CR also carries the
+// ConfigMap pin (resourceVersion when the CM is readable, name-only when
+// it is not rendered yet); an unknown slot fails closed.
+func TestBuildRunSlotsStampConfigEntry(t *testing.T) {
+	ctx := context.Background()
+	scheme := slotStampingScheme(t)
+	cm := &corev1.ConfigMap{}
+	cm.Name = "repo-config"
+	cm.Namespace = "criteria-jobs"
+	cm.ResourceVersion = "777"
+
+	t.Run("pinner wired: entry overrides and configRef stamp", func(t *testing.T) {
+		b := &RunBuilder{
+			Defaults:     parityDefaults(),
+			Namespace:    "criteria-jobs",
+			Routes:       slotStampingPayload(),
+			Client:       fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build(),
+			Log:          logr.Discard(),
+			ConfigPinner: pinResolverOver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()),
+		}
+		run, reasons := b.BuildRun(ctx, slotDecision())
+		require.Empty(t, reasons)
+		require.NotNil(t, run)
+		require.Equal(t, "make build-all", run.Spec.BuildCmd)
+		require.Equal(t, "make test-all", run.Spec.TestCmd)
+		require.Equal(t, "make gate-all", run.Spec.CIGateCmd)
+		require.Equal(t, "release-9.1", run.Spec.BaseBranch)
+		require.NotNil(t, run.Spec.ConfigRef)
+		assert.Equal(t, "repo-config", run.Spec.ConfigRef.Name)
+		assert.Equal(t, "777", run.Spec.ConfigRef.ResourceVersion)
+	})
+
+	t.Run("unreadable ConfigMap degrades to a name-only pin", func(t *testing.T) {
+		absent := fake.NewClientBuilder().WithScheme(scheme).Build()
+		b := &RunBuilder{
+			Defaults:     parityDefaults(),
+			Namespace:    "criteria-jobs",
+			Routes:       slotStampingPayload(),
+			Client:       absent,
+			Log:          logr.Discard(),
+			ConfigPinner: pinResolverOver(absent),
+		}
+		run, reasons := b.BuildRun(ctx, slotDecision())
+		require.Empty(t, reasons)
+		require.NotNil(t, run.Spec.ConfigRef, "a read-deferred ConfigMap stamps a name-only pin, not nothing")
+		assert.Equal(t, "repo-config", run.Spec.ConfigRef.Name)
+		assert.Empty(t, run.Spec.ConfigRef.ResourceVersion, "no resourceVersion may be fabricated")
+	})
+
+	t.Run("nil pinner still stamps entry overrides (pin-less posture)", func(t *testing.T) {
+		b := &RunBuilder{
+			Defaults:  parityDefaults(),
+			Namespace: "criteria-jobs",
+			Routes:    slotStampingPayload(),
+			Log:       logr.Discard(),
+		}
+		run, reasons := b.BuildRun(ctx, slotDecision())
+		require.Empty(t, reasons)
+		require.Equal(t, "make build-all", run.Spec.BuildCmd, "the slot entry's overrides land even pin-less (stamping is decoupled from the consult)")
+		assert.Nil(t, run.Spec.ConfigRef)
+	})
+
+	t.Run("unknown slot fails closed", func(t *testing.T) {
+		b := &RunBuilder{
+			Defaults:     parityDefaults(),
+			Namespace:    "criteria-jobs",
+			Routes:       slotStampingPayload(),
+			Log:          logr.Discard(),
+			ConfigPinner: pinResolverOver(fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()),
+		}
+		d := slotDecision()
+		d.Slot = "ghost-slot"
+		run, reasons := b.BuildRun(ctx, d)
+		require.Nil(t, run)
+		require.Len(t, reasons, 1)
+		assert.Contains(t, reasons[0], "dispatch slot")
+	})
+}
+
+// TestCompareSpecSlotLanesAgree is the contract test the reviewer's
+// blocking defect would have tripped: for the same ticket and slot, the
+// watcher lane (StampRun + pinner) and the assignment lane (BuildRun +
+// pinner) stamp IDENTICAL CRs — and a builder that silently drops its
+// pinner diverges on exactly spec.configRef, which the shadow window
+// reports instead of silently running lane defaults.
+func TestCompareSpecSlotLanesAgree(t *testing.T) {
+	ctx := context.Background()
+	scheme := slotStampingScheme(t)
+	cm := &corev1.ConfigMap{}
+	cm.Name = "repo-config"
+	cm.Namespace = "criteria-jobs"
+	cm.ResourceVersion = "777"
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+	resolver := pinResolverOver(cl)
+
+	sel := &routes.Selection{
+		Name:           "kanboard-develop-url",
+		Workflow:       parityWorkflow(),
+		ConfigName:     "repo-config",
+		Config:         slotStampingPayload().ConfigLibrary["repo-config"],
+		ConflictPolicy: criteriav1.ImageConflictPolicyFailClosed,
+	}
+	watcherRun := runspec.StampRun(runspec.StampInput{
+		Name:             "kb-319-1770000010",
+		TicketID:         "KB-319",
+		RepoURL:          "https://github.com/brokenbots/workflow-example.git",
+		Selection:        sel,
+		Defaults:         parityDefaults(),
+		Namespace:        "criteria-jobs",
+		ResolveConfigPin: resolver,
+	})
+
+	b := &RunBuilder{
+		Defaults:     parityDefaults(),
+		Namespace:    "criteria-jobs",
+		Routes:       slotStampingPayload(),
+		Log:          logr.Discard(),
+		ConfigPinner: resolver,
+	}
+	wouldBe, reasons := b.BuildRun(ctx, slotDecision())
+	require.Empty(t, reasons)
+	assert.Empty(t, CompareSpec(wouldBe, watcherRun),
+		"both slot lanes wired to the same pinner must stamp identical CRs")
+
+	// The defect arm: a builder without its pinner still matches the
+	// entry overrides but loses the pin — exactly one divergence reason,
+	// spec.configRef.
+	pinless := &RunBuilder{
+		Defaults:  parityDefaults(),
+		Namespace: "criteria-jobs",
+		Routes:    slotStampingPayload(),
+		Log:       logr.Discard(),
+	}
+	pinlessRun, reasons := pinless.BuildRun(ctx, slotDecision())
+	require.Empty(t, reasons)
+	div := CompareSpec(pinlessRun, watcherRun)
+	require.Len(t, div, 1)
+	assert.Contains(t, div[0], "spec.configRef")
 }
 
 // BuildRunReportsDefaultDivergence: operator env drift (a different

@@ -13,6 +13,31 @@ import (
 // subscription lane uses only Control.
 type ControlClient = v1connect.CriteriaServiceClient
 
+// AgentClient builds a connect client for castle's CriteriaService on the
+// assignment-agent lane (KB-338): the operator's REAL agent identity — a
+// criteria identity whose overseer record turns "online" through the lane's
+// Heartbeat loop, so castle's server-side dispatch (leaseAndDispatchNext)
+// pushes queued WorkflowAssignments to it on the Control stream, and its
+// event submissions on leased runs pass the ownership gate. Same transport
+// requirements as NewControlClient (cleartext HTTP/2; nil httpClient
+// defaults to the h2c prior-knowledge client; KB-239).
+//
+// Deliberately NOT the lease-safety posture: this lane heartbeats and
+// consumes assignments to execute them (1 CR in flight per replica, the
+// dave serial rule, enforced by the agent's serial processor). The token
+// must be a dedicated pre-provisioned agent criteria token — the
+// orchestrator-only token is rejected by castle's control lane the same way
+// it is on the shadow stream.
+func NewAgentClient(cfg Config, httpClient *http.Client) ControlClient {
+	if httpClient == nil {
+		httpClient = newClearTextH2CClient()
+	}
+	if cfg.Token != "" {
+		httpClient = &http.Client{Transport: &tokenTransport{base: httpClient.Transport, token: cfg.Token}}
+	}
+	return v1connect.NewCriteriaServiceClient(httpClient, strings.TrimSuffix(cfg.Addr, "/"))
+}
+
 // NewControlClient builds a connect client for castle's CriteriaService —
 // the service whose Control server-stream pushes queued WorkflowAssignments
 // to a connected identity (CRI-60; KB-319 shadow-run consumes it).

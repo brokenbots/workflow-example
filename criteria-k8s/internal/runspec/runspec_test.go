@@ -315,6 +315,35 @@ func TestStampRunSkipsConsultWithoutConfigEntry(t *testing.T) {
 	require.Equal(t, "make build", got.Spec.BuildCmd)
 }
 
+// TestStampRunStampsSlotOverridesWithoutResolver pins the KB-338
+// decoupling: a selection naming a config slot stamps the ENTRY's spec
+// overrides even when no pin provider is wired — a nil resolver must
+// never silently reduce the lane to its fallback flags. The ref (the
+// part the consult resolves) stays unset.
+func TestStampRunStampsSlotOverridesWithoutResolver(t *testing.T) {
+	sel := testSelection()
+	sel.ConfigName = "repo-config"
+	sel.Config = routes.ConfigEntry{
+		BuildCmd:   "make build-all",
+		TestCmd:    "make test-all",
+		CIGateCmd:  "make gate-all",
+		BaseBranch: "release-9.1",
+	}
+	got := StampRun(StampInput{
+		Name:      "kb-338-1770000008",
+		TicketID:  "KB-338",
+		RepoURL:   "repo",
+		Selection: sel,
+		Defaults:  testDefaults(),
+		Namespace: "criteria-jobs",
+	})
+	require.Equal(t, "make build-all", got.Spec.BuildCmd)
+	require.Equal(t, "make test-all", got.Spec.TestCmd)
+	require.Equal(t, "make gate-all", got.Spec.CIGateCmd)
+	require.Equal(t, "release-9.1", got.Spec.BaseBranch)
+	require.Nil(t, got.Spec.ConfigRef, "without a provider the pin is unstamped, but the entry overrides land")
+}
+
 // TestExecNamespace: the workflow's declared execution namespace wins;
 // absent, the lane's own namespace applies.
 func TestExecNamespace(t *testing.T) {

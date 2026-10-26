@@ -109,7 +109,29 @@ type Payload struct {
 	// global workflow-library binding data until its namespace serves its
 	// own binding (binding-first, deletion second).
 	ProjectRegistry map[string]ProjectEntry `json:"projectRegistry,omitempty"`
-	Routes          []Route                 `json:"routes"`
+	// Dispatch (KB-338, P0.5 dual-read) maps a Kanboard project name to
+	// its castle dispatch record: the project's card-firing rules migrated
+	// out of the routes array. Presence decides the read path per project
+	// — a project with a record is served by its rules alone; the routes
+	// array stops routing for it — while projects without records keep
+	// the legacy array. Rules are authored per project (KB-322 deletes the
+	// array once every live project has records). Optional: payloads
+	// predating the dual-read validate unchanged.
+	Dispatch map[string]DispatchEntry `json:"dispatch,omitempty"`
+	Routes   []Route                  `json:"routes"`
+}
+
+// DispatchEntry is one project's castle dispatch record (KB-338, the
+// P0.5 preview): its rules carry the Route vocabulary verbatim, so
+// migrated projects resolve exactly as the routes array did. The record
+// key is the project, so a rule need not (and must not) declare a
+// different project.
+type DispatchEntry struct {
+	// Rules are the project's dispatch rules, matched by state and tag
+	// subset exactly as a matchedRoute's array entries are (tag-specific
+	// beats tag-less). At least one rule: an empty record is a dispatch
+	// black hole, so it rejects.
+	Rules []Route `json:"rules"`
 }
 
 // Workflow is a workflow-library object: how a run obtains its workflow and
@@ -394,11 +416,17 @@ func Parse(data []byte) (*Payload, error) {
 // routeStatesPresence shadows Route with a raw states field so JSON key
 // presence is observable: an omitted states key decodes to a nil
 // RawMessage, while an explicit "states": [] or "states": null decodes to
-// a non-nil one.
+// a non-nil one. The dispatch records (KB-338) shadow the same field
+// through their rules so the default applies to both dispatch surfaces.
 type routeStatesPresence struct {
 	Routes []struct {
 		StatesRaw json.RawMessage `json:"states"`
 	} `json:"routes"`
+	Dispatch map[string]struct {
+		Rules []struct {
+			StatesRaw json.RawMessage `json:"states"`
+		} `json:"rules"`
+	} `json:"dispatch"`
 }
 
 // applyDefaults applies the payload defaults of k8s/routes.schema.json
@@ -412,6 +440,16 @@ func (p *Payload) applyDefaults(presence routeStatesPresence) {
 			continue
 		}
 		p.Routes[i].States = []string{DefaultState}
+	}
+	for project, entry := range p.Dispatch {
+		presenceEntry := presence.Dispatch[project]
+		for i := range entry.Rules {
+			if i < len(presenceEntry.Rules) && presenceEntry.Rules[i].StatesRaw != nil {
+				continue
+			}
+			entry.Rules[i].States = []string{DefaultState}
+		}
+		p.Dispatch[project] = entry
 	}
 }
 
@@ -497,23 +535,12 @@ func (p *Payload) Validate() error {
 	}
 	seenRoutes := make(map[string]bool, len(p.Routes))
 	for i, r := range p.Routes {
-		if !labelRe.MatchString(r.Name) {
-			return fmt.Errorf("routes[%d].name %q is not a DNS-1123 label", i, r.Name)
-		}
 		if seenRoutes[r.Name] {
 			return fmt.Errorf("routes[%d].name %q is not unique", i, r.Name)
 		}
 		seenRoutes[r.Name] = true
-		if _, ok := p.WorkflowLibrary[r.Workflow]; !ok {
-			return fmt.Errorf("routes[%d] (%s): workflow %q is not present in workflowLibrary", i, r.Name, r.Workflow)
-		}
-		// KB-103: a route's configRef must resolve against the payload's
-		// configLibrary — the same integrity rule the workflow ref has —
-		// so payload errors surface when the ConfigMap is applied.
-		if r.ConfigRef != "" {
-			if _, ok := p.ConfigLibrary[r.ConfigRef]; !ok {
-				return fmt.Errorf("routes[%d] (%s): configRef %q is not present in configLibrary", i, r.Name, r.ConfigRef)
-			}
+		if err := p.validateRuleBody(fmt.Sprintf("routes[%d] (%s)", i, r.Name), &r); err != nil {
+			return err
 		}
 		if r.Project == "" {
 			return fmt.Errorf("routes[%d] (%s): project is required", i, r.Name)
@@ -527,24 +554,86 @@ func (p *Payload) Validate() error {
 				return fmt.Errorf("routes[%d] (%s): project %q is not present in projectRegistry", i, r.Name, r.Project)
 			}
 		}
-		if len(r.States) == 0 {
-			return fmt.Errorf("routes[%d] (%s): states must not be empty (omit the states key to default to [%s])", i, r.Name, DefaultState)
+	}
+	// KB-338 (P0.5 dual-read): a dispatch record is the project's migrated
+	// dispatch surface. Its rules carry the same integrity rules a
+	// routes-array rule carries — identical vocabulary, identical library
+	// memberships, so the dual-read is behavior-identical — but they are
+	// recorded per project: names must be unique within the record, no
+	// 'project' member beyond the record key is meaningful (a mismatching
+	// one rejects), and the record's project must resolve through the
+	// registry when one is present. A record with no rules is a dispatch
+	// black hole, not a no-op, so it rejects.
+	for project, entry := range p.Dispatch {
+		if strings.TrimSpace(project) == "" {
+			return fmt.Errorf("dispatch has a blank project name")
 		}
-		for _, s := range r.States {
-			if s == "" {
-				return fmt.Errorf("routes[%d] (%s): states must not contain empty names", i, r.Name)
+		if len(entry.Rules) == 0 {
+			return fmt.Errorf("dispatch[%q]: rules must not be empty", project)
+		}
+		seenRecord := make(map[string]bool, len(entry.Rules))
+		for i := range entry.Rules {
+			r := &entry.Rules[i]
+			if seenRecord[r.Name] {
+				return fmt.Errorf("dispatch[%q]: rule name %q is not unique within the record", project, r.Name)
+			}
+			seenRecord[r.Name] = true
+			if err := p.validateRuleBody(fmt.Sprintf("dispatch[%q].rules[%d] (%s)", project, i, r.Name), r); err != nil {
+				return err
+			}
+			if r.Project != "" && r.Project != project {
+				return fmt.Errorf("dispatch[%q].rules[%d] (%s): a record rule must not declare project %q — the record key is the project", project, i, r.Name, r.Project)
+			}
+			if len(p.ProjectRegistry) > 0 {
+				if _, ok := p.ProjectRegistry[project]; !ok {
+					return fmt.Errorf("dispatch[%q] rules[%d] (%s): project %q is not present in projectRegistry", project, i, r.Name, project)
+				}
 			}
 		}
-		for _, tag := range r.Tags {
-			if tag == "" {
-				return fmt.Errorf("routes[%d] (%s): tags must not contain empty names", i, r.Name)
-			}
+	}
+	return nil
+}
+
+// validateRuleBody carries the integrity checks every dispatch rule
+// carries regardless of the surface declaring it (routes array or
+// KB-338's per-project dispatch record): a DNS-1123 name, a
+// workflow-library member as its workflow, KB-103's configRef membership,
+// and the states and tag-match vocabularies. Call sites layer their
+// surface-specific rules (uniqueness scope, project-field semantics) on
+//
+//	top; this helper stays the fail-closed floor the dual-read shares.
+func (p *Payload) validateRuleBody(where string, r *Route) error {
+	if !labelRe.MatchString(r.Name) {
+		return fmt.Errorf("%s: name %q is not a DNS-1123 label", where, r.Name)
+	}
+	if _, ok := p.WorkflowLibrary[r.Workflow]; !ok {
+		return fmt.Errorf("%s: workflow %q is not present in workflowLibrary", where, r.Workflow)
+	}
+	// KB-103: a rule's configRef must resolve against the payload's
+	// configLibrary — the same integrity rule the workflow ref has —
+	// so payload errors surface when the ConfigMap is applied.
+	if r.ConfigRef != "" {
+		if _, ok := p.ConfigLibrary[r.ConfigRef]; !ok {
+			return fmt.Errorf("%s: configRef %q is not present in configLibrary", where, r.ConfigRef)
 		}
-		switch r.TagMatch {
-		case "", TagMatchAll, TagMatchAny:
-		default:
-			return fmt.Errorf("routes[%d] (%s): tagMatch must be %q or %q, got %q", i, r.Name, TagMatchAll, TagMatchAny, r.TagMatch)
+	}
+	if len(r.States) == 0 {
+		return fmt.Errorf("%s: states must not be empty (omit the states key to default to [%s])", where, DefaultState)
+	}
+	for _, s := range r.States {
+		if s == "" {
+			return fmt.Errorf("%s: states must not contain empty names", where)
 		}
+	}
+	for _, tag := range r.Tags {
+		if tag == "" {
+			return fmt.Errorf("%s: tags must not contain empty names", where)
+		}
+	}
+	switch r.TagMatch {
+	case "", TagMatchAll, TagMatchAny:
+	default:
+		return fmt.Errorf("%s: tagMatch must be %q or %q, got %q", where, TagMatchAll, TagMatchAny, r.TagMatch)
 	}
 	return nil
 }
@@ -631,13 +720,37 @@ func (p *Payload) staleBindingShapes() []string {
 // hard-rejects the stale surfaces there, so a valid post-cutover payload
 // never carries them.
 func (p *Payload) DeprecationWarnings() []string {
+	var warnings []string
 	stale := p.staleBindingShapes()
-	if len(stale) == 0 || p.PostCutover() {
-		return nil
+	// The stale run-config surfaces warn while the migration window is
+	// open; post-cutover Validate rejects them, so a valid post-cutover
+	// payload never carries them.
+	if len(stale) > 0 && !p.PostCutover() {
+		warnings = make([]string, 0, len(stale))
+		for _, entry := range stale {
+			warnings = append(warnings, entry+": deprecated global run-config surfaces (KB-313, ADR 307) — per-project bindings own run config; these reject once every projectRegistry entry is cutover-done")
+		}
 	}
-	warnings := make([]string, 0, len(stale))
-	for _, entry := range stale {
-		warnings = append(warnings, entry+": deprecated global run-config surfaces (KB-313, ADR 307) — per-project bindings own run config; these reject once every projectRegistry entry is cutover-done")
+	// KB-338 (P0.5 dual-read): a project with a dispatch record is served
+	// by that record alone — any routes-array rules left for it are dead
+	// config the read path ignores. Surface them so the KB-322 deletion
+	// pass sees what to remove; the warning is independent of the
+	// binding-cutover state the stale surfaces ride.
+	recordProjects := make([]string, 0, len(p.Dispatch))
+	for project := range p.Dispatch {
+		recordProjects = append(recordProjects, project)
+	}
+	slices.Sort(recordProjects)
+	for _, project := range recordProjects {
+		dead := 0
+		for _, r := range p.Routes {
+			if r.Project == project {
+				dead++
+			}
+		}
+		if dead > 0 {
+			warnings = append(warnings, fmt.Sprintf("dispatch[%q]: the record is the project's dispatch surface — its %d routes-array rule(s) are dead config the dual-read ignores (delete in the KB-322 follow-up)", project, dead))
+		}
 	}
 	return warnings
 }
@@ -1061,6 +1174,18 @@ func (p *Payload) TicketStates() []string {
 			}
 		}
 	}
+	// Dispatch records (KB-338) are dispatch surfaces of their own: their
+	// rule states belong to the union too.
+	for _, entry := range p.Dispatch {
+		for _, r := range entry.Rules {
+			for _, s := range r.States {
+				if !seen[s] {
+					seen[s] = true
+					states = append(states, s)
+				}
+			}
+		}
+	}
 	slices.Sort(states)
 	return states
 }
@@ -1073,11 +1198,22 @@ func (p *Payload) TicketStates() []string {
 func (p *Payload) ProjectStates(project string) []string {
 	seen := make(map[string]bool)
 	states := make([]string, 0)
-	for i := range p.Routes {
-		if p.Routes[i].Project != project {
+	// P0.5 dual-read (KB-338): the states the watcher queries follow the
+	// same per-project selection matchRoute applies — record rules when a
+	// dispatch record is present, the legacy routes array otherwise — so
+	// a migrated project keeps polling the states its record declares.
+	rules := p.Routes
+	fromRecord := false
+	if entry, ok := p.Dispatch[project]; ok {
+		rules, fromRecord = entry.Rules, true
+	}
+	for i := range rules {
+		// Record rules ride the record's key; only array rules carry a
+		// per-entry project to filter by.
+		if !fromRecord && rules[i].Project != project {
 			continue
 		}
-		for _, s := range p.Routes[i].States {
+		for _, s := range rules[i].States {
 			if !seen[s] {
 				seen[s] = true
 				states = append(states, s)
@@ -1295,9 +1431,26 @@ func (p *Payload) ConfigsTagGroupMember(tag string) bool {
 // decides.
 func (p *Payload) matchRoute(sel Selector) (*Route, error) {
 	specific, general := (*Route)(nil), (*Route)(nil)
-	for i := range p.Routes {
-		r := &p.Routes[i]
-		if r.Project != sel.Project || !slices.Contains(r.States, sel.State) {
+	// P0.5 dual-read (KB-338): a project with a dispatch record is served
+	// by that record's rules alone — the record is the migrated dispatch
+	// surface, so legacy array rules for it are dead config (warned in
+	// DeprecationWarnings, deleted in KB-322). Projects without a record
+	// keep the routes array, unchanged. The surfaces never merge: a
+	// per-project cutover keeps each read path's semantics
+	// self-contained, mirroring KB-311's binding-first model.
+	routes := p.Routes
+	fromRecord := false
+	if entry, ok := p.Dispatch[sel.Project]; ok {
+		routes, fromRecord = entry.Rules, true
+	}
+	for i := range routes {
+		r := &routes[i]
+		// Record rules ride the record's key; only array rules carry a
+		// per-entry project to filter by.
+		if !fromRecord && r.Project != sel.Project {
+			continue
+		}
+		if !slices.Contains(r.States, sel.State) {
 			continue
 		}
 		if len(r.Tags) == 0 {

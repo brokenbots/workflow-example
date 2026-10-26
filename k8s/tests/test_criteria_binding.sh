@@ -424,8 +424,13 @@ for path in binding_files:
         failures.append(f"{name}: namespace {ns!r} maps to {len(projects)} registry projects (expected exactly one)")
         continue
     project, entry = projects[0]
+    # KB-338 honest stamp: a shipped binding is the render SOURCE for the
+    # cutover, so a PRE-cutover project's binding is a staged surface, not a
+    # served one — warn, don't fail (go-dev's premature 'done' was withdrawn
+    # until the go-dev canary fires through castle; TS SDK stays done).
     if entry.get("cutover") != "done":
-        failures.append(f"{name}: project {project!r} is not cutover: done — the binding CM is served only after cutover (KB-311)")
+        print(f"WARN: {name}: project {project!r} is PRE-cutover — binding staged, served only after the marker flips (KB-311 render first, flip second; KB-338 honest stamp)")
+    sys.stderr.flush()
     ns_routes = [r for r in routes_payload.get("routes", []) if r.get("project") == project]
     if not ns_routes:
         failures.append(f"{name}: project {project!r} has no routes in the routes payload")

@@ -91,7 +91,14 @@ WORKFLOW_KEYS = {"type", "namespace", "class", "image", "url", "ref", "volumes",
 VOLUME_KEYS = {"name", "kind", "mountPath", "subPath", "readOnly", "claim", "server", "path", "sizeLimit", "secretName", "env"}
 SECRET_KEYS = {"name", "secretProviderClass", "mountPath", "env"}
 ROUTE_KEYS = {"name", "workflow", "project", "tags", "tagMatch", "states", "configRef"}
-TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes", "projectRegistry"}
+# KB-338 (P0.5 dual-read): 'dispatch' — per-project castle dispatch records
+# (Kanboard project name -> the project's rule set), migrated project-by-
+# project out of the routes array. Presence decides the read path per
+# project: a project with a record is served by the record alone (the legacy
+# array entry for it goes dead), projects without a record keep the legacy
+# array. The KB-322 follow-up deletes the array once every live project
+# carries records.
+TOP_KEYS = {"apiVersion", "kind", "workflowLibrary", "configLibrary", "routes", "projectRegistry", "dispatch"}
 # KB-311 (ADR 307): projectRegistry — the ONLY ticket->project routing table.
 # Entries mirror routes.schema.json's projectEntry: closed key set, DNS-1123
 # namespace, advisory owner/name repo members, cutover marker vocabulary of
@@ -430,41 +437,100 @@ def validate_route(route, where, library, config_library, errs):
     for key in ("name", "workflow", "project"):
         if key not in route:
             errs.append(f"{where} is missing required field {key}")
-    for key in route:
-        if key not in ROUTE_KEYS:
-            errs.append(f"{where} has unknown field {key!r}")
-    for key in ("name", "workflow"):
-        if key in route and not is_label(route[key]):
-            errs.append(f"{where}.{key} {route[key]!r} is not a DNS-1123 label")
+    _validate_rule_body(route, where, library, config_library, errs)
     project = route.get("project")
     if "project" in route and (not isinstance(project, str) or not project):
         errs.append(f"{where}.project must be a non-empty string")
-    tag_match = route.get("tagMatch")
-    if "tagMatch" in route and tag_match not in ("all", "any"):
+
+
+def _validate_rule_body(rule, where, library, config_library, errs):
+    # Rule body sans the project semantics, shared by the routes array
+    # (validate_route) and the dispatch records (validate_dispatch_rule):
+    # closed field set, DNS-1123 name/workflow/configRef, tag vocabulary,
+    # non-empty unique lists, library membership cross-checks.
+    for key in rule:
+        if key not in ROUTE_KEYS:
+            errs.append(f"{where} has unknown field {key!r}")
+    for key in ("name", "workflow"):
+        if key in rule and not is_label(rule[key]):
+            errs.append(f"{where}.{key} {rule[key]!r} is not a DNS-1123 label")
+    tag_match = rule.get("tagMatch")
+    if "tagMatch" in rule and tag_match not in ("all", "any"):
         errs.append(f"{where}.tagMatch {tag_match!r} must be one of all, any")
-    if "tags" in route:
-        tags = route["tags"]
+    if "tags" in rule:
+        tags = rule["tags"]
         if not isinstance(tags, list) or any(not isinstance(t, str) or not t for t in tags):
             errs.append(f"{where}.tags must be an array of non-empty strings")
         elif len(set(tags)) != len(tags):
             errs.append(f"{where}.tags must be unique")
-    states = route.get("states")
-    if "states" in route:
+    states = rule.get("states")
+    if "states" in rule:
         if not isinstance(states, list) or any(not isinstance(s, str) or not s for s in states):
             errs.append(f"{where}.states must be an array of non-empty strings")
         elif not states:
             errs.append(f"{where}.states must not be empty")
         elif len(set(states)) != len(states):
             errs.append(f"{where}.states must be unique")
-    workflow = route.get("workflow")
-    if "workflow" in route and isinstance(library, dict) and workflow not in library:
+    workflow = rule.get("workflow")
+    if "workflow" in rule and isinstance(library, dict) and workflow not in library:
         errs.append(f"{where}.workflow {workflow!r} is not in workflowLibrary")
-    config_ref = route.get("configRef")
-    if "configRef" in route:
+    config_ref = rule.get("configRef")
+    if "configRef" in rule:
         if not is_label(config_ref):
             errs.append(f"{where}.configRef {config_ref!r} is not a DNS-1123 label")
         elif isinstance(config_library, dict) and config_ref not in config_library:
             errs.append(f"{where}.configRef {config_ref!r} is not in configLibrary")
+
+
+def validate_dispatch_rule(rule, where, project, library, config_library, errs):
+    # KB-338: a dispatch-record rule is Route-shaped with the project
+    # semantics changed — the record key IS the project, so 'project' is
+    # optional and must restate that key verbatim when present. Mirrors
+    # criteria-k8s/internal/routes' Validate.
+    if not isinstance(rule, dict):
+        errs.append(f"{where} must be an object")
+        return
+    for key in ("name", "workflow"):
+        if key not in rule:
+            errs.append(f"{where} is missing required field {key}")
+    _validate_rule_body(rule, where, library, config_library, errs)
+    if "project" in rule:
+        member = rule["project"]
+        if not isinstance(member, str) or not member:
+            errs.append(f"{where}.project must be a non-empty string (the record key is the project)")
+        elif member != project:
+            errs.append(f"{where}.project {member!r} must restate the record key {project!r} verbatim, or be absent")
+
+
+def validate_dispatch(dispatch, library, config_library, errs):
+    if not isinstance(dispatch, dict) or not dispatch:
+        errs.append("payload.dispatch must be a non-empty object of project name -> record")
+        return
+    for project, record in dispatch.items():
+        if not isinstance(project, str) or re.search(r"\S", project) is None:
+            errs.append("payload.dispatch has a blank project name")
+            continue
+        where = f"payload.dispatch.{project}"
+        if not isinstance(record, dict):
+            errs.append(f"{where} must be an object")
+            continue
+        for key in record:
+            if key != "rules":
+                errs.append(f"{where} has unknown field {key!r}")
+        if "rules" not in record:
+            errs.append(f"{where} is missing required field rules")
+            continue
+        rules = record["rules"]
+        if not isinstance(rules, list) or not rules:
+            errs.append(f"{where}.rules must be a non-empty array")
+            continue
+        seen = set()
+        for i, rule in enumerate(rules):
+            rn = rule.get("name") if isinstance(rule, dict) else None
+            if rn in seen:
+                errs.append(f"{where}.rules has duplicate name {rn!r} (unique within the record)")
+            seen.add(rn)
+            validate_dispatch_rule(rule, f"{where}.rules[{i}]", project, library, config_library, errs)
 
 
 def validate_config(name, entry, where, errs):
@@ -546,6 +612,20 @@ def validate(doc):
             for i, route in enumerate(routes if isinstance(routes, list) else []):
                 if isinstance(route, dict) and route.get("project") not in registry:
                     errs.append(f"payload.routes[{i}].project {route.get('project')!r} is not in projectRegistry (the registry is the only ticket->project routing table, KB-311)")
+        # KB-338: dispatch record projects must be registered too — a record
+        # for an unregistered project mirrors the Go validator's registry
+        # cross-check.
+        dispatch = doc.get("dispatch")
+        if isinstance(dispatch, dict) and registry and isinstance(registry, dict):
+            for project in dispatch:
+                if project not in registry:
+                    errs.append(f"payload.dispatch.{project} is not in projectRegistry (the registry is the only ticket->project routing table, KB-311)")
+    # KB-338 (P0.5 dual-read): the per-project dispatch records. Validated
+    # regardless of the registry block (a payload may carry dispatch without
+    # projectRegistry only if the registry itself also fails — the cross-check
+    # above then adds nothing more).
+    if "dispatch" in doc:
+        validate_dispatch(doc.get("dispatch"), library, config_library, errs)
         # KB-313 (ADR 307): the global CM is a thin catalog — a post-cutover
         # payload (the registry is non-empty and every entry cutover: done)
         # that still carries global run-config (volumes/secrets/env/
@@ -917,7 +997,11 @@ def kb311_route_unregistered_project(d):
 
 
 def kb311_registry_entry_without_cutover(d):
-    d["projectRegistry"]["Criteria Go Dev"].pop("cutover")
+    # KB-338: 'Criteria Go Dev' is already pre-cutover in the shipped
+    # payload (honest stamp), so this mutation pops the marker from
+    # 'TypeScript SDK' to keep asserting that an entry without the marker
+    # stays legal.
+    d["projectRegistry"]["TypeScript SDK"].pop("cutover")
 
 
 negative.extend([
@@ -983,13 +1067,77 @@ def kb313_window_half_done(d):
             entry.pop("cutover", None)
 
 
+# KB-338 (P0.5 dual-read): dispatch records — the migrated per-project
+# surface of the routes array. Schema violations marked True below are
+# enforced by the shipped draft-07 schema itself (minItems, propertyNames,
+# additionalProperties, required, enum); the mirror-only ones (library
+# membership, registry cross-check, record-key restatement) cannot be
+# expressed in the schema and are what the structural validator catches
+# beyond it.
+def add_dispatch_record(d):
+    d["dispatch"] = {
+        "Kanboard Tickets": {
+            "rules": [
+                {"name": "kanboard-triage", "workflow": "kanboard-triage-url", "states": ["Backlog"], "tags": ["bug"], "tagMatch": "any"},
+                {"name": "kanboard-develop", "workflow": "kanboard-develop-url", "states": ["Backlog", "In Progress"]},
+            ]
+        }
+    }
+
+
+def dispatch_empty_rules(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Kanboard Tickets"]["rules"] = []
+
+
+def dispatch_blank_project(d):
+    add_dispatch_record(d)
+    d["dispatch"]["   "] = d["dispatch"].pop("Kanboard Tickets")
+
+
+def dispatch_unknown_field(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Kanboard Tickets"]["route"] = d["dispatch"]["Kanboard Tickets"].pop("rules")
+
+
+def dispatch_bad_tagmatch(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Kanboard Tickets"]["rules"][0]["tagMatch"] = "some"
+
+
+def dispatch_rule_missing_workflow(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Kanboard Tickets"]["rules"][0].pop("workflow")
+
+
+def dispatch_rule_unknown_workflow(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Kanboard Tickets"]["rules"][1]["workflow"] = "no-such-object"
+
+
+def dispatch_rule_mismatched_project(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Kanboard Tickets"]["rules"][0]["project"] = "Unregistered Project"
+
+
+def dispatch_unknown_registry_project(d):
+    add_dispatch_record(d)
+    d["dispatch"]["Unregistered Project"] = d["dispatch"].pop("Kanboard Tickets")
+
+
 negative.extend([
-    ("postcutover-stale-global-surfaces", True, mutate(kb313_all_done)),
-    ("postcutover-stale-env-remains", True, mutate(kb313_only_env_remains)),
-    ("postcutover-stale-adapterimages-remains", True, mutate(kb313_leave_only_adapterimages)),
+    ("dispatch-empty-rules", True, mutate(dispatch_empty_rules)),
+    ("dispatch-blank-project", True, mutate(dispatch_blank_project)),
+    ("dispatch-unknown-entry-field", True, mutate(dispatch_unknown_field)),
+    ("dispatch-bad-tagmatch", True, mutate(dispatch_bad_tagmatch)),
+    ("dispatch-rule-missing-workflow", True, mutate(dispatch_rule_missing_workflow)),
+    ("dispatch-rule-unknown-workflow", False, mutate(dispatch_rule_unknown_workflow)),
+    ("dispatch-rule-mismatched-project", False, mutate(dispatch_rule_mismatched_project)),
+    ("dispatch-not-in-registry", False, mutate(dispatch_unknown_registry_project)),
 ])
 
 positive.extend([
+    ("dispatch-record-serves-project", mutate(add_dispatch_record)),
     ("postcutover-clean", mutate(kb313_postcutover_clean)),
     ("namespace-optional-workflow-entry", mutate(kb313_namespace_optional)),
     ("migration-window-half-done-registry", mutate(kb313_window_half_done)),

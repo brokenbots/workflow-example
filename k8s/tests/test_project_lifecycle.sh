@@ -175,11 +175,22 @@ pass "binding claims resolve the per-ns PVCs (criteria-data, criteria-repo)"
 #    no go-domain workflowLibrary entries at this card's base (975eb73).
 #    These legs pin that state as a regression guard: KB-312's cutover leg
 #    must keep it true (the KB-312 verify 'global CM' leg enforces it live).
+# 6) Registry state for the go domain. The shipped payload used to carry
+#    cutover:done for 'Criteria Go Dev' with ZERO runs ever executed through
+#    the binding — KB-338's honest stamp withdraws the claim: the go domain
+#    is pre-cutover until its canary produces a real run (binding-first,
+#    KB-311: render first, flip second). These legs pin the corrected state:
+#    the entry is present (routing metadata stays), the marker is ABSENT,
+#    the route keeps routing to the project, and the global workflowLibrary
+#    carries no criteria-go-dev binding data. project-lifecycle verify —
+#    which asserts the post-cutover shape — is expected to refuse this
+#    project until the canary lands and the marker is re-stamped on
+#    evidence.
 routes_json="$(awk '/^[ ]*routes.json: \|$/{b=1;next} b&&(/^[ \t]/||$0==""){sub(/^[ \t]*/,"",$0);print;next} b{exit}' "$examples/routes-configmap.yaml")"
 [ -n "$routes_json" ] || fail "routes example carries no routes.json"
 jq -e --arg ns criteria-go-dev \
-  '.projectRegistry | to_entries[] | select(.value.namespace == $ns) | .value.cutover == "done"' \
-  >/dev/null <<<"$routes_json" || fail "registry marker for the go domain is not cutover:done"
+  '.projectRegistry | to_entries[] | select(.value.namespace == $ns) | (.value.cutover // "") == ""' \
+  >/dev/null <<<"$routes_json" || fail "registry marker for the go domain is not absent (KB-338 honest stamp: pre-cutover until the canary produces a real run)"
 jq -e '.routes[] | select(.workflow=="kanboard-develop-url" and (.project=="Criteria Go Dev"))' \
   >/dev/null <<<"$routes_json" || fail "the go route no longer routes to Criteria Go Dev (the registry entry is routing metadata and stays)"
 library_json="$(jq -Sc '.workflowLibrary' <<<"$routes_json")"

@@ -629,8 +629,14 @@ if (payload) {
 //   1. the payload structurally validates against
 //      k8s/criteria-binding.schema.json (fail-closed unknown keys at every
 //      level — top-level, volume, secret, config slot);
-//   2. it belongs to a registry entry (namespace -> project, cutover: done
-//      — a binding for a pre-cutover namespace is not a live surface);
+//   2. it belongs to a registry entry (namespace -> project; a binding in a
+//      namespace the registry does not route to is not a live surface.
+//      KB-338 honest stamp: cutover: done on every shipped binding was the
+//      old stance, and 'Criteria Go Dev' proved it wrong — the binding is
+//      the render SOURCE for the cutover, so a binding for a PRE-cutover
+//      project is a staged, not a served, surface. That state is warned
+//      loudly, not failed: the marker follows the canary, KB-311 render
+//      first, flip second);
 //   3. that project's routes select exactly one workflow-library object and
 //      the binding SATISFIES the tree's interface (mounts byte-exact both
 //      ways, required adapter kinds covered, secret lanes resolved, declared
@@ -689,7 +695,7 @@ for (const name of bindingExamples) {
     fail(file, `namespace "${ns}" maps to ${projects.length} registry projects (expected exactly one) — the registry is the only ticket->project routing table (KB-311)`);
   const { project, entry } = projects[0];
   if (entry.cutover !== "done")
-    fail(file, `project "${project}" (namespace ${ns}) is not marked cutover: done — the binding ConfigMap is served only after cutover (binding-first, deletion second, KB-311)`);
+    warn(`${file}: project "${project}" (namespace ${ns}) is PRE-cutover — its binding is a staged surface, not served until the marker flips (binding-first, KB-311; render first, flip second — re-run the go-dev canary on evidence, KB-338)`);
 
   // The project's routes must select exactly one workflow-library object.
   const workflowNames = new Set((payload.routes ?? [])
