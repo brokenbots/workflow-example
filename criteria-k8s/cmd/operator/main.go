@@ -71,9 +71,21 @@ var (
 	shadowCastleAddr  = flag.String("shadow-castle-addr", getenv("SHADOW_CASTLE_ADDR", ""), "Castle Connect endpoint for the shadow-run assignment consumer (KB-319); empty rides --castle-addr")
 	shadowCriteriaID  = flag.String("shadow-criteria-id", getenv("SHADOW_CRITERIA_ID", "criteria-k8s-operator"), "Criteria id presented on the shadow-run Control subscribe (KB-319)")
 	shadowRoutesFile  = flag.String("shadow-routes-file", getenv("SHADOW_ROUTES_FILE", ""), "Routes payload file for the shadow-run spec mirror (KB-319); one startup read; empty keeps the watchdog decision-only")
-	debugEventsFile   = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
-	retentionPeriod   = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
-	sweepInterval     = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
+	// KB-338 assignment agent lane: the operator's Control consumer. With
+	// the flag on, the lane connects as the project's executing agent:
+	// assignment deliveries translate fail-closed onto the shared stamp
+	// path (RunBuilder), the bridge mirrors CR lifecycle into castle's
+	// desired-run rows, and everything serializes to 1 run per replica.
+	// DEFAULT OFF — flipping it is the deliberate dispatch cutover
+	// posture; the lane never starts without it (no env-only default).
+	assignmentRun   = flag.Bool("assignment-agent", getBool("CRITERIA_ASSIGNMENT_AGENT", false), "Run the assignment agent lane (KB-338): operator consumes its project's castle WorkflowAssignments and stamps CriteriaRuns through the shared stamp path; default off (kill switch)")
+	agentCastleAddr = flag.String("assignment-castle-addr", getenv("CRITERIA_AGENT_CASTLE_ADDR", ""), "Castle Connect endpoint for the assignment agent lane (KB-338); empty rides --castle-addr")
+	agentCriteriaID = flag.String("assignment-criteria-id", getenv("CRITERIA_AGENT_CRITERIA_ID", ""), "Criteria overseer id for a pre-provisioned agent identity (KB-338); required with an agent token, ignored by the per-boot Register fallback")
+	agentProject    = flag.String("assignment-project", getenv("CRITERIA_AGENT_PROJECT", ""), "Project scope the assignment agent executes for (KB-338): assignments whose project routing label names another project are never executed here; empty accepts everything dispatched to this identity")
+	agentRoutesFile = flag.String("assignment-routes-file", getenv("CRITERIA_AGENT_ROUTES_FILE", ""), "Routes payload file the assignment agent lane stamps against (KB-338); empty rides --shadow-routes-file; neither set keeps the lane off (it cannot attribute runs without one)")
+	debugEventsFile = flag.String("debug-events-file", getenv("CRITERIA_DEBUG_EVENTS_FILE", ""), "Debug-only events.ndjson path handed to runner Jobs via EVENTS_FILE so criteria additionally mirrors lifecycle events to a file; empty (default) runs castle-only with no events.ndjson written")
+	retentionPeriod = flag.Duration("retention-period", getDuration("RETENTION_PERIOD", 7*24*time.Hour), "Keep per-ticket intake/triage artifacts this long after the last write (0 disables sweeping)")
+	sweepInterval   = flag.Duration("retention-interval", getDuration("RETENTION_INTERVAL", time.Hour), "How often the retention sweep runs")
 	// KB-24: the stall watchdog's step-progress window. A Running run whose
 	// castle stream shows no step progress (lifecycle envelopes plus the
 	// copilot adapter's agent-activity AdapterEvents; heartbeats, terminal
@@ -404,6 +416,65 @@ func main() {
 		logger.Info("shadow-run watchdog enabled (observational)", "addr", shadowAddr, "criteriaId", *shadowCriteriaID)
 	}
 
+	// KB-338 P0.2: the assignment agent lane — the operator's Control
+	// consumer for its project's dispatch. With the kill switch on, the
+	// lane registers (or resumes a pre-provisioned agent identity), keeps
+	// its overseer online, consumes the project's WorkflowAssignments, and
+	// stamps their CriteriaRuns through the SAME shared path the shadow
+	// mirror derives with — 1 run per replica, the bridge mirroring CR
+	// lifecycle back into the desired-run rows
+	// (internal/control/agentbridge.go). Castle's lease gate hands this
+	// agent its project's work only while it stays online; the
+	// GetAssignmentDisposition courtesy gate re-checks ownership before
+	// any stamp (fail-open: castle's per-envelope ownership check is the
+	// enforcement). Kill switch: --assignment-agent=0 (the default).
+	if !*assignmentRun {
+		logger.Info("assignment agent lane disabled (kill switch)")
+	} else if agentAddr := agentRunAddr(); agentAddr == "" {
+		logger.Info("assignment agent lane disabled (no castle address)")
+	} else {
+		agentToken, agentTokenErr := agentCastleTokenFromEnv()
+		if agentTokenErr != nil {
+			logger.Error(agentTokenErr, "assignment agent lane: agent token file unreadable; falling back to the shared CASTLE_TOKEN")
+			agentToken = castleTokenFromEnv()
+		}
+		agentRoutesPayload, agentRoutesErr := loadShadowRoutes(*agentRoutesFile)
+		if agentRoutesPayload == nil && agentRoutesErr == nil {
+			agentRoutesErr = fmt.Errorf("no routes payload configured: set --assignment-routes-file (or --shadow-routes-file); the lane cannot attribute runs without one")
+		}
+		if agentRoutesPayload == nil {
+			// Fail-safe at boot: a lane that cannot stamp a single run is
+			// not a degraded lane, it is an inert consumer — keep the
+			// operator alive, keep the lane off, name the fix in the log.
+			logger.Error(agentRoutesErr, "assignment agent lane disabled: no routes payload configured; set --assignment-routes-file (or --shadow-routes-file)",
+				"routesFile", *agentRoutesFile)
+		} else {
+			agentCfg := control.AgentConfig{
+				Addr:       agentAddr,
+				Token:      agentToken,
+				CriteriaID: *agentCriteriaID,
+				Name:       getenv("CRITERIA_AGENT_NAME", "criteria-k8s-operator"),
+				Project:    *agentProject,
+			}
+			builder := &control.RunBuilder{
+				Defaults:  shadowRunnerDefaults(),
+				Namespace: *namespaceFlag,
+				Routes:    agentRoutesPayload,
+				Client:    directClient,
+				Log:       logger,
+			}
+			events := castle.NewAssignmentEventFeed(castle.Config{Addr: agentAddr, Token: agentToken}, nil)
+			dispositions := castle.NewServerClient(castle.Config{Addr: agentAddr, Token: agentToken}, nil)
+			agent := control.NewAssignmentAgent(agentCfg, builder, *namespaceFlag, directClient, events, dispositions, logger)
+			go func() {
+				if err := agent.Run(ctx); err != nil && ctx.Err() == nil {
+					logger.Error(err, "assignment agent lane exited")
+				}
+			}()
+			logger.Info("assignment agent lane enabled (executing)", "addr", agentAddr, "criteriaId", *agentCriteriaID, "project", *agentProject)
+		}
+	}
+
 	logger.Info("starting criteria-k8s operator")
 	if err := mgr.Start(ctx); err != nil {
 		logger.Error(err, "operator exited")
@@ -463,6 +534,38 @@ func shadowRunAddr() string {
 		return *shadowCastleAddr
 	}
 	return *castleAddr
+}
+
+// agentRunAddr resolves the assignment agent lane's castle endpoint: the
+// dedicated flag first, the shared --castle-addr as fallback. Empty keeps
+// the lane off entirely.
+func agentRunAddr() string {
+	if *agentCastleAddr != "" {
+		return *agentCastleAddr
+	}
+	return *castleAddr
+}
+
+// agentCastleTokenFromEnv resolves the criteria token for the assignment
+// agent lane: CRITERIA_AGENT_CASTLE_TOKEN first, else the file
+// CRITERIA_AGENT_CASTLE_TOKEN_FILE points at (the chart delivers
+// credential material as mounted files), falling back to the shared
+// CASTLE_TOKEN / CASTLE_TOKEN_FILE resolution when neither agent var is
+// wired. A token-file read error is returned to the caller so the fallback
+// is diagnosable (path and cause only — never the secret material).
+func agentCastleTokenFromEnv() (string, error) {
+	token := getenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+	if file := getenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", ""); token == "" && file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("reading %s: %w", file, err)
+		}
+		token = strings.TrimSpace(string(data))
+	}
+	if token == "" {
+		return castleTokenFromEnv(), nil
+	}
+	return token, nil
 }
 
 // newShadowRunBuilder wires the assignment lane's spec mirror. A deployment
