@@ -1730,8 +1730,14 @@ func TestShippedExampleProjectRegistry(t *testing.T) {
 		if entry.Namespace != wantNS {
 			t.Errorf("%s namespace = %q, want %q", project, entry.Namespace, wantNS)
 		}
-		if !entry.IsCutoverDone() {
-			t.Errorf("%s is not cutover:done (the acceptance demonstrates binding-first execution)", project)
+		// KB-338 honest stamp: go-dev's cutover:done was premature — zero
+		// runs have ever been served binding-first, so the marker is
+		// withdrawn until the go-dev canary fires through castle on
+		// evidence (KB-311 render first, flip second; TypeScript SDK's
+		// cutover stands). Pin the marker's absence in the record.
+		wantDone := project == "TypeScript SDK"
+		if entry.IsCutoverDone() != wantDone {
+			t.Errorf("%s cutover marker = %v, want %v (KB-338 honest stamp: go-dev pre-cutover until the canary proves it)", project, entry.IsCutoverDone(), wantDone)
 		}
 	}
 	// The intake's pre-cutover route: those projects resolve but keep the
