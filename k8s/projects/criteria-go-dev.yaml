@@ -1,5 +1,5 @@
 # == KB-312 per-project namespace cutover (ADR 307) — rendered target state for
-# project Criteria Go Dev (ns criteria-go-dev, registry cutover: done) ==
+# project Criteria Go Dev (ns criteria-go-dev, registry cutover: unset) ==
 #
 # Rendered by k8s/project-lifecycle.sh; kubectl is not consulted at render
 # time, so re-render + diff is the drift check:

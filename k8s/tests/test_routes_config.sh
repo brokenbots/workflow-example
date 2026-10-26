@@ -997,7 +997,11 @@ def kb311_route_unregistered_project(d):
 
 
 def kb311_registry_entry_without_cutover(d):
-    d["projectRegistry"]["Criteria Go Dev"].pop("cutover")
+    # KB-338: 'Criteria Go Dev' is already pre-cutover in the shipped
+    # payload (honest stamp), so this mutation pops the marker from
+    # 'TypeScript SDK' to keep asserting that an entry without the marker
+    # stays legal.
+    d["projectRegistry"]["TypeScript SDK"].pop("cutover")
 
 
 negative.extend([
