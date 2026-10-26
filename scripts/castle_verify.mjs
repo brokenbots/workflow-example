@@ -35,7 +35,8 @@
 //     --out evidence.json [--pretty]
 //
 // Exit codes: 0 checklist completed (verdicts may still be pending-eyes), 2
-// usage error, 3 every leg failed (castle unreachable or malformed answers).
+// usage error, 3 unexpected harness failure (e.g. an unreadable token file) —
+// transport and refusal answers are observations, never crashes.
 
 import { writeFileSync } from 'node:fs';
 
@@ -137,6 +138,15 @@ export function podstateSeqs(resp) {
 // dispositionVerdict maps GetAssignmentDisposition's answer into the
 // checklist verdict: state, the leasing agent's criteria id and whether it
 // carries the expected prefix.
+function flatTimestamp(v) {
+  // protojson Timestamp arrives as an RFC3339 string (connect) or a
+  // {seconds, nanos} JSON (legacy wire); callers want one comparable string.
+  if (v && typeof v === 'object') {
+    const s = Number(v.seconds ?? 0);
+    return s > 0 ? `${new Date(s * 1000).toISOString().replace(/\.\d+Z$/, 'Z')} (unix ${s})` : '';
+  }
+  return String(v ?? '');
+}
 export function dispositionVerdict(resp, expectedPrefix = '') {
   const state = String(resp?.state ?? '');
   const leasedCriteriaId = String(resp?.leasedCriteriaId ?? resp?.leased_criteria_id ?? '');
@@ -146,7 +156,7 @@ export function dispositionVerdict(resp, expectedPrefix = '') {
     state: state || 'unknown',
     leasedCriteriaId,
     rejectionReason: String(resp?.rejectionReason ?? resp?.rejection_reason ?? ''),
-    updatedAt: String(resp?.updatedAt ?? resp?.updated_at ?? ''),
+    updatedAt: flatTimestamp(resp?.updatedAt ?? resp?.updated_at),
     leased: state === 'LEASED' || state === 'WORKFLOW_ASSIGNMENT_STATE_LEASED',
   };
   if (expectedPrefix) {
