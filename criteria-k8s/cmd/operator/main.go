@@ -18,6 +18,7 @@ import (
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -456,13 +457,7 @@ func main() {
 				Name:       getenv("CRITERIA_AGENT_NAME", "criteria-k8s-operator"),
 				Project:    *agentProject,
 			}
-			builder := &control.RunBuilder{
-				Defaults:  shadowRunnerDefaults(),
-				Namespace: *namespaceFlag,
-				Routes:    agentRoutesPayload,
-				Client:    directClient,
-				Log:       logger,
-			}
+			builder := newShadowRunBuilder(agentRoutesPayload, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
 			events := castle.NewAssignmentEventFeed(castle.Config{Addr: agentAddr, Token: agentToken}, nil)
 			dispositions := castle.NewServerClient(castle.Config{Addr: agentAddr, Token: agentToken}, nil)
 			agent := control.NewAssignmentAgent(agentCfg, builder, *namespaceFlag, directClient, events, dispositions, logger)
@@ -568,22 +563,46 @@ func agentCastleTokenFromEnv() (string, error) {
 	return token, nil
 }
 
+// configPinResolver is the KB-103 per-repo ConfigMap pinner the assignment
+// and shadow builders consult at stamp time, mirroring the watcher's
+// closure (runstamp.PinConfigRef) with the KB-250 no-silent-degrade
+// discipline adapted to the operator lane: a failed read is logged at lane
+// level (the operator has no kanboard channel to comment on) and the
+// resolved name-only ref stamps — never silent, never a fabricated
+// resourceVersion.
+func configPinResolver(cl client.Client, log logr.Logger) runspec.CriteriaRunConfigRefProvider {
+	return func(ns string, sel *routes.Selection) (*criteriav1.CriteriaRunConfigRef, error) {
+		if cl == nil || sel == nil {
+			return nil, nil
+		}
+		cfgRef, err := runstamp.PinConfigRef(context.Background(), cl, ns, sel)
+		if err != nil {
+			log.Error(err, "per-repo config ConfigMap read failed at stamping; stamping a name-only pin",
+				"configMap", sel.ConfigName, "configMapNamespace", ns)
+		}
+		return cfgRef, err
+	}
+}
+
 // newShadowRunBuilder wires the assignment lane's spec mirror. A deployment
 // without a routes payload is decision-only posture, not a lane
 // disagreement: the builder stays unwired (nil) so BuildRun's
 // "routes payload not configured" degrade never enters the divergence log;
 // the caller logs that posture once at startup (a routes-file READ ERROR
-// keeps its own louder Error-level log).
+// keeps its own louder Error-level log). The KB-103 config pinner is
+// always wired with the payload (KB-338): a named config slot must stamp
+// through to the CR, never silently resolve to lane defaults.
 func newShadowRunBuilder(routesPayload *routes.Payload, defaults runspec.Defaults, ns string, cl client.Client, log logr.Logger) *control.RunBuilder {
 	if routesPayload == nil {
 		return nil
 	}
 	return &control.RunBuilder{
-		Defaults:  defaults,
-		Namespace: ns,
-		Routes:    routesPayload,
-		Client:    cl,
-		Log:       log,
+		Defaults:     defaults,
+		Namespace:    ns,
+		Routes:       routesPayload,
+		Client:       cl,
+		Log:          log,
+		ConfigPinner: configPinResolver(cl, log),
 	}
 }
 

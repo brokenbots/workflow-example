@@ -27,9 +27,10 @@ import (
 // Observational principle preserved (CRI-60 / KB-319): BuildRun never
 // creates, admits, or leases anything — the CR stays in memory and the
 // builder performs no API writes. The only reads are the pin consults the
-// watcher's shape also performs (the KB-311 binding pin; the KB-103 config
-// consult is skipped because the assignment's label vocabulary carries no
-// config selector — a documented divergence source compareSpec reports).
+// watcher's shape also performs: the KB-311 binding pin, and the KB-103
+// config consult when the dispatch envelope's slot names a
+// configurationLibrary entry (Decision.Slot) — the divergence source
+// compareSpec reports when the two lanes disagree.
 //
 // A nil Routes keeps the builder in decision-only degrade: BuildRun fails
 // with a reason instead of guessing a spec — which is why wiring callers
@@ -54,11 +55,14 @@ type RunBuilder struct {
 	Log logr.Logger
 	// ConfigPinner (KB-338) resolves the KB-103 per-repo ConfigMap pin
 	// when the assignment's dispatch envelope named a configurationLibrary
-	// slot (Decision.Slot — Selection.ConfigName non-empty). nil keeps the
-	// documented no-pin-degrade: the slot selects the config ENTRY (so its
-	// overrides land in the spec) but the ConfigMap pin is absent and
-	// StampRun omits configRef, exactly as the slot-less pre-cutover stamp
-	// did pre-KB-338.
+	// slot (Decision.Slot — Selection.ConfigName non-empty): the consult
+	// runs and spec.configRef stamps — name-only when the ConfigMap is
+	// not readable yet (KB-250 no-silent-degrade; the operator wires a
+	// logging pinner). nil is a pin-less mirror posture: the shared stamp
+	// still lands the slot ENTRY's spec overrides (the consult is
+	// decoupled from the stamp), but no spec.configRef — the divergence
+	// compareSpec reports. A live executing lane must never ship nil:
+	// the assignment lane always wires it.
 	ConfigPinner runspec.CriteriaRunConfigRefProvider
 }
 
@@ -133,14 +137,15 @@ func (b *RunBuilder) selection(d Decision) (*routes.Selection, []string) {
 	sel := &routes.Selection{
 		Name:     d.WorkflowName,
 		Workflow: wf,
-		// The assignment carries no config selector (no configRef/tag
-		// vocabulary in the queue's required labels), so ConfigName and
-		// Config stay empty: when the watcher's route resolves per-repo
-		// config, compareSpec reports the spec.configRef divergence. This
-		// is the known, deliberately-documented divergence source of the
-		// shadow window. The dispatch envelope (KB-338) is the one channel
-		// that CAN carry one — Decision.Slot — and then the slot names the
-		// configurationLibrary entry directly (KB-103 per-repo config).
+		// The queue's required labels carry no configRef vocabulary, so a
+		// decision without a slot resolves no per-repo config (ConfigName
+		// empty): when the watcher's tag-group route resolves one,
+		// compareSpec reports the spec.configRef divergence — the known,
+		// deliberately-documented divergence source of the shadow window.
+		// The dispatch envelope (KB-338) is the one channel that CAN carry
+		// a selector — Decision.Slot — naming the configurationLibrary
+		// entry directly (KB-103 per-repo config); the slot's entry
+		// resolves below.
 		ConfigName:     d.Slot,
 		Config:         routes.ConfigEntry{},
 		ConflictPolicy: b.Routes.EffectiveImageConflictPolicy(wf, d.Project),
@@ -180,8 +185,11 @@ func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selectio
 	}
 	// The KB-103 consult: a slot selection (KB-338 envelope) names the
 	// configured entry directly, so the pin resolves through the shared
-	// ConfigPinner when the wiring provided one. Slot-less builds keep the
-	// documented no-pin-degrade path (ResolveConfigPin nil).
+	// ConfigPinner when the wiring provided one. With a nil pinner the
+	// shared stamp still lands the slot ENTRY's spec overrides (the stamp
+	// is decoupled from the consult — KB-338) but leaves spec.configRef
+	// unset, the divergence compareSpec reports; live lanes always wire
+	// the pinner.
 	if b.ConfigPinner != nil && sel.ConfigName != "" {
 		in.ResolveConfigPin = b.ConfigPinner
 	}

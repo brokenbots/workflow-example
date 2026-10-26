@@ -94,8 +94,9 @@ type StampInput struct {
 	BindingResourceVersion string
 	// ResolveConfigPin consults the KB-103 pinned per-repo ConfigMap.
 	// Consulted ONLY on the pre-cutover shape and only when the selection
-	// carries a config entry. nil skips the consult entirely (ConfigRef
-	// unstamped) — the operator's no-pin-client mirror.
+	// carries a config slot: a nil provider degrades to the pin-less
+	// stamp (the slot's ENTRY overrides still land — the stamp is
+	// decoupled from the consult — but spec.configRef stays unset).
 	ResolveConfigPin CriteriaRunConfigRefProvider
 }
 
@@ -134,12 +135,17 @@ func StampRun(in StampInput) *criteriav1.CriteriaRun {
 		spec.CIGateCmd = in.Defaults.CIGateCmd
 		spec.BaseBranch = in.Defaults.BaseBranch
 		// KB-103: per-repo config outranks the lane-level fallback flags
-		// entry-by-entry; spec.configRef pins the ConfigMap the operator
-		// renders (fail-closed on drift). The consult (and its side
-		// effects) belong to the caller; a nil resolver means the lane
-		// cannot pin.
-		if in.ResolveConfigPin != nil && in.Selection.ConfigName != "" {
-			cfgRef, _ := in.ResolveConfigPin(ExecNamespace(in.Namespace, in.Selection), in.Selection)
+		// entry-by-entry, and the stamp is DECOUPLED from the pin consult:
+		// a selection naming a config slot stamps the ENTRY's values
+		// whenever it resolves (KB-338 — a missing pinner must never
+		// silently reduce the lane to its fallback flags), while
+		// spec.configRef stamps only when a provider resolved the
+		// ConfigMap pin.
+		if in.Selection.ConfigName != "" {
+			var cfgRef *criteriav1.CriteriaRunConfigRef
+			if in.ResolveConfigPin != nil {
+				cfgRef, _ = in.ResolveConfigPin(ExecNamespace(in.Namespace, in.Selection), in.Selection)
+			}
 			runstamp.StampRepoConfig(&spec, in.Selection, cfgRef)
 		}
 	}

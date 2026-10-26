@@ -454,6 +454,53 @@ func TestAdapterMirrorParity(t *testing.T) {
 	})
 }
 
+// TestAdapterMirrorEvolvesTrackedRuns drives mirror() (not recordParity
+// directly) over the entry lifecycle: a terminal-but-undecided entry whose
+// reconcile run lands on a LATER poll still records parity that poll (the
+// ladder latched — nothing drains), and a decided entry with a live run in
+// the index is evicted, so the map stays bounded. Eviction must NOT
+// re-arm the card: the run stays in the index, so the memo GC's top
+// branch keeps the memo.
+func TestAdapterMirrorEvolvesTrackedRuns(t *testing.T) {
+	adapter, logRec := newTestAdapter(t, &fakeDispatch{})
+	adapter.runs["KB-1"] = &submittedRun{runID: "r1", terminal: true, endPhase: criteriav1.PhaseSucceeded, endState: finalStateHandlerComplete}
+	// Poll 1: the CR has not landed yet — the entry stays undecided, no
+	// drain attempt on a terminal entry.
+	adapter.mirror(context.Background(), nil, map[string]runPhases{})
+	if adapter.runs["KB-1"] == nil || adapter.runs["KB-1"].decision != "" {
+		t.Fatalf("a terminal entry without an indexed run must stay latched undecided; runs=%v", adapter.runs)
+	}
+	if adapter.parityDecided != 0 {
+		t.Fatalf("no CR observed yet must not decide; decided=%d", adapter.parityDecided)
+	}
+	// Poll 2: the CR lands — the undecided TERMINAL entry re-records
+	// (this is the fix under test: the old mirror skipped terminal
+	// entries entirely, so this entry would never have decided).
+	runsIndex := map[string]runPhases{
+		"KB-1": syntheticRunPhases(criteriav1.PhaseSucceeded, routes.ClassDefault, finalStateHandlerComplete),
+	}
+	adapter.mirror(context.Background(), []kanboard.Task{{ID: 1, ColumnName: "Backlog"}}, runsIndex)
+	if adapter.parityAgreed != 1 || adapter.parityDecided != 1 {
+		t.Fatalf("terminal undecided entry must record parity once its CR indexes; agree:%d decided:%d",
+			adapter.parityAgreed, adapter.parityDecided)
+	}
+	if !logRec.contains("lanes agree") {
+		t.Error("agreement must log")
+	}
+	// Poll 3: decided + run still indexed — evicted now, with the memo
+	// safe (the GC's hasRun branch holds).
+	adapter.mirror(context.Background(), nil, runsIndex)
+	if _, still := adapter.runs["KB-1"]; still {
+		t.Fatal("a decided entry with a live indexed run must be evicted")
+	}
+	// Non-terminal entries never evict: the fire gate's in-flight state.
+	adapter.runs["KB-2"] = &submittedRun{runID: "r2"}
+	adapter.mirror(context.Background(), nil, map[string]runPhases{})
+	if adapter.runs["KB-2"] == nil {
+		t.Fatal("an in-flight entry must never evict")
+	}
+}
+
 // TestAdapterMirrorWindowEnd pins the drain's natural-stop semantics: EOF
 // (server ended the watch window) and the mirror-window deadline are
 // NOT drain errors; everything else surfaces.

@@ -141,8 +141,11 @@ func (a *castleAdapter) Disabled() bool {
 
 // fire submits one assignment for a fired card. Best-effort against the
 // shared fire gates: every failure logs and returns, never panics the
-// poll; the column-entry gate re-fires the submission on the next poll so
-// no dedicated retry loop is needed.
+// poll. There is no dedicated retry loop — a failed or un-acked submit
+// leaves no tracked entry, so the KB-302 memo GC deletes the card's memo
+// and the card's next first-sighting re-fires it on a later poll; a
+// tracked entry whose run has not gone terminal keeps the memo pinned so
+// the pre-CR window does not re-fire instead.
 func (a *castleAdapter) fire(ctx context.Context, task kanboard.Task, repoURL string, sel *routes.Selection) {
 	ticketID := task.Identifier()
 	envelope := control.DispatchEnvelope{
@@ -196,15 +199,32 @@ func (a *castleAdapter) fire(ctx context.Context, task kanboard.Task, repoURL st
 	a.runs[ticketID] = entry
 }
 
-// mirror drains the watch stream for every tracked submission and records
-// the decision ladder's output. runsIndex is the poll's existing CR index —
-// the same map reconcileTaskColumn acts on.
+// mirror services every tracked submission: undecided runs drain the
+// watch stream, every terminal run rides the parity ladder, and
+// decided-terminal entries with a live CR are evicted so the per-process
+// map stays bounded. An eviction keeps the card's KB-302 memo alive (the
+// memo GC consults the reconcile index first), so it cannot re-arm a
+// settled card; entries whose CR has left the cluster stay latched as the
+// anti-refire latch instead of evicting.
 func (a *castleAdapter) mirror(ctx context.Context, tasks []kanboard.Task, runsIndex map[string]runPhases) {
 	if a == nil {
 		return
 	}
 	for ticketID, entry := range a.runs {
+		if entry.terminal && entry.decision != "" && runsIndex[ticketID].anyRun {
+			// Decided + the reconcile lane still indexes the run: the
+			// parity line is recorded, nothing further can change it, and
+			// the memo GC keeps the card parked — evict.
+			delete(a.runs, ticketID)
+			continue
+		}
 		if entry.terminal {
+			// Terminal but undecided (or CR gone): the ladder has latched,
+			// so there is nothing left to drain — only re-record against
+			// this poll's index (recordParity no-ops both when undecided
+			// runs still wait and once decided). Eviction here would
+			// delete the fire gate's terminal latch.
+			a.recordParity(ticketID, entry, tasks, runsIndex)
 			continue
 		}
 		if err := a.drainRun(ctx, entry); err != nil {

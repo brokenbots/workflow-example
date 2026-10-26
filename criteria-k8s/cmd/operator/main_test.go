@@ -367,4 +367,6 @@ func TestNewShadowRunBuilderWiring(t *testing.T) {
 	assert.Same(t, payload, b.Routes)
 	assert.Equal(t, "criteria-jobs", b.Namespace)
 	assert.Equal(t, "make test", b.Defaults.TestCmd)
+	assert.NotNil(t, b.ConfigPinner,
+		"the KB-103 config pinner is wired whenever the payload is (KB-338): a dispatch slot must stamp through to the CR, never silently resolve to lane defaults")
 }
