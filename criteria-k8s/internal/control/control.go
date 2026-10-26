@@ -96,6 +96,12 @@ type Decision struct {
 	RepoURL      string
 	Class        string
 	WorkflowName string
+	// Slot (KB-338) is the dispatch envelope's config slot: the
+	// configurationLibrary entry the run executes under (KB-103 per-repo
+	// config). Empty keeps the assignment lane's original posture — no
+	// config selector (ConfigName and Config stay empty, the shadow
+	// window's documented divergence source).
+	Slot string
 	// Missing names every required decision field the assignment did not
 	// carry. A non-empty Missing is itself a divergence: the dispatch lane
 	// queued work the operator cannot attribute.

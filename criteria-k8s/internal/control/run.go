@@ -52,6 +52,14 @@ type RunBuilder struct {
 	Client client.Client
 	// Log receives the pin-read failures (no secret material).
 	Log logr.Logger
+	// ConfigPinner (KB-338) resolves the KB-103 per-repo ConfigMap pin
+	// when the assignment's dispatch envelope named a configurationLibrary
+	// slot (Decision.Slot — Selection.ConfigName non-empty). nil keeps the
+	// documented no-pin-degrade: the slot selects the config ENTRY (so its
+	// overrides land in the spec) but the ConfigMap pin is absent and
+	// StampRun omits configRef, exactly as the slot-less pre-cutover stamp
+	// did pre-KB-338.
+	ConfigPinner runspec.CriteriaRunConfigRefProvider
 }
 
 // Configured reports whether the builder can actually derive a spec: a
@@ -71,9 +79,13 @@ func (b *RunBuilder) Configured() bool {
 // name; namespace, labels, and the full spec are compared. The reasons
 // come from the exported CompareSpec (kept separately so callers' parity
 // tests can drive both halves).
-func (b *RunBuilder) BuildRun(ctx context.Context, d Decision) (*criteriav1.CriteriaRun, []string) {
+func (b *RunBuilder) BuildRun(ctx context.Context, d Decision, opts ...BuildOption) (*criteriav1.CriteriaRun, []string) {
 	if b == nil || b.Routes == nil {
 		return nil, []string{"routes payload not configured: spec-level comparison unavailable"}
+	}
+	o := buildOptions{}
+	for _, opt := range opts {
+		opt(&o)
 	}
 	var reasons []string
 	if d.Ticket == "" {
@@ -89,7 +101,21 @@ func (b *RunBuilder) BuildRun(ctx context.Context, d Decision) (*criteriav1.Crit
 	if len(reasons) > 0 {
 		return nil, reasons
 	}
-	return b.stamp(ctx, d, sel), nil
+	return b.stamp(ctx, d, sel, o.nameSuffix), nil
+}
+
+// BuildOption customizes a single BuildRun call.
+type BuildOption func(*buildOptions)
+
+type buildOptions struct {
+	nameSuffix string
+}
+
+// WithNameSuffix carves the run's name with the given disambiguator —
+// the assignment lane passes the castle run id so two assignments for one
+// ticket in the same second stamp distinct CRs.
+func WithNameSuffix(suffix string) BuildOption {
+	return func(o *buildOptions) { o.nameSuffix = suffix }
 }
 
 // selection resolves the routes workflow the assignment names. The
@@ -104,7 +130,7 @@ func (b *RunBuilder) selection(d Decision) (*routes.Selection, []string) {
 		return nil, []string{fmt.Sprintf(
 			"spec.workflow.name: assignment names unknown workflow %q (absent from the routes workflow library)", d.WorkflowName)}
 	}
-	return &routes.Selection{
+	sel := &routes.Selection{
 		Name:     d.WorkflowName,
 		Workflow: wf,
 		// The assignment carries no config selector (no configRef/tag
@@ -112,19 +138,34 @@ func (b *RunBuilder) selection(d Decision) (*routes.Selection, []string) {
 		// Config stay empty: when the watcher's route resolves per-repo
 		// config, compareSpec reports the spec.configRef divergence. This
 		// is the known, deliberately-documented divergence source of the
-		// shadow window.
-		ConfigName:     "",
+		// shadow window. The dispatch envelope (KB-338) is the one channel
+		// that CAN carry one — Decision.Slot — and then the slot names the
+		// configurationLibrary entry directly (KB-103 per-repo config).
+		ConfigName:     d.Slot,
 		Config:         routes.ConfigEntry{},
 		ConflictPolicy: b.Routes.EffectiveImageConflictPolicy(wf, d.Project),
-	}, nil
+	}
+	if d.Slot != "" {
+		entry, ok := b.Routes.ConfigLibrary[d.Slot]
+		if !ok {
+			return nil, []string{fmt.Sprintf(
+				"dispatch slot: assignment slot %q (absent from the routes configuration library)", d.Slot)}
+		}
+		sel.Config = entry
+	}
+	return sel, nil
 }
 
 // stamp mirrors the watcher's buildCriteriaRun lane wiring onto the
 // builder's own inputs (defaults namespace, binding pin read) and stamps
 // through the shared path.
-func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selection) *criteriav1.CriteriaRun {
+func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selection, nameSuffix string) *criteriav1.CriteriaRun {
+	name := fmt.Sprintf("%s-%d", strings.ToLower(d.Ticket), nowUnix())
+	if nameSuffix != "" {
+		name = fmt.Sprintf("%s-%s", name, nameSuffix)
+	}
 	in := runspec.StampInput{
-		Name:      fmt.Sprintf("%s-%d", strings.ToLower(d.Ticket), nowUnix()),
+		Name:      name,
 		TicketID:  d.Ticket,
 		RepoURL:   d.RepoURL,
 		Selection: sel,
@@ -137,9 +178,13 @@ func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selectio
 		in.BindingResourceVersion = b.bindingPin(ctx, entry.Namespace)
 		return runspec.StampRun(in)
 	}
-	// The KB-103 config consult is skipped: the selection carries no
-	// config entry (see selection). ResolveConfigPin stays nil — the
-	// documented no-pin-degrade path.
+	// The KB-103 consult: a slot selection (KB-338 envelope) names the
+	// configured entry directly, so the pin resolves through the shared
+	// ConfigPinner when the wiring provided one. Slot-less builds keep the
+	// documented no-pin-degrade path (ResolveConfigPin nil).
+	if b.ConfigPinner != nil && sel.ConfigName != "" {
+		in.ResolveConfigPin = b.ConfigPinner
+	}
 	return runspec.StampRun(in)
 }
 
