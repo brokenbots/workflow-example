@@ -24,6 +24,7 @@ import (
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 )
 
@@ -739,6 +740,23 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 	return criteriav1.PhasePending
 }
 
+// castleRunIDFromRun resolves the run's castle run id across the three
+// carry paths (KB-344): the controller-stamped status (previous
+// observations), the assignment lane's dispatch stamp, and the run-event
+// proxy's watcher stamp. With the proxy in place the runner never dials
+// castle, so for proxy-minted runs no engine agent row exists for
+// discovery to find — the annotation is the only source, and the observed
+// id is stamped back into status so later reconciles converge on it.
+func castleRunIDFromRun(run *criteriav1.CriteriaRun) string {
+	if run.Status.CastleRunID != "" {
+		return run.Status.CastleRunID
+	}
+	if asg := run.Annotations[control.AnnAssignmentRunID]; asg != "" {
+		return asg
+	}
+	return run.Annotations[jobbuilder.AnnotationProxyCastleRunID]
+}
+
 // observeCastle observes the run's lifecycle from castle and layers it onto
 // the pending status update: the castle run id, terminal completion, and the
 // recorded terminal marker. An unavailable or inconclusive source (castle
@@ -754,8 +772,11 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 
 	// The runner job name is the agent-name key: the engine registers a
 	// castle agent named after the runner pod's hostname, which carries the
-	// job name as its prefix.
-	obs, err := r.Castle.Observe(ctx, jobbuilder.JobName(run), run.Status.CastleRunID)
+	// job name as its prefix. The known run id rides the three-path carry
+	// (KB-344): a stamped status, the assignment annotation, or the proxy
+	// annotation — an annotation-resolved id skips discovery entirely,
+	// which proxy-minted runs need (no engine agent row exists to find).
+	obs, err := r.Castle.Observe(ctx, jobbuilder.JobName(run), castleRunIDFromRun(run))
 	if err != nil {
 		logger.Error(err, "observing run lifecycle from castle")
 		return nil, err

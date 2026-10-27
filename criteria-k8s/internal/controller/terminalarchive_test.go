@@ -27,6 +27,7 @@ import (
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -666,3 +667,27 @@ func TestBackfillWalksAllListPages(t *testing.T) {
 var (
 	mowTime = metav1.NewTime(time.Now())
 )
+
+// KB-344: a terminal CR whose status stamp and runner job are both gone
+// still enriches on the annotation carry — the proxy (watcher lane) or the
+// agent (dispatch lane) stamped the castle run id, and a known run id needs
+// no discovery even though the runner job to key it on no longer exists.
+func TestBackfillEnrichesAnnotationCarriedRunID(t *testing.T) {
+	proxied := terminalArchivableRun("cri-44", "cr-uid-44", "Succeeded", "")
+	proxied.Status.JobName = ""
+	proxied.Annotations = map[string]string{jobbuilder.AnnotationProxyCastleRunID: "proxy-run-44"}
+
+	cl := newSchemeAndClient(t, proxied)
+	archiver := newFakeArchiver()
+
+	res, err := controller.BackfillRunArchives(context.Background(), cl, archiver,
+		&fakeCastle{observation: &castle.Observation{RunID: "proxy-run-44"}}, "default", "test-1.2.3", logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Archived)
+	assert.Equal(t, 0, res.Failed)
+
+	stored := archiver.record("proxy-run-44")
+	require.NotNil(t, stored, "the annotation-carried run id keys the record, not the CR uid")
+	assert.Equal(t, "proxy-run-44", stored.GetRunId())
+	assert.Equal(t, "Succeeded", stored.GetFinalPhase())
+}

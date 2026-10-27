@@ -106,7 +106,11 @@ func enrichBackfillRun(ctx context.Context, enricher castle.RunSource, run *crit
 	if enricher == nil || enricher.Disabled() {
 		return obs
 	}
-	knownRunID := run.Status.CastleRunID
+	// KB-344: the known run id rides the three-path carry — a proxy-stamped
+	// or assignment-stamped annotation supplies the id for runs whose
+	// status stamp never landed (terminal before reconcile) and whose
+	// runner job is already reaped, where discovery cannot conclude.
+	knownRunID := castleRunIDFromRun(run)
 	runnerJob := run.Status.JobName
 	if knownRunID == "" && runnerJob == "" {
 		return obs

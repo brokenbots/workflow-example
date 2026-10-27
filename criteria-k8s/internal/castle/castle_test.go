@@ -163,6 +163,31 @@ func TestObserveDiscoversRunByRunnerAgentAndDrains(t *testing.T) {
 	assert.Nil(t, obs.Terminal, "running run is not terminal")
 }
 
+// KB-344: a carried run id (status stamp or proxy/assignment annotation)
+// needs no runner job at all — proxy-minted runs never register an engine
+// agent row for discovery to find.
+func TestObserveKnownRunIDSkipsDiscoveryWithoutRunnerJob(t *testing.T) {
+	server := &stubServer{
+		runs: []*v1.Run{{
+			RunId: "run-proxy-1", CriteriaId: "crit-42", WorkflowName: "kanboard_triage_v1", Status: "running",
+		}},
+		events: map[string][]*v1.Envelope{
+			"run-proxy-1": {
+				provisionEnvelope("run-proxy-1", 1, "scope-a", "default"),
+			},
+		},
+	}
+	srv := newTestServer(t, server)
+	defer srv.Close()
+
+	c := New(Config{Addr: srv.URL}, nil)
+	obs, err := c.Observe(context.Background(), "", "run-proxy-1")
+	require.NoError(t, err)
+	assert.Equal(t, "run-proxy-1", obs.RunID)
+	require.Len(t, obs.Lifecycle, 1)
+	assert.True(t, obs.Lifecycle[0].IsProvisionWanted())
+}
+
 // Subsequent observations reuse the known run id and read incrementally from
 // the cursor; the resolved release adapter is remembered across calls.
 func TestObserveIncrementalCursorAndPersistentScopes(t *testing.T) {
@@ -274,7 +299,7 @@ func TestObserveRunNotYetKnownIsAnError(t *testing.T) {
 
 	_, err = c.Observe(context.Background(), "", "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "requires a runner job name")
+	assert.Contains(t, err.Error(), "requires a known run id or a runner job name")
 
 	// The runner registered, but the run has not been created yet.
 	server.mu.Lock()

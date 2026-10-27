@@ -234,8 +234,12 @@ func (c *Client) Observe(ctx context.Context, runnerJob, knownRunID string) (*Ob
 	if c.Disabled() {
 		return obs, nil
 	}
-	if runnerJob == "" {
-		return nil, fmt.Errorf("castle observation requires a runner job name: run discovery matches the agent the runner pod registers")
+	// Discovery needs the runner job (the agent-name key). A known run id
+	// from the status stamp or a KB-344 carry annotation needs no discovery:
+	// proxy-minted runs never register an engine agent row, and a reaped
+	// runner job would make discovery impossible even for stamped runs.
+	if runnerJob == "" && knownRunID == "" {
+		return nil, fmt.Errorf("castle observation requires a known run id or a runner job name: discovery matches the agent the runner pod registers")
 	}
 
 	runID := knownRunID
