@@ -84,6 +84,12 @@ operator:
   # API for run/adapter lifecycle instead of reading events.ndjson off the
   # data PVC. Empty disables observation (Job conditions only).
   castleAddr: http://castle:8080
+  # KB-344: the port hosting the operator's run-event proxy (the boot gate
+  # listener). Runner Jobs dial http://criteria-k8s-operator.<ns>.svc:<port>
+  # as CASTLE_ADDR and speak the criteria protocol to the operator — run
+  # pods never receive a castle address or credential. 0 disables the proxy
+  # lane entirely (runners fall back to their local events file).
+  runEventsPort: 8082
   # Castle run-archive token (KB-314) via OpenBao CSI — the ONLY chart
   # posture for secret material (CRI-250: no templated Secrets). Set the
   # name of the SecretProviderClass rendered into the namespace; the

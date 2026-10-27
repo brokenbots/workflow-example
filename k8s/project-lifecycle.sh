@@ -503,6 +503,16 @@ spec:
           value: http://castle.${platform_ns}.svc.cluster.local:8080
         - name: CASTLE_TOKEN_FILE
           value: /var/run/secrets/criteria/castle/castle_criteria_token
+        # KB-344: the run-event proxy lane is OFF in per-project namespaces
+        # — there is no criteria-k8s-operator Service here (a per-project
+        # operator cannot present the platform castle-mount credential the
+        # proxy re-emit path requires), so the explicitly EMPTY addr opts
+        # the boot gate out: no listener, no derived proxy endpoint, and
+        # runner Jobs render without CASTLE_ADDR and keep their local
+        # events file. Omitting the variable would instead inherit the
+        # :8082 default and bind a proxy lane whose forward path is dead.
+        - name: BOOTGATE_VIEW_ADDR
+          value: ""
         - name: CRITERIA_JOB_ARCH
           value: amd64
         - name: CRITERIA_STALL_WINDOW

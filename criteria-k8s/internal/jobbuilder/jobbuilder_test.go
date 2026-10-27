@@ -190,7 +190,7 @@ func TestBuildRunnerJob(t *testing.T) {
 	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "PROVIDER_BASE_URL", Value: "http://provider/v1"})
 	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "JOB_NAME", Value: job.Name})
 	assert.NotContains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"},
-		"without Defaults.CastleAddr the runner stays in local file mode")
+		"without Defaults.CriteriaServerAddr the runner stays in local file mode")
 
 	var podIP corev1.EnvVar
 	for _, e := range runner.Env {
@@ -542,8 +542,9 @@ func findJob(t *testing.T, jobs []*batchv1.Job, name string) *batchv1.Job {
 	return nil
 }
 
-// With Defaults.CastleAddr set, the runner receives CASTLE_ADDR so criteria
-// publishes lifecycle to castle in server mode. When unset, the env var is
+// With Defaults.CriteriaServerAddr set, the runner receives CASTLE_ADDR
+// (the operator's run-event proxy endpoint) so criteria publishes lifecycle
+// in server mode. When unset, the env var is
 // absent entirely and the runner's local-mode behaviour is unchanged.
 func TestBuildRunnerJobCastleAddr(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
@@ -554,13 +555,111 @@ func TestBuildRunnerJobCastleAddr(t *testing.T) {
 		},
 	}
 
-	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data", CastleAddr: "http://castle:9443"})
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data", CriteriaServerAddr: "http://criteria-k8s-operator:8082"})
 	runner := job.Spec.Template.Spec.Containers[0]
-	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: "http://castle:9443"})
+	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: "http://criteria-k8s-operator:8082"})
+	// KB-344: the CR name rides with the run so the engine registers with
+	// the operator's run-event proxy under the proxy's attribution key.
+	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: "cri-42"})
+	// No castle credential rides with the run (the proxy owns the castle
+	// identity); the run pod learns only the operator endpoint.
+	assert.NotContains(t, runner.Env, func() corev1.EnvVar { return corev1.EnvVar{Name: "CASTLE_TOKEN"} }())
+	assert.NotContains(t, runner.Env, func() corev1.EnvVar { return corev1.EnvVar{Name: "CASTLE_TOKEN_FILE"} }())
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.CSI != nil {
+			spc := vol.CSI.VolumeAttributes["secretProviderClass"]
+			if strings.Contains(spc, "castle") {
+				t.Errorf("runner job mounts a castle-backed secret volume: %s", vol.Name)
+			}
+		}
+	}
 
 	localJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
 	localRunner := localJob.Spec.Template.Spec.Containers[0]
 	assert.NotContains(t, localRunner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"})
+	// The run-name carry is unconditional: attribution metadata is never a
+	// credential.
+	assert.Contains(t, localRunner.Env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: "cri-42"})
+}
+
+// KB-344 review remediation: only an enrolled run's runner Job carries the
+// proxy enrollment token — the engine's bootstrap credential for the
+// operator's run-event proxy. It is proxy-scoped metadata (never a castle
+// credential), rides in both dispatch modes, and is absent for runs the
+// proxy has not enrolled.
+func TestBuildRunnerJobCarriesProxyEnrollmentToken(t *testing.T) {
+	enrolled := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cri-43",
+			Annotations: map[string]string{
+				jobbuilder.AnnotationProxyEnrollToken: "prenrol-abc123",
+			},
+		},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-43",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+	defaults := jobbuilder.Defaults{DataPVC: "criteria-data", CriteriaServerAddr: "http://criteria-k8s-operator:8082"}
+
+	workflowRunner := jobbuilder.BuildRunnerJob(enrolled, defaults).Spec.Template.Spec.Containers[0]
+	assert.Contains(t, workflowRunner.Env, corev1.EnvVar{Name: "CRITERIA_PROXY_ENROLLMENT_TOKEN", Value: "prenrol-abc123"})
+
+	// Source mode takes the same carry (buildSourceRunnerJob via the
+	// source-mode dispatch).
+	sourceRun := *enrolled
+	sourceRun.Spec.WorkflowSource = &criteriav1.RunWorkflowSource{URL: "https://example.com/wf.yaml"}
+	sourceRunner := jobbuilder.BuildRunnerJob(&sourceRun, defaults).Spec.Template.Spec.Containers[0]
+	assert.Contains(t, sourceRunner.Env, corev1.EnvVar{Name: "CRITERIA_PROXY_ENROLLMENT_TOKEN", Value: "prenrol-abc123"})
+
+	// A run the proxy has not enrolled carries no enrollment env.
+	unenrolled := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-44"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-44",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+	localJob := jobbuilder.BuildRunnerJob(unenrolled, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	assert.NotContains(t, localJob.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "CRITERIA_PROXY_ENROLLMENT_TOKEN"})
+}
+
+// KB-344 review remediation: the boot-gate pre-check URL follows the
+// run-event proxy endpoint's port (both legs ride the same bootgate
+// listener); the legacy 8082 default holds when the proxy is off or the
+// endpoint is portless.
+func TestOperatorViewURLFollowsRunEventsPort(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "cri-45", Namespace: "jobs"},
+		Spec: criteriav1.CriteriaRunSpec{
+			TicketID: "CRI-45",
+			RepoURL:  "https://github.com/brokenbots/workflow-example.git",
+		},
+	}
+
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{
+		DataPVC:            "criteria-data",
+		CriteriaServerAddr: "http://criteria-k8s-operator.jobs.svc:9099",
+	})
+	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "CRITERIA_OPERATOR_VIEW_URL",
+		Value: "http://criteria-k8s-operator.jobs.svc.cluster.local:9099/operator-view",
+	})
+	assert.NotContains(t, job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "CRITERIA_OPERATOR_VIEW_URL",
+		Value: "http://criteria-k8s-operator.jobs.svc.cluster.local:8082/operator-view",
+	}, "the non-8082 run-event port must not leave the pre-check dangling on the legacy default")
+
+	legacyJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
+	// Local (proxy-lane-off) mode still emits the KB-234 pre-check URL on
+	// the operator svc name at the legacy :8082 default — operatorViewURL
+	// always returns a URL, so the value stays pinned even where the
+	// boot-gate listener itself is off (recorded consequence of the
+	// lane-off posture).
+	assert.Contains(t, legacyJob.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "CRITERIA_OPERATOR_VIEW_URL",
+		Value: "http://criteria-k8s-operator.jobs.svc.cluster.local:8082/operator-view",
+	})
 }
 
 // CRI-136 retired the events.ndjson dual-write: by default the runner

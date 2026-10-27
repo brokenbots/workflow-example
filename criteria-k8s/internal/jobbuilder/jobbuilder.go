@@ -3,6 +3,7 @@ package jobbuilder
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -36,6 +37,24 @@ const (
 	// an annotation, not a label, because the comma separator is illegal in
 	// a Kubernetes label value (CRI-234 R1).
 	AnnotationAdapterKinds = "criteria.brokenbots.dev/adapter-kinds"
+	// AnnotationProxyCastleRunID is the castle run id the operator's
+	// run-event proxy minted for a CriteriaRun (KB-344 watcher lane): the
+	// proxy creates the run under the run's owning agent identity when the
+	// engine calls CreateRun, so the controller's castle observation rides
+	// this annotation instead of the discovery pass — with the proxy in
+	// place the runner never dials castle and no engine agent row exists
+	// for castle to discover runs by.
+	AnnotationProxyCastleRunID = "criteria.brokenbots.dev/proxy-castle-run-id"
+	// AnnotationProxyEnrollToken is the per-run proxy enrollment token
+	// (KB-344 review remediation): the operator's run-event proxy stamps
+	// it on the CR (proxy.Enroll) before the runner Job renders, the
+	// runner env hands it to the engine as its --server-bootstrap-token
+	// bootstrap credential, and the proxy's Register binds identity
+	// minting to it — a caller that names an existing CriteriaRun without
+	// the token mints no identity. Proxy-scoped: it opens the operator's
+	// run-event proxy for this run only and is worthless at castle, so
+	// run pods still carry no castle credential.
+	AnnotationProxyEnrollToken = "criteria.brokenbots.dev/proxy-enroll-token"
 	// LabelScopeID is the scope instance id a per-scope adapter pod serves.
 	// Peer pods serve exactly one scope, so the label stays single-valued
 	// under the (scope, environment) grouping.
@@ -125,11 +144,16 @@ type Defaults struct {
 	Image           string
 	DataPVC         string
 	ProviderBaseURL string
-	// CastleAddr is the castle orchestrator address handed to runner Jobs.
-	// When set, runners execute criteria in server mode: lifecycle is
-	// published to castle (CRI-133/134), which is the operator's only run
-	// observation surface. Empty keeps the runner in local file mode.
-	CastleAddr string
+	// CriteriaServerAddr is the run-events endpoint handed to runner
+	// Jobs as CASTLE_ADDR: when set, runners execute criteria in server
+	// mode and publish lifecycle envelopes to it (CRI-133/134), which is
+	// the operator's only run observation surface. KB-344: the endpoint
+	// is the OPERATOR's run-event proxy (its svc, serving the criteria
+	// protocol), never castle itself — run pods learn no castle address
+	// and carry no castle credential, and the operator re-emits envelopes
+	// to castle under the run's owning agent identity. Empty keeps the
+	// runner in local file mode.
+	CriteriaServerAddr string
 	// DebugEventsFile is the debug-only events.ndjson path handed to runner
 	// Jobs via EVENTS_FILE (CRI-136). The events.ndjson dual-write is
 	// retired: only an explicitly configured debug path makes criteria
@@ -531,9 +555,19 @@ func baseBranchOrDefault(spec string) string {
 
 // operatorViewURL is the in-cluster boot-gate view endpoint the operator
 // serves (cmd/operator --bootgate-view-addr). The service is created with
-// the operator manifest (k8s/examples).
-func operatorViewURL(ns string) string {
-	return "http://criteria-k8s-operator." + ns + ".svc.cluster.local:8082/operator-view"
+// the operator manifest (k8s/examples). The port follows the run-event
+// proxy endpoint (KB-344 review remediation: both legs ride the same
+// bootgate listener, so a non-default runEventsPort keeps the runner's
+// boot-gate pre-check pointed at the real listener instead of the dangling
+// hardcode); an empty proxy endpoint keeps the legacy 8082 default.
+func operatorViewURL(ns, criteriaServerAddr string) string {
+	port := "8082"
+	if u, err := url.Parse(criteriaServerAddr); err == nil {
+		if p := u.Port(); p != "" {
+			port = p
+		}
+	}
+	return "http://criteria-k8s-operator." + ns + ".svc.cluster.local:" + port + "/operator-view"
 }
 
 func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
@@ -545,7 +579,12 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		// exits 0 before registering with castle.
 		{Name: "CRITERIA_RUN_TICKET", Value: run.Spec.TicketID},
 		{Name: "CRITERIA_RUN_JOB", Value: JobName(run)},
-		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace)},
+		// KB-234 operator leg: the boot gate's identity + operator-view URL.
+		// The operator serves the view (cmd/operator bootgate-view-addr);
+		// a runner whose CR turned terminal (or was deleted under it)
+		// exits 0 before registering with castle. The port follows the
+		// run-event proxy endpoint (KB-344 review remediation).
+		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace, defaults.CriteriaServerAddr)},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
 		{Name: "REPO_DIR", Value: repoDir},
 		{Name: "INTAKE_ROOT", Value: intakeRoot},
@@ -592,8 +631,21 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	if defaults.DebugEventsFile != "" {
 		env = append(env, corev1.EnvVar{Name: "EVENTS_FILE", Value: defaults.DebugEventsFile})
 	}
-	if defaults.CastleAddr != "" {
-		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CastleAddr})
+	if defaults.CriteriaServerAddr != "" {
+		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CriteriaServerAddr})
+	}
+	// KB-344: the CR name rides with the run so the runner's engine
+	// registers with the operator's run-event proxy under the identity the
+	// proxy attributes envelopes by. The engine's criteria binary takes it
+	// through --name (runner.sh).
+	env = append(env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: run.GetName()})
+	// KB-344 review remediation: the per-run proxy enrollment token — the
+	// engine's bootstrap credential for the operator's run-event proxy
+	// (--server-bootstrap-token in the runner scripts), which binds the
+	// proxy's Register to the pod serving this run. Proxy-scoped and
+	// stamped on the CR by the proxy's Enroll; never a castle credential.
+	if tok := run.GetAnnotations()[AnnotationProxyEnrollToken]; tok != "" {
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_PROXY_ENROLLMENT_TOKEN", Value: tok})
 	}
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 

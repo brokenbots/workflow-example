@@ -523,6 +523,42 @@ func TestSourceRunnerScriptBehavior(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "discovery dir must be cleaned up on exit")
 	})
 
+	t.Run("server mode forwards run attribution and enrollment to the proxy", func(t *testing.T) {
+		code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+			"WORKFLOW_URL":                    "git::https://example.com/wf.git",
+			"CASTLE_ADDR":                     "http://criteria-k8s-operator:8082",
+			"CRITERIA_RUN_NAME":               "cri-231",
+			"CRITERIA_PROXY_ENROLLMENT_TOKEN": "prenrol-231",
+		})
+		require.Equal(t, 0, code, out)
+		assert.Contains(t, stubLog, "[--name] [cri-231]",
+			"the engine must register under the owning run so the proxy attributes its streams to the right run: %s", stubLog)
+		assert.Contains(t, stubLog, "[--server-bootstrap-token] [prenrol-231]",
+			"the engine must present the proxy enrollment credential as its bootstrap token (KB-344): %s", stubLog)
+	})
+
+	t.Run("empty run-name and enrollment env put neither flag on the command line", func(t *testing.T) {
+		code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+			"WORKFLOW_URL": "git::https://example.com/wf.git",
+			"CASTLE_ADDR":  "http://criteria-k8s-operator:8082",
+		})
+		require.Equal(t, 0, code, out)
+		assert.NotContains(t, stubLog, "--server-bootstrap-token",
+			"an empty token env must not render an empty-value bootstrap flag: %s", stubLog)
+		assert.NotContains(t, stubLog, "[--name]",
+			"an empty run-name env must not render an empty-value attribution flag: %s", stubLog)
+	})
+
+	t.Run("enrollment token without server mode passes no bootstrap flag", func(t *testing.T) {
+		code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+			"WORKFLOW_URL":                    "git::https://example.com/wf.git",
+			"CRITERIA_PROXY_ENROLLMENT_TOKEN": "prenrol-231",
+		})
+		require.Equal(t, 0, code, out)
+		assert.NotContains(t, stubLog, "--server-bootstrap-token",
+			"the token is only a bootstrap credential while the engine runs server mode: %s", stubLog)
+	})
+
 	t.Run("no castle or events config keeps the run local", func(t *testing.T) {
 		code, out, _ := runSourceRunnerScript(t, script, map[string]string{
 			"WORKFLOW_URL": "git::https://example.com/wf.git",

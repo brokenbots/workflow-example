@@ -5,6 +5,9 @@ Single declarative install/upgrade unit for the Criteria workflow stack in the
 the live-mutated deployment env. The chart packages:
 
 * `criteria-k8s-operator` Deployment (retention sweep env, `--namespace` flag)
+* ClusterIP Service `criteria-k8s-operator` for the run-event proxy lane
+  (KB-344) — port `operator.runEventsPort` (default 8082), named target
+  port `run-events`; no Service when `operator.runEventsPort=0`
 * Namespaced `Role`/`RoleBinding` for the operator plus both service accounts
   (`criteria-k8s-operator`, `criteria-runner`) and the runner RBAC
 * `CriteriaRun` CRD (`crds/`, installed by helm on install; see the [upgrade

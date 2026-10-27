@@ -89,6 +89,17 @@ grep -q 'providerBaseUrl:' "$CHART/values.yaml" || fail "values.yaml missing pro
 grep -q '^watcher:' "$CHART/values.yaml" && \
     fail "values.yaml still declares the retired watcher block (removed KB-228)"
 
+# KB-344 review remediation: the run-event proxy Service must be gated on
+# runEventsPort exactly like the operator Deployment's container port —
+# runEventsPort 0 disables the lane entirely, and an ungated Service
+# renders `port: 0` targeting a named port the Deployment omits (invalid
+# manifest in a documented posture). Structural check: both templates carry
+# the gate, so the guard cannot silently decouple again.
+grep -q 'if .Values.operator.runEventsPort' "$CHART/templates/operator-deployment.yaml" || \
+    fail "operator deployment does not gate the run-event container port on runEventsPort"
+grep -q 'if and .Values.operator.enabled .Values.operator.runEventsPort' "$CHART/templates/operator-service.yaml" || \
+    fail "operator Service is not gated on runEventsPort (a 0 value renders port: 0 against an omitted named port)"
+
 if ! command -v helm > /dev/null 2>&1; then
     echo "helm not found; chart structure checks passed, skipping template rendering"
     echo "PASS: criteria-k8s chart structure is valid"
@@ -133,7 +144,9 @@ PY
 [ "$(count_kind Deployment)" -eq 2 ] || fail "expected 2 Deployments (operator, castle), got $(count_kind Deployment)"
 grep -q 'name: castle$' "$RENDERED" || fail "castle Deployment missing"
 grep -q 'name: criteria-k8s-operator$' "$RENDERED" || fail "operator Deployment missing"
-[ "$(count_kind Service)" -eq 1 ] || fail "expected 1 Service (castle), got $(count_kind Service)"
+[ "$(count_kind Service)" -eq 2 ] || fail "expected 2 Services (operator run-events, castle), got $(count_kind Service)"
+# KB-344: the run-event proxy Service exists at the default runEventsPort.
+grep -q 'name: run-events' "$RENDERED" || fail "operator run-event Service missing under default values"
 [ "$(count_kind PersistentVolumeClaim)" -eq 2 ] || fail "expected 2 PVCs, got $(count_kind PersistentVolumeClaim)"
 [ "$(count_kind SecretProviderClass)" -eq 2 ] || fail "expected 2 SecretProviderClasses, got $(count_kind SecretProviderClass)"
 [ "$(count_kind Role)" -eq 2 ] || fail "expected 2 Roles (operator, runner), got $(count_kind Role)"
@@ -251,6 +264,52 @@ helm template criteria-k8s "$CHART" --set namespaceCreate=true > "$NS_RENDERED" 
 grep -q '^kind: Namespace$' "$NS_RENDERED" || fail "namespaceCreate=true did not render a Namespace"
 grep -q 'pod-security.kubernetes.io/enforce: baseline' "$NS_RENDERED" || fail "rendered Namespace lacks pod-security label"
 
+# --------------------------------------------- runEventsPort=0 (lane off, KB-344)
+# runEventsPort 0 disables the run-event proxy lane entirely: the operator
+# Deployment omits the named container port (documented values contract), so
+# the operator Service must not render — a `port: 0` Service targeting an
+# absent named port is invalid and fails install in exactly the posture the
+# value documents as supported.
+NOEVENTS_RENDERED="$(mktemp)"
+helm template criteria-k8s "$CHART" --set operator.runEventsPort=0 > "$NOEVENTS_RENDERED" || \
+    fail "helm template failed with operator.runEventsPort=0"
+if grep -q 'run-events' "$NOEVENTS_RENDERED" 2> /dev/null; then
+    fail "runEventsPort=0 still renders the operator run-event Service (or deployment port)"
+fi
+# The lane-off state must be explicit at the deployment env: BOOTGATE_VIEW_ADDR
+# renders EMPTY (the operator resolves set-but-empty as a lane opt-out), never
+# omitted — an omitted variable inherits the :8082 default and binds a proxy
+# lane whose Service this posture does not render, so every run pod dials an
+# unresolvable name and dies at boot instead of keeping file mode.
+if ! grep -qF 'name: BOOTGATE_VIEW_ADDR' "$NOEVENTS_RENDERED"; then
+    fail "runEventsPort=0 omitted BOOTGATE_VIEW_ADDR (the lane state must be explicit, not the :8082 env default)"
+fi
+view_value="$(grep -A1 -F 'name: BOOTGATE_VIEW_ADDR' "$NOEVENTS_RENDERED" | tail -n 1)"
+case "$view_value" in
+    *'value: ""'*) ;;
+    *) fail "runEventsPort=0 rendered '$view_value' for BOOTGATE_VIEW_ADDR, not the explicit empty value" ;;
+esac
+rm -f "$NOEVENTS_RENDERED"
+
+# Contrast: a set runEventsPort keeps the lane wired — the boots gate env,
+# the named container port, and the criteria-k8s-operator Service all render.
+PORTOUT="$(helm template criteria-k8s "$CHART" --set operator.runEventsPort=8082)" || \
+    fail "helm template failed with operator.runEventsPort=8082"
+view_value_port="$(printf '%s\n' "$PORTOUT" | grep -A1 -F 'name: BOOTGATE_VIEW_ADDR' | tail -n 1)"
+case "$view_value_port" in
+    *'value: ":8082"'*) ;;
+    *) fail "runEventsPort=8082 rendered '$view_value_port' for BOOTGATE_VIEW_ADDR, not the listener address" ;;
+esac
+case "$PORTOUT" in
+    *'name: run-events'*) ;;
+    *) fail "runEventsPort=8082 did not render the named run-events container port" ;;
+esac
+svc_names="$(printf '%s\n' "$PORTOUT" | awk '/^kind: Service$/{svc=1; next} svc && /^  name:/{print $2; svc=0}')"
+case "$svc_names" in
+    *'criteria-k8s-operator'*) ;;
+    *) fail "runEventsPort=8082 did not render the operator Service (rendered Service names: $svc_names)" ;;
+esac
+
 # ------------------------------------------------------ value override wiring
 check_override() { # description set-expr pattern
     local out
@@ -287,14 +346,27 @@ out="$(helm template criteria-k8s "$CHART" -n alt-ns --set namespace="")" || fai
 
 # -------------------------------------------------------------- toggles
 out="$(helm template criteria-k8s "$CHART" --set castle.enabled=false)" || fail "helm template failed with castle disabled"
+# castle.enabled=false must not render the castle Service. The chart also
+# renders the operator run-event Service (KB-344), so the check is scoped to
+# the castle Service by name, not to "no Service at all".
+if printf '%s\n' "$out" | awk '
+    /^kind: Service$/ { ind = 1; next }
+    /^---$/ { ind = 0 }
+    ind && $0 ~ /^  name: castle$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+'; then fail "castle Service rendered despite castle.enabled=false"; fi
 # Newline-anchored globs stand in for grep's ^...$ line anchors (and keep
 # 'kind: Service' from matching 'kind: ServiceAccount'); no pipe, no SIGPIPE.
-[[ "$out" == *$'\nkind: Service\n'* ]] && fail "castle Service rendered despite castle.enabled=false"
 [[ "$out" == *$'\n  name: castle\n'* ]] && fail "castle Deployment rendered despite castle.enabled=false"
+[[ "$out" == *$'\n  name: criteria-k8s-operator\n'* ]] || fail "operator run-event Service missing with castle disabled"
 
 out="$(helm template criteria-k8s "$CHART" --set operator.enabled=false --set castle.enabled=false)" \
     || fail "helm template failed with all components disabled"
 [[ "$out" == *$'\nkind: Deployment\n'* ]] && fail "Deployment rendered with all components disabled"
+# With both components off nothing renders at all: the operator Service is
+# gated on operator.enabled (and operator.runEventsPort), so "no Service"
+# only holds in this fully disabled posture.
+[[ "$out" == *$'\nkind: Service\n'* ]] && fail "Service rendered with all components disabled"
 
 # ------------------------------------------------------- CRD packaging
 helm template criteria-k8s "$CHART" --include-crds > "$CRD_RENDERED" || fail "helm template --include-crds failed"
@@ -371,7 +443,7 @@ assert_blocks_equal "castle Service selector" \
 # are additive on top of it.
 printf '%s\n' "$castle_dep_r" \
     | awk '$0 == "template:" { f = 1; next } f && $0 == "spec:" { exit } f { print }' \
-    | grep -qx 'app: castle' || fail "castle pod template dropped the live app: castle label"
+    | grep -x 'app: castle' > /dev/null || fail "castle pod template dropped the live app: castle label"
 
 # Castle container block (image, securityContext, env, command, probes,
 # mounts) must equal the live manifest; the chart must not add runtime

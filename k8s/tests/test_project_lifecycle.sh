@@ -40,6 +40,24 @@ cmp "$tmp/once.yaml" k8s/projects/criteria-go-dev.yaml \
   || fail "committed k8s/projects/criteria-go-dev.yaml drifted from the renderer; re-run: $lifecycle render --namespace criteria-go-dev --output k8s/projects/criteria-go-dev.yaml"
 pass "deterministic render matches committed target state"
 
+# 1b) KB-344 per-project posture: the per-project operator keeps the
+#     run-event proxy lane OFF — there is no criteria-k8s-operator Service
+#     in a project namespace (the per-project operator cannot present the
+#     platform castle credential for the re-emit path), so the operator
+#     env pins an explicitly EMPTY BOOTGATE_VIEW_ADDR (a set-but-empty
+#     value the operator resolves as a lane opt-out) and runner Jobs for
+#     this namespace render without CASTLE_ADDR, keeping their local
+#     events file. An omitted variable would inherit the :8082 default and
+#     bind a proxy lane whose forward path is dead.
+bootgate_value="$(grep -A1 -F 'name: BOOTGATE_VIEW_ADDR' "$tmp/once.yaml" | tail -n1)"
+case "$bootgate_value" in
+  *'value: ""'*) pass "per-project operator renders the explicit lane-off BOOTGATE_VIEW_ADDR" ;;
+  *) fail "per-project operator BOOTGATE_VIEW_ADDR is '$bootgate_value', not the explicit lane-off empty value" ;;
+esac
+if grep -q '^kind: Service$' "$tmp/once.yaml"; then
+  fail "per-project render carries a Service; the per-project posture has no local proxy lane to serve"
+fi
+
 # 2) Every document in the rendered target state must parse as YAML
 #    (python3+pyyaml; skipped loudly when unavailable on the runner).
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then

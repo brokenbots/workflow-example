@@ -24,6 +24,7 @@ import (
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 )
 
@@ -92,6 +93,21 @@ type CriteriaRunReconciler struct {
 	// (the running operator's version). Empty resolution falls to a "dev"
 	// fallback in the record builder.
 	OperatorVersion string
+	// RunEvents is the run-event proxy's enrollment edge (KB-344 review
+	// remediation): before any runner Job renders, the reconciler enrolls
+	// the run so the proxy stamps the per-run bootstrap token on the CR
+	// and the jobbuilder carries it into the runner env — the credential
+	// that binds the proxy's Register to the pod serving the run. Nil
+	// (proxy lane off) renders runners without the enrollment carry.
+	RunEvents ProxyEnroller
+}
+
+// ProxyEnroller is the run-event proxy's enrollment edge (KB-344 review
+// remediation): mint or reuse the per-run bootstrap token the proxy binds
+// its Register gate to, stamped durably on the CR so an operator restart
+// re-reads it. Implemented by *proxy.Proxy.
+type ProxyEnroller interface {
+	Enroll(ctx context.Context, crName string) (string, error)
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -402,6 +418,26 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if drift != "" {
 		return r.failConfigRenderDrift(ctx, &run, update, drift, logger)
+	}
+
+	// KB-344 review remediation: enroll the run with the run-event proxy
+	// before any runner Job renders — the proxy stamps the per-run
+	// bootstrap credential on the CR and the mirror below feeds it to
+	// BuildAll in THIS pass, so an engine pod never boots without it. A
+	// failed enrollment fails the reconcile (retried on the next pass)
+	// instead of rendering a tokenless runner Job the proxy would refuse.
+	if r.RunEvents != nil && resolvedDefaults.CriteriaServerAddr != "" {
+		enrollToken, err := r.RunEvents.Enroll(ctx, run.GetName())
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// Mirror the just-stamped annotation onto the local object: the
+		// informer-backed view may not have propagated the proxy's patch
+		// yet, and the rendered Job needs the value now.
+		if run.Annotations == nil {
+			run.Annotations = map[string]string{}
+		}
+		run.Annotations[jobbuilder.AnnotationProxyEnrollToken] = enrollToken
 	}
 
 	desiredJobs := jobbuilder.BuildAll(&run, resolvedDefaults)
@@ -739,6 +775,23 @@ func derivePhase(job *batchv1.Job) criteriav1.CriteriaRunPhase {
 	return criteriav1.PhasePending
 }
 
+// castleRunIDFromRun resolves the run's castle run id across the three
+// carry paths (KB-344): the controller-stamped status (previous
+// observations), the assignment lane's dispatch stamp, and the run-event
+// proxy's watcher stamp. With the proxy in place the runner never dials
+// castle, so for proxy-minted runs no engine agent row exists for
+// discovery to find — the annotation is the only source, and the observed
+// id is stamped back into status so later reconciles converge on it.
+func castleRunIDFromRun(run *criteriav1.CriteriaRun) string {
+	if run.Status.CastleRunID != "" {
+		return run.Status.CastleRunID
+	}
+	if asg := run.Annotations[control.AnnAssignmentRunID]; asg != "" {
+		return asg
+	}
+	return run.Annotations[jobbuilder.AnnotationProxyCastleRunID]
+}
+
 // observeCastle observes the run's lifecycle from castle and layers it onto
 // the pending status update: the castle run id, terminal completion, and the
 // recorded terminal marker. An unavailable or inconclusive source (castle
@@ -754,8 +807,11 @@ func (r *CriteriaRunReconciler) observeCastle(ctx context.Context, run *criteria
 
 	// The runner job name is the agent-name key: the engine registers a
 	// castle agent named after the runner pod's hostname, which carries the
-	// job name as its prefix.
-	obs, err := r.Castle.Observe(ctx, jobbuilder.JobName(run), run.Status.CastleRunID)
+	// job name as its prefix. The known run id rides the three-path carry
+	// (KB-344): a stamped status, the assignment annotation, or the proxy
+	// annotation — an annotation-resolved id skips discovery entirely,
+	// which proxy-minted runs need (no engine agent row exists to find).
+	obs, err := r.Castle.Observe(ctx, jobbuilder.JobName(run), castleRunIDFromRun(run))
 	if err != nil {
 		logger.Error(err, "observing run lifecycle from castle")
 		return nil, err

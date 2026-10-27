@@ -11,8 +11,11 @@ set -euo pipefail
 #
 # The check is behavioral: the runner script is executed in a sandbox with a
 # stub criteria binary that captures its environment and argv, once with
-# CASTLE_ADDR set and once unset. Structural guards pin both runner.sh copies
-# (canonical + chart-embedded) staying in sync.
+# CASTLE_ADDR set and once unset. KB-344: the sandbox also proves the proxy
+# identity carry — with CRITERIA_RUN_NAME/CRITERIA_PROXY_ENROLLMENT_TOKEN
+# set the engine argv must include --name and --server-bootstrap-token (and
+# neither of the two when the env is unset). Structural guards pin both
+# runner.sh copies (canonical + chart-embedded) staying in sync.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -52,18 +55,20 @@ done
 # Sandbox the runner script: rewrite its absolute container paths to the temp
 # tree and stub the criteria binary so it records the environment and argv it
 # was invoked with.
-sandbox_runner() { # sandbox_dir -> stdout: path of the rewritten runner copy
-    local sb="$1"
+sandbox_runner() { # src_script sandbox_dir -> stdout: path of the rewritten runner copy
+    local src_script="$1"
+    local sb="$2"
     sed -e "s|/usr/local/bin/criteria|$sb/bin/criteria|g" \
         -e "s|/secrets/linear_api_key|$sb/secrets/linear_api_key|g" \
         -e "s|/data/.criteria/runs/|$sb/data/.criteria/runs/|g" \
         -e "s|^workflow_src=/workflows$|workflow_src=$sb/workflows|" \
         -e "s|^workflow_tmp=/tmp/workflows$|workflow_tmp=$sb/workflows-tmp|" \
-        "$RUNNER_CANONICAL"
+        "$src_script"
 }
 
-run_runner() { # out_env out_args castle_addr
-    local out_env="$1" out_args="$2" castle_addr="$3"
+run_runner() { # out_env out_args castle_addr src_script [EXTRA_ENV=value...]
+    local out_env="$1" out_args="$2" castle_addr="$3" src_script="$4"
+    shift 4
     local sb
     sb=$(mktemp -d)
     SANDBOXES+=("$sb")
@@ -95,7 +100,7 @@ exit 0
 EOF
     chmod +x "$sb/bin/criteria"
 
-    sandbox_runner "$sb" > "$sb/runner.sh"
+    sandbox_runner "$src_script" "$sb" > "$sb/runner.sh"
     chmod +x "$sb/runner.sh"
 
     # Full job env block: the runner dereferences every one of these under
@@ -132,9 +137,12 @@ EOF
     if [ -n "$castle_addr" ]; then
         run_env+=("CASTLE_ADDR=$castle_addr")
     fi
+    if [ "$#" -gt 0 ]; then
+        run_env+=("$@")
+    fi
 
     env -i "${run_env[@]}" "$sb/runner.sh" || \
-        fail "runner script failed under set -eu (CASTLE_ADDR=${castle_addr:-unset})"
+        fail "runner script failed under set -eu (CASTLE_ADDR=${castle_addr:-unset}, src=$src_script)"
 }
 
 # Server mode: the engine process must see CRITERIA_SERVER_TLS=disable and the
@@ -150,19 +158,61 @@ cleanup() {
 }
 trap cleanup EXIT
 
-run_runner "$env_file" "$args_file" "http://castle:8080"
+# Server mode (tokenless): the engine process must see CRITERIA_SERVER_TLS=disable
+# and the --server flag with the configured address verbatim. Without the
+# per-run env, argv must carry neither attribution nor bootstrap flags:
+# a run identity or enrollment credential is per-run state, never a
+# boot-time default (KB-344).
+for runner_src in "$RUNNER_CANONICAL" "$RUNNER_CHART"; do
+    run_runner "$env_file" "$args_file" "http://castle:8080" "$runner_src"
 
-grep -qx 'CRITERIA_SERVER_TLS=disable' "$env_file" || \
-    fail "criteria apply was invoked without CRITERIA_SERVER_TLS=disable in its environment (CRI-138 plaintext rejection)"
-grep -qF -- '--server' "$args_file" || fail "criteria apply was invoked without --server in server mode"
-grep -qF 'http://castle:8080' "$args_file" || fail "criteria apply --server did not receive CASTLE_ADDR verbatim"
+    grep -qx 'CRITERIA_SERVER_TLS=disable' "$env_file" || \
+        fail "criteria apply was invoked without CRITERIA_SERVER_TLS=disable in its environment (CRI-138 plaintext rejection)"
+    grep -qx -- '--server' "$args_file" || fail "criteria apply was invoked without --server in server mode"
+    grep -qF 'http://castle:8080' "$args_file" || fail "criteria apply --server did not receive CASTLE_ADDR verbatim"
+    if grep -qx -- '--name' "$args_file"; then
+        fail "$runner_src passed --name with no run identity in the env (attribution is per-run state)"
+    fi
+    if grep -qx -- '--server-bootstrap-token' "$args_file"; then
+        fail "$runner_src passed --server-bootstrap-token with no enrollment credential in the env"
+    fi
+done
 
 # Local file mode: no CASTLE_ADDR, no TLS opt-out, no --server flag.
-run_runner "$env_file" "$args_file" ""
+for runner_src in "$RUNNER_CANONICAL" "$RUNNER_CHART"; do
+    run_runner "$env_file" "$args_file" "" "$runner_src"
 
-if grep -q '^CRITERIA_SERVER_TLS=' "$env_file"; then
-    fail "runner exported CRITERIA_SERVER_TLS outside server mode (CASTLE_ADDR unset)"
-fi
-grep -qF -- '--server' "$args_file" && fail "criteria apply received --server without CASTLE_ADDR"
+    if grep -q '^CRITERIA_SERVER_TLS=' "$env_file"; then
+        fail "runner exported CRITERIA_SERVER_TLS outside server mode (CASTLE_ADDR unset)"
+    fi
+    if grep -qx -- '--server' "$args_file"; then
+        fail "criteria apply received --server without CASTLE_ADDR"
+    fi
+    if grep -qx -- '--name' "$args_file"; then
+        fail "$runner_src passed --name without CASTLE_ADDR (nothing to attribute)"
+    fi
+    if grep -qx -- '--server-bootstrap-token' "$args_file"; then
+        fail "$runner_src passed --server-bootstrap-token without CASTLE_ADDR (nothing to present it to)"
+    fi
+done
 
-echo "PASS: runner server mode exports CRITERIA_SERVER_TLS=disable (and only then) before criteria apply --server"
+# KB-344: the proxy identity carry — with the enrolled run's env
+# (CRITERIA_RUN_NAME + CRITERIA_PROXY_ENROLLMENT_TOKEN), both runner copies
+# pass --name <run> and --server-bootstrap-token <token> so the operator's
+# run-event proxy attributes the streams to the owning CriteriaRun and the
+# engine presents the CR-stamped bootstrap credential on Register.
+for runner_src in "$RUNNER_CANONICAL" "$RUNNER_CHART"; do
+    run_runner "$env_file" "$args_file" "http://castle:8080" "$runner_src" \
+        CRITERIA_RUN_NAME=cri-138-server-tls CRITERIA_PROXY_ENROLLMENT_TOKEN=prenrol-138
+
+    grep -qx -- '--name' "$args_file" || \
+        fail "$runner_src dropped the --name run-attribution flag (the proxy could not attribute the streams)"
+    grep -qx 'cri-138-server-tls' "$args_file" || \
+        fail "$runner_src did not pass the run identity as the --name value"
+    grep -qx -- '--server-bootstrap-token' "$args_file" || \
+        fail "$runner_src dropped --server-bootstrap-token (the enrollment credential would never reach the proxy)"
+    grep -qx 'prenrol-138' "$args_file" || \
+        fail "$runner_src did not pass the enrollment token as the --server-bootstrap-token value"
+done
+
+echo "PASS: runner server mode exports CRITERIA_SERVER_TLS=disable (and only then), carries --name and --server-bootstrap-token from the per-run env (and only then), before criteria apply --server"

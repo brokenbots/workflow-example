@@ -87,6 +87,16 @@ cmp_embedded() {
 cmp_embedded "runner.sh" "$RUNNER_CANONICAL"
 cmp_embedded "adapter.sh" "$ADAPTER_CANONICAL"
 
+# 5b. The embedded runner.sh must carry the KB-344 run-event proxy identity
+#     block (--name run attribution + --server-bootstrap-token enrollment):
+#     the byte-compare above already catches drift from the canonical copy,
+#     but pinning the block by name turns any future "simplification" of
+#     the proxy handoff into a named failure here, same as the other copies.
+has 'set -- "$@" --name "$CRITERIA_RUN_NAME"'
+has ': "${CRITERIA_PROXY_ENROLLMENT_TOKEN:=}"'
+has 'if [ -n "$CRITERIA_PROXY_ENROLLMENT_TOKEN" ]'
+has 'set -- "$@" --server-bootstrap-token "$CRITERIA_PROXY_ENROLLMENT_TOKEN"'
+
 # 6. Secret hygiene: credential-shaped literals never ship in the manifest.
 if grep -qE 'ghp_|gho_|github_pat_|hvs\.' "$MANIFEST"; then
     fail "credential-shaped literal found in operator-prereqs.yaml"

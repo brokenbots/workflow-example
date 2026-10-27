@@ -425,3 +425,145 @@ func TestResolveAgentRoutesPath(t *testing.T) {
 	require.NoError(t, absentErr, "a neither-set posture is not an error, it is lane-off")
 	assert.Nil(t, absent, "an empty resolved path loads no payload")
 }
+
+func TestResolveRunEventsLane(t *testing.T) {
+	// Default operator posture: the boot gate listener's port back-ends
+	// the derived svc endpoint (KB-344), and the derivation reports no
+	// disabling reason.
+	endpoint, reason := resolveRunEventsLane(":8082", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "http://criteria-k8s-operator.criteria-system.svc:8082", endpoint)
+	assert.Equal(t, "", reason)
+
+	// An explicit --run-events-addr wins over the derivation.
+	endpoint, reason = resolveRunEventsLane(":8082", "http://operator.ingress.svc:9090", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "http://operator.ingress.svc:9090", endpoint)
+	assert.Equal(t, "", reason)
+
+	// A host:port listener still yields the port-only svc endpoint.
+	endpoint, reason = resolveRunEventsLane("0.0.0.0:9099", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "http://criteria-k8s-operator.criteria-system.svc:9099", endpoint)
+	assert.Equal(t, "", reason)
+
+	// KB-344 review remediation: the three off-cases each keep the
+	// endpoint empty and name their reason, so a runner Job never dials a
+	// proxy whose forward path is dead. Empty boot gate:
+	endpoint, reason = resolveRunEventsLane("", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.Contains(t, reason, "boot gate listener")
+	// Empty castle endpoint:
+	endpoint, reason = resolveRunEventsLane(":8082", "", "criteria-k8s-operator", "criteria-system", "", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.Contains(t, reason, "castle endpoint")
+	// Empty castle credential (no agent credential, no shared token):
+	endpoint, reason = resolveRunEventsLane(":8082", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "")
+	assert.Equal(t, "", endpoint)
+	assert.Contains(t, reason, "castle credential")
+
+	// A partial configuration stays off even when an explicit endpoint is
+	// configured: the gate runs before the override.
+	endpoint, reason = resolveRunEventsLane("", "http://operator.ingress.svc:9090", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.NotEqual(t, "", reason)
+
+	// Derivation postures that cannot produce an endpoint stay off too.
+	endpoint, reason = resolveRunEventsLane(":8082-noport", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.NotEqual(t, "", reason)
+}
+
+// TestBootgateViewAddrDefault pins the KB-344 lane-off contract at the env
+// → flag-default layer: BOOTGATE_VIEW_ADDR set to the empty string resolves
+// to an empty --bootgate-view-addr (the chart renders that for
+// runEventsPort 0: no listener, no derived proxy endpoint), while an unset
+// variable keeps the legacy :8082 default. A plain getenv fallback cannot
+// express the set-but-empty case — that is the defect this pins.
+func TestBootgateViewAddrDefault(t *testing.T) {
+	const envKey = "BOOTGATE_VIEW_ADDR"
+	oldValue, hadValue := os.LookupEnv(envKey)
+	t.Cleanup(func() {
+		if hadValue {
+			os.Setenv(envKey, oldValue)
+		} else {
+			os.Unsetenv(envKey)
+		}
+	})
+
+	// Unset: the legacy default keeps the view (and the derived run-event
+	// endpoint) up.
+	os.Unsetenv(envKey)
+	assert.Equal(t, ":8082", bootgateViewAddrDefault())
+
+	// Explicitly empty: the operator's caller opted the lane out — an
+	// empty listen address disables it.
+	os.Setenv(envKey, "")
+	assert.Equal(t, "", bootgateViewAddrDefault())
+
+	// Explicitly set: the operator's value wins.
+	os.Setenv(envKey, "0.0.0.0:9099")
+	assert.Equal(t, "0.0.0.0:9099", bootgateViewAddrDefault())
+}
+
+// TestRunEventsLaneEnvShapes pins the deployment postures' env shapes to
+// the lane state they must produce, mirroring main()'s composition (env →
+// flag default → agent credential → lane derivation): the per-project
+// render's explicitly empty BOOTGATE_VIEW_ADDR keeps the run-event proxy
+// lane off (runner Jobs then render without CASTLE_ADDR and keep their
+// local events file), while the unset-variable env keeps the :8082 lane
+// derivable. CASTLE_ADDR rides the flag layer (bound at package init in
+// production), so the test sets the flag global to the env value main()
+// would have resolved.
+func TestRunEventsLaneEnvShapes(t *testing.T) {
+	envOverride := func(key, value string) func() {
+		old, had := os.LookupEnv(key)
+		return func() {
+			if had {
+				os.Setenv(key, old)
+			} else {
+				os.Unsetenv(key)
+			}
+		}
+	}
+	// The per-project env shape (k8s/project-lifecycle.sh): a cross-ns
+	// castle endpoint + shared token file, no agent credential.
+	for _, key := range []string{"CASTLE_ADDR", "CRITERIA_AGENT_CASTLE_TOKEN", "CRITERIA_AGENT_CASTLE_TOKEN_FILE"} {
+		t.Cleanup(envOverride(key, os.Getenv(key)))
+	}
+	os.Unsetenv("CRITERIA_AGENT_CASTLE_TOKEN")
+	os.Unsetenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE")
+	os.Setenv("CASTLE_ADDR", "http://castle.juice-platform.svc.cluster.local:8080")
+	oldFlagCastleAddr := *castleAddr
+	*castleAddr = os.Getenv("CASTLE_ADDR")
+	t.Cleanup(func() { *castleAddr = oldFlagCastleAddr })
+
+	// CASTLE_ADDR alone does not forward a run's own identity — the agent
+	// token comes from the operator's own castle-token file only.
+	tokenFile := filepath.Join(t.TempDir(), "castle_token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("project-castle-tok\n"), 0o600))
+	t.Cleanup(envOverride("CASTLE_TOKEN_FILE", os.Getenv("CASTLE_TOKEN_FILE")))
+	os.Setenv("CASTLE_TOKEN_FILE", tokenFile)
+	proxyToken, err := agentCastleTokenFromEnv()
+	require.NoError(t, err)
+	require.Equal(t, "project-castle-tok", proxyToken)
+
+	t.Run("explicitly empty BOOTGATE_VIEW_ADDR keeps the proxy lane off", func(t *testing.T) {
+		t.Cleanup(envOverride("BOOTGATE_VIEW_ADDR", os.Getenv("BOOTGATE_VIEW_ADDR")))
+		os.Setenv("BOOTGATE_VIEW_ADDR", "")
+		addr := bootgateViewAddrDefault()
+		assert.Equal(t, "", addr, "the lane-off render must resolve an empty --bootgate-view-addr")
+
+		endpoint, reason := resolveRunEventsLane(addr, "", "criteria-k8s-operator", "criteria-go-dev", *castleAddr, proxyToken)
+		assert.Equal(t, "", endpoint, "no endpoint may derive from an opted-out listener")
+		assert.Contains(t, reason, "boot gate listener")
+	})
+
+	t.Run("unset BOOTGATE_VIEW_ADDR keeps the :8082 lane", func(t *testing.T) {
+		t.Cleanup(envOverride("BOOTGATE_VIEW_ADDR", os.Getenv("BOOTGATE_VIEW_ADDR")))
+		os.Unsetenv("BOOTGATE_VIEW_ADDR")
+		addr := bootgateViewAddrDefault()
+		assert.Equal(t, ":8082", addr, "an unset variable keeps the legacy default, unlike the explicit empty render")
+
+		endpoint, reason := resolveRunEventsLane(addr, "", "criteria-k8s-operator", "criteria-go-dev", *castleAddr, proxyToken)
+		assert.Equal(t, "http://criteria-k8s-operator.criteria-go-dev.svc:8082", endpoint)
+		assert.Equal(t, "", reason)
+	})
+}
