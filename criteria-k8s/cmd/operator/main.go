@@ -146,7 +146,7 @@ var (
 	// http://criteria-k8s-operator.<ns>.svc:<port> from the boot gate
 	// address; "empty" (proxy lane off) keeps runners in local file mode.
 	runEventsAddr = flag.String("run-events-addr", getenv("CRITERIA_RUN_EVENTS_ADDR", ""), "Run-event proxy endpoint for runner Jobs (KB-344); empty derives the operator svc from the boot gate listener")
-	runEventsSvc   = flag.String("run-events-svc", getenv("CRITERIA_RUN_EVENTS_SVC", "criteria-k8s-operator"), "Operator Service name the derived run-events endpoint uses (KB-344)")
+	runEventsSvc  = flag.String("run-events-svc", getenv("CRITERIA_RUN_EVENTS_SVC", "criteria-k8s-operator"), "Operator Service name the derived run-events endpoint uses (KB-344)")
 )
 
 func main() {
@@ -280,9 +280,9 @@ func main() {
 			Deployment: *operatorDeployment,
 		},
 		Defaults: jobbuilder.Defaults{
-			Image:               *defaultImage,
-			DataPVC:             *dataPVC,
-			ProviderBaseURL:     *providerBaseURL,
+			Image:           *defaultImage,
+			DataPVC:         *dataPVC,
+			ProviderBaseURL: *providerBaseURL,
 			// KB-344: the run-event proxy endpoint (the operator svc), or
 			// empty when the proxy lane is off — jobbuilder then renders
 			// runner Jobs without CASTLE_ADDR and the engine falls back to
