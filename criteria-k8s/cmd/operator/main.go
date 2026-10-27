@@ -139,7 +139,11 @@ var (
 	// KB-234 operator leg: the boot gate's operator-view endpoint. The
 	// runner's boot gate (internal/bootgate) resolves its CR's phase here
 	// before registering with castle; ":8082" default, empty disables.
-	bootgateViewAddr = flag.String("bootgate-view-addr", getenv("BOOTGATE_VIEW_ADDR", ":8082"), "Boot gate operator-view listen address serving GET /operator-view (KB-234; empty disables)")
+	// KB-344: the env resolution distinguishes set-but-empty (the chart's
+	// explicit lane-off render: empty addr, no listener, no proxy lane)
+	// from unset (the :8082 default keeps both the view and the derived
+	// run-event endpoint up).
+	bootgateViewAddr = flag.String("bootgate-view-addr", bootgateViewAddrDefault(), "Boot gate operator-view listen address serving GET /operator-view (KB-234; empty disables)")
 	// KB-344: the run-events endpoint runner Jobs receive as CASTLE_ADDR —
 	// the operator's run-event proxy on the boot gate server (the criteria
 	// protocol), never castle. Empty derives
@@ -786,6 +790,20 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// bootgateViewAddrDefault resolves the env override for --bootgate-view-addr
+// keeping set-but-empty distinct from unset: an explicitly empty
+// BOOTGATE_VIEW_ADDR yields an empty listen address (the KB-344 lane-off
+// posture the chart renders for runEventsPort 0 — without this, an
+// explicitly empty value would still fall back to :8082 and the operator
+// would bind a proxy lane whose Service the chart does not render), while
+// an unset variable keeps the legacy :8082 default.
+func bootgateViewAddrDefault() string {
+	if v, ok := os.LookupEnv("BOOTGATE_VIEW_ADDR"); ok {
+		return v
+	}
+	return ":8082"
 }
 
 func getDuration(key string, fallback time.Duration) time.Duration {

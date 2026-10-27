@@ -276,7 +276,39 @@ helm template criteria-k8s "$CHART" --set operator.runEventsPort=0 > "$NOEVENTS_
 if grep -q 'run-events' "$NOEVENTS_RENDERED" 2> /dev/null; then
     fail "runEventsPort=0 still renders the operator run-event Service (or deployment port)"
 fi
+# The lane-off state must be explicit at the deployment env: BOOTGATE_VIEW_ADDR
+# renders EMPTY (the operator resolves set-but-empty as a lane opt-out), never
+# omitted — an omitted variable inherits the :8082 default and binds a proxy
+# lane whose Service this posture does not render, so every run pod dials an
+# unresolvable name and dies at boot instead of keeping file mode.
+if ! grep -qF 'name: BOOTGATE_VIEW_ADDR' "$NOEVENTS_RENDERED"; then
+    fail "runEventsPort=0 omitted BOOTGATE_VIEW_ADDR (the lane state must be explicit, not the :8082 env default)"
+fi
+view_value="$(grep -A1 -F 'name: BOOTGATE_VIEW_ADDR' "$NOEVENTS_RENDERED" | tail -n 1)"
+case "$view_value" in
+    *'value: ""'*) ;;
+    *) fail "runEventsPort=0 rendered '$view_value' for BOOTGATE_VIEW_ADDR, not the explicit empty value" ;;
+esac
 rm -f "$NOEVENTS_RENDERED"
+
+# Contrast: a set runEventsPort keeps the lane wired — the boots gate env,
+# the named container port, and the criteria-k8s-operator Service all render.
+PORTOUT="$(helm template criteria-k8s "$CHART" --set operator.runEventsPort=8082)" || \
+    fail "helm template failed with operator.runEventsPort=8082"
+view_value_port="$(printf '%s\n' "$PORTOUT" | grep -A1 -F 'name: BOOTGATE_VIEW_ADDR' | tail -n 1)"
+case "$view_value_port" in
+    *'value: ":8082"'*) ;;
+    *) fail "runEventsPort=8082 rendered '$view_value_port' for BOOTGATE_VIEW_ADDR, not the listener address" ;;
+esac
+case "$PORTOUT" in
+    *'name: run-events'*) ;;
+    *) fail "runEventsPort=8082 did not render the named run-events container port" ;;
+esac
+svc_names="$(printf '%s\n' "$PORTOUT" | awk '/^kind: Service$/{svc=1; next} svc && /^  name:/{print $2; svc=0}')"
+case "$svc_names" in
+    *'criteria-k8s-operator'*) ;;
+    *) fail "runEventsPort=8082 did not render the operator Service (rendered Service names: $svc_names)" ;;
+esac
 
 # ------------------------------------------------------ value override wiring
 check_override() { # description set-expr pattern

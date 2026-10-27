@@ -93,14 +93,20 @@ spec:
             # continues anonymously.
             - name: CASTLE_ADDR
               value: {{ .Values.operator.castleAddr | quote }}
-            {{- if .Values.operator.runEventsPort }}
-            # KB-344: the boot gate listener hosting the operator view and
-            # the run-event proxy — the CASTLE_ADDR endpoint runner Jobs
-            # dial. Unset (runEventsPort 0) disables the lane; runners
-            # then fall back to their local events file.
+            # KB-234/344: the boot gate listener hosting the operator view
+            # and the run-event proxy — the CASTLE_ADDR endpoint runner
+            # Jobs dial. The lane state stays explicit: runEventsPort 0
+            # renders an EMPTY address (the operator treats set-but-empty
+            # as a lane opt-out: no listener, no proxy endpoint, runner
+            # Jobs fall back to their local events file); omitting the var
+            # instead would inherit the :8082 default and bind a proxy
+            # lane whose Service is not rendered here.
             - name: BOOTGATE_VIEW_ADDR
+              {{- if .Values.operator.runEventsPort }}
               value: {{ printf ":%v" .Values.operator.runEventsPort | quote }}
-            {{- end }}
+              {{- else }}
+              value: {{ "" | quote }}
+              {{- end }}
             {{- if .Values.operator.castleTokenSpc }}
             # KB-314: the token file from the OpenBao CSI mount
             # (operator.castleTokenSpc). CRI-250 keeps credential material
