@@ -314,14 +314,27 @@ out="$(helm template criteria-k8s "$CHART" -n alt-ns --set namespace="")" || fai
 
 # -------------------------------------------------------------- toggles
 out="$(helm template criteria-k8s "$CHART" --set castle.enabled=false)" || fail "helm template failed with castle disabled"
+# castle.enabled=false must not render the castle Service. The chart also
+# renders the operator run-event Service (KB-344), so the check is scoped to
+# the castle Service by name, not to "no Service at all".
+if printf '%s\n' "$out" | awk '
+    /^kind: Service$/ { ind = 1; next }
+    /^---$/ { ind = 0 }
+    ind && $0 ~ /^  name: castle$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+'; then fail "castle Service rendered despite castle.enabled=false"; fi
 # Newline-anchored globs stand in for grep's ^...$ line anchors (and keep
 # 'kind: Service' from matching 'kind: ServiceAccount'); no pipe, no SIGPIPE.
-[[ "$out" == *$'\nkind: Service\n'* ]] && fail "castle Service rendered despite castle.enabled=false"
 [[ "$out" == *$'\n  name: castle\n'* ]] && fail "castle Deployment rendered despite castle.enabled=false"
+[[ "$out" == *$'\n  name: criteria-k8s-operator\n'* ]] || fail "operator run-event Service missing with castle disabled"
 
 out="$(helm template criteria-k8s "$CHART" --set operator.enabled=false --set castle.enabled=false)" \
     || fail "helm template failed with all components disabled"
 [[ "$out" == *$'\nkind: Deployment\n'* ]] && fail "Deployment rendered with all components disabled"
+# With both components off nothing renders at all: the operator Service is
+# gated on operator.enabled (and operator.runEventsPort), so "no Service"
+# only holds in this fully disabled posture.
+[[ "$out" == *$'\nkind: Service\n'* ]] && fail "Service rendered with all components disabled"
 
 # ------------------------------------------------------- CRD packaging
 helm template criteria-k8s "$CHART" --include-crds > "$CRD_RENDERED" || fail "helm template --include-crds failed"
@@ -398,7 +411,7 @@ assert_blocks_equal "castle Service selector" \
 # are additive on top of it.
 printf '%s\n' "$castle_dep_r" \
     | awk '$0 == "template:" { f = 1; next } f && $0 == "spec:" { exit } f { print }' \
-    | grep -qx 'app: castle' || fail "castle pod template dropped the live app: castle label"
+    | grep -x 'app: castle' > /dev/null || fail "castle pod template dropped the live app: castle label"
 
 # Castle container block (image, securityContext, env, command, probes,
 # mounts) must equal the live manifest; the chart must not add runtime
