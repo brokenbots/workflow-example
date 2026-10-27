@@ -25,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	connect "connectrpc.com/connect"
 	v1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -88,10 +90,10 @@ type Proxy struct {
 	// now is a test seam for Heartbeat's ServerTime.
 	now func() time.Time
 
-	mu      sync.Mutex
-	byToken map[string]*agentEntry // minted token → identity
+	mu           sync.Mutex
+	byToken      map[string]*agentEntry // minted token → identity
 	byCriteriaID map[string]*agentEntry // minted criteria id → identity
-	runs    map[string]*runEntry   // proxy run id → run
+	runs         map[string]*runEntry   // proxy run id → run
 }
 
 // Config wires the proxy's dependency edges.
@@ -111,12 +113,12 @@ type Config struct {
 // New builds the proxy.
 func New(cfg Config) *Proxy {
 	return &Proxy{
-		log:     cfg.Log,
-		client:  cfg.Client,
-		ns:      cfg.NS,
-		submit:  cfg.Submit,
-		create:  cfg.Create,
-		now:     time.Now,
+		log:          cfg.Log,
+		client:       cfg.Client,
+		ns:           cfg.NS,
+		submit:       cfg.Submit,
+		create:       cfg.Create,
+		now:          time.Now,
 		byToken:      make(map[string]*agentEntry),
 		byCriteriaID: make(map[string]*agentEntry),
 		runs:         make(map[string]*runEntry),
@@ -287,9 +289,9 @@ func (p *Proxy) SubmitEvents(ctx context.Context, stream *connect.BidiStream[v1.
 			return connect.NewError(connect.CodeFailedPrecondition, err)
 		}
 
-		forwarded := *env
+		forwarded := proto.Clone(env).(*v1.Envelope)
 		forwarded.RunId = castleRunID
-		ack, err := p.submit.SubmitEnvelope(ctx, &forwarded)
+		ack, err := p.submit.SubmitEnvelope(ctx, forwarded)
 		if err != nil {
 			p.log.Error(err, "run-event proxy: castle forward failed",
 				"criteriaRun", agent.crName, "proxyRunId", env.GetRunId(), "castleRunId", castleRunID)
