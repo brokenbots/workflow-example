@@ -616,30 +616,26 @@ func (s *podStateSubmitStub) tokenAt(i int) string {
 	return s.tokens[i]
 }
 
-// podStateFeedTokenFromEnv mirrors main()'s KB-345 credential selection for
-// the pod-state feed: the KB-344 shared lane resolution
-// (agentCastleTokenFromEnv) with its unreadable-file fallback to the shared
-// CASTLE_TOKEN, loudly logged at the resolution site.
-func podStateFeedTokenFromEnv() (string, error) {
-	token, err := agentCastleTokenFromEnv()
-	if err != nil {
-		return castleTokenFromEnv(), err
-	}
-	return token, nil
+func (s *podStateSubmitStub) tokenCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tokens)
 }
 
-// TestPodStateFeedSubmitCredentialClass pins the KB-345 wiring rule at the
-// production composition level: the pod-state feed submits under the
-// assignment lane's AGENT-class credential (CRITERIA_AGENT_CASTLE_TOKEN /
-// its mounted file), and falls back to the shared orchestrator CASTLE_TOKEN
-// only when the lane's credential is unwired. Castle's SubmitEvents gate
-// denies orchestrator-class identities from agent-owned procedures, so the
+// TestPodStateFeedSubmitCredentialClass pins the KB-345 wiring rule by
+// driving the shipped operator path end to end: env → newPodStateFeed (the
+// production constructor, which resolves the assignment lane's AGENT-class
+// credential through resolveAgentCastleToken) → Emit → the credential
+// header castle receives. The feed must submit under the lane's
+// AGENT-class credential (CRITERIA_AGENT_CASTLE_TOKEN / its mounted file),
+// falling back to the shared orchestrator CASTLE_TOKEN only when the
+// lane's credential is unwired — castle's SubmitEvents gate denies
+// orchestrator-class identities from agent-owned procedures, so the
 // pre-345 wiring (Token: castleToken) left every podstate emit rejecting
 // ('pod-state emit failed') and no event persisting on a lane-credential
-// deployment. The test mirrors main()'s composition (env →
-// agentCastleTokenFromEnv → the production call site
-// castle.NewPodStateFeed(cfg, nil) → Emit) against a live h2c criteria stub
-// and asserts the credential castle actually receives.
+// deployment. The stub is served over h2c exactly as castle's cleartext
+// SubmitEvents port does, so the production nil-client default stays
+// exercised (KB-239).
 func TestPodStateFeedSubmitCredentialClass(t *testing.T) {
 	newStubServer := func(t *testing.T) (*podStateSubmitStub, string) {
 		t.Helper()
@@ -647,16 +643,13 @@ func TestPodStateFeedSubmitCredentialClass(t *testing.T) {
 		path, handler := criteriav1connect.NewCriteriaServiceHandler(stub)
 		mux := http.NewServeMux()
 		mux.Handle(path, handler)
-		// The production call site passes a nil client: the feed's default
-		// must stay the prior-knowledge h2c transport (KB-239), so serve the
-		// stub over h2c exactly as castle's cleartext SubmitEvents port does.
 		srv := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
 		t.Cleanup(srv.Close)
 		return stub, srv.URL
 	}
-	emitOne := func(t *testing.T, stub *podStateSubmitStub, addr, token string) {
+	emitOne := func(t *testing.T, stub *podStateSubmitStub, addr string) {
 		t.Helper()
-		feed := castle.NewPodStateFeed(castle.PodStateFeedConfig{Addr: addr, Token: token}, nil)
+		feed := newPodStateFeed(addr, logr.Discard())
 		feed.Emit(context.Background(), "run-345",
 			[]events.PodStateReport{{
 				AdapterName: "intake",
@@ -669,18 +662,15 @@ func TestPodStateFeedSubmitCredentialClass(t *testing.T) {
 				Message:     "0/4 nodes are available",
 				ObservedAt:  time.Now().UTC(),
 			}}, logr.Discard())
-		require.Equal(t, 1, len(stub.tokens), "the emit must reach the stub (the podstate submit path)")
+		require.Equal(t, 1, stub.tokenCount(), "the emit must reach the stub (the podstate submit path)")
 	}
 
 	t.Run("lane credential configured: the emit carries the lane token, never the shared one", func(t *testing.T) {
 		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "agent-lane-token")
 		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", "")
 		t.Setenv("CASTLE_TOKEN", "shared-orchestrator-token")
-		feedToken, err := podStateFeedTokenFromEnv()
-		require.NoError(t, err)
-		require.Equal(t, "agent-lane-token", feedToken)
 		stub, addr := newStubServer(t)
-		emitOne(t, stub, addr, feedToken)
+		emitOne(t, stub, addr)
 		assert.Equal(t, "agent-lane-token", stub.tokenAt(0),
 			"the pod-state submit must ride the assignment lane's AGENT-class credential (KB-345)")
 	})
@@ -690,10 +680,8 @@ func TestPodStateFeedSubmitCredentialClass(t *testing.T) {
 		tokenFile := filepath.Join(t.TempDir(), "castle_token")
 		require.NoError(t, os.WriteFile(tokenFile, []byte("agent-file-token\n"), 0o600))
 		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", tokenFile)
-		feedToken, err := podStateFeedTokenFromEnv()
-		require.NoError(t, err)
 		stub, addr := newStubServer(t)
-		emitOne(t, stub, addr, feedToken)
+		emitOne(t, stub, addr)
 		assert.Equal(t, "agent-file-token", stub.tokenAt(0),
 			"the mounted-file credential rides the submit exactly as the env credential does")
 	})
@@ -702,11 +690,22 @@ func TestPodStateFeedSubmitCredentialClass(t *testing.T) {
 		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
 		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", "")
 		t.Setenv("CASTLE_TOKEN", "shared-orchestrator-token")
-		feedToken, err := podStateFeedTokenFromEnv()
-		require.NoError(t, err)
 		stub, addr := newStubServer(t)
-		emitOne(t, stub, addr, feedToken)
+		emitOne(t, stub, addr)
 		assert.Equal(t, "shared-orchestrator-token", stub.tokenAt(0),
 			"with the lane's credential unwired the feed keeps its pre-lane shared identity")
 	})
+}
+
+// TestNewPodStateFeedIsTheSoleBuildSite guards the KB-345 wiring: the
+// operator must construct the pod-state feed exclusively through
+// newPodStateFeed, the function that carries the lane-credential rule.
+// An inline castle.NewPodStateFeed call site (e.g. a revert to
+// Token: castleToken) would bypass the rule invisibly to the suite above,
+// so main.go is pinned to exactly one build site — inside the constructor.
+func TestNewPodStateFeedIsTheSoleBuildSite(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(src), "castle.NewPodStateFeed("),
+		"the pod-state feed must be built only inside newPodStateFeed; an inline build site bypasses the KB-345 credential rule")
 }
