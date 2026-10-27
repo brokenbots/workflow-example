@@ -41,10 +41,13 @@ type PodStateFeedConfig struct {
 	// http://castle.criteria-jobs.svc.cluster.local:8080. Empty disables the
 	// feed.
 	Addr string
-	// Token is the pre-shared criteria bearer token (CASTLE_TOKEN), the
-	// operator's established castle identity. No bootstrap/register path:
-	// the feed reuses the same stable identity castle observation reads
-	// with.
+	// Token is the pre-shared castle bearer credential the feed submits
+	// with. No bootstrap/register path: the feed reuses a stable pre-shared
+	// identity. KB-345 wire the AGENT-class credential (the assignment
+	// lane's CRITERIA_AGENT_CASTLE_TOKEN), not the orchestrator's shared
+	// CASTLE_TOKEN: castle's SubmitEvents gate denies orchestrator-class
+	// identities from agent-owned procedures, so a run-owned-lane deployment
+	// emitting under the shared identity has every submit rejected.
 	Token string
 }
 

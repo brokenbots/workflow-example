@@ -285,7 +285,16 @@ func main() {
 	// engine uses, so session-wait expiry names the pod's phase instead of
 	// the blind 15m verdict (KB-70 PodStateProbe). Disabled entirely with
 	// --castle-addr empty.
-	podStateFeed := castle.NewPodStateFeed(castle.PodStateFeedConfig{Addr: *castleAddr, Token: castleToken}, nil)
+	//
+	// KB-345: the feed submits under the assignment lane's AGENT-class
+	// credential, not the shared orchestrator identity — castle's
+	// SubmitEvents gate denies orchestrator-class identities from
+	// agent-owned procedures, so the pre-345 shared-token wiring left every
+	// podstate emit rejecting and nothing persisting (card 345 defect-5
+	// residual). proxyToken is the KB-344 shared resolution: CRITERIA_AGENT_CASTLE_TOKEN
+	// (or its mounted file) when deployed, the shared CASTLE_TOKEN only as
+	// the lane-off fallback.
+	podStateFeed := castle.NewPodStateFeed(castle.PodStateFeedConfig{Addr: *castleAddr, Token: proxyToken}, nil)
 
 	reconciler := &controller.CriteriaRunReconciler{
 		Client:   mgr.GetClient(),
