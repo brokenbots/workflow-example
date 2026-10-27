@@ -89,6 +89,17 @@ grep -q 'providerBaseUrl:' "$CHART/values.yaml" || fail "values.yaml missing pro
 grep -q '^watcher:' "$CHART/values.yaml" && \
     fail "values.yaml still declares the retired watcher block (removed KB-228)"
 
+# KB-344 review remediation: the run-event proxy Service must be gated on
+# runEventsPort exactly like the operator Deployment's container port —
+# runEventsPort 0 disables the lane entirely, and an ungated Service
+# renders `port: 0` targeting a named port the Deployment omits (invalid
+# manifest in a documented posture). Structural check: both templates carry
+# the gate, so the guard cannot silently decouple again.
+grep -q 'if .Values.operator.runEventsPort' "$CHART/templates/operator-deployment.yaml" || \
+    fail "operator deployment does not gate the run-event container port on runEventsPort"
+grep -q 'if and .Values.operator.enabled .Values.operator.runEventsPort' "$CHART/templates/operator-service.yaml" || \
+    fail "operator Service is not gated on runEventsPort (a 0 value renders port: 0 against an omitted named port)"
+
 if ! command -v helm > /dev/null 2>&1; then
     echo "helm not found; chart structure checks passed, skipping template rendering"
     echo "PASS: criteria-k8s chart structure is valid"
@@ -133,7 +144,9 @@ PY
 [ "$(count_kind Deployment)" -eq 2 ] || fail "expected 2 Deployments (operator, castle), got $(count_kind Deployment)"
 grep -q 'name: castle$' "$RENDERED" || fail "castle Deployment missing"
 grep -q 'name: criteria-k8s-operator$' "$RENDERED" || fail "operator Deployment missing"
-[ "$(count_kind Service)" -eq 1 ] || fail "expected 1 Service (castle), got $(count_kind Service)"
+[ "$(count_kind Service)" -eq 2 ] || fail "expected 2 Services (operator run-events, castle), got $(count_kind Service)"
+# KB-344: the run-event proxy Service exists at the default runEventsPort.
+grep -q 'name: run-events' "$RENDERED" || fail "operator run-event Service missing under default values"
 [ "$(count_kind PersistentVolumeClaim)" -eq 2 ] || fail "expected 2 PVCs, got $(count_kind PersistentVolumeClaim)"
 [ "$(count_kind SecretProviderClass)" -eq 2 ] || fail "expected 2 SecretProviderClasses, got $(count_kind SecretProviderClass)"
 [ "$(count_kind Role)" -eq 2 ] || fail "expected 2 Roles (operator, runner), got $(count_kind Role)"
@@ -250,6 +263,20 @@ helm template criteria-k8s "$CHART" --set namespaceCreate=true > "$NS_RENDERED" 
     fail "helm template failed with namespaceCreate=true"
 grep -q '^kind: Namespace$' "$NS_RENDERED" || fail "namespaceCreate=true did not render a Namespace"
 grep -q 'pod-security.kubernetes.io/enforce: baseline' "$NS_RENDERED" || fail "rendered Namespace lacks pod-security label"
+
+# --------------------------------------------- runEventsPort=0 (lane off, KB-344)
+# runEventsPort 0 disables the run-event proxy lane entirely: the operator
+# Deployment omits the named container port (documented values contract), so
+# the operator Service must not render — a `port: 0` Service targeting an
+# absent named port is invalid and fails install in exactly the posture the
+# value documents as supported.
+NOEVENTS_RENDERED="$(mktemp)"
+helm template criteria-k8s "$CHART" --set operator.runEventsPort=0 > "$NOEVENTS_RENDERED" || \
+    fail "helm template failed with operator.runEventsPort=0"
+if grep -q 'run-events' "$NOEVENTS_RENDERED" 2> /dev/null; then
+    fail "runEventsPort=0 still renders the operator run-event Service (or deployment port)"
+fi
+rm -f "$NOEVENTS_RENDERED"
 
 # ------------------------------------------------------ value override wiring
 check_override() { # description set-expr pattern

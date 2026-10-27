@@ -3,7 +3,12 @@
 # to the operator — which attributes envelopes to the run's owning agent
 # identity and re-emits them to castle — and never receive a castle
 # address or credential.
-{{- if .Values.operator.enabled }}
+#
+# Gated on runEventsPort (KB-344 review remediation, mirroring the
+# deployment's container-port guard): 0 disables the proxy lane entirely —
+# the operator Deployment omits the named port, so a Service targeting it
+# would be invalid and fail install in exactly the documented posture.
+{{- if and .Values.operator.enabled .Values.operator.runEventsPort }}
 ---
 apiVersion: v1
 kind: Service
