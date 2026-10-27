@@ -239,12 +239,18 @@ func main() {
 	proxyAddr := agentRunAddr()
 	// The proxy lane is served only when it has everything: a boot gate
 	// listener (it rides the same HTTP server), a castle endpoint to
-	// re-emit envelopes to, and a credential to present. Anything missing
-	// keeps runEventsEndpoint empty, which leaves runner Jobs in local
-	// file mode — the same posture as --castle-addr empty pre-KB-344.
-	runEventsEndpoint := deriveRunEventsEndpoint(*bootgateViewAddr, *runEventsAddr, *runEventsSvc, *namespaceFlag)
+	// re-emit envelopes to, and a credential to present (KB-344 review
+	// remediation: any partial configuration must keep the endpoint empty,
+	// because handing runner Jobs the operator endpoint while the proxy
+	// cannot forward re-creates the empty-transcript dead-end this card
+	// removes — without CASTLE_ADDR the runners keep their pre-KB-344
+	// anonymous-to-castle posture instead). The disabling reason is logged
+	// so a lane-off never stays silent.
+	runEventsEndpoint, runEventsDisabled := resolveRunEventsLane(*bootgateViewAddr, *runEventsAddr, *runEventsSvc, *namespaceFlag, proxyAddr, proxyToken)
 	if runEventsEndpoint != "" {
 		logger.Info("run-event proxy endpoint derived (KB-344)", "endpoint", runEventsEndpoint, "bootgate", *bootgateViewAddr, "namespace", *namespaceFlag)
+	} else {
+		logger.Info("run-event proxy disabled (KB-344)", "reason", runEventsDisabled)
 	}
 
 	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
@@ -387,8 +393,6 @@ func main() {
 			prefix, handler := criteria.NewServiceHandler(runProxy)
 			mux.Handle(prefix, handler)
 			logger.Info("run-event proxy enabled (KB-344)", "route", prefix, "castle", proxyAddr, "namespace", *namespaceFlag)
-		} else {
-			logger.Info("run-event proxy disabled: missing boot gate addr, castle endpoint, or credential (KB-344)")
 		}
 		bgSrv := &http.Server{Addr: *bootgateViewAddr, Handler: h2c.NewHandler(mux, &http2.Server{}), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
@@ -599,31 +603,39 @@ func agentRunAddr() string {
 	return *castleAddr
 }
 
-// deriveRunEventsEndpoint resolves the CASTLE_ADDR runner Jobs receive
-// (KB-344): the operator's run-event proxy endpoint, never castle. An
-// explicit --run-events-addr wins; otherwise the svc endpoint is derived
-// from the boot gate listener's port and --run-events-svc. The derivation
-// returns "" when the proxy lane is off — no boot gate listener — which
-// keeps runner Jobs in local file mode, mirroring the --castle-addr-empty
-// posture upstream lanes already use.
-func deriveRunEventsEndpoint(bootgateViewAddr, explicit, svcName, ns string) string {
-	if explicit != "" {
-		return explicit
-	}
+// resolveRunEventsLane resolves the CASTLE_ADDR runner Jobs receive
+// (KB-344): the operator's run-event proxy endpoint, never castle. The
+// lane is served only when every prerequisite holds — a boot gate listener
+// to ride, a castle endpoint to re-emit envelopes to, and a credential to
+// present — and an explicit --run-events-addr wins over deriving the svc
+// endpoint from the listener's port. Anything missing yields ("", reason):
+// runner Jobs then render without CASTLE_ADDR and stay in local file mode
+// (the pre-KB-344 posture) instead of dialing a proxy whose forward path
+// is dead — the empty-transcript dead-end this card exists to remove.
+func resolveRunEventsLane(bootgateViewAddr, explicit, svcName, ns, castleAddr, castleToken string) (string, string) {
 	if bootgateViewAddr == "" {
-		return ""
+		return "", "no boot gate listener (bootgate-view-addr empty) to serve the proxy lane on"
+	}
+	if castleAddr == "" {
+		return "", "no castle endpoint for the proxy to re-emit run events to (castle-addr empty)"
+	}
+	if castleToken == "" {
+		return "", "no castle credential for the proxy to present (no agent credential and no shared token mounted)"
+	}
+	if explicit != "" {
+		return explicit, ""
 	}
 	// The listener is host:port or :port; the svc endpoint needs the port
-	// only. A portless listener keeps the lane off (nothing to derive
-	// from), as does a non-numeric port.
+	// only. A portless or non-numeric listener port keeps the lane off
+	// (nothing to derive from).
 	_, port, ok := strings.Cut(bootgateViewAddr, ":")
 	if !ok || port == "" {
-		return ""
+		return "", "boot gate listener carries no port to derive the svc endpoint from"
 	}
 	if _, err := strconv.Atoi(port); err != nil {
-		return ""
+		return "", "boot gate listener port is not numeric; no svc endpoint derivable"
 	}
-	return fmt.Sprintf("http://%s.%s.svc:%s", svcName, ns, port)
+	return fmt.Sprintf("http://%s.%s.svc:%s", svcName, ns, port), ""
 }
 
 // agentCastleTokenFromEnv resolves the criteria token for the assignment

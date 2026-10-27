@@ -426,25 +426,47 @@ func TestResolveAgentRoutesPath(t *testing.T) {
 	assert.Nil(t, absent, "an empty resolved path loads no payload")
 }
 
-func TestDeriveRunEventsEndpoint(t *testing.T) {
+func TestResolveRunEventsLane(t *testing.T) {
 	// Default operator posture: the boot gate listener's port back-ends
-	// the derived svc endpoint (KB-344).
-	assert.Equal(t,
-		"http://criteria-k8s-operator.criteria-system.svc:8082",
-		deriveRunEventsEndpoint(":8082", "", "criteria-k8s-operator", "criteria-system"))
+	// the derived svc endpoint (KB-344), and the derivation reports no
+	// disabling reason.
+	endpoint, reason := resolveRunEventsLane(":8082", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "http://criteria-k8s-operator.criteria-system.svc:8082", endpoint)
+	assert.Equal(t, "", reason)
 
 	// An explicit --run-events-addr wins over the derivation.
-	assert.Equal(t,
-		"http://operator.ingress.svc:9090",
-		deriveRunEventsEndpoint(":8082", "http://operator.ingress.svc:9090", "criteria-k8s-operator", "criteria-system"))
+	endpoint, reason = resolveRunEventsLane(":8082", "http://operator.ingress.svc:9090", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "http://operator.ingress.svc:9090", endpoint)
+	assert.Equal(t, "", reason)
 
 	// A host:port listener still yields the port-only svc endpoint.
-	assert.Equal(t,
-		"http://criteria-k8s-operator.criteria-system.svc:9099",
-		deriveRunEventsEndpoint("0.0.0.0:9099", "", "criteria-k8s-operator", "criteria-system"))
+	endpoint, reason = resolveRunEventsLane("0.0.0.0:9099", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "http://criteria-k8s-operator.criteria-system.svc:9099", endpoint)
+	assert.Equal(t, "", reason)
 
-	// Lane-off postures keep the endpoint empty: runner Jobs then render
-	// without CASTLE_ADDR and stay in local file mode.
-	assert.Equal(t, "", deriveRunEventsEndpoint("", "", "criteria-k8s-operator", "criteria-system"))
-	assert.Equal(t, "", deriveRunEventsEndpoint(":8082-noport", "", "criteria-k8s-operator", "criteria-system"))
+	// KB-344 review remediation: the three off-cases each keep the
+	// endpoint empty and name their reason, so a runner Job never dials a
+	// proxy whose forward path is dead. Empty boot gate:
+	endpoint, reason = resolveRunEventsLane("", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.Contains(t, reason, "boot gate listener")
+	// Empty castle endpoint:
+	endpoint, reason = resolveRunEventsLane(":8082", "", "criteria-k8s-operator", "criteria-system", "", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.Contains(t, reason, "castle endpoint")
+	// Empty castle credential (no agent credential, no shared token):
+	endpoint, reason = resolveRunEventsLane(":8082", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "")
+	assert.Equal(t, "", endpoint)
+	assert.Contains(t, reason, "castle credential")
+
+	// A partial configuration stays off even when an explicit endpoint is
+	// configured: the gate runs before the override.
+	endpoint, reason = resolveRunEventsLane("", "http://operator.ingress.svc:9090", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.NotEqual(t, "", reason)
+
+	// Derivation postures that cannot produce an endpoint stay off too.
+	endpoint, reason = resolveRunEventsLane(":8082-noport", "", "criteria-k8s-operator", "criteria-system", "http://castle:8081", "tok")
+	assert.Equal(t, "", endpoint)
+	assert.NotEqual(t, "", reason)
 }
