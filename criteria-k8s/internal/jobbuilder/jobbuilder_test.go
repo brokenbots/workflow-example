@@ -651,8 +651,15 @@ func TestOperatorViewURLFollowsRunEventsPort(t *testing.T) {
 	}, "the non-8082 run-event port must not leave the pre-check dangling on the legacy default")
 
 	legacyJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
-	assert.NotContains(t, legacyJob.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "CRITERIA_OPERATOR_VIEW_URL"},
-		"local mode never points at the boot gate")
+	// Local (proxy-lane-off) mode still emits the KB-234 pre-check URL on
+	// the operator svc name at the legacy :8082 default — operatorViewURL
+	// always returns a URL, so the value stays pinned even where the
+	// boot-gate listener itself is off (recorded consequence of the
+	// lane-off posture).
+	assert.Contains(t, legacyJob.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+		Name:  "CRITERIA_OPERATOR_VIEW_URL",
+		Value: "http://criteria-k8s-operator.jobs.svc.cluster.local:8082/operator-view",
+	})
 }
 
 // CRI-136 retired the events.ndjson dual-write: by default the runner

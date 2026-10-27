@@ -175,6 +175,14 @@ if [ -n "$CASTLE_ADDR" ]; then
     if [ -n "$CRITERIA_RUN_NAME" ]; then
         set -- "$@" --name "$CRITERIA_RUN_NAME"
     fi
+    # KB-344 review remediation: the proxy enforces per-run enrollment —
+    # the engine presents the CR-stamped, proxy-scoped token as its
+    # bootstrap credential (X-Server-Bootstrap on Register). Absent
+    # (lane posture without enrollment) the flag is not passed at all.
+    : "${CRITERIA_PROXY_ENROLLMENT_TOKEN:=}"
+    if [ -n "$CRITERIA_PROXY_ENROLLMENT_TOKEN" ]; then
+        set -- "$@" --server-bootstrap-token "$CRITERIA_PROXY_ENROLLMENT_TOKEN"
+    fi
 fi
 
 # Debug-only events mirror (CRI-136): unset keeps the run castle-only.
