@@ -425,3 +425,26 @@ func TestResolveAgentRoutesPath(t *testing.T) {
 	require.NoError(t, absentErr, "a neither-set posture is not an error, it is lane-off")
 	assert.Nil(t, absent, "an empty resolved path loads no payload")
 }
+
+func TestDeriveRunEventsEndpoint(t *testing.T) {
+	// Default operator posture: the boot gate listener's port back-ends
+	// the derived svc endpoint (KB-344).
+	assert.Equal(t,
+		"http://criteria-k8s-operator.criteria-system.svc:8082",
+		deriveRunEventsEndpoint(":8082", "", "criteria-k8s-operator", "criteria-system"))
+
+	// An explicit --run-events-addr wins over the derivation.
+	assert.Equal(t,
+		"http://operator.ingress.svc:9090",
+		deriveRunEventsEndpoint(":8082", "http://operator.ingress.svc:9090", "criteria-k8s-operator", "criteria-system"))
+
+	// A host:port listener still yields the port-only svc endpoint.
+	assert.Equal(t,
+		"http://criteria-k8s-operator.criteria-system.svc:9099",
+		deriveRunEventsEndpoint("0.0.0.0:9099", "", "criteria-k8s-operator", "criteria-system"))
+
+	// Lane-off postures keep the endpoint empty: runner Jobs then render
+	// without CASTLE_ADDR and stay in local file mode.
+	assert.Equal(t, "", deriveRunEventsEndpoint("", "", "criteria-k8s-operator", "criteria-system"))
+	assert.Equal(t, "", deriveRunEventsEndpoint(":8082-noport", "", "criteria-k8s-operator", "criteria-system"))
+}

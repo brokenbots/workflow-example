@@ -11,15 +11,19 @@ import (
 	"strings"
 	"time"
 
+	criteria "github.com/brokenbots/criteria/sdk"
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/proxy"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runstamp"
 	"github.com/go-logr/logr"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -136,6 +140,13 @@ var (
 	// runner's boot gate (internal/bootgate) resolves its CR's phase here
 	// before registering with castle; ":8082" default, empty disables.
 	bootgateViewAddr = flag.String("bootgate-view-addr", getenv("BOOTGATE_VIEW_ADDR", ":8082"), "Boot gate operator-view listen address serving GET /operator-view (KB-234; empty disables)")
+	// KB-344: the run-events endpoint runner Jobs receive as CASTLE_ADDR —
+	// the operator's run-event proxy on the boot gate server (the criteria
+	// protocol), never castle. Empty derives
+	// http://criteria-k8s-operator.<ns>.svc:<port> from the boot gate
+	// address; "empty" (proxy lane off) keeps runners in local file mode.
+	runEventsAddr = flag.String("run-events-addr", getenv("CRITERIA_RUN_EVENTS_ADDR", ""), "Run-event proxy endpoint for runner Jobs (KB-344); empty derives the operator svc from the boot gate listener")
+	runEventsSvc   = flag.String("run-events-svc", getenv("CRITERIA_RUN_EVENTS_SVC", "criteria-k8s-operator"), "Operator Service name the derived run-events endpoint uses (KB-344)")
 )
 
 func main() {
@@ -213,6 +224,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// KB-344: the run-event proxy identity is resolved once and shared by
+	// the proxy and the assignment agent lane. The assignment agent's
+	// credential is preferred (owner-consistent: the proxy re-emits the
+	// dispatch lane's envelopes under the run's owning agent identity);
+	// the shared castle token is the fallback serving the watcher lane
+	// (the proxy mints the castle run itself and stamps the CR). A token
+	// file read error keeps the loud log, never the secret material.
+	proxyToken, proxyTokenErr := agentCastleTokenFromEnv()
+	if proxyTokenErr != nil {
+		logger.Error(proxyTokenErr, "run-event proxy: agent credential file unreadable; falling back to the shared CASTLE_TOKEN")
+		proxyToken = castleTokenFromEnv()
+	}
+	proxyAddr := agentRunAddr()
+	// The proxy lane is served only when it has everything: a boot gate
+	// listener (it rides the same HTTP server), a castle endpoint to
+	// re-emit envelopes to, and a credential to present. Anything missing
+	// keeps runEventsEndpoint empty, which leaves runner Jobs in local
+	// file mode — the same posture as --castle-addr empty pre-KB-344.
+	runEventsEndpoint := deriveRunEventsEndpoint(*bootgateViewAddr, *runEventsAddr, *runEventsSvc, *namespaceFlag)
+	if runEventsEndpoint != "" {
+		logger.Info("run-event proxy endpoint derived (KB-344)", "endpoint", runEventsEndpoint, "bootgate", *bootgateViewAddr, "namespace", *namespaceFlag)
+	}
+
 	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
 	// of reading events.ndjson off the PVC. The token comes from the
 	// CASTLE_TOKEN environment only so it never leaks into argv.
@@ -249,7 +283,11 @@ func main() {
 			Image:               *defaultImage,
 			DataPVC:             *dataPVC,
 			ProviderBaseURL:     *providerBaseURL,
-			CastleAddr:          *castleAddr,
+			// KB-344: the run-event proxy endpoint (the operator svc), or
+			// empty when the proxy lane is off — jobbuilder then renders
+			// runner Jobs without CASTLE_ADDR and the engine falls back to
+			// its local events file.
+			CriteriaServerAddr:  runEventsEndpoint,
 			DebugEventsFile:     *debugEventsFile,
 			CriteriaBaseImage:   *criteriaBaseImage,
 			AdapterRegistry:     *adapterRegistry,
@@ -328,11 +366,31 @@ func main() {
 	// KB-234 operator leg: serve the boot gate's operator view. The
 	// endpoint reads the CR through the DIRECT client (never the cache) so
 	// a boot decision never rides a stale informer view.
+	// KB-344: the same server also hosts the run-event proxy over the
+	// criteria Connect protocol — runner engines dial this endpoint (the
+	// CASTLE_ADDR they receive) and the proxy re-emits their envelopes to
+	// castle under the run's owning agent identity. h2c keeps Connect
+	// HTTP/2 (bidi streaming) working behind the plain-TCP listener.
 	if *bootgateViewAddr != "" {
 		mux := http.NewServeMux()
 		view := &controller.BootgateView{Client: directClient, Namespace: *namespaceFlag}
 		mux.Handle("/operator-view", view)
-		bgSrv := &http.Server{Addr: *bootgateViewAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		if runEventsEndpoint != "" {
+			proxyFeed := castle.NewAssignmentEventFeed(castle.Config{Addr: proxyAddr, Token: proxyToken}, nil)
+			runProxy := proxy.New(proxy.Config{
+				Log:    logger,
+				Client: directClient,
+				NS:     *namespaceFlag,
+				Submit: proxyFeed,
+				Create: proxyFeed,
+			})
+			prefix, handler := criteria.NewServiceHandler(runProxy)
+			mux.Handle(prefix, handler)
+			logger.Info("run-event proxy enabled (KB-344)", "route", prefix, "castle", proxyAddr, "namespace", *namespaceFlag)
+		} else {
+			logger.Info("run-event proxy disabled: missing boot gate addr, castle endpoint, or credential (KB-344)")
+		}
+		bgSrv := &http.Server{Addr: *bootgateViewAddr, Handler: h2c.NewHandler(mux, &http2.Server{}), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			<-ctx.Done()
 			_ = bgSrv.Shutdown(context.Background())
@@ -434,11 +492,10 @@ func main() {
 	} else if agentAddr := agentRunAddr(); agentAddr == "" {
 		logger.Info("assignment agent lane disabled (no castle address)")
 	} else {
-		agentToken, agentTokenErr := agentCastleTokenFromEnv()
-		if agentTokenErr != nil {
-			logger.Error(agentTokenErr, "assignment agent lane: agent token file unreadable; falling back to the shared CASTLE_TOKEN")
-			agentToken = castleTokenFromEnv()
-		}
+		// The proxy lane resolved this token earlier (KB-344): one shared
+		// resolution keeps the proxy's re-emit identity and the lane's own
+		// Control identity identical.
+		agentToken := proxyToken
 		agentRoutesPath := resolveAgentRoutesPath(*agentRoutesFile, *shadowRoutesFile)
 		agentRoutesPayload, agentRoutesErr := loadShadowRoutes(agentRoutesPath)
 		if agentRoutesPayload == nil && agentRoutesErr == nil {
@@ -540,6 +597,33 @@ func agentRunAddr() string {
 		return *agentCastleAddr
 	}
 	return *castleAddr
+}
+
+// deriveRunEventsEndpoint resolves the CASTLE_ADDR runner Jobs receive
+// (KB-344): the operator's run-event proxy endpoint, never castle. An
+// explicit --run-events-addr wins; otherwise the svc endpoint is derived
+// from the boot gate listener's port and --run-events-svc. The derivation
+// returns "" when the proxy lane is off — no boot gate listener — which
+// keeps runner Jobs in local file mode, mirroring the --castle-addr-empty
+// posture upstream lanes already use.
+func deriveRunEventsEndpoint(bootgateViewAddr, explicit, svcName, ns string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if bootgateViewAddr == "" {
+		return ""
+	}
+	// The listener is host:port or :port; the svc endpoint needs the port
+	// only. A portless listener keeps the lane off (nothing to derive
+	// from), as does a non-numeric port.
+	_, port, ok := strings.Cut(bootgateViewAddr, ":")
+	if !ok || port == "" {
+		return ""
+	}
+	if _, err := strconv.Atoi(port); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%s", svcName, ns, port)
 }
 
 // agentCastleTokenFromEnv resolves the criteria token for the assignment
