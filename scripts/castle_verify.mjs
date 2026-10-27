@@ -191,8 +191,8 @@ export function podstateSeqs(resp) {
 // maxPages bounds the loop so a pathological producer cannot spin the
 // harness; exhausting the budget sets `truncated` and the evidence bundle
 // renders an explicit marker instead of presenting a partial seq list as
-// complete.
-export async function collectPodstate(base, runId, token, fetchImpl = fetch, maxPages = MaxEventPages) {
+// complete. `limit` is injectable for the tests' small-page fixtures.
+export async function collectPodstate(base, runId, token, fetchImpl = fetch, maxPages = MaxEventPages, limit = EventPageLimit) {
   const events = [];
   let since = 0;
   let nextSinceSeq = 0;
@@ -201,7 +201,7 @@ export async function collectPodstate(base, runId, token, fetchImpl = fetch, max
   let pages = 0;
   let drained = false;
   for (let page = 0; page < maxPages; page++) {
-    const resp = await connectUnary(base, ServerProcedures.listRunEvents, { runId, sinceSeq: since, limit: EventPageLimit }, token, fetchImpl);
+    const resp = await connectUnary(base, ServerProcedures.listRunEvents, { runId, sinceSeq: since, limit }, token, fetchImpl);
     if (resp?.code) { refusal = resp; break; }
     pages = page + 1;
     const pageEvents = Array.isArray(resp.events) ? resp.events : [];
@@ -214,7 +214,7 @@ export async function collectPodstate(base, runId, token, fetchImpl = fetch, max
     const next = normalizeSeq(resp.nextSinceSeq ?? resp.next_since_seq);
     if (next > cursor) cursor = next;
     if (cursor > since) { since = cursor; nextSinceSeq = cursor; }
-    if (pageEvents.length < EventPageLimit) { drained = true; break; } // short page: run stream drained
+    if (pageEvents.length < limit) { drained = true; break; } // short page: run stream drained
   }
   truncated = !drained && !refusal && pages === maxPages;
   return { podstate: podstateSeqs(events), refusal, truncated, nextSinceSeq, pages };
