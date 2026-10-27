@@ -13,15 +13,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 
@@ -35,10 +42,14 @@ import (
 
 	castlev1 "github.com/brokenbots/castle/castle/gen/castle/v1"
 
+	sdkv1 "github.com/brokenbots/criteria/sdk/pb/criteria/v1"
+	criteriav1connect "github.com/brokenbots/criteria/sdk/pb/criteria/v1/criteriav1connect"
+
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/castle"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/control"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/controller"
+	"github.com/brokenbots/workflow-example/criteria-k8s/internal/events"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/jobbuilder"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/routes"
 	"github.com/brokenbots/workflow-example/criteria-k8s/internal/runspec"
@@ -346,6 +357,47 @@ func TestAgentCastleTokenFromEnv(t *testing.T) {
 	})
 }
 
+// fallbackCaptureSink records the error logs resolveAgentCastleToken emits,
+// so the consumer-naming contract of the shared credential resolution's
+// degrade path can be pinned without a logging dependency.
+type fallbackCaptureSink struct {
+	msgs []string
+	errs []string
+}
+
+func (s *fallbackCaptureSink) Enabled(int) bool               { return true }
+func (s *fallbackCaptureSink) Init(logr.RuntimeInfo)          {}
+func (s *fallbackCaptureSink) Info(int, string, ...any)       {}
+func (s *fallbackCaptureSink) WithValues(...any) logr.LogSink { return s }
+func (s *fallbackCaptureSink) WithName(string) logr.LogSink   { return s }
+func (s *fallbackCaptureSink) Error(err error, msg string, _ ...any) {
+	s.msgs = append(s.msgs, msg)
+	s.errs = append(s.errs, err.Error())
+}
+
+// TestResolveAgentCastleTokenFallbackLogsItsConsumer pins the KB-345
+// review's log-naming rule: the shared agent-credential resolution serves
+// several lanes (run-event proxy, pod-state feed), so an unreadable
+// credential file logs WHICH lane degraded, and every lane keeps the
+// diagnosable path+cause error — never secret material — while degrading to
+// the shared token exactly as the resolution itself prescribes.
+func TestResolveAgentCastleTokenFallbackLogsItsConsumer(t *testing.T) {
+	t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+	missing := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", missing)
+	t.Setenv("CASTLE_TOKEN", "shared-orchestrator-token")
+	sink := &fallbackCaptureSink{}
+
+	token := resolveAgentCastleToken(logr.New(sink), "pod-state feed")
+
+	require.Len(t, sink.msgs, 1, "the unreadable credential file must be logged loudly once")
+	assert.Equal(t, "pod-state feed: agent credential file unreadable; falling back to the shared CASTLE_TOKEN", sink.msgs[0],
+		"the fallback log must name the consumer so an operator sees which lane degraded")
+	require.Len(t, sink.errs, 1)
+	assert.Contains(t, sink.errs[0], "missing", "the logged error keeps the diagnosable path, never secret material")
+	assert.Equal(t, "shared-orchestrator-token", token, "the unreadable file still resolves the lane-off fallback token")
+}
+
 // TestNewShadowRunBuilderWiring pins the operator's spec-mirror wiring
 // seam: a deployment without a routes payload wires NO builder
 // (decision-only posture — the "routes payload not configured" degrade
@@ -566,4 +618,135 @@ func TestRunEventsLaneEnvShapes(t *testing.T) {
 		assert.Equal(t, "http://criteria-k8s-operator.criteria-go-dev.svc:8082", endpoint)
 		assert.Equal(t, "", reason)
 	})
+}
+
+// podStateSubmitStub implements the slice of the SDK's CriteriaServiceHandler
+// the pod-state feed consumes, recording the credential riding each submit.
+// Other methods embed the nil handler and panic if called. Operator-level
+// mirror of internal/castle's podStateCriteriaStub (CRI-264: composition in
+// package main is invisible to the package suites, so the wiring is pinned
+// here against a live criteria stub).
+type podStateSubmitStub struct {
+	criteriav1connect.CriteriaServiceHandler
+
+	mu     sync.Mutex
+	tokens []string
+}
+
+func (s *podStateSubmitStub) SubmitEvents(ctx context.Context, stream *connect.BidiStream[sdkv1.Envelope, sdkv1.Ack]) error {
+	s.mu.Lock()
+	s.tokens = append(s.tokens, stream.RequestHeader().Get("X-Criteria-Token"))
+	s.mu.Unlock()
+	for {
+		if _, err := stream.Receive(); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return err
+		}
+	}
+	return stream.Send(&sdkv1.Ack{RunId: "run-ack"})
+}
+
+func (s *podStateSubmitStub) tokenAt(i int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i >= len(s.tokens) {
+		return ""
+	}
+	return s.tokens[i]
+}
+
+func (s *podStateSubmitStub) tokenCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.tokens)
+}
+
+// TestPodStateFeedSubmitCredentialClass pins the KB-345 wiring rule by
+// driving the shipped operator path end to end: env → newPodStateFeed (the
+// production constructor, which resolves the assignment lane's AGENT-class
+// credential through resolveAgentCastleToken) → Emit → the credential
+// header castle receives. The feed must submit under the lane's
+// AGENT-class credential (CRITERIA_AGENT_CASTLE_TOKEN / its mounted file),
+// falling back to the shared orchestrator CASTLE_TOKEN only when the
+// lane's credential is unwired — castle's SubmitEvents gate denies
+// orchestrator-class identities from agent-owned procedures, so the
+// pre-345 wiring (Token: castleToken) left every podstate emit rejecting
+// ('pod-state emit failed') and no event persisting on a lane-credential
+// deployment. The stub is served over h2c exactly as castle's cleartext
+// SubmitEvents port does, so the production nil-client default stays
+// exercised (KB-239).
+func TestPodStateFeedSubmitCredentialClass(t *testing.T) {
+	newStubServer := func(t *testing.T) (*podStateSubmitStub, string) {
+		t.Helper()
+		stub := &podStateSubmitStub{}
+		path, handler := criteriav1connect.NewCriteriaServiceHandler(stub)
+		mux := http.NewServeMux()
+		mux.Handle(path, handler)
+		srv := httptest.NewServer(h2c.NewHandler(mux, &http2.Server{}))
+		t.Cleanup(srv.Close)
+		return stub, srv.URL
+	}
+	emitOne := func(t *testing.T, stub *podStateSubmitStub, addr string) {
+		t.Helper()
+		feed := newPodStateFeed(addr, logr.Discard())
+		feed.Emit(context.Background(), "run-345",
+			[]events.PodStateReport{{
+				AdapterName: "intake",
+				AdapterType: "shell",
+				ScopeName:   "develop",
+				ScopeID:     "dev-001",
+				Pod:         "shell-develop-dev-001-adapter",
+				Phase:       events.PodPhasePending,
+				Reason:      "Unschedulable",
+				Message:     "0/4 nodes are available",
+				ObservedAt:  time.Now().UTC(),
+			}}, logr.Discard())
+		require.Equal(t, 1, stub.tokenCount(), "the emit must reach the stub (the podstate submit path)")
+	}
+
+	t.Run("lane credential configured: the emit carries the lane token, never the shared one", func(t *testing.T) {
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "agent-lane-token")
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", "")
+		t.Setenv("CASTLE_TOKEN", "shared-orchestrator-token")
+		stub, addr := newStubServer(t)
+		emitOne(t, stub, addr)
+		assert.Equal(t, "agent-lane-token", stub.tokenAt(0),
+			"the pod-state submit must ride the assignment lane's AGENT-class credential (KB-345)")
+	})
+
+	t.Run("mount-file lane credential: trimmed before the submit", func(t *testing.T) {
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+		tokenFile := filepath.Join(t.TempDir(), "castle_token")
+		require.NoError(t, os.WriteFile(tokenFile, []byte("agent-file-token\n"), 0o600))
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", tokenFile)
+		stub, addr := newStubServer(t)
+		emitOne(t, stub, addr)
+		assert.Equal(t, "agent-file-token", stub.tokenAt(0),
+			"the mounted-file credential rides the submit exactly as the env credential does")
+	})
+
+	t.Run("lane off: the emit falls back to the shared orchestrator token", func(t *testing.T) {
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+		t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", "")
+		t.Setenv("CASTLE_TOKEN", "shared-orchestrator-token")
+		stub, addr := newStubServer(t)
+		emitOne(t, stub, addr)
+		assert.Equal(t, "shared-orchestrator-token", stub.tokenAt(0),
+			"with the lane's credential unwired the feed keeps its pre-lane shared identity")
+	})
+}
+
+// TestNewPodStateFeedIsTheSoleBuildSite guards the KB-345 wiring: the
+// operator must construct the pod-state feed exclusively through
+// newPodStateFeed, the function that carries the lane-credential rule.
+// An inline castle.NewPodStateFeed call site (e.g. a revert to
+// Token: castleToken) would bypass the rule invisibly to the suite above,
+// so main.go is pinned to exactly one build site — inside the constructor.
+func TestNewPodStateFeedIsTheSoleBuildSite(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(src), "castle.NewPodStateFeed("),
+		"the pod-state feed must be built only inside newPodStateFeed; an inline build site bypasses the KB-345 credential rule")
 }

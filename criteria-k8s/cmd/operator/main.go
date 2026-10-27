@@ -233,13 +233,8 @@ func main() {
 	// credential is preferred (owner-consistent: the proxy re-emits the
 	// dispatch lane's envelopes under the run's owning agent identity);
 	// the shared castle token is the fallback serving the watcher lane
-	// (the proxy mints the castle run itself and stamps the CR). A token
-	// file read error keeps the loud log, never the secret material.
-	proxyToken, proxyTokenErr := agentCastleTokenFromEnv()
-	if proxyTokenErr != nil {
-		logger.Error(proxyTokenErr, "run-event proxy: agent credential file unreadable; falling back to the shared CASTLE_TOKEN")
-		proxyToken = castleTokenFromEnv()
-	}
+	// (the proxy mints the castle run itself and stamps the CR).
+	proxyToken := resolveAgentCastleToken(logger, "run-event proxy")
 	proxyAddr := agentRunAddr()
 	// The proxy lane is served only when it has everything: a boot gate
 	// listener (it rides the same HTTP server), a castle endpoint to
@@ -285,7 +280,17 @@ func main() {
 	// engine uses, so session-wait expiry names the pod's phase instead of
 	// the blind 15m verdict (KB-70 PodStateProbe). Disabled entirely with
 	// --castle-addr empty.
-	podStateFeed := castle.NewPodStateFeed(castle.PodStateFeedConfig{Addr: *castleAddr, Token: castleToken}, nil)
+	//
+	// KB-345: the feed submits under the assignment lane's AGENT-class
+	// credential, not the shared orchestrator identity — castle's
+	// SubmitEvents gate denies orchestrator-class identities from
+	// agent-owned procedures, so the pre-345 shared-token wiring left every
+	// podstate emit rejecting and nothing persisting (card 345 defect-5
+	// residual). The feed performs its own lane resolution
+	// (newPodStateFeed/resolveAgentCastleToken): CRITERIA_AGENT_CASTLE_TOKEN
+	// (or its mounted file) when deployed, the shared CASTLE_TOKEN only as
+	// the lane-off fallback.
+	podStateFeed := newPodStateFeed(*castleAddr, logger)
 
 	reconciler := &controller.CriteriaRunReconciler{
 		Client:   mgr.GetClient(),
@@ -677,6 +682,31 @@ func agentCastleTokenFromEnv() (string, error) {
 		return castleTokenFromEnv(), nil
 	}
 	return token, nil
+}
+
+// resolveAgentCastleToken returns the assignment lane's AGENT-class castle
+// credential (CRITERIA_AGENT_CASTLE_TOKEN / its mounted file). When the
+// lane is unwired, agentCastleTokenFromEnv already yields the shared
+// CASTLE_TOKEN; an unreadable mounted file is logged loudly (never the
+// secret material) and also falls back to the shared token. consumer names
+// the lane the credential serves, so each lane's degrade names itself.
+func resolveAgentCastleToken(log logr.Logger, consumer string) string {
+	token, err := agentCastleTokenFromEnv()
+	if err != nil {
+		log.Error(err, consumer+": agent credential file unreadable; falling back to the shared CASTLE_TOKEN")
+		return castleTokenFromEnv()
+	}
+	return token
+}
+
+// newPodStateFeed builds the pod-state feed. KB-345: the feed submits under
+// the assignment lane's AGENT-class credential, not the shared orchestrator
+// identity — castle's SubmitEvents gate denies orchestrator-class identities
+// from agent-owned procedures. The shared CASTLE_TOKEN is only the lane-off
+// fallback.
+func newPodStateFeed(castleAddr string, log logr.Logger) *castle.PodStateFeed {
+	token := resolveAgentCastleToken(log, "pod-state feed")
+	return castle.NewPodStateFeed(castle.PodStateFeedConfig{Addr: castleAddr, Token: token}, nil)
 }
 
 // configPinResolver is the KB-103 per-repo ConfigMap pinner the assignment
