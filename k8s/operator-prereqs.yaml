@@ -283,6 +283,13 @@ data:
     if [ -n "$CASTLE_ADDR" ]; then
         export CRITERIA_SERVER_TLS=disable
         set -- "$@" --server "$CASTLE_ADDR"
+        # KB-344: CASTLE_ADDR is the operator's run-event proxy in the stamped
+        # posture; --name carries the owning CriteriaRun so the proxy
+        # attributes this engine's streams to the right run.
+        : "${CRITERIA_RUN_NAME:=}"
+        if [ -n "$CRITERIA_RUN_NAME" ]; then
+            set -- "$@" --name "$CRITERIA_RUN_NAME"
+        fi
     fi
     
     # Debug-only events mirror (CRI-136): the events.ndjson dual-write is

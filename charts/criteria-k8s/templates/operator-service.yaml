@@ -1,0 +1,25 @@
+# criteria-k8s operator Service (KB-344): the run-event proxy endpoint
+# runner Jobs dial as CASTLE_ADDR. Run pods speak the criteria protocol
+# to the operator — which attributes envelopes to the run's owning agent
+# identity and re-emits them to castle — and never receive a castle
+# address or credential.
+{{- if .Values.operator.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: criteria-k8s-operator
+  namespace: {{ include "criteria-k8s.namespace" . }}
+  labels:
+    {{- include "criteria-k8s.labels" . | nindent 4 }}
+    app.kubernetes.io/name: criteria-k8s-operator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: criteria-k8s-operator
+  ports:
+    - name: run-events
+      port: {{ .Values.operator.runEventsPort }}
+      targetPort: run-events
+      protocol: TCP
+{{- end }}

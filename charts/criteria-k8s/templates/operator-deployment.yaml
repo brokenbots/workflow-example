@@ -42,6 +42,11 @@ spec:
               containerPort: 8080
             - name: health
               containerPort: 8081
+            {{- if .Values.operator.runEventsPort }}
+            # KB-344: the run-event proxy / boot gate operator view.
+            - name: run-events
+              containerPort: {{ .Values.operator.runEventsPort }}
+            {{- end }}
           env:
             # Retention sweep: keep per-ticket intake/triage artifacts this
             # long after the last write (0s disables sweeping).
@@ -88,6 +93,14 @@ spec:
             # continues anonymously.
             - name: CASTLE_ADDR
               value: {{ .Values.operator.castleAddr | quote }}
+            {{- if .Values.operator.runEventsPort }}
+            # KB-344: the boot gate listener hosting the operator view and
+            # the run-event proxy — the CASTLE_ADDR endpoint runner Jobs
+            # dial. Unset (runEventsPort 0) disables the lane; runners
+            # then fall back to their local events file.
+            - name: BOOTGATE_VIEW_ADDR
+              value: {{ printf ":%v" .Values.operator.runEventsPort | quote }}
+            {{- end }}
             {{- if .Values.operator.castleTokenSpc }}
             # KB-314: the token file from the OpenBao CSI mount
             # (operator.castleTokenSpc). CRI-250 keeps credential material

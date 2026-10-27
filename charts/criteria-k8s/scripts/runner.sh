@@ -229,10 +229,7 @@ jq -n \
     }' > "$runtime_vars"
 
 # Server mode (CRI-133/134): when CASTLE_ADDR is set, criteria publishes run
-# lifecycle to the castle control plane. KB-344: CASTLE_ADDR now names the
-# operator's run-event proxy (operator svc), so run pods dial the operator,
-# never castle. CRITERIA_RUN_NAME carries the CriteriaRun CR name for the
-# proxy's attribution. Unset keeps the historical local
+# lifecycle to the castle control plane. Unset keeps the historical local
 # file mode.
 #
 # Castle dev mode serves plaintext. The engine client refuses plaintext
@@ -240,10 +237,13 @@ jq -n \
 # (CRI-138), so server mode opts out through the CRITERIA_SERVER_TLS env
 # fallback of the --server-tls flag.
 : "${CASTLE_ADDR:=}"
-: "${CRITERIA_RUN_NAME:=}"
 if [ -n "$CASTLE_ADDR" ]; then
     export CRITERIA_SERVER_TLS=disable
     set -- "$@" --server "$CASTLE_ADDR"
+    # KB-344: CASTLE_ADDR is the operator's run-event proxy in the stamped
+    # posture; --name carries the owning CriteriaRun so the proxy
+    # attributes this engine's streams to the right run.
+    : "${CRITERIA_RUN_NAME:=}"
     if [ -n "$CRITERIA_RUN_NAME" ]; then
         set -- "$@" --name "$CRITERIA_RUN_NAME"
     fi
