@@ -357,6 +357,47 @@ func TestAgentCastleTokenFromEnv(t *testing.T) {
 	})
 }
 
+// fallbackCaptureSink records the error logs resolveAgentCastleToken emits,
+// so the consumer-naming contract of the shared credential resolution's
+// degrade path can be pinned without a logging dependency.
+type fallbackCaptureSink struct {
+	msgs []string
+	errs []string
+}
+
+func (s *fallbackCaptureSink) Enabled(int) bool               { return true }
+func (s *fallbackCaptureSink) Init(logr.RuntimeInfo)          {}
+func (s *fallbackCaptureSink) Info(int, string, ...any)       {}
+func (s *fallbackCaptureSink) WithValues(...any) logr.LogSink { return s }
+func (s *fallbackCaptureSink) WithName(string) logr.LogSink   { return s }
+func (s *fallbackCaptureSink) Error(err error, msg string, _ ...any) {
+	s.msgs = append(s.msgs, msg)
+	s.errs = append(s.errs, err.Error())
+}
+
+// TestResolveAgentCastleTokenFallbackLogsItsConsumer pins the KB-345
+// review's log-naming rule: the shared agent-credential resolution serves
+// several lanes (run-event proxy, pod-state feed), so an unreadable
+// credential file logs WHICH lane degraded, and every lane keeps the
+// diagnosable path+cause error — never secret material — while degrading to
+// the shared token exactly as the resolution itself prescribes.
+func TestResolveAgentCastleTokenFallbackLogsItsConsumer(t *testing.T) {
+	t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN", "")
+	missing := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("CRITERIA_AGENT_CASTLE_TOKEN_FILE", missing)
+	t.Setenv("CASTLE_TOKEN", "shared-orchestrator-token")
+	sink := &fallbackCaptureSink{}
+
+	token := resolveAgentCastleToken(logr.New(sink), "pod-state feed")
+
+	require.Len(t, sink.msgs, 1, "the unreadable credential file must be logged loudly once")
+	assert.Equal(t, "pod-state feed: agent credential file unreadable; falling back to the shared CASTLE_TOKEN", sink.msgs[0],
+		"the fallback log must name the consumer so an operator sees which lane degraded")
+	require.Len(t, sink.errs, 1)
+	assert.Contains(t, sink.errs[0], "missing", "the logged error keeps the diagnosable path, never secret material")
+	assert.Equal(t, "shared-orchestrator-token", token, "the unreadable file still resolves the lane-off fallback token")
+}
+
 // TestNewShadowRunBuilderWiring pins the operator's spec-mirror wiring
 // seam: a deployment without a routes payload wires NO builder
 // (decision-only posture — the "routes payload not configured" degrade
