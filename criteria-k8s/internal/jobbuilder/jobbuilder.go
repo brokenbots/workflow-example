@@ -3,6 +3,7 @@ package jobbuilder
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -44,6 +45,16 @@ const (
 	// place the runner never dials castle and no engine agent row exists
 	// for castle to discover runs by.
 	AnnotationProxyCastleRunID = "criteria.brokenbots.dev/proxy-castle-run-id"
+	// AnnotationProxyEnrollToken is the per-run proxy enrollment token
+	// (KB-344 review remediation): the operator's run-event proxy stamps
+	// it on the CR (proxy.Enroll) before the runner Job renders, the
+	// runner env hands it to the engine as its --server-bootstrap-token
+	// bootstrap credential, and the proxy's Register binds identity
+	// minting to it — a caller that names an existing CriteriaRun without
+	// the token mints no identity. Proxy-scoped: it opens the operator's
+	// run-event proxy for this run only and is worthless at castle, so
+	// run pods still carry no castle credential.
+	AnnotationProxyEnrollToken = "criteria.brokenbots.dev/proxy-enroll-token"
 	// LabelScopeID is the scope instance id a per-scope adapter pod serves.
 	// Peer pods serve exactly one scope, so the label stays single-valued
 	// under the (scope, environment) grouping.
@@ -544,9 +555,19 @@ func baseBranchOrDefault(spec string) string {
 
 // operatorViewURL is the in-cluster boot-gate view endpoint the operator
 // serves (cmd/operator --bootgate-view-addr). The service is created with
-// the operator manifest (k8s/examples).
-func operatorViewURL(ns string) string {
-	return "http://criteria-k8s-operator." + ns + ".svc.cluster.local:8082/operator-view"
+// the operator manifest (k8s/examples). The port follows the run-event
+// proxy endpoint (KB-344 review remediation: both legs ride the same
+// bootgate listener, so a non-default runEventsPort keeps the runner's
+// boot-gate pre-check pointed at the real listener instead of the dangling
+// hardcode); an empty proxy endpoint keeps the legacy 8082 default.
+func operatorViewURL(ns, criteriaServerAddr string) string {
+	port := "8082"
+	if u, err := url.Parse(criteriaServerAddr); err == nil {
+		if p := u.Port(); p != "" {
+			port = p
+		}
+	}
+	return "http://criteria-k8s-operator." + ns + ".svc.cluster.local:" + port + "/operator-view"
 }
 
 func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intakeRoot, triageRoot, providerBaseURL string, maxVisits int, defaults Defaults, plan *workflowPlan) corev1.Container {
@@ -558,7 +579,12 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 		// exits 0 before registering with castle.
 		{Name: "CRITERIA_RUN_TICKET", Value: run.Spec.TicketID},
 		{Name: "CRITERIA_RUN_JOB", Value: JobName(run)},
-		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace)},
+		// KB-234 operator leg: the boot gate's identity + operator-view URL.
+		// The operator serves the view (cmd/operator bootgate-view-addr);
+		// a runner whose CR turned terminal (or was deleted under it)
+		// exits 0 before registering with castle. The port follows the
+		// run-event proxy endpoint (KB-344 review remediation).
+		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace, defaults.CriteriaServerAddr)},
 		{Name: "REPO_URL", Value: run.Spec.RepoURL},
 		{Name: "REPO_DIR", Value: repoDir},
 		{Name: "INTAKE_ROOT", Value: intakeRoot},
@@ -613,6 +639,14 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	// proxy attributes envelopes by. The engine's criteria binary takes it
 	// through --name (runner.sh).
 	env = append(env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: run.GetName()})
+	// KB-344 review remediation: the per-run proxy enrollment token — the
+	// engine's bootstrap credential for the operator's run-event proxy
+	// (--server-bootstrap-token in the runner scripts), which binds the
+	// proxy's Register to the pod serving this run. Proxy-scoped and
+	// stamped on the CR by the proxy's Enroll; never a castle credential.
+	if tok := run.GetAnnotations()[AnnotationProxyEnrollToken]; tok != "" {
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_PROXY_ENROLLMENT_TOKEN", Value: tok})
+	}
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 
 	return corev1.Container{

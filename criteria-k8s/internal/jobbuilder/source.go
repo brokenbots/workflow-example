@@ -469,7 +469,7 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 		// (the CR's phase gate at every server-mode boot).
 		{Name: "CRITERIA_RUN_TICKET", Value: run.Spec.TicketID},
 		{Name: "CRITERIA_RUN_JOB", Value: JobName(run)},
-		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace)},
+		{Name: "CRITERIA_OPERATOR_VIEW_URL", Value: operatorViewURL(run.Namespace, defaults.CriteriaServerAddr)},
 		{Name: "WORKFLOW_URL", Value: source.URL},
 	}
 	if source.Ref != "" {
@@ -500,6 +500,14 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 	// registers with the operator's run-event proxy under the identity the
 	// proxy attributes envelopes by.
 	env = append(env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: run.GetName()})
+	// KB-344 review remediation: the per-run proxy enrollment token — the
+	// engine's bootstrap credential for the operator's run-event proxy
+	// (--server-bootstrap-token in the runner scripts), which binds the
+	// proxy's Register to the pod serving this run. Proxy-scoped and
+	// stamped on the CR by the proxy's Enroll; never a castle credential.
+	if tok := run.GetAnnotations()[AnnotationProxyEnrollToken]; tok != "" {
+		env = append(env, corev1.EnvVar{Name: "CRITERIA_PROXY_ENROLLMENT_TOKEN", Value: tok})
+	}
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 	// D69: the entrypoint derives its secret --var pairs from the declared
 	// secrets (see secretVarBindings); newline-separated varname=absfile.

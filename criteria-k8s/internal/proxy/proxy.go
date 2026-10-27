@@ -16,6 +16,7 @@ package proxy
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -94,6 +95,10 @@ type Proxy struct {
 	byToken      map[string]*agentEntry // minted token → identity
 	byCriteriaID map[string]*agentEntry // minted criteria id → identity
 	runs         map[string]*runEntry   // proxy run id → run
+	// enrolled memoizes the per-run enrollment token keyed by CR name
+	// (Enroll): the durable record is the CR annotation, so entries
+	// survive operator restarts via re-read.
+	enrolled map[string]string
 }
 
 // Config wires the proxy's dependency edges.
@@ -122,15 +127,30 @@ func New(cfg Config) *Proxy {
 		byToken:      make(map[string]*agentEntry),
 		byCriteriaID: make(map[string]*agentEntry),
 		runs:         make(map[string]*runEntry),
+		enrolled:     make(map[string]string),
 	}
 }
 
 // Register implements CriteriaService.Register for run pods. The engine
 // registers with its --name (the CriteriaRun the runner carries); the
-// proxy issues a criteria identity bound to that CR. No bootstrap-token
-// gate is repeated here: the bootgate server terminates in-pod traffic
-// inside the operator's own namespace, and the CR-name gate below IS the
-// authorization boundary — an unknown name yields no identity.
+// proxy issues a criteria identity bound to that CR.
+//
+// Authorization boundary (KB-344 review remediation): Register is
+// bootstrap-only per the SDK auth contract, and bootstrap rides a
+// deployment-defined credential. The proxy's is the per-run enrollment
+// token Enroll stamps on the run's CR before the runner Job renders; the
+// runner env hands it to the engine, which presents it as the
+// X-Server-Bootstrap header. The operator's Service is a ClusterIP
+// reachable from anywhere inside the cluster network, so an unauthenticated
+// Register would let any pod mint an identity for a run it does not serve
+// and forward forged envelopes to castle — bypassing castle's per-envelope
+// ownership gate (KB-324/330) the proxy exists to preserve. Matching the
+// token binds identity minting to the pod actually serving this run. A
+// mismatch (absent header, wrong token, or a CR the controller has not
+// enrolled yet) mints nothing. The minted identity is castle-side only;
+// the enrollment token itself never opens anything at castle, so run pods
+// still carry no castle credential. Restarts stay safe because the
+// expected token is re-read from the CR annotation, not held in memory.
 func (p *Proxy) Register(ctx context.Context, req *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error) {
 	name := req.Msg.GetName()
 	if name == "" {
@@ -146,6 +166,12 @@ func (p *Proxy) Register(ctx context.Context, req *connect.Request[v1.RegisterRe
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("proxy: reading CriteriaRun %s/%s: %w", p.ns, name, err))
 	}
+	enrolled := cr.GetAnnotations()[jobbuilder.AnnotationProxyEnrollToken]
+	presented := req.Header().Get("X-Server-Bootstrap")
+	if enrolled == "" || presented == "" || subtle.ConstantTimeCompare([]byte(enrolled), []byte(presented)) != 1 {
+		return nil, connect.NewError(connect.CodePermissionDenied,
+			fmt.Errorf("proxy: CriteriaRun %s/%s has no valid enrollment token for this Register", p.ns, name))
+	}
 
 	agent, err := mintAgent(name)
 	if err != nil {
@@ -157,6 +183,49 @@ func (p *Proxy) Register(ctx context.Context, req *connect.Request[v1.RegisterRe
 	p.mu.Unlock()
 	p.log.Info("run-event proxy: registered engine identity", "criteriaRun", name)
 	return connect.NewResponse(&v1.RegisterResponse{CriteriaId: agent.criteriaID, Token: agent.token}), nil
+}
+
+// Enroll provisions (or reuses) the per-run enrollment token the proxy's
+// Register gate binds engine identity minting to (KB-344 review
+// remediation). The controller calls it before the runner Job renders:
+// the token is stamped durably on the CR, so an operator restart re-reads
+// it during Register instead of forgetting runs enrolled before the
+// restart. A stamp failure returns an error instead of continuing
+// best-effort, so the reconcile retries before any engine pod exists that
+// would boot without the credential. The token is proxy-scoped: it
+// authorizes Register on the operator's run-event proxy for exactly this
+// run and is worthless at castle — the zero-castle-credentials property
+// of run pods holds.
+func (p *Proxy) Enroll(ctx context.Context, crName string) (string, error) {
+	p.mu.Lock()
+	token, ok := p.enrolled[crName]
+	p.mu.Unlock()
+	if ok {
+		return token, nil
+	}
+	cr := &criteriav1.CriteriaRun{}
+	if err := p.client.Get(ctx, client.ObjectKey{Namespace: p.ns, Name: crName}, cr); err != nil {
+		return "", fmt.Errorf("proxy: reading CriteriaRun %s/%s to enroll: %w", p.ns, crName, err)
+	}
+	if token = cr.GetAnnotations()[jobbuilder.AnnotationProxyEnrollToken]; token != "" {
+		p.rememberEnrollment(crName, token)
+		return token, nil
+	}
+	token, err := newRandomID("prenrol-")
+	if err != nil {
+		return "", fmt.Errorf("proxy: minting enrollment token for %s/%s: %w", p.ns, crName, err)
+	}
+	if err := p.patchRunAnnotation(ctx, crName, jobbuilder.AnnotationProxyEnrollToken, token); err != nil {
+		return "", fmt.Errorf("proxy: stamping enrollment token on CriteriaRun %s/%s: %w", p.ns, crName, err)
+	}
+	p.rememberEnrollment(crName, token)
+	return token, nil
+}
+
+func (p *Proxy) rememberEnrollment(crName, token string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.enrolled[crName] = token
 }
 
 // Heartbeat implements CriteriaService.Heartbeat: an identity check plus a
@@ -349,6 +418,14 @@ func (p *Proxy) castleRunID(ctx context.Context, entry *runEntry, proxyRunID str
 		return "", fmt.Errorf("proxy: reading CriteriaRun %s/%s: %w", p.ns, entry.agent.crName, err)
 	}
 	resolved := cr.GetAnnotations()[control.AnnAssignmentRunID]
+	// KB-344 review remediation: seed from the proxy's own stamp before
+	// minting — a lost in-memory entry (operator restart, or a second
+	// engine run against the same CR after a lost stamp) reuses the castle
+	// run already recorded on the object instead of creating a second one
+	// and forking the transcript.
+	if resolved == "" {
+		resolved = cr.GetAnnotations()[jobbuilder.AnnotationProxyCastleRunID]
+	}
 	if resolved == "" && p.create != nil {
 		created, err := p.create.CreateRun(ctx, &v1.CreateRunRequest{
 			WorkflowName: entry.workflowName,
@@ -372,13 +449,24 @@ func (p *Proxy) castleRunID(ctx context.Context, entry *runEntry, proxyRunID str
 }
 
 // stampAnnotation merges one annotation onto the run's CR. Best-effort:
-// the proxy's event path does not gate on the stamp (the controller
-// observes it whenever it lands; missed stamps re-stamp on reconnect).
+// the event path does not gate on the stamp — a transient patch failure
+// costs the controller one observation cycle, and castleRunID now seeds
+// from the annotation on later streams, so a landed stamp is reused and
+// nothing is minted twice.
 func (p *Proxy) stampAnnotation(ctx context.Context, crName, key, value string) {
+	if err := p.patchRunAnnotation(ctx, crName, key, value); err != nil {
+		p.log.Error(err, "run-event proxy: stamping run annotation", "criteriaRun", crName, "key", key)
+	}
+}
+
+// patchRunAnnotation merges one annotation onto the CR and fails loudly:
+// Enroll is the strict caller — an unstamped enrollment token would let a
+// runner Job render without its bootstrap credential, so the reconcile
+// must retry instead of continuing best-effort.
+func (p *Proxy) patchRunAnnotation(ctx context.Context, crName, key, value string) error {
 	cr := &criteriav1.CriteriaRun{}
 	if err := p.client.Get(ctx, client.ObjectKey{Namespace: p.ns, Name: crName}, cr); err != nil {
-		p.log.Error(err, "run-event proxy: reading CriteriaRun for annotation stamp", "criteriaRun", crName)
-		return
+		return fmt.Errorf("reading CriteriaRun %s/%s: %w", p.ns, crName, err)
 	}
 	base := cr.DeepCopy()
 	if cr.Annotations == nil {
@@ -386,8 +474,9 @@ func (p *Proxy) stampAnnotation(ctx context.Context, crName, key, value string) 
 	}
 	cr.Annotations[key] = value
 	if err := p.client.Patch(ctx, cr, client.MergeFrom(base)); err != nil {
-		p.log.Error(err, "run-event proxy: stamping run annotation", "criteriaRun", crName, "key", key)
+		return fmt.Errorf("stamping %s on CriteriaRun %s/%s: %w", key, p.ns, crName, err)
 	}
+	return nil
 }
 
 func (p *Proxy) runByID(id string) *runEntry {

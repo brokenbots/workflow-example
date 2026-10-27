@@ -252,6 +252,24 @@ func main() {
 	} else {
 		logger.Info("run-event proxy disabled (KB-344)", "reason", runEventsDisabled)
 	}
+	// KB-344 review remediation: build (not serve) the run-event proxy
+	// before the reconciler — the reconciler enrolls runs through it
+	// (Enroll stamps the per-run bootstrap credential on the CR) before
+	// their runner Jobs render, so the proxy object must exist regardless
+	// of which leg consumes it first. Serving still happens only on the
+	// boot gate server, only when the lane is on; with the lane off the
+	// reconciler renders runners without the proxy endpoint entirely.
+	var runProxy *proxy.Proxy
+	if runEventsEndpoint != "" {
+		proxyFeed := castle.NewAssignmentEventFeed(castle.Config{Addr: proxyAddr, Token: proxyToken}, nil)
+		runProxy = proxy.New(proxy.Config{
+			Log:    logger,
+			Client: directClient,
+			NS:     *namespaceFlag,
+			Submit: proxyFeed,
+			Create: proxyFeed,
+		})
+	}
 
 	// Observe run lifecycle from castle (CRI-133 ServerService API) instead
 	// of reading events.ndjson off the PVC. The token comes from the
@@ -274,6 +292,11 @@ func main() {
 		// The run-archive client (KB-314): stores terminal run records
 		// before child-job reaping and finalizer removal.
 		RunArchiver: castleArchiver,
+		// KB-344 review remediation: the run-event proxy's enrollment
+		// edge — enrolls each run (per-run bootstrap credential stamped on
+		// the CR) before its runner Job renders. Nil when the proxy lane
+		// is off.
+		RunEvents: runProxy,
 		// Archive-record provenance: the running operator's version, from
 		// OPERATOR_VERSION (unset resolves to a "dev" record value).
 		OperatorVersion: getenv("OPERATOR_VERSION", ""),
@@ -382,14 +405,6 @@ func main() {
 		view := &controller.BootgateView{Client: directClient, Namespace: *namespaceFlag}
 		mux.Handle("/operator-view", view)
 		if runEventsEndpoint != "" {
-			proxyFeed := castle.NewAssignmentEventFeed(castle.Config{Addr: proxyAddr, Token: proxyToken}, nil)
-			runProxy := proxy.New(proxy.Config{
-				Log:    logger,
-				Client: directClient,
-				NS:     *namespaceFlag,
-				Submit: proxyFeed,
-				Create: proxyFeed,
-			})
 			prefix, handler := criteria.NewServiceHandler(runProxy)
 			mux.Handle(prefix, handler)
 			logger.Info("run-event proxy enabled (KB-344)", "route", prefix, "castle", proxyAddr, "namespace", *namespaceFlag)

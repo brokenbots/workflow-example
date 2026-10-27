@@ -93,6 +93,21 @@ type CriteriaRunReconciler struct {
 	// (the running operator's version). Empty resolution falls to a "dev"
 	// fallback in the record builder.
 	OperatorVersion string
+	// RunEvents is the run-event proxy's enrollment edge (KB-344 review
+	// remediation): before any runner Job renders, the reconciler enrolls
+	// the run so the proxy stamps the per-run bootstrap token on the CR
+	// and the jobbuilder carries it into the runner env — the credential
+	// that binds the proxy's Register to the pod serving the run. Nil
+	// (proxy lane off) renders runners without the enrollment carry.
+	RunEvents ProxyEnroller
+}
+
+// ProxyEnroller is the run-event proxy's enrollment edge (KB-344 review
+// remediation): mint or reuse the per-run bootstrap token the proxy binds
+// its Register gate to, stamped durably on the CR so an operator restart
+// re-reads it. Implemented by *proxy.Proxy.
+type ProxyEnroller interface {
+	Enroll(ctx context.Context, crName string) (string, error)
 }
 
 // +kubebuilder:rbac:groups=criteria.brokenbots.dev,resources=criteriaruns,verbs=get;list;watch;create;update;patch;delete
@@ -403,6 +418,26 @@ func (r *CriteriaRunReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if drift != "" {
 		return r.failConfigRenderDrift(ctx, &run, update, drift, logger)
+	}
+
+	// KB-344 review remediation: enroll the run with the run-event proxy
+	// before any runner Job renders — the proxy stamps the per-run
+	// bootstrap credential on the CR and the mirror below feeds it to
+	// BuildAll in THIS pass, so an engine pod never boots without it. A
+	// failed enrollment fails the reconcile (retried on the next pass)
+	// instead of rendering a tokenless runner Job the proxy would refuse.
+	if r.RunEvents != nil && resolvedDefaults.CriteriaServerAddr != "" {
+		enrollToken, err := r.RunEvents.Enroll(ctx, run.GetName())
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// Mirror the just-stamped annotation onto the local object: the
+		// informer-backed view may not have propagated the proxy's patch
+		// yet, and the rendered Job needs the value now.
+		if run.Annotations == nil {
+			run.Annotations = map[string]string{}
+		}
+		run.Annotations[jobbuilder.AnnotationProxyEnrollToken] = enrollToken
 	}
 
 	desiredJobs := jobbuilder.BuildAll(&run, resolvedDefaults)
