@@ -190,7 +190,7 @@ func TestBuildRunnerJob(t *testing.T) {
 	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "PROVIDER_BASE_URL", Value: "http://provider/v1"})
 	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "JOB_NAME", Value: job.Name})
 	assert.NotContains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"},
-		"without Defaults.CastleAddr the runner stays in local file mode")
+		"without Defaults.CriteriaServerAddr the runner stays in local file mode")
 
 	var podIP corev1.EnvVar
 	for _, e := range runner.Env {
@@ -542,8 +542,9 @@ func findJob(t *testing.T, jobs []*batchv1.Job, name string) *batchv1.Job {
 	return nil
 }
 
-// With Defaults.CastleAddr set, the runner receives CASTLE_ADDR so criteria
-// publishes lifecycle to castle in server mode. When unset, the env var is
+// With Defaults.CriteriaServerAddr set, the runner receives CASTLE_ADDR
+// (the operator's run-event proxy endpoint) so criteria publishes lifecycle
+// in server mode. When unset, the env var is
 // absent entirely and the runner's local-mode behaviour is unchanged.
 func TestBuildRunnerJobCastleAddr(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
@@ -554,13 +555,31 @@ func TestBuildRunnerJobCastleAddr(t *testing.T) {
 		},
 	}
 
-	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data", CastleAddr: "http://castle:9443"})
+	job := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data", CriteriaServerAddr: "http://criteria-k8s-operator:8082"})
 	runner := job.Spec.Template.Spec.Containers[0]
-	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: "http://castle:9443"})
+	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: "http://criteria-k8s-operator:8082"})
+	// KB-344: the CR name rides with the run so the engine registers with
+	// the operator's run-event proxy under the proxy's attribution key.
+	assert.Contains(t, runner.Env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: "cri-42"})
+	// No castle credential rides with the run (the proxy owns the castle
+	// identity); the run pod learns only the operator endpoint.
+	assert.NotContains(t, runner.Env, func() corev1.EnvVar { return corev1.EnvVar{Name: "CASTLE_TOKEN"} }())
+	assert.NotContains(t, runner.Env, func() corev1.EnvVar { return corev1.EnvVar{Name: "CASTLE_TOKEN_FILE"} }())
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.CSI != nil {
+			spc := vol.CSI.VolumeAttributes["secretProviderClass"]
+			if strings.Contains(spc, "castle") {
+				t.Errorf("runner job mounts a castle-backed secret volume: %s", vol.Name)
+			}
+		}
+	}
 
 	localJob := jobbuilder.BuildRunnerJob(run, jobbuilder.Defaults{DataPVC: "criteria-data"})
 	localRunner := localJob.Spec.Template.Spec.Containers[0]
 	assert.NotContains(t, localRunner.Env, corev1.EnvVar{Name: "CASTLE_ADDR"})
+	// The run-name carry is unconditional: attribution metadata is never a
+	// credential.
+	assert.Contains(t, localRunner.Env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: "cri-42"})
 }
 
 // CRI-136 retired the events.ndjson dual-write: by default the runner

@@ -160,13 +160,21 @@ if [ "$(printf '%s' "$workflow_ref" | tr -d '[:space:]')" != "" ]; then
 fi
 
 # Server mode (CRI-133/134): publish run lifecycle to castle when
-# configured. Castle dev mode serves plaintext; the engine refuses
+# configured. KB-344: the endpoint is the operator's run-event proxy
+# (CASTLE_ADDR names the operator's svc), so run pods dial the operator,
+# never castle. CRITERIA_RUN_NAME carries the CriteriaRun CR name for the
+# proxy's run attribution; present whenever server mode is configured.
+# Castle dev mode serves plaintext; the engine refuses
 # plaintext connections to non-loopback hosts unless TLS is explicitly
 # disabled (CRI-138).
 : "${CASTLE_ADDR:=}"
+: "${CRITERIA_RUN_NAME:=}"
 if [ -n "$CASTLE_ADDR" ]; then
     export CRITERIA_SERVER_TLS=disable
     set -- "$@" --server "$CASTLE_ADDR"
+    if [ -n "$CRITERIA_RUN_NAME" ]; then
+        set -- "$@" --name "$CRITERIA_RUN_NAME"
+    fi
 fi
 
 # Debug-only events mirror (CRI-136): unset keeps the run castle-only.
@@ -485,9 +493,13 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 	if defaults.DebugEventsFile != "" {
 		env = append(env, corev1.EnvVar{Name: "EVENTS_FILE", Value: defaults.DebugEventsFile})
 	}
-	if defaults.CastleAddr != "" {
-		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CastleAddr})
+	if defaults.CriteriaServerAddr != "" {
+		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CriteriaServerAddr})
 	}
+	// KB-344: the CR name rides with the run so the runner's engine
+	// registers with the operator's run-event proxy under the identity the
+	// proxy attributes envelopes by.
+	env = append(env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: run.GetName()})
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 	// D69: the entrypoint derives its secret --var pairs from the declared
 	// secrets (see secretVarBindings); newline-separated varname=absfile.

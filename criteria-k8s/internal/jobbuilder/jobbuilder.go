@@ -133,11 +133,16 @@ type Defaults struct {
 	Image           string
 	DataPVC         string
 	ProviderBaseURL string
-	// CastleAddr is the castle orchestrator address handed to runner Jobs.
-	// When set, runners execute criteria in server mode: lifecycle is
-	// published to castle (CRI-133/134), which is the operator's only run
-	// observation surface. Empty keeps the runner in local file mode.
-	CastleAddr string
+	// CastleAddr is the run-events endpoint handed to runner Jobs: when
+	// set, runners execute criteria in server mode and publish lifecycle
+	// envelopes to it (CRI-133/134), which is the operator's only run
+	// observation surface. KB-344: the endpoint is the OPERATOR's
+	// run-event proxy (its svc, serving the criteria protocol), never
+	// castle itself — run pods learn no castle address and carry no
+	// castle credential, and the operator re-emits envelopes to castle
+	// under the run's owning agent identity. Empty keeps the runner in
+	// local file mode.
+	CriteriaServerAddr string
 	// DebugEventsFile is the debug-only events.ndjson path handed to runner
 	// Jobs via EVENTS_FILE (CRI-136). The events.ndjson dual-write is
 	// retired: only an explicitly configured debug path makes criteria
@@ -600,9 +605,14 @@ func workflowRunnerContainer(run *criteriav1.CriteriaRun, image, repoDir, intake
 	if defaults.DebugEventsFile != "" {
 		env = append(env, corev1.EnvVar{Name: "EVENTS_FILE", Value: defaults.DebugEventsFile})
 	}
-	if defaults.CastleAddr != "" {
-		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CastleAddr})
+	if defaults.CriteriaServerAddr != "" {
+		env = append(env, corev1.EnvVar{Name: "CASTLE_ADDR", Value: defaults.CriteriaServerAddr})
 	}
+	// KB-344: the CR name rides with the run so the runner's engine
+	// registers with the operator's run-event proxy under the identity the
+	// proxy attributes envelopes by. The engine's criteria binary takes it
+	// through --name (runner.sh).
+	env = append(env, corev1.EnvVar{Name: "CRITERIA_RUN_NAME", Value: run.GetName()})
 	env = appendEnvDistinct(env, plan.runnerEnvs())
 
 	return corev1.Container{
