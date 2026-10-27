@@ -15,6 +15,8 @@ set -euo pipefail
 #     documented observation, not a failure);
 #   - refusal classification (KB-326 S3 isolation: anonymous pass refused,
 #     class gates refused, uniform not_found);
+#   - leg 0 health prologue and leg E operator CR-view verdicts (operator-
+#     stamped CriteriaRun) plus the in-cluster env seat defaults;
 #   - the evidence bundle renders the card's close-out fields: assignment
 #     disposition, CR name, podstate seqs — and the log-only parity leg.
 
@@ -35,7 +37,7 @@ RESULTS="$(node --input-type=module - "$HARNESS" <<'EOF'
 import { createRequire } from 'node:module';
 const require_ = createRequire(process.cwd() + '/package.json');
 const harnessUrl = process.argv[2];
-const { parsePodstateEvent, podstateSeqs, dispositionVerdict, runRowVerdict, refusalObservation, assembleEvidence } = await import(harnessUrl);
+const { parsePodstateEvent, podstateSeqs, dispositionVerdict, runRowVerdict, refusalObservation, healthObservation, operatorViewVerdict, castleBaseFromEnv, operatorBaseFromEnv, assembleEvidence } = await import(harnessUrl);
 
 const fails = [];
 const eq = (label, got, want) => {
@@ -140,6 +142,35 @@ eq('anon 401', refusalObservation('P', { code: 'unauthenticated' }, { tokenless:
 eq('class gate', refusalObservation('P', { code: 'permission_denied', message: 'trigger identities cannot invoke this procedure' }).observed, 'refused-class-gate');
 eq('uniform not_found', refusalObservation('P', { code: 'not_found', message: 'run not found' }, { tokenless: true }).observed, 'refused-uniform-not-found');
 
+// --- leg 0: health prologue classification ---
+eq('health serving', healthObservation({ status: 'SERVING' }).observed, 'SERVING');
+eq('health enum shape', healthObservation({ status: 'SERVING_STATUS_SERVING' }).observed, 'SERVING_STATUS_SERVING');
+eq('health unreachable', healthObservation({ code: 'unavailable', message: 'transport: connect ECONNREFUSED' }).observed, 'unreachable');
+eq('health refusal shape', healthObservation({ code: 'http_404', message: 'HTTP 404' }).observed, 'unexpected-http_404');
+
+// --- leg E: operator CR view (KB-234 job-first operator-stamped CR) ---
+{
+  const running = operatorViewVerdict({ phase: 'Running', terminal: false }, 'kb-342-1793068430');
+  eq('operator running', running.phase, 'Running');
+  eq('operator executing', running.running, true);
+  eq('operator present', running.crPresent, true);
+  eq('operator job echoed', running.job, 'kb-342-1793068430');
+  const succeeded = operatorViewVerdict({ phase: 'Succeeded', terminal: true }, 'kb-342-1793045450');
+  eq('succeeded not running', succeeded.running, false);
+  eq('succeeded present', succeeded.crPresent, true);
+  const orphan = operatorViewVerdict({ phase: 'NotFound', terminal: true }, 'kb-342-1793045450');
+  eq('orphan absent', orphan.crPresent, false);
+  const missing = operatorViewVerdict(null, 'kb-342-1793068430');
+  eq('missing body unknown', missing.phase, 'unknown');
+  eq('missing body absent', missing.crPresent, false);
+}
+
+// --- in-cluster env defaults for the castle/operator seats ---
+eq('castle env default', castleBaseFromEnv({ CASTLE_SERVICE_HOST: 'castle.criteria-jobs.svc.cluster.local', CASTLE_SERVICE_PORT_H2C: '8080' }), 'http://castle.criteria-jobs.svc.cluster.local:8080');
+eq('castle env empty', castleBaseFromEnv({}), '');
+eq('operator env default', operatorBaseFromEnv({ CRITERIA_K8S_OPERATOR_SERVICE_HOST: '10.43.156.32', CRITERIA_K8S_OPERATOR_PORT_8082_TCP_PORT: '8082' }), 'http://10.43.156.32:8082');
+eq('operator env empty', operatorBaseFromEnv({}), '');
+
 // --- evidence bundle carries the card's close-out fields ---
 {
   const body = assembleEvidence({
@@ -148,12 +179,17 @@ eq('uniform not_found', refusalObservation('P', { code: 'not_found', message: 'r
     disposition: dispositionVerdict({ runId: '7d8cd36e', state: 'WORKFLOW_ASSIGNMENT_STATE_LEASED', leasedCriteriaId: 'f18ceef3-abcd' }, 'f18ceef3'),
     runRow: runRowVerdict({ run_id: '7d8cd36e', workflow_name: 'kanboard_develop_v1', status: 'running' }),
     podstate: podstateSeqs([connectShape, stored]),
+    health: healthObservation({ status: 'SERVING' }),
+    operatorView: operatorViewVerdict({ phase: 'Running', terminal: false }, 'kb-342-1793068430'),
     isolation: [refusalObservation('GetRun', { code: 'not_found' }, { tokenless: true })],
     fetchedAt: '2026-10-26T20:30:00Z',
   });
   for (const wants of [
     '- run: `7d8cd36e-60d0-47aa-a0c7-57fed50b6dfd`',
     '- CR name: `kb-342-1793045450`',
+    '- castle health: SERVING',
+    'phase=Running terminal=false',
+    'operator-stamped CriteriaRun executing',
     'state=`WORKFLOW_ASSIGNMENT_STATE_LEASED`',
     'leased_criteria_id=`f18ceef3-abcd`',
     '(matches expected criteria lane)',
@@ -163,9 +199,16 @@ eq('uniform not_found', refusalObservation('P', { code: 'not_found', message: 'r
   ]) {
     if (!body.includes(wants)) fails.push(`evidence bundle missing: ${wants}`);
   }
+  const orphanBundle = assembleEvidence({
+    runId: 'r', crName: 'kb-342-1793045450',
+    operatorView: operatorViewVerdict({ phase: 'NotFound', terminal: true }, 'kb-342-1793045450'),
+    fetchedAt: '2026-10-26T20:30:00Z',
+  });
+  if (!orphanBundle.includes('ABSENT (phase=NotFound')) fails.push('orphan CR rendering missing');
   // Seat-gap rendering when a leg cannot be verified.
   const gaps = assembleEvidence({ crName: 'kb-342-1793045450', fetchedAt: '2026-10-26T20:30:00Z' });
   if (!gaps.includes('NOT VERIFIABLE FROM THIS CREDENTIAL SEAT')) fails.push('gap rendering missing for missing legs');
+  if (!gaps.includes('CR (operator view): NOT PROBED')) fails.push('operator-view gap rendering missing');
 }
 
 if (fails.length > 0) {
