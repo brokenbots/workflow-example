@@ -43,11 +43,12 @@ type PodStateFeedConfig struct {
 	Addr string
 	// Token is the pre-shared castle bearer credential the feed submits
 	// with. No bootstrap/register path: the feed reuses a stable pre-shared
-	// identity. KB-345 wire the AGENT-class credential (the assignment
-	// lane's CRITERIA_AGENT_CASTLE_TOKEN), not the orchestrator's shared
-	// CASTLE_TOKEN: castle's SubmitEvents gate denies orchestrator-class
-	// identities from agent-owned procedures, so a run-owned-lane deployment
-	// emitting under the shared identity has every submit rejected.
+	// identity. KB-345: callers must wire the AGENT-class credential (the
+	// assignment lane's CRITERIA_AGENT_CASTLE_TOKEN), not the orchestrator's
+	// shared CASTLE_TOKEN — castle's SubmitEvents gate denies
+	// orchestrator-class identities from agent-owned procedures, so a
+	// lane-credential deployment emitting under the shared identity has
+	// every submit rejected.
 	Token string
 }
 
