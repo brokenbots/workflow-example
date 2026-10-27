@@ -36,6 +36,14 @@ const (
 	// an annotation, not a label, because the comma separator is illegal in
 	// a Kubernetes label value (CRI-234 R1).
 	AnnotationAdapterKinds = "criteria.brokenbots.dev/adapter-kinds"
+	// AnnotationProxyCastleRunID is the castle run id the operator's
+	// run-event proxy minted for a CriteriaRun (KB-344 watcher lane): the
+	// proxy creates the run under the run's owning agent identity when the
+	// engine calls CreateRun, so the controller's castle observation rides
+	// this annotation instead of the discovery pass — with the proxy in
+	// place the runner never dials castle and no engine agent row exists
+	// for castle to discover runs by.
+	AnnotationProxyCastleRunID = "criteria.brokenbots.dev/proxy-castle-run-id"
 	// LabelScopeID is the scope instance id a per-scope adapter pod serves.
 	// Peer pods serve exactly one scope, so the label stays single-valued
 	// under the (scope, environment) grouping.

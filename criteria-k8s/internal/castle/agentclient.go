@@ -99,10 +99,23 @@ func (f *AssignmentEventFeed) Submit(ctx context.Context, runID, correlationID s
 	return f.submitEnvelope(ctx, env)
 }
 
-// submitEnvelope mirrors PodStateFeed.emit: one bidi stream per envelope,
-// bounded retries.
-func (f *AssignmentEventFeed) submitEnvelope(ctx context.Context, env *v1.Envelope) error {
-	return f.retry(ctx, "assignment event", func(ctx context.Context) error {
+// SubmitEnvelope forwards ONE pre-built envelope onto the run's event
+// stream (KB-344 run-event proxy): the proxy re-emits the engine's
+// envelopes verbatim — only run_id is re-pointed to the castle run — so
+// the engine's payloads, timestamps, sequence numbers and correlation ids
+// survive the hop and castle's (run_id, correlation_id) dedupe keeps its
+// exact meaning. Returns castle's ack, whose Seq carries the
+// server-assigned persisted sequence (echoed back to the engine in the
+// proxy ack).
+func (f *AssignmentEventFeed) SubmitEnvelope(ctx context.Context, env *v1.Envelope) (*v1.Ack, error) {
+	if f.Disabled() || f.client == nil {
+		return nil, errors.New("assignment event feed: no client")
+	}
+	if env == nil || env.RunId == "" {
+		return nil, errors.New("assignment event feed: empty run_id")
+	}
+	var ack *v1.Ack
+	err := f.retry(ctx, "assignment event", func(ctx context.Context) error {
 		stream := f.client.SubmitEvents(ctx)
 		if err := stream.Send(env); err != nil {
 			return err
@@ -110,11 +123,45 @@ func (f *AssignmentEventFeed) submitEnvelope(ctx context.Context, env *v1.Envelo
 		if err := stream.CloseRequest(); err != nil {
 			return err
 		}
-		if _, err := stream.Receive(); err != nil && !errors.Is(err, io.EOF) {
+		recv, err := stream.Receive()
+		switch {
+		case err != nil && !errors.Is(err, io.EOF):
 			return err
+		case recv != nil:
+			ack = recv
 		}
 		return stream.CloseResponse()
 	})
+	if err != nil {
+		return nil, err
+	}
+	return ack, nil
+}
+
+// submitEnvelope mirrors PodStateFeed.emit: one bidi stream per envelope,
+// bounded retries.
+func (f *AssignmentEventFeed) submitEnvelope(ctx context.Context, env *v1.Envelope) error {
+	_, err := f.SubmitEnvelope(ctx, env)
+	return err
+}
+
+// CreateRun creates a castle run under the feed's identity (KB-344
+// run-event proxy, watcher lane): the desired run the engine's proxied
+// event stream lands on, owned by the same criteria identity that submits
+// the events — castle keys run ownership on the caller, so the per-envelope
+// ownership gate passes by construction. Deliberately NOT retried: castle
+// mints a fresh run id per call, and a retry after a lost response would
+// leak a duplicate pending run; the engine's CreateRun failure path is the
+// same loud surface a direct-castle engine saw.
+func (f *AssignmentEventFeed) CreateRun(ctx context.Context, req *v1.CreateRunRequest) (*v1.Run, error) {
+	if f.Disabled() || f.client == nil {
+		return nil, errors.New("assignment event feed: no client")
+	}
+	resp, err := f.client.CreateRun(ctx, connect.NewRequest(req))
+	if err != nil {
+		return nil, fmt.Errorf("assignment run create: %w", err)
+	}
+	return resp.Msg, nil
 }
 
 // retry runs the attempt up to maxAttempts times with exponential backoff
