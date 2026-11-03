@@ -30,9 +30,9 @@ const perScopeAdapterNameSegment = 5 // len("-adp-")
 func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) string {
 	sanitizedKind := safeObjectName(kind)
 	// reserve = "-adp-" + sanitized kind + "-" + scope hash
-	// (5 + len(kind) + 1 + 12): kind "shell" keeps the full job prefix for
-	// job names <= 40 (40 + 23 = 63 exactly); kind "copilot-coordinator"
-	// (19) for job names <= 26 (26 + 37 = 63).
+	// (5 + len(sanitizedKind) + 1 + 12): kind "shell" keeps the full job
+	// prefix for job names <= 40 (40 + 23 = 63 exactly); kind
+	// "copilot-coordinator" (19) for job names <= 26 (26 + 37 = 63).
 	name := fmt.Sprintf("%s-adp-%s-%s",
 		perScopeJobPrefix(run,
 			perScopeAdapterNameSegment+len(sanitizedKind)+1+perScopePodHashLength),
