@@ -12,20 +12,31 @@ import (
 
 const perScopePodHashLength = 12
 
+// perScopeAdapterNameSegment joins the job-name prefix and the sanitized
+// adapter kind in a per-scope adapter pod name.
+const perScopeAdapterNameSegment = 5 // len("-adp-")
+
 // PerScopeAdapterPodName returns a DNS-safe pod name for a per-scope adapter.
 // It is len-safe by construction (KB-346): the job-name prefix is sanitized
-// and capped first, so the scope hash — the name's only discriminator on the
-// fallback path — always survives the 63-character object-name limit no
-// matter how long the owning run's name is. The old right-trim-at-63 dropped
-// the hash itself, collapsing distinct scopes of a long-named run into one
-// name. Hashes stay deterministic so a re-provisioned scope reconciles the
-// same object; if a pathologically long adapter kind still pushes the
-// assembled name past 63 characters, the overflow takes from the LEFT and
-// the hash survives.
+// and capped ONLY when the assembled name would exceed the 63-character
+// object-name limit (the reserve is computed over the SANITIZED kind, so a
+// prefix cap never costs the scope hash — the name's only discriminator on
+// the fallback path). The pre-KB-346 derivation right-trimmed at 63 and
+// dropped the hash itself for long run names, collapsing distinct scopes of
+// a long-named run into one name. Hashes stay deterministic so a
+// re-provisioned scope reconciles the same object; if a pathologically long
+// adapter kind still pushes the assembled name past 63 characters, the
+// overflow takes from the LEFT and the hash survives.
 func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) string {
+	sanitizedKind := safeObjectName(kind)
+	// reserve = "-adp-" + sanitized kind + "-" + scope hash
+	// (5 + len(kind) + 1 + 12): kind "shell" keeps the full job prefix for
+	// job names <= 40 (40 + 23 = 63 exactly); kind "copilot-coordinator"
+	// (19) for job names <= 26 (26 + 37 = 63).
 	name := fmt.Sprintf("%s-adp-%s-%s",
-		perScopeJobPrefix(run),
-		safeObjectName(kind),
+		perScopeJobPrefix(run,
+			perScopeAdapterNameSegment+len(sanitizedKind)+1+perScopePodHashLength),
+		sanitizedKind,
 		shortHash(scopeID),
 	)
 	return keepSuffixBytes(name)

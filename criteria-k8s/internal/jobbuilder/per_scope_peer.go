@@ -37,25 +37,37 @@ const EnvAdapters = "CRITERIA_REMOTE_ADAPTERS"
 // perScopePodNameLimit is the Kubernetes object-name length limit.
 const perScopePodNameLimit = 63
 
+// peerPodNameSegment joins the job-name prefix and the scope hash in a
+// per-scope peer pod name.
+const peerPodNameSegment = "-peer-"
+
 // perScopeJobPrefixMax caps the job-name prefix of every per-scope pod name
-// (KB-346): 24 + len("-peer-") + 12 + 1 + 12 = 55, so the name fits the
-// 63-character object-name limit with BOTH discriminating hash suffixes
-// intact from the start. Dispatch-lane CriteriaRun names are
-// <ticket>-<timestamp>-<suffix> (54+ characters), and the old
-// right-trim-at-63 dropped exactly the hashes — every (scope, environment)
-// group of a long-named run desired the SAME truncated name, the desired map
-// keyed by name let map order pick one winner, the create path saw the name
-// existing and silently skipped the rest, and the kb-342-1793682106 develop
-// run died scope_session_pending waiting for peer pods that never existed.
+// when the assembled name would exceed the 63-character object-name limit
+// (KB-346): 24 + len("-peer-") + 12 + 1 + 12 = 55, so BOTH discriminating
+// hash suffixes survive no matter how long the job name is. Dispatch-lane
+// CriteriaRun names are <ticket>-<timestamp>-<suffix> (54+ characters), and
+// the old right-trim-at-63 dropped exactly the hashes — every (scope,
+// environment) group of a long-named run desired the SAME truncated name,
+// the desired map keyed by name let map order pick one winner, the create
+// path saw the name existing and silently skipped the rest, and the
+// kb-342-1793682106 develop run died scope_session_pending waiting for
+// peer pods that never existed. The cap applies ONLY in the overflow case:
+// names the pre-KB-346 derivation left untrimmed stay byte-identical, so no
+// live pod is renamed (the reconcile deletes undesired pod names —
+// KB-253 pod-identity churn).
 const perScopeJobPrefixMax = 24
 
-// perScopeJobPrefix sanitizes and caps the owning job's name so a per-scope
-// pod name assembled over it ALWAYS keeps its hash suffixes: any overflow is
-// cut from the job prefix, never from the right. JobName rides a label value
-// or the run name, both unbounded.
-func perScopeJobPrefix(run *criteriav1.CriteriaRun) string {
+// perScopeJobPrefix sanitizes the owning job's name and caps it ONLY when
+// the assembled per-scope pod name would exceed the 63-character
+// object-name limit: reserve is the number of bytes that follow the prefix
+// in the assembled name ("-peer-"+12+1+12 or "-adp-"+kind+1+12). Under the
+// limit the FULL sanitized job name is used, so names the pre-KB-346
+// derivation left untrimmed stay byte-identical; over it the prefix caps at
+// perScopeJobPrefixMax so both hash suffixes always fit. JobName rides a
+// label value or the run name, both unbounded.
+func perScopeJobPrefix(run *criteriav1.CriteriaRun, reserve int) string {
 	job := safeObjectName(JobName(run))
-	if len(job) <= perScopeJobPrefixMax {
+	if len(job)+reserve <= perScopePodNameLimit {
 		return job
 	}
 	// safeObjectName guarantees a non-empty, hyphen-free-edged DNS string,
@@ -79,8 +91,14 @@ func keepSuffixBytes(base string) string {
 }
 
 func PerScopePeerPodName(run *criteriav1.CriteriaRun, scopeID, environment string) string {
-	name := fmt.Sprintf("%s-peer-%s-%s",
-		perScopeJobPrefix(run),
+	// reserve = "-peer-" + scope hash + "-" + env hash (6 + 12 + 1 + 12 =
+	// 31): a job name of <= 32 chars yields the full untrimmed prefix
+	// (32 + 31 = 63 exactly); 33+ caps to 24 (24 + 31 = 55 <= 63, both
+	// hashes intact).
+	name := fmt.Sprintf("%s%s%s-%s",
+		perScopeJobPrefix(run,
+			len(peerPodNameSegment)+perScopePodHashLength+1+perScopePodHashLength),
+		peerPodNameSegment,
 		shortHash(scopeID),
 		shortHash(environment),
 	)

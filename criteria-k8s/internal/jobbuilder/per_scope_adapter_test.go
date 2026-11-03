@@ -1,6 +1,7 @@
 package jobbuilder_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,6 +41,44 @@ func TestPerScopeAdapterPodNameLongJobNameKeepsScopeHash(t *testing.T) {
 		assert.True(t, strings.HasSuffix(first, "-"+hash12("shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46")),
 			"the 12-hex scope hash must survive the 63-cap intact (KB-346) for kind %q", kind)
 		assert.NotEqual(t, first, second, "distinct scopes keep distinct names under a 54+ char job name")
+	}
+}
+
+// KB-346 boundary: every job name whose assembled adapter name fits the
+// 63-character limit keeps the full untrimmed pre-KB-346 shape
+// "<job>-adp-<kind>-<scopehash12>" byte-for-byte. Kind "shell" is the widest
+// common reserve (5 + 5 + 1 + 12 = 23), so the band runs to length 40:
+// 40 + 23 = 63 exactly.
+func TestPerScopeAdapterPodNameJobNamesUpTo40CharsStayUntrimmed(t *testing.T) {
+	scope := "shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"
+	for n := 1; n <= 40; n++ {
+		job := dnsSafeJobName(n)
+		run := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: job}}
+		want := job + "-adp-shell-" + hash12(scope)
+		t.Run(fmt.Sprintf("job-name-length-%d", n), func(t *testing.T) {
+			assert.Equal(t, want, jobbuilder.PerScopeAdapterPodName(run, "shell", scope),
+				"an assembled name of <= 63 chars keeps the pre-KB-346 untrimmed shape byte-for-byte")
+			if n == 40 {
+				assert.Len(t, want, 63, "the untrimmed boundary yields exactly 63 characters (40 + 23)")
+			}
+		})
+	}
+}
+
+// KB-346 boundary just past the untrimmed band: a 33-char job name caps the
+// prefix at 24 bytes while the scope hash survives intact for both a short
+// kind ("shell", reserve 23) and a sanitized multi-word kind
+// ("copilot-coordinator", reserve 37).
+func TestPerScopeAdapterPodNameJobName33KeepsScopeHashForEveryKind(t *testing.T) {
+	job := "kb-342-acceptance-1793682106-abcd"
+	require.Len(t, job, 33)
+	run := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: job}}
+	scope := "shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"
+	for _, kind := range []string{"shell", "copilot", "copilot.coordinator"} {
+		name := jobbuilder.PerScopeAdapterPodName(run, kind, scope)
+		assert.LessOrEqual(t, len(name), 63, "kind %q", kind)
+		assert.True(t, strings.HasSuffix(name, "-"+hash12(scope)),
+			"the 12-hex scope hash must survive the prefix cap intact (KB-346) for kind %q", kind)
 	}
 }
 
