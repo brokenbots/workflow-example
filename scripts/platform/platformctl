@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# platformctl — dispatch-only wrapper for the platform setup tooling.
+# Each subcommand calls EXACTLY one component; no logic lives here.
+#
+# Usage:
+#   platformctl project setup   --namespace <ns> --project-name "<name>" --repos <owner/name,...> [--cutover] [--apply]
+#   platformctl project verify  --namespace <ns> --project-name "<name>"
+#   platformctl project teardown --namespace <ns> --project-name "<name>" [--repos <owner/name,...>] [--drain-timeout 600] [--apply]
+#   platformctl job register    --spec <spec.json> [--apply] [--skip-container-gates]
+#   platformctl job verify      --spec <spec.json>            (dry-run = the verify pass)
+#   platformctl card file       --project-id 1 --title ... --description ...
+#   platformctl card arm        --task-id <id> --repo <owner/name> [--classification p0]
+#   platformctl card disarm     --task-id <id>
+#   platformctl card show      --task-id <id>
+#
+# Dry-run default on every write; --apply flips writes live.
+# See docs/jobs-setup.md — the DOCUMENT is the operator manual; this wrapper
+# is only the entrypoint.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+PY="${PYTHON:-python3}"
+
+cmd="${1:-}"; [ -n "$cmd" ] || { sed -n "2,20p" "$0" >&2; exit 2; }
+shift
+
+case "$cmd" in
+  project)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      setup)    exec "$PY" "$HERE/components/setup_project.py" "$@" ;;
+      verify)   exec "$PY" "$HERE/components/verify_project.py" "$@" ;;
+      teardown) exec "$PY" "$HERE/components/teardown_project.py" "$@" ;;
+      *) echo "project: unknown subcommand '$sub' (setup|verify|teardown)" >&2; exit 2 ;;
+    esac
+    ;;
+  job)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      register) exec "$PY" "$HERE/components/register_job.py" "$@" ;;
+      verify)   exec "$PY" "$HERE/components/register_job.py" "$@" ;;  # dry-run IS the verify
+      *) echo "job: unknown subcommand '$sub' (register|verify)" >&2; exit 2 ;;
+    esac
+    ;;
+  card)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      file)   exec "$PY" "$HERE/components/file_card.py" file "$@" ;;
+      arm)    exec "$PY" "$HERE/components/file_card.py" arm "$@" ;;
+      disarm) exec "$PY" "$HERE/components/file_card.py" disarm "$@" ;;
+      show)   exec "$PY" "$HERE/components/file_card.py" show "$@" ;;
+      *) echo "card: unknown subcommand '$sub' (file|arm|disarm|show)" >&2; exit 2 ;;
+    esac
+    ;;
+  help|-h|--help) sed -n "2,20p" "$0" ;;
+  *) echo "unknown command '$cmd' (project|job|card)" >&2; exit 2 ;;
+esac

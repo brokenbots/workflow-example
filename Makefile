@@ -245,6 +245,8 @@ test: validate test-criteria-k8s
 	./harness_wire_v1/tests/test_wire_standalone.sh
 	@echo "Running deployed remote env listen-address regression test (KB-240)..."
 	./k8s/tests/test_env_listen_ports.sh
+	@echo "Running platform setup tooling regression test (offline: compiles/dispatch/refusals)..."
+	./tests/test_platform_setup.sh
 
 test-criteria-k8s:
 	cd criteria-k8s && go test ./...
@@ -288,7 +290,9 @@ lint: lint-go
 		decision_demo_local_v1/tests/test_decision_demo_runtime.sh \
 		k8s/tests/test_outcome_reason_flow.sh \
 		k8s/tests/test_harness_expectations.sh \
-		harness_wire_v1/tests/test_wire_standalone.sh
+		harness_wire_v1/tests/test_wire_standalone.sh \
+		scripts/platform/platformctl \
+		tests/test_platform_setup.sh
 
 # The Go lint leg. Full-CI gate lines invoke `make lint-go` explicitly
 # (see the develop-loop ci_gate step), so this must exist under this name.

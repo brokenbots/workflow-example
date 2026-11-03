@@ -552,5 +552,8 @@ configure cross-pod mTLS.
 | `values-secrets-store-csi-driver.yaml` | Helm values for the upstream CSI driver chart. |
 | `values-openbao-csi-provider.yaml` | Helm values for the OpenBao CSI provider chart. |
 | `tests/` | Regression tests for the manifests and launchers. |
+
+For setting up NEW projects/jobs on the platform (deterministic tooling:
+`scripts/platform/`, dry-run-first, one doc) see [docs/jobs-setup.md](../docs/jobs-setup.md).
 | `criteria-k8s/config/install.yaml` | Operator install manifest (CRD, RBAC, operator and watcher deployments). |
 | `criteria-k8s/config/examples/criteriarun.yaml` | Example `CriteriaRun` for the manual path. |

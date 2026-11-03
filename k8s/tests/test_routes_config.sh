@@ -1536,8 +1536,8 @@ if isinstance(cleanup_wf, dict):
 # all shipped kanboard objects) so the next subtree change
 # fails here until its re-pin lands in the same change.
 for kb_name, kb_subtree, kb_class, kb_pin in (
-        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "63535719e37750301a8b7cc9be2c74b2d18c847e"),
-        ("kanboard-develop-url", "kanboard_develop_v1", None, "63535719e37750301a8b7cc9be2c74b2d18c847e"),
+        ("kanboard-triage-url", "kanboard_triage_v1", "triage", "7cd157a29f345bb5c40b2af39cc0f7366fe0d816"),
+        ("kanboard-develop-url", "kanboard_develop_v1", None, "7cd157a29f345bb5c40b2af39cc0f7366fe0d816"),
 ):
     kb_wf = base[LIB].get(kb_name)
     if not isinstance(kb_wf, dict):
