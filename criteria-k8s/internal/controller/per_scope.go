@@ -96,15 +96,10 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	}
 
 	type envGroup struct {
-		scopeID     string
 		environment string
 		members     []events.LifecycleEvent
 	}
-	type envGroupKey struct {
-		scopeID     string
-		environment string
-	}
-	groups := make(map[envGroupKey]*envGroup)
+	groups := make(map[string]*envGroup)
 
 	desired := make(map[string]*corev1.Pod, len(active))
 	for _, scope := range active {
@@ -138,7 +133,7 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		// alone puts the whole declared kind set in one peer; the peer's
 		// scope-set mode (CRITERIA_REMOTE_SCOPES_DIR) serves every scope
 		// of the environment from that one pod.
-		key := envGroupKey{environment: scope.Environment}
+		key := scope.Environment
 		group, ok := groups[key]
 		if !ok {
 			group = &envGroup{environment: scope.Environment}
@@ -155,12 +150,12 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 	// after boot, so nothing recreate-shaped is ever needed. Synthetic
 	// members carry no tokens; they contribute definitions only.
 	if len(graphs) > 0 {
-		for key, group := range groups {
+		for environment, group := range groups {
 			existing := map[string]struct{}{}
 			for _, m := range group.members {
 				existing[localAdapterKind(m)+"."+m.AdapterName] = struct{}{}
 			}
-			graphDefs := graphs[key.environment]
+			graphDefs := graphs[environment]
 			// KB-306: a provisioned member carries the lockfile digest but
 			// (live engines) no image_reference — the digest lane needs the
 			// artifact repo too, so the compiled graph's lockfile source
@@ -188,7 +183,6 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 				group.members = append(group.members, syntheticManifestMember(def))
 				existing[defKey] = struct{}{}
 			}
-			groups[key] = group
 		}
 		// An environment the graphs name but no provision has ever touched
 		// is skipped deliberately: no runner-registered scope exists for it,
@@ -196,7 +190,11 @@ func (r *CriteriaRunReconciler) reconcilePerScopeAdapters(ctx context.Context, r
 		// bringing those up).
 	}
 	for _, group := range groups {
-		pod := jobbuilder.BuildPerScopePeerPod(run, r.Defaults, group.scopeID, group.environment, group.members, runnerIP)
+		// scopeID stays empty here: the environment is the isolation
+		// boundary (user doctrine, KB-213/KB-214) and the graph lane keys
+		// by environment, so the peer pod name discriminates on the
+		// environment hash alone (KB-346).
+		pod := jobbuilder.BuildPerScopePeerPod(run, r.Defaults, "", group.environment, group.members, runnerIP)
 		if pod == nil {
 			continue
 		}
