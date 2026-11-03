@@ -1,7 +1,6 @@
 package jobbuilder
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"net"
 
@@ -13,20 +12,34 @@ import (
 
 const perScopePodHashLength = 12
 
+// perScopeAdapterNameSegment joins the job-name prefix and the sanitized
+// adapter kind in a per-scope adapter pod name.
+const perScopeAdapterNameSegment = 5 // len("-adp-")
+
 // PerScopeAdapterPodName returns a DNS-safe pod name for a per-scope adapter.
-// The scope id is hashed so the name stays within the 63-character limit while
-// remaining deterministic and unique enough to avoid collisions between
-// sequential scopes.
+// It is len-safe by construction (KB-346): the job-name prefix is sanitized
+// and capped ONLY when the assembled name would exceed the 63-character
+// object-name limit (the reserve is computed over the SANITIZED kind, so a
+// prefix cap never costs the scope hash — the name's only discriminator on
+// the fallback path). The pre-KB-346 derivation right-trimmed at 63 and
+// dropped the hash itself for long run names, collapsing distinct scopes of
+// a long-named run into one name. Hashes stay deterministic so a
+// re-provisioned scope reconciles the same object; if a pathologically long
+// adapter kind still pushes the assembled name past 63 characters, the
+// overflow takes from the LEFT and the hash survives.
 func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) string {
-	job := JobName(run)
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(scopeID)))[:perScopePodHashLength]
-	base := fmt.Sprintf("%s-adp-%s-%s", job, kind, hash)
-	base = safeObjectName(base)
-	if len(base) > 63 {
-		base = base[:63]
-		base = trimHyphens(base)
-	}
-	return base
+	sanitizedKind := safeObjectName(kind)
+	// reserve = "-adp-" + sanitized kind + "-" + scope hash
+	// (5 + len(sanitizedKind) + 1 + 12): kind "shell" keeps the full job
+	// prefix for job names <= 40 (40 + 23 = 63 exactly); kind
+	// "copilot-coordinator" (19) for job names <= 26 (26 + 37 = 63).
+	name := fmt.Sprintf("%s-adp-%s-%s",
+		perScopeJobPrefix(run,
+			perScopeAdapterNameSegment+len(sanitizedKind)+1+perScopePodHashLength),
+		sanitizedKind,
+		shortHash(scopeID),
+	)
+	return keepSuffixBytes(name)
 }
 
 // BuildPerScopeAdapterPod constructs a Pod for one provision-wanted lifecycle

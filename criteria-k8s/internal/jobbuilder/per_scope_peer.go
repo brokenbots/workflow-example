@@ -34,18 +34,85 @@ const PerScopePeerContainerName = "criteria-peer"
 // (internal/peer/config.go EnvAdapters).
 const EnvAdapters = "CRITERIA_REMOTE_ADAPTERS"
 
+// perScopePodNameLimit is the Kubernetes object-name length limit.
+const perScopePodNameLimit = 63
+
+// peerPodNameSegment joins the job-name prefix and the scope hash in a
+// per-scope peer pod name.
+const peerPodNameSegment = "-peer-"
+
+// perScopeJobPrefixMax caps the job-name prefix of every per-scope pod name
+// when the assembled name would exceed the 63-character object-name limit
+// (KB-346): 24 + len("-peer-") + 12 + 1 + 12 = 55, so BOTH discriminating
+// hash suffixes survive no matter how long the job name is. Dispatch-lane
+// CriteriaRun names are <ticket>-<timestamp>-<suffix> (54+ characters), and
+// the old right-trim-at-63 dropped exactly the hashes — every (scope,
+// environment) group of a long-named run desired the SAME truncated name,
+// the desired map keyed by name let map order pick one winner, the create
+// path saw the name existing and silently skipped the rest, and the
+// kb-342-1793682106 develop run died scope_session_pending waiting for
+// peer pods that never existed. The cap applies ONLY in the overflow case:
+// names the pre-KB-346 derivation left untrimmed stay byte-identical, so no
+// live pod is renamed (the reconcile deletes undesired pod names —
+// KB-253 pod-identity churn).
+const perScopeJobPrefixMax = 24
+
+// perScopeJobPrefix sanitizes the owning job's name and caps it ONLY when
+// the assembled per-scope pod name would exceed the 63-character
+// object-name limit: reserve is the number of bytes that follow the prefix
+// in the assembled name ("-peer-"+12+1+12 or "-adp-"+kind+1+12). Under the
+// limit the FULL sanitized job name is used, so names the pre-KB-346
+// derivation left untrimmed stay byte-identical; over it the prefix caps at
+// perScopeJobPrefixMax so both hash suffixes always fit. JobName rides a
+// label value or the run name, both unbounded.
+func perScopeJobPrefix(run *criteriav1.CriteriaRun, reserve int) string {
+	job := safeObjectName(JobName(run))
+	if len(job)+reserve <= perScopePodNameLimit {
+		return job
+	}
+	// The overflow branch is reachable with a job name SHORTER than the
+	// cap: a long sanitized adapter kind can push the assembled name past
+	// 63 on its own (the adapter path passes reserve = 5 +
+	// len(sanitizedKind) + 1 + 12, unbounded by perScopeJobPrefixMax).
+	// Clamp before slicing — a shorter job keeps its full name (the old
+	// safeObjectName bounding).
+	prefix := job
+	if len(prefix) > perScopeJobPrefixMax {
+		prefix = prefix[:perScopeJobPrefixMax]
+	}
+	// safeObjectName guarantees a non-empty, hyphen-free-edged DNS string,
+	// so the capped prefix keeps its leading bytes and only interior
+	// dangling hyphens need trimming.
+	return strings.TrimRight(prefix, "-")
+}
+
+// keepSuffixBytes caps a per-scope pod name at 63 characters without ever
+// right-trimming (KB-346): any residual overflow is cut from the LEFT, so
+// the rightmost discriminating bytes — the hash suffixes — always survive.
+// The capped job prefix keeps peer names at <= 55 characters, so this never
+// fires for them; the per-adapter name only reaches it for a pathologically
+// long adapter kind, where losing job-name bytes beats losing the scope
+// hash.
+func keepSuffixBytes(base string) string {
+	if len(base) <= perScopePodNameLimit {
+		return base
+	}
+	return trimHyphens(base[len(base)-perScopePodNameLimit:])
+}
+
 func PerScopePeerPodName(run *criteriav1.CriteriaRun, scopeID, environment string) string {
-	name := fmt.Sprintf("%s-peer-%s-%s",
-		JobName(run),
+	// reserve = "-peer-" + scope hash + "-" + env hash (6 + 12 + 1 + 12 =
+	// 31): a job name of <= 32 chars yields the full untrimmed prefix
+	// (32 + 31 = 63 exactly); 33+ caps to 24 (24 + 31 = 55 <= 63, both
+	// hashes intact).
+	name := fmt.Sprintf("%s%s%s-%s",
+		perScopeJobPrefix(run,
+			len(peerPodNameSegment)+perScopePodHashLength+1+perScopePodHashLength),
+		peerPodNameSegment,
 		shortHash(scopeID),
 		shortHash(environment),
 	)
-	base := safeObjectName(name)
-	if len(base) > 63 {
-		base = base[:63]
-		base = trimHyphens(base)
-	}
-	return base
+	return keepSuffixBytes(name)
 }
 
 // shortHash renders a 12-hex-character sha256 prefix of s, the same suffix

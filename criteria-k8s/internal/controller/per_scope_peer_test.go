@@ -25,6 +25,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// longRunName is the dispatch-lane shape (KB-346): <ticket>-<timestamp>-
+// <castle uuid>, 54 characters — long enough that the old peer-pod name
+// right-trim-at-63 swallowed both hash suffixes entirely. Mirrored from the
+// jobbuilder regression fixture.
+const longRunName = "kb-342-1793682106-5af00d01-f837-4080-87e7-db39fe475ce3"
+
 func groupProvision(adapter, kind, scopeID, environment string) events.LifecycleEvent {
 	return events.LifecycleEvent{
 		Event:       events.EventProvisionWanted,
@@ -169,6 +175,97 @@ func TestReconcilePerScopeAdaptersSeparatesDifferentEnvironments(t *testing.T) {
 	assert.ElementsMatch(t, []string{"copilot.review", "shell.audit"}, podManifestDefinitions(byEnv["prod"]),
 		"the prod pod's manifest hosts exactly its two same-environment members — no pod mixes adapters of different environments")
 	assert.NotEqual(t, byEnv["ci"].Name, byEnv["prod"].Name)
+}
+
+// KB-346 controller-level regression, kb-342-1793682106 shape: a 54+
+// character dispatch-lane run name provisions four scopes across three
+// environments, and the long job name must NOT collapse the three
+// environment groups onto one truncated peer pod name. The old
+// right-trim-at-63 produced one …-peer-e3b pod for remote/develop,
+// remote/worktree and remote/primary — the desired map keyed by name let
+// one group win, the create path silently skipped the rest, and run_handler
+// died scope_session_pending waiting for a pod that never existed. The pod
+// must also be attributed per (scope, environment) group in the KB-225
+// pod-state feed: with the collapse, every active member was reported
+// against the single surviving pod.
+func TestReconcilePerScopeAdaptersLongRunNameSeparatesEnvironmentsAndAttributesPodState(t *testing.T) {
+	feed, stub := podStateTestFeed(t)
+	run := perScopeTestRun(true)
+	run.Name = longRunName
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
+	r.PodState = feed
+
+	// remote/worktree hosts TWO members (one environment group), the other
+	// two environments one member each — the kb-342 member shape.
+	ev := groupProvision("coordinator", "copilot.coordinator", "1c0f5598", "remote/worktree")
+	ev.ScopeTag = "run-handler"
+	intakeWorktree := groupProvision("intake", "shell", "f56e1496", "remote/worktree")
+	intakeWorktree.ScopeTag = "worktree"
+	intakePrimary := groupProvision("intake", "shell", "639ca762", "remote/primary")
+	intakePrimary.ScopeTag = "primary"
+	intakeDevelop := groupProvision("intake", "shell", "e3b4c5d6", "remote/develop")
+	intakeDevelop.ScopeTag = "develop"
+	rootShell := groupProvision("intake", "shell", "0fcd5f9e", "root")
+	rootShell.ScopeTag = "root-scope"
+	ctx := context.Background()
+	_, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{
+		ev, intakeWorktree, intakePrimary, intakeDevelop, rootShell,
+	}, nil, logr.Discard())
+	require.NoError(t, err)
+
+	pods := listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 4, "four environments -> four DISTINCT peer pods, never one collapsed pod")
+	seen := make(map[string]struct{}, len(pods))
+	expectedPod := make(map[string]string, len(pods))
+	for _, environment := range []string{"remote/develop", "remote/worktree", "remote/primary", "root"} {
+		name := jobbuilder.PerScopePeerPodName(run, "", environment)
+		expectedPod[environment] = name
+		seen[name] = struct{}{}
+	}
+	assert.Len(t, seen, 4, "environment group names stay DISTINCT under the 54+ char job name (KB-346)")
+	for i := range pods {
+		assert.Contains(t, seen, pods[i].Name, "every observed pod is exactly one environment group's derived name")
+	}
+
+	// Run the scope sessions to Running so the pod-state feed reports every
+	// active member, then assert the KB-346 attribution edge: no member's
+	// report names a pod outside its own (scope, environment) group.
+	for i := range pods {
+		p := pods[i].DeepCopy()
+		p.Status = corev1.PodStatus{Phase: corev1.PodRunning}
+		require.NoError(t, cl.Status().Update(ctx, p))
+	}
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{
+		ev, intakeWorktree, intakePrimary, intakeDevelop, rootShell,
+	}, nil, logr.Discard())
+	require.NoError(t, err)
+
+	// Five active scopes (remote/worktree hosts two) -> five member reports.
+	groupsByScope := map[string]string{
+		"1c0f5598": "remote/worktree",
+		"f56e1496": "remote/worktree",
+		"639ca762": "remote/primary",
+		"e3b4c5d6": "remote/develop",
+		"0fcd5f9e": "root",
+	}
+	require.Equal(t, len(groupsByScope), stub.received("castle-run-1"),
+		"one report per active member, each keyed by its own scope")
+	podsByScope := make(map[string]string, len(groupsByScope))
+	for i := 0; i < stub.received("castle-run-1"); i++ {
+		data := stub.dataFor(t, "castle-run-1", i)
+		scopeID := data["scope_instance_id"].(string)
+		require.Contains(t, groupsByScope, scopeID, "unexpected scope %q in the pod-state feed", scopeID)
+		podsByScope[scopeID] = data["pod"].(string)
+	}
+	for scopeID, environment := range groupsByScope {
+		assert.Equal(t, expectedPod[environment], podsByScope[scopeID],
+			"scope %s must be attributed to ITS (scope, environment) group's pod", scopeID)
+	}
+	assert.Equal(t, expectedPod["remote/worktree"], podsByScope["1c0f5598"],
+		"the two remote/worktree members share their group's pod")
+	assert.Equal(t, podsByScope["1c0f5598"], podsByScope["f56e1496"])
+	assert.NotEqual(t, podsByScope["1c0f5598"], podsByScope["639ca762"],
+		"a remote/worktree member's report must never name a remote/primary pod")
 }
 
 // The runner is never a co-tenant of an adapter pod, and the peer container
