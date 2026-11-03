@@ -70,10 +70,19 @@ func perScopeJobPrefix(run *criteriav1.CriteriaRun, reserve int) string {
 	if len(job)+reserve <= perScopePodNameLimit {
 		return job
 	}
+	// The overflow branch is reachable with a job name SHORTER than the
+	// cap: a long sanitized adapter kind can push the assembled name past
+	// 63 on its own (the adapter path passes reserve = 5 + len(kind) + 1 +
+	// 12, unbounded by perScopeJobPrefixMax). Clamp before slicing — a
+	// shorter job keeps its full name (the old safeObjectName bounding).
+	prefix := job
+	if len(prefix) > perScopeJobPrefixMax {
+		prefix = prefix[:perScopeJobPrefixMax]
+	}
 	// safeObjectName guarantees a non-empty, hyphen-free-edged DNS string,
 	// so the capped prefix keeps its leading bytes and only interior
 	// dangling hyphens need trimming.
-	return strings.TrimRight(job[:perScopeJobPrefixMax], "-")
+	return strings.TrimRight(prefix, "-")
 }
 
 // keepSuffixBytes caps a per-scope pod name at 63 characters without ever

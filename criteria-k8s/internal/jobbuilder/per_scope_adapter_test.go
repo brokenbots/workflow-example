@@ -82,6 +82,65 @@ func TestPerScopeAdapterPodNameJobName33KeepsScopeHashForEveryKind(t *testing.T)
 	}
 }
 
+// KB-346 round-3 regression: perScopeJobPrefix clamps BEFORE slicing, so a
+// job name SHORTER than the 24-byte cap that still overflows 63 with a long
+// sanitized adapter kind panic-freely produces a DNS-safe name that keeps
+// the scope hash. This band panicked before the clamp (job[:24] with
+// len(job) < 24); it is reachable from the controller's legacy per-adapter
+// fallback path whose inputs are unbounded engine-published values, and a
+// reconcile panic escapes the controller worker goroutine and kills the
+// operator process. The peer namer's fixed 31-byte reserve keeps its
+// overflow branch out of this band, but the same clamp guards it.
+func TestPerScopeAdapterPodNameShortJobNameLongKindStaysSafe(t *testing.T) {
+	scope := "shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"
+	for jobLen := 1; jobLen <= 23; jobLen++ {
+		for _, kindLen := range []int{26, 30, 44, 63} {
+			job := strings.Repeat("j", jobLen)
+			kind := strings.Repeat("k", kindLen)
+			t.Run(fmt.Sprintf("job-name-%d-kind-%d", jobLen, kindLen), func(t *testing.T) {
+				run := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: job}}
+				name := jobbuilder.PerScopeAdapterPodName(run, kind, scope)
+				require.LessOrEqual(t, len(name), 63)
+				assert.Regexp(t, `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, name)
+				assert.True(t, strings.HasSuffix(name, "-"+hash12(scope)),
+					"the scope hash must survive: job length %d, kind length %d", jobLen, kindLen)
+			})
+		}
+	}
+}
+
+// KB-346 round-3 regression, concrete shapes: the exact engine-published
+// band the round-2 tests missed (peers reserve 31, so their overflow branch
+// needs a 33+ char job — a short job name keeps the full untrimmed peer
+// shape, which the peer assertion pins from the other side).
+func TestPerScopeAdapterPodNameShortJobNameConcreteShapes(t *testing.T) {
+	scope := "shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46"
+
+	// 19-byte job with a 28-byte kind: 19 + 5 + 28 + 1 + 12 = 65 > 63, the
+	// overflow branch runs on a job shorter than the cap — the pre-clamp
+	// build panicked here (slice bounds out of range [:24] with length 19).
+	run := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "criteria-run-kb-346"}}
+	require.Len(t, run.Name, 19)
+	name := jobbuilder.PerScopeAdapterPodName(run, "remote-primary-shell-adapter", scope)
+	assert.LessOrEqual(t, len(name), 63)
+	assert.Regexp(t, `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, name)
+	assert.True(t, strings.HasSuffix(name, "-"+hash12(scope)),
+		"the scope hash must survive the clamp: %s", name)
+
+	// 6-byte job with a 44-character kind: same branch, bigger kind.
+	small := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-346"}}
+	name = jobbuilder.PerScopeAdapterPodName(small, "remote-primary-copilot-coordinator-fallbacks", scope)
+	assert.LessOrEqual(t, len(name), 63)
+	assert.Regexp(t, `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, name)
+	assert.True(t, strings.HasSuffix(name, "-"+hash12(scope)),
+		"the scope hash must survive the clamp: %s", name)
+
+	// Peer guard from the other side: a short job name's peer name stays in
+	// the untrimmed shape (19 + 31 = 50 <= 63), no clamp, no panic.
+	peer := jobbuilder.PerScopePeerPodName(run, "scope-a", "remote/develop")
+	assert.Equal(t, "criteria-run-kb-346-peer-"+hash12("scope-a")+"-"+hash12("remote/develop"), peer)
+}
+
 func TestBuildPerScopeAdapterPod(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-116", Namespace: "criteria-jobs", UID: "run-uid"},
