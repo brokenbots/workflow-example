@@ -1,7 +1,6 @@
 package jobbuilder
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"net"
 
@@ -14,19 +13,22 @@ import (
 const perScopePodHashLength = 12
 
 // PerScopeAdapterPodName returns a DNS-safe pod name for a per-scope adapter.
-// The scope id is hashed so the name stays within the 63-character limit while
-// remaining deterministic and unique enough to avoid collisions between
-// sequential scopes.
+// It is len-safe by construction (KB-346): the job-name prefix is sanitized
+// and capped first, so the scope hash — the name's only discriminator on the
+// fallback path — always survives the 63-character object-name limit no
+// matter how long the owning run's name is. The old right-trim-at-63 dropped
+// the hash itself, collapsing distinct scopes of a long-named run into one
+// name. Hashes stay deterministic so a re-provisioned scope reconciles the
+// same object; if a pathologically long adapter kind still pushes the
+// assembled name past 63 characters, the overflow takes from the LEFT and
+// the hash survives.
 func PerScopeAdapterPodName(run *criteriav1.CriteriaRun, kind, scopeID string) string {
-	job := JobName(run)
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(scopeID)))[:perScopePodHashLength]
-	base := fmt.Sprintf("%s-adp-%s-%s", job, kind, hash)
-	base = safeObjectName(base)
-	if len(base) > 63 {
-		base = base[:63]
-		base = trimHyphens(base)
-	}
-	return base
+	name := fmt.Sprintf("%s-adp-%s-%s",
+		perScopeJobPrefix(run),
+		safeObjectName(kind),
+		shortHash(scopeID),
+	)
+	return keepSuffixBytes(name)
 }
 
 // BuildPerScopeAdapterPod constructs a Pod for one provision-wanted lifecycle

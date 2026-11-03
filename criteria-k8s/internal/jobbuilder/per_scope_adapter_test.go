@@ -24,6 +24,25 @@ func TestPerScopeAdapterPodNameIsDNSSafeAndShort(t *testing.T) {
 	assert.Contains(t, name, "copilot")
 }
 
+// KB-346: a 54+ character dispatch-lane run name must leave the scope hash
+// intact as the name's suffix — the old right-trim-at-63 dropped the hash
+// itself, collapsing distinct scopes of the run into one name.
+func TestPerScopeAdapterPodNameLongJobNameKeepsScopeHash(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: longRunName},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "KB-342"},
+	}
+	for _, kind := range []string{"shell", "copilot", "copilot.coordinator"} {
+		first := jobbuilder.PerScopeAdapterPodName(run, kind, "shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46")
+		second := jobbuilder.PerScopeAdapterPodName(run, kind, "shell/00000000-0000-0000-0000-000000000001")
+		require.LessOrEqual(t, len(first), 63, "kind %q", kind)
+		assert.Regexp(t, `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, first)
+		assert.True(t, strings.HasSuffix(first, "-"+hash12("shell/9f1d3c2b-6a4e-4f8a-9c1d-3e7b5a2f0d46")),
+			"the 12-hex scope hash must survive the 63-cap intact (KB-346) for kind %q", kind)
+		assert.NotEqual(t, first, second, "distinct scopes keep distinct names under a 54+ char job name")
+	}
+}
+
 func TestBuildPerScopeAdapterPod(t *testing.T) {
 	run := &criteriav1.CriteriaRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "cri-116", Namespace: "criteria-jobs", UID: "run-uid"},

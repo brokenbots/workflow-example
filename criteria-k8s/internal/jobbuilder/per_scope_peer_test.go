@@ -1,8 +1,10 @@
 package jobbuilder_test
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	criteriav1 "github.com/brokenbots/workflow-example/criteria-k8s/api/v1"
@@ -280,6 +282,63 @@ func TestPerScopePeerPodNameLongInputsStayDNSSafe(t *testing.T) {
 		"production-environment-with-a-rather-long-descriptive-identity")
 	assert.LessOrEqual(t, len(name), 63)
 	assert.Regexp(t, `^[a-z0-9-]+$`, name)
+}
+
+// longRunName is the dispatch-lane shape (KB-346): <ticket>-<timestamp>-
+// <castle uuid>, 54 characters — long enough that the old name
+// right-trim-at-63 swallowed both hash suffixes entirely.
+const longRunName = "kb-342-1793682106-5af00d01-f837-4080-87e7-db39fe475ce3"
+
+func hash12(s string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))[:12]
+}
+
+// KB-346 determinism regression: two env-groups differing ONLY in
+// environment produce DIFFERENT names under a job name far past the
+// 63-character limit. The old derivation right-trimmed the scope and
+// environment hashes away (the live kb-342-1793682106 run produced one
+// …-peer-e3b pod for its three environments, then died scope_session_pending
+// waiting for peer pods that never existed), so the desired-map keyed by
+// name let map-iteration order pick one winner while the create path
+// silently skipped the rest.
+func TestPerScopePeerPodNameLongJobNameKeepsHashesAndSeparatesEnvironments(t *testing.T) {
+	run := &criteriav1.CriteriaRun{
+		ObjectMeta: metav1.ObjectMeta{Name: longRunName},
+		Spec:       criteriav1.CriteriaRunSpec{TicketID: "KB-342"},
+	}
+	require.Len(t, run.Name, 54)
+
+	// Per-environment pods span every scope instance of the environment
+	// (the controller passes the empty scope id).
+	scopeHash := hash12("")
+	names := make(map[string]struct{}, 3)
+	for _, environment := range []string{"remote/develop", "remote/worktree", "remote/primary"} {
+		name := jobbuilder.PerScopePeerPodName(run, "", environment)
+		require.LessOrEqual(t, len(name), 63)
+		assert.Regexp(t, `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, name)
+		// Right-trim must never cut a hash suffix: the scope hash segment
+		// AND the environment hash both survive intact as tail bytes.
+		assert.Contains(t, name, "-peer-"+scopeHash+"-",
+			"the scope hash segment must survive the 63-cap")
+		assert.True(t, strings.HasSuffix(name, "-"+hash12(environment)),
+			"the environment hash must survive the 63-cap as the name's suffix (KB-346): %s for env %s", name, environment)
+		// The capped job prefix (KB-346, <prefix24>) still pins the owning
+		// job so the name stays inside its family.
+		assert.True(t, strings.HasPrefix(name, longRunName[:24]))
+		names[name] = struct{}{}
+	}
+	assert.Len(t, names, 3, "develop/worktree/primary groups each get a DISTINCT name")
+}
+
+// KB-346 stability regression: the 92c58c5c-era untrimmed shape for runs
+// whose name fits stays byte-stable — the cap only ever affects names the
+// old derivation would have truncated.
+func TestPerScopePeerPodNameShortJobNameStaysUntrimmed(t *testing.T) {
+	run := groupTestRun()
+	want := "cri-234-peer-" + hash12("scope-a") + "-" + hash12("ci")
+	assert.Equal(t, want, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"))
+	assert.Equal(t, want, jobbuilder.PerScopePeerPodName(run, "scope-a", "ci"),
+		"deterministic: a re-provision reconciles the same object")
 }
 
 func TestBuildPerScopePeerPodEmptyMembersNil(t *testing.T) {

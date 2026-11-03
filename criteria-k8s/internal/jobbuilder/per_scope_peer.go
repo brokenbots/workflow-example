@@ -34,18 +34,57 @@ const PerScopePeerContainerName = "criteria-peer"
 // (internal/peer/config.go EnvAdapters).
 const EnvAdapters = "CRITERIA_REMOTE_ADAPTERS"
 
+// perScopePodNameLimit is the Kubernetes object-name length limit.
+const perScopePodNameLimit = 63
+
+// perScopeJobPrefixMax caps the job-name prefix of every per-scope pod name
+// (KB-346): 24 + len("-peer-") + 12 + 1 + 12 = 55, so the name fits the
+// 63-character object-name limit with BOTH discriminating hash suffixes
+// intact from the start. Dispatch-lane CriteriaRun names are
+// <ticket>-<timestamp>-<suffix> (54+ characters), and the old
+// right-trim-at-63 dropped exactly the hashes — every (scope, environment)
+// group of a long-named run desired the SAME truncated name, the desired map
+// keyed by name let map order pick one winner, the create path saw the name
+// existing and silently skipped the rest, and the kb-342-1793682106 develop
+// run died scope_session_pending waiting for peer pods that never existed.
+const perScopeJobPrefixMax = 24
+
+// perScopeJobPrefix sanitizes and caps the owning job's name so a per-scope
+// pod name assembled over it ALWAYS keeps its hash suffixes: any overflow is
+// cut from the job prefix, never from the right. JobName rides a label value
+// or the run name, both unbounded.
+func perScopeJobPrefix(run *criteriav1.CriteriaRun) string {
+	job := safeObjectName(JobName(run))
+	if len(job) <= perScopeJobPrefixMax {
+		return job
+	}
+	// safeObjectName guarantees a non-empty, hyphen-free-edged DNS string,
+	// so the capped prefix keeps its leading bytes and only interior
+	// dangling hyphens need trimming.
+	return strings.TrimRight(job[:perScopeJobPrefixMax], "-")
+}
+
+// keepSuffixBytes caps a per-scope pod name at 63 characters without ever
+// right-trimming (KB-346): any residual overflow is cut from the LEFT, so
+// the rightmost discriminating bytes — the hash suffixes — always survive.
+// The capped job prefix keeps peer names at <= 55 characters, so this never
+// fires for them; the per-adapter name only reaches it for a pathologically
+// long adapter kind, where losing job-name bytes beats losing the scope
+// hash.
+func keepSuffixBytes(base string) string {
+	if len(base) <= perScopePodNameLimit {
+		return base
+	}
+	return trimHyphens(base[len(base)-perScopePodNameLimit:])
+}
+
 func PerScopePeerPodName(run *criteriav1.CriteriaRun, scopeID, environment string) string {
 	name := fmt.Sprintf("%s-peer-%s-%s",
-		JobName(run),
+		perScopeJobPrefix(run),
 		shortHash(scopeID),
 		shortHash(environment),
 	)
-	base := safeObjectName(name)
-	if len(base) > 63 {
-		base = base[:63]
-		base = trimHyphens(base)
-	}
-	return base
+	return keepSuffixBytes(name)
 }
 
 // shortHash renders a 12-hex-character sha256 prefix of s, the same suffix
