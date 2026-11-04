@@ -7,7 +7,7 @@
 # The binding ConfigMap below is spliced verbatim from
 # k8s/examples/binding-criteria-go-dev.yaml — the KB-311 fail-closed binding schema
 # (k8s/criteria-binding.schema.json) is its contract.
-# Binding checksum (canonical JSON, operator algorithm): c84f51f06cb14c4e2451030f0b88f344dbdb23d230edb0df4bae31a0c154a58a
+# Binding checksum (canonical JSON, operator algorithm): 6f8cd883f7bc2073a646b9748bc7e62d4addf6009d922e5642e2558bbcbdde9b
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -378,7 +378,8 @@ data:
         "GOFLAGS": "-mod=readonly",
         "GOPROXY": "https://proxy.golang.org,direct",
         "GOTOOLCHAIN": "local",
-        "CRITERIA_TOOL_TIMEOUT": "45m"
+        "CRITERIA_TOOL_TIMEOUT": "45m",
+        "MERGE_CI_MAX_SECONDS": "1800"
       },
       "volumes": [
         {

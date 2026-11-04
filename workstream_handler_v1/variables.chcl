@@ -34,9 +34,9 @@ variable "ci_gate_cmd" {
 }
 
 variable "merge_ci_max_seconds" {
-    description = "merge-gate wait budget in seconds for wait_merge_ci: the post-merge deadline for the squash commit's own CI to complete green (the standing KB-272 gate) and, after a KB-328 merged-PR recovery, the same wait for the already-merged PR. Default 600 covers fast CI; repos with long squash-CI envelopes (observed 13-78m on criteria) raise it. Values above 3540 exceed the wait step's 3600s timeout envelope and the step fails closed before the deadline. Env MERGE_CI_MAX_SECONDS still overrides it for test/ops."
+    description = "merge-gate wait budget in seconds for wait_merge_ci: the post-merge deadline for the squash commit's own CI to complete green (the standing KB-272 gate) and, after a KB-328 merged-PR recovery, the same wait for the already-merged PR. Default 1200 covers the observed normal criteria squash-CI envelope (690s end-to-end on KB-347, 2026-11-03) with 2x headroom. Per-project values ride the workflow binding env map: MERGE_CI_MAX_SECONDS is a declared workflow-interface env name, so a cut-over project binding MUST deliver it (it double-serves as the test/ops env override). The env override applies flat after render over the var-rendered budget. Values above 3540 exceed the wait step's 3600s timeout envelope and the step fails closed before the deadline. Extreme tails beyond any in-run budget park to a human via the KB-272 withhold — KB-328 recovery re-verdicts the already-merged PR."
     type        = number
-    default     = 600
+    default     = 1200
 }
 
 variable "log_file" {

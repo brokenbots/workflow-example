@@ -41,7 +41,8 @@ data:
         "GOFLAGS": "-mod=readonly",
         "GOPROXY": "https://proxy.golang.org,direct",
         "GOTOOLCHAIN": "local",
-        "CRITERIA_TOOL_TIMEOUT": "45m"
+        "CRITERIA_TOOL_TIMEOUT": "45m",
+        "MERGE_CI_MAX_SECONDS": "1800"
       },
       "volumes": [
         {
