@@ -31,7 +31,8 @@ data:
         "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org",
         "NPM_CONFIG_PROXY": "http://proxy.internal:3128",
         "NODE_OPTIONS": "--max-old-space-size=4096",
-        "CRITERIA_TOOL_TIMEOUT": "45m"
+        "CRITERIA_TOOL_TIMEOUT": "45m",
+        "MERGE_CI_MAX_SECONDS": "1200"
       },
       "volumes": [
         {

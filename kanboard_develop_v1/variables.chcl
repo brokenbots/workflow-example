@@ -62,9 +62,9 @@ variable "ci_gate_cmd" {
 }
 
 variable "merge_ci_max_seconds" {
-    description = "merge-gate wait budget in seconds forwarded to workstream_handler_v1: post-merge deadline for the squash commit's own CI to complete green (the standing KB-272 gate). Default 600 covers fast CI; repos with long squash-CI envelopes (observed 13-78m on criteria) raise it. Values above 3540 exceed the wait step's 3600s timeout envelope and fail closed before the deadline."
+    description = "merge-gate wait budget in seconds forwarded to workstream_handler_v1: post-merge deadline for the squash commit's own CI to complete green (the standing KB-272 gate). Default 1200 covers the observed normal criteria squash-CI envelope (690s end-to-end on KB-347, 2026-11-03) with 2x headroom; per-project values ride the workflow binding env map via the tree interface (env: MERGE_CI_MAX_SECONDS is a declared env name — a cut-over binding MUST deliver a value; the pre-cut-over path stays on this default). The wait_merge_ci.sh MERGE_CI_MAX_SECONDS env override applies after render; values above 3540 exceed the wait step's 3600s timeout envelope and fail closed before the deadline. Extreme tails beyond any in-run budget park to a human via the KB-272 withhold — KB-328 recovery re-verdicts the already-merged PR."
     type        = number
-    default     = 600
+    default     = 1200
 }
 
 variable "allow_dirty" {

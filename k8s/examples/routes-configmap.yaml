@@ -507,7 +507,7 @@ data:
               "WORKFLOW_GITHUB_TOKEN",
               "REVIEWER_GITHUB_TOKEN"
             ],
-            "env": [],
+            "env": ["MERGE_CI_MAX_SECONDS"],
             "configSlots": [
               {
                 "slot": "baseBranch",
