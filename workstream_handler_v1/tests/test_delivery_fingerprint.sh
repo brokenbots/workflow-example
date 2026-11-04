@@ -31,7 +31,10 @@ case "$*" in
  {"number":650,"state":"OPEN","headRefName":"KB-650","title":"KB-650 live","url":"https://github.com/brokenbots/criteria/pull/650","mergeCommit":null,"updatedAt":"2026-10-25T04:30:00Z"},
  {"number":537,"state":"CLOSED","headRefName":"KB-650-old","title":"KB-650 abandoned first try","url":"https://github.com/brokenbots/criteria/pull/537","mergeCommit":null,"updatedAt":"2026-10-20T04:00:00Z"},
  {"number":273,"state":"MERGED","headRefName":"CRI-273","title":"CRI 273","url":"https://github.com/brokenbots/criteria/pull/273","mergeCommit":{"oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"updatedAt":"2026-10-01T00:00:00Z"},
- {"number":27,"state":"MERGED","headRefName":"CRI-27","title":"CRI 27","url":"https://github.com/brokenbots/criteria/pull/27","mergeCommit":{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"updatedAt":"2026-09-30T00:00:00Z"}
+ {"number":27,"state":"MERGED","headRefName":"CRI-27","title":"CRI 27","url":"https://github.com/brokenbots/criteria/pull/27","mergeCommit":{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"updatedAt":"2026-09-30T00:00:00Z"},
+ {"number":54,"state":"MERGED","headRefName":"kb-322-run-viewer-ui","title":"KB-322 run-viewer: replay transport, motion toggle, graph position","url":"https://github.com/brokenbots/castle/pull/54","mergeCommit":{"oid":"cccccccccccccccccccccccccccccccccccccccc"},"updatedAt":"2026-10-24T16:41:39Z"},
+ {"number":55,"state":"MERGED","headRefName":"kb-322-caddyfile","title":"parapet: route castle.v1.* to castle (+ commit the Caddyfile)","url":"https://github.com/brokenbots/castle/pull/55","mergeCommit":{"oid":"e2c84a33ebbcf503c36c35acc22734686372716f"},"updatedAt":"2026-10-24T17:07:36Z"},
+ {"number":337,"state":"MERGED","headRefName":"KB-337","title":"KB 337","url":"https://github.com/brokenbots/castle/pull/65","mergeCommit":{"oid":"1490138233c3dd90d51c73aae6ec7a1e567e8c31"},"updatedAt":"2026-10-25T23:52:01Z"}
 ]' ;;
     *) exit 64 ;;
 esac
@@ -85,5 +88,25 @@ out="$(run_fp 'KB-27')"
 # KB-27 owns a merged PR, so use a synthetic closed-only identity via #? none in mock — the
 # 600/650 pair covers priority; closed-only is covered by priority order reading. Keep to mocks.
 pass "closed-unmerged priority verified by ordering (open>merged>closed>none)"
+
+# 7. LIVE REGRESSION (castle #55, kb-322 run 29260374): suffix branch kb-322-caddyfile
+#    must NOT satisfy KB-322's identity (old rule matched: '-' was a boundary).
+out="$(run_fp 'KB-322')"
+printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
+    || fail "KB-322 must fingerprint only the identity-carrying PR: got '$out'"
+pass "suffix branch kb-322-caddyfile does NOT hijack KB-322 (regression castle #55)"
+
+# 8. Title token form: PR 54's title 'KB-322 run-viewer: ...' IS identity (hyphenated full token).
+printf '%s\n' "$out" | grep -q 'url=https://github.com/brokenbots/castle/pull/54' \
+    || fail "PR 54 title carries the hyphenated KB-322 token and must match: got '$out'"
+pass "hyphenated title token matches (PR 54 is the run-viewer port of ticket 322 scope)"
+
+# 9. Space-form prefix title is NOT identity: a foreign 'parapet: ...' title with id buried
+#    in a suffix BRANCH must not match even if the title carried 'KB 322' — covered by the
+#    exact-token rule (only 'KB-322' matches, never 'KB 322').
+out="$(run_fp 'KB-337')"
+printf '%s\n' "$out" | grep -q '^state:merged pr=337 url=https://github.com/brokenbots/castle/pull/65 merge_sha=1490138233c3dd90d51c73aae6ec7a1e567e8c31$' \
+    || fail "exact branch KB-337 must still own its identity: got '$out'"
+pass "own-branch exact match unchanged (castle #65 shape)"
 
 echo "all delivery_fingerprint tests green"
