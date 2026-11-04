@@ -7,10 +7,13 @@ set -euo pipefail
 # branch lookup, branch-scan recovery guesses, the foreign-PR patch).
 #
 # Invariant: a card's PR is identified by TICKET IDENTITY, never by which
-# branch the worktree stands on. Scans ALL PRs (every state); matches by
-# boundary-aware ticket id in head branch name OR title (space/dash/underscore
-# normalized both sides — 'KB 328'/'kb-328'/'KB_328' match; CRI-27 never
-# matches CRI-273; dependabot PRs cannot match by construction).
+# branch the worktree stands on. Scans ALL PRs (every state). Identity =
+# head branch EXACTLY the ticket id ('KB-<id>', case-insensitive) OR title
+# carrying the full hyphenated token 'KB-<id>' boundary-checked. Suffix
+# branches ('kb-<id>-<slug>') and bare id-prefix titles ('KB <id> <slug>')
+# are FOREIGN — live: castle PR #55 kb-322-caddyfile hijacked KB-322 under
+# the old separator rule. CRI-27 never matches CRI-273; dependabot PRs
+# cannot match by construction.
 #
 # Priority: OPEN > MERGED > CLOSED > none (newest-updated first in class):
 # OPEN = live work, MERGED = delivered work to reconcile, CLOSED(unmerged) =
@@ -45,9 +48,24 @@ open_row=""
 merged_row=""
 closed_row=""
 
-matches_ticket() {
-    _norm=$(printf '%s' "$1" | tr '[:upper:]_ ' '[:lower:]-')
-    printf '%s' "$_norm" | grep -qE "(^|[^0-9a-z])${ticket_re}([^0-9a-z]|$)"
+# Identity matchers (2026-11-04 correction of the 10-25 KB-328 shape; live evidence:
+# castle PR #55 'kb-322-caddyfile' hijacked ticket KB-322's fingerprint because the old
+# boundary rule treats '-' as a separator after the id):
+#   branch_owner PR -> head branch is EXACTLY the ticket id (case-insensitive). The develop
+#     pipeline always branches exactly KB-<id> (checkout_branch re-asserts the workstream
+#     basename), so only this shape carries the identity. Suffix branches are foreign.
+#   title_owner PR -> title contains the full hyphenated token KB-<id> (case-insensitive,
+#     boundary-checked). A space form ('KB 322') is NOT identity: foreign PRs can carry
+#     '<id> <slug>' prefixes (castle PR #55 title 'parapet: ... kb-322-caddyfile' branch).
+ticket_exact_lc=$(printf '%s' "$ticket_lc")
+title_token_re=$(printf '(^|[^0-9a-z])%s([^0-9a-z]|$)' "$ticket_lc")
+
+branch_owner() {
+    [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" = "$ticket_exact_lc" ]
+}
+
+title_owner() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | grep -qE "$title_token_re"
 }
 
 title_of() {
@@ -57,7 +75,7 @@ title_of() {
 
 while IFS="$(printf '\t')" read -r st num head url sha ts; do
     [ -n "$st" ] || continue
-    if matches_ticket "$head" || matches_ticket "$(title_of "$num")"; then
+    if branch_owner "$head" || title_owner "$(title_of "$num")"; then
         case "$st" in
             OPEN)   [ -n "$open_row" ]   || open_row="$num|$url" ;;
             MERGED) [ -n "$merged_row" ] || { [ -n "$sha" ] && merged_row="$num|$url|$sha"; } ;;
