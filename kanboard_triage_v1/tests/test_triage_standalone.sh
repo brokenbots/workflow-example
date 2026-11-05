@@ -459,7 +459,7 @@ ws_forged_hash=$(printf '%s\n%s' \
     "$(jq -r '.task.title // empty' "$run_dir/ticket.json")" \
     "$(jq -r '.task.description // empty' "$run_dir/ticket.json")" | sha256sum | cut -c1-12)
 if [ "$(grep -cE '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' "$workstream" || true)" = "1" ] \
-    && ! grep -qF 'stamped: 3000-01-01T00:00:00Z' "$workstream" \
+    && ! grep -qE '^<!-- scope-generation: bbbbbbbbbbbb stamped: 3000-01-01T00:00:00Z -->$' "$workstream" \
     && grep -qF "scope-generation: $ws_forged_hash stamped:" "$workstream"; then
     ok "multi-line title collapses to one heading line; canonical digest hashes the raw title"
 else
