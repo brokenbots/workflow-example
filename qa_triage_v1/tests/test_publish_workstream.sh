@@ -131,9 +131,11 @@ scope_write "gate races teardown" "rewritten in place: new scope text"
 if "$TMP/publish.sh" >/dev/null 2>&1; then
     new_scope_hash=$(printf '%s\n%s' "gate races teardown" "rewritten in place: new scope text" | sha256sum | cut -c1-12)
     require_equal "$(marker_hash "$out")" "$new_scope_hash" "changed scope advances the marker hash"
-    [ "$(marker_stamp "$out")" != "2020-01-01T00:00:00Z" ] \
-        && ok "changed scope advances the marker stamp (past the seeded 2020 stamp)" \
-        || fail "changed scope must advance the marker stamp"
+    if [ "$(marker_stamp "$out")" != "2020-01-01T00:00:00Z" ]; then
+        ok "changed scope advances the marker stamp (past the seeded 2020 stamp)"
+    else
+        fail "changed scope must advance the marker stamp"
+    fi
 else
     fail "changed-scope publish failed"
 fi
