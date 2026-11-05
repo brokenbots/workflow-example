@@ -390,6 +390,47 @@ else
     fail "workstream is missing task content"
 fi
 
+# ── 4b. Scope-generation marker (KB-355) ─────────────────────────────────────
+# Every (re)write stamps which scope generation the file describes so the
+# delivery-fingerprint classifier can suppress a rewritten ticket's
+# predecessor-scope PRs instead of re-closing the card (live: castle #54).
+scope_stamp() { sed -n '/^<!-- scope-generation: /s/.*stamped: \(.*Z\) -->.*/\1/p' "$workstream" | head -1; }
+if grep -Eq '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' "$workstream"; then
+    ok "workstream stamps a scope-generation marker"
+else
+    fail "workstream must carry '<!-- scope-generation: <hash> stamped: <RFC3339Z> -->' under the heading"
+fi
+
+ws_title=$(jq -r '.task.title // empty' "$run_dir/ticket.json")
+ws_desc=$(jq -r '.task.description // empty' "$run_dir/ticket.json")
+ws_hash=$(printf '%s\n%s' "$ws_title" "$ws_desc" | sha256sum | cut -c1-12)
+if grep -qF "scope-generation: $ws_hash stamped:" "$workstream"; then
+    ok "scope-generation hash is the canonical scope digest (title + description)"
+else
+    fail "scope-generation hash must be sha256 of title + newline + description; expected $ws_hash"
+fi
+
+first_stamp=$(scope_stamp)
+if "$ws_script" > /dev/null 2>&1 && [ "$(scope_stamp)" = "$first_stamp" ]; then
+    ok "re-triage of an unchanged scope preserves the generation stamp"
+else
+    fail "unchanged scope re-triage must preserve the scope-generation stamp ($first_stamp)"
+fi
+
+jq '.task.description = "rewritten in place: P0.5 routes-CM catalog cleanup"' \
+    "$run_dir/ticket.json" > "$run_dir/ticket.rewritten.json" \
+    && mv "$run_dir/ticket.rewritten.json" "$run_dir/ticket.json"
+if "$ws_script" > /dev/null 2>&1 \
+    && ! grep -qF "scope-generation: $ws_hash stamped:" "$workstream"; then
+    ok "rewritten scope advances the scope-generation hash"
+else
+    fail "rewritten scope must advance the scope-generation hash"
+fi
+
+# Restore the fixture-shaped ticket and workstream for the later sections.
+cp "$TREE_ROOT/tests/fixtures/task_tagged.json" "$run_dir/ticket.json"
+"$ws_script" > /dev/null 2>&1 || fail "workstream restore rewrite failed"
+
 # ── 5. Ready-for-development re-arm wiring (CRI-240 semantics) ───────────────
 
 # The re-arm steps exist in the compiled graph.

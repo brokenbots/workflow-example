@@ -18,6 +18,13 @@
 #
 # fetch_ticket stores the Kanboard {task, tags, comments} envelope, so every
 # field is read through .task / .comments.
+#
+# KB-355: the write path stamps a scope-generation marker —
+# '<!-- scope-generation: <hash of title+description> stamped: <RFC3339Z> -->'
+# — so the delivery-fingerprint classifier can suppress merged identity PRs
+# that predate the ticket's current scope (in-place ticket rewrites keep the
+# id; the predecessor scope's delivery must not re-close the card). The reuse
+# path hands the published file through untouched.
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 set -eu
@@ -36,6 +43,13 @@ TITLE=$(jq -r '.task.title // empty' "$TICKET_JSON")
 DESC=$(jq -r '.task.description // empty' "$TICKET_JSON")
 STATE=$(jq -r '.task.column_id // empty' "$TICKET_JSON")
 
+# KB-355 scope generation: hash of the scope-bearing content (title +
+# description) and the generation time. The file is absent/empty on this path,
+# so the stamp is always a fresh generation (triage's rewriter preserves an
+# unchanged scope's stamp on its own path).
+SCOPE_HASH=$(printf '%s\n%s' "$TITLE" "$DESC" | sha256sum | cut -c1-12)
+SCOPE_STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 if [ -z "$TITLE" ]; then
     echo "ticket.json carries no task title; cannot assemble the confirmed workstream" >&2
     exit 1
@@ -43,6 +57,8 @@ fi
 
 {
     echo "# Workstream: $TITLE"
+    echo
+    printf '<!-- scope-generation: %s stamped: %s -->\n' "$SCOPE_HASH" "$SCOPE_STAMP"
     echo
     echo "Source: Kanboard task KB-$(jq -r '.task.id' "$TICKET_JSON")"
     echo "Board column at development start: $STATE"

@@ -9,6 +9,14 @@
 # Linear .data.issue envelope becomes the Kanboard {task, tags, comments}
 # envelope — the hollow-workstream defect class cannot recur here because the
 # field paths are pinned to the new envelope from the start.
+#
+# KB-355: every (re)write stamps a scope-generation marker into the file —
+# '<!-- scope-generation: <hash of title+description> stamped: <RFC3339Z> -->'.
+# Ticket rewrites in place keep the ticket id, so a predecessor scope's merged
+# PR stays a permanent delivery-fingerprint identity match; the marker's
+# generation time lets the classifier suppress merged identity PRs that predate
+# the current scope. An unchanged scope re-triaged keeps its original stamp
+# (the file is regenerated, but the generation time must not advance).
 set -eu
 
 TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
@@ -19,8 +27,35 @@ mkdir -p "$(dirname "$WORKSTREAM")"
 TITLE=$(jq -r '.task.title // empty' "$TICKET_JSON")
 DESC=$(jq -r '.task.description // empty' "$TICKET_JSON")
 
+# KB-355 scope generation: hash of the scope-bearing content (title +
+# description; comment-only edits do not advance the generation), and the
+# generation time. An existing marker with THIS scope hash and a well-formed
+# stamp is preserved so re-triage of an unchanged scope never re-arms the
+# classifier's predecessor guard; anything else starts a new generation.
+SCOPE_HASH=$(printf '%s\n%s' "$TITLE" "$DESC" | sha256sum | cut -c1-12)
+valid_scope_stamp() {
+    case "$1" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+scope_prev_stamp=""
+scope_prev_hash=""
+if [ -s "$WORKSTREAM" ]; then
+    scope_prev_line=$(grep -m1 'scope-generation:' "$WORKSTREAM" 2>/dev/null || true)
+    scope_prev_hash=$(printf '%s' "$scope_prev_line" | sed -n 's/.*scope-generation: \([0-9a-f]\{12\}\) stamped:.*/\1/p')
+    scope_prev_stamp=$(printf '%s' "$scope_prev_line" | sed -n 's/.*stamped: \([0-9T:-]*Z\).*/\1/p' | head -1)
+fi
+if [ "$scope_prev_hash" = "$SCOPE_HASH" ] && valid_scope_stamp "$scope_prev_stamp"; then
+    SCOPE_STAMP=$scope_prev_stamp
+else
+    SCOPE_STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+fi
+
 {
     echo "# Workstream: $TITLE"
+    echo
+    printf '<!-- scope-generation: %s stamped: %s -->\n' "$SCOPE_HASH" "$SCOPE_STAMP"
     echo
     echo "Source: Kanboard task KB-$(jq -r '.task.id' "$TICKET_JSON")"
     echo

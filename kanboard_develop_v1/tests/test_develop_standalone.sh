@@ -677,6 +677,20 @@ else
     fail "workstream is missing ticket content or triage evidence from comments"
 fi
 
+# KB-355: the write path stamps the scope generation so the delivery-fingerprint
+# classifier can suppress the predecessor scope of a rewritten ticket.
+if grep -Eq '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' "$workstream"; then
+    ok "assembled workstream stamps a scope-generation marker"
+else
+    fail "assembled workstream must carry '<!-- scope-generation: <hash> stamped: <RFC3339Z> -->' under the heading"
+fi
+ws_title=$(jq -r '.task.title // empty' "$run_dir/ticket.json")
+ws_desc=$(jq -r '.task.description // empty' "$run_dir/ticket.json")
+ws_hash=$(printf '%s\n%s' "$ws_title" "$ws_desc" | sha256sum | cut -c1-12)
+grep -qF "scope-generation: $ws_hash stamped:" "$workstream" \
+    || fail "scope-generation hash must be sha256 of title + newline + description; expected $ws_hash"
+ok "scope-generation hash is the canonical scope digest (title + description)"
+
 # Reuse: an existing published workstream is the triage run's conclusion and
 # must pass through byte-for-byte untouched. (CRI-239 exit criterion: written
 # when absent, reused when present, never overwriting triage conclusions.)
