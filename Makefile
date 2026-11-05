@@ -267,7 +267,6 @@ lint: lint-go
 		kanboard_develop_v1/tests/test_develop_standalone.sh \
 		kanboard_triage_v1/tests/test_triage_standalone.sh \
 		qa_triage_v1/tests/test_publish_workstream.sh \
-		qa_triage_v1/tests/test_publish_workstream.sh \
 		k8s/tests/test_workflow_graphs_flat.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
 		k8s/tests/test_runner_tree_discovery.sh \
