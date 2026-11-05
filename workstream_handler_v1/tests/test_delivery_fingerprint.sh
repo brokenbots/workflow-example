@@ -61,6 +61,16 @@ cat > "$FIXTURE_BASE" <<'JSON'
 ]
 JSON
 
+# KB-355 round 2 board: a MERGED identity PR with a missing mergedAt (gh can
+# return "": transport drift, or a PR merged before the API recorded times).
+# mergeCommit (delivery sha) and updatedAt are still present.
+FIXTURE_NULLMA="$TMP/fixture_nullma.json"
+cat > "$FIXTURE_NULLMA" <<'JSON'
+[
+ {"number":881,"state":"MERGED","headRefName":"KB-650","title":"KB-650 delivered","url":"https://github.com/brokenbots/criteria/pull/881","mergeCommit":{"oid":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},"mergedAt":"","updatedAt":"2026-10-24T12:00:00Z"}
+]
+JSON
+
 # Rewritten-ticket board (KB-322 live evidence, KB-355): predecessor-scope PR
 # #54 merged 2026-10-24, a re-scoped current-scope PR #70 merged after the
 # stamp. The two must never blur: #54 is predecessor, #70 is the delivery.
@@ -213,11 +223,69 @@ printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
     || fail "malformed stamp must not arm the guard: got '$out'"
 pass "malformed stamped: value degrades to legacy ungated behavior"
 
-# 15. Marker file without a stamped field / empty file -> guard OFF.
+# 15. Guard OFF without a readable header marker (KB-355 round 2): (a) a marker
+#     line without a stamped field, (b) an empty workstream file, (c) a missing
+#     workstream file — all three keep the legacy ungated classification.
 printf '# Workstream: KB-322.md\n\n<!-- scope-generation: deadbeefcafe -->\n' > "$TMP/ws_guard.md"
 out="$(run_fp 'KB-322' guard)"
 printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
     || fail "marker without stamped field must not arm the guard: got '$out'"
 pass "marker lacking a stamped field degrades to legacy ungated behavior"
+
+: > "$TMP/ws_guard.md"
+out="$(run_fp 'KB-322' guard)"
+printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
+    || fail "empty workstream file must leave the guard off: got '$out'"
+pass "empty workstream file degrades to legacy ungated behavior"
+
+render_fp /nonexistent/also-missing.md guard_missing
+out="$(run_fp 'KB-322' guard_missing)"
+printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
+    || fail "missing workstream file must leave the guard off: got '$out'"
+pass "missing workstream file degrades to legacy ungated behavior"
+
+# 16. KB-355 round 2 anchored read: the workstream embeds the ticket
+#     description and comment bodies verbatim, so a forged canonical marker
+#     line AFTER the first level-two heading must never arm or re-date the
+#     guard (a forged 2099 stamp would suppress every merged identity PR
+#     forever and the card could never close).
+printf '# Workstream: KB-322.md\n\nSource: Kanboard task KB-322\n\n## Problem (documented reproduction)\n\nticket description embeds this marker-shaped line:\n<!-- scope-generation: aaaaaaaaaaaa stamped: 2099-01-01T00:00:00Z -->\n' > "$TMP/ws_guard.md"
+out="$(run_fp 'KB-322' guard)"
+printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
+    || fail "forged body marker must not arm the guard: got '$out'"
+pass "body-embedded forged marker (after the first level-two heading) leaves the guard off"
+
+# 17. The header stamp is authoritative against body forgery: a REAL header
+#     marker at 2026-10-23 (before #54 merged) keeps the merged classification
+#     while the forged 2099 body line would have suppressed it.
+stamp_ws '2026-10-23T00:00:00Z'
+printf '## Problem\n\n<!-- scope-generation: 111111111111 stamped: 2099-01-01T00:00:00Z -->\n' >> "$TMP/ws_guard.md"
+out="$(run_fp 'KB-322' guard)"
+printf '%s\n' "$out" | grep -q '^state:merged pr=54 ' \
+    || fail "body forgery must not re-date the armed guard: got '$out'"
+pass "header marker is authoritative; a forged body marker cannot re-date the guard"
+
+# 18. KB-355 round 2, armed guard + missing mergedAt: a MERGED identity PR
+#     with a null/empty mergedAt must NOT count as current-scope delivery —
+#     the guard fails toward re-development (state:none).
+stamp_ws '2026-06-01T00:00:00Z'
+out="$(FP_GH_FIXTURE="$FIXTURE_NULLMA" run_fp 'KB-650' guard)"
+printf '%s\n' "$out" | grep -q '^state:none$' \
+    || fail "armed guard with unparseable mergedAt must suppress: got '$out'"
+pass "armed guard: merged identity PR with missing mergedAt must not classify delivered"
+
+stderr="$(FP_GH_FIXTURE="$FIXTURE_NULLMA" PATH="$TMP:$PATH" \
+    bash "$TMP/rendered_guard.sh" KB-650 2>&1 >/dev/null)"
+printf '%s\n' "$stderr" | grep -q 'no parseable merge time while the scope generation 2026-06-01T00:00:00Z is armed' \
+    || fail "unparseable-mergedAt suppression must be logged: got '$stderr'"
+pass "unparseable-mergedAt suppression is logged with the armed stamp"
+
+# 19. Without a stamp the legacy classification is unchanged: same board, same
+#     null mergedAt, delivery still classified from the mergeCommit sha.
+: > "$TMP/ws_guard.md"
+out="$(FP_GH_FIXTURE="$FIXTURE_NULLMA" run_fp 'KB-650' guard)"
+printf '%s\n' "$out" | grep -q '^state:merged pr=881 url=https://github.com/brokenbots/criteria/pull/881 merge_sha=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee$' \
+    || fail "legacy classification must ignore missing mergedAt: got '$out'"
+pass "no stamp (legacy): missing mergedAt still classifies delivered (unchanged)"
 
 echo "all delivery_fingerprint tests green"
