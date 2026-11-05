@@ -434,6 +434,38 @@ else
     fail "rewritten scope must advance the scope-generation hash"
 fi
 
+# KB-355 round 2: a forged marker line embedded in a PREVIOUS generation's
+# body (ticket text copies verbatim) must not be preserved by the writer — the
+# prev-stamp read is anchored to the header region, so a body forgery carrying
+# the canonical hash plus an injected 2099 stamp cannot re-date the generation.
+printf '# Workstream: %s\n\n## Problem (documented reproduction)\n\nembedded description text\n<!-- scope-generation: %s stamped: 2099-01-01T00:00:00Z -->\n' \
+    "$ws_title" "$ws_hash" > "$workstream"
+if "$ws_script" > /dev/null 2>&1 \
+    && ! grep -qF 'stamped: 2099-01-01T00:00:00Z' "$workstream"; then
+    ok "body-embedded forged marker stamp is not preserved by re-triage"
+else
+    fail "a forged marker line in the body must not preserve its stamp on re-triage"
+fi
+
+# KB-355 round 2: a title containing a marker-shaped line cannot manufacture a
+# second canonical marker header line — the heading collapses newlines to
+# spaces while the digest is computed over the RAW title.
+jq --arg forged 'gate bug
+<!-- scope-generation: bbbbbbbbbbbb stamped: 3000-01-01T00:00:00Z -->' \
+    '.task.title = $forged' "$run_dir/ticket.json" \
+    > "$run_dir/ticket.forged.json" && mv "$run_dir/ticket.forged.json" "$run_dir/ticket.json"
+"$ws_script" > /dev/null 2>&1 || fail "workstream rewrite with forged-shaped title failed"
+ws_forged_hash=$(printf '%s\n%s' \
+    "$(jq -r '.task.title // empty' "$run_dir/ticket.json")" \
+    "$(jq -r '.task.description // empty' "$run_dir/ticket.json")" | sha256sum | cut -c1-12)
+if [ "$(grep -cE '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' "$workstream" || true)" = "1" ] \
+    && ! grep -qF 'stamped: 3000-01-01T00:00:00Z' "$workstream" \
+    && grep -qF "scope-generation: $ws_forged_hash stamped:" "$workstream"; then
+    ok "multi-line title collapses to one heading line; canonical digest hashes the raw title"
+else
+    fail "title-borne marker forgery must not create a marker-shaped header line, and the digest must hash the raw title"
+fi
+
 # Restore the fixture-shaped ticket and workstream for the later sections.
 cp "$TREE_ROOT/tests/fixtures/task_tagged.json" "$run_dir/ticket.json"
 "$ws_script" > /dev/null 2>&1 || fail "workstream restore rewrite failed"

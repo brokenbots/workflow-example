@@ -17,6 +17,15 @@
 # generation time lets the classifier suppress merged identity PRs that predate
 # the current scope. An unchanged scope re-triaged keeps its original stamp
 # (the file is regenerated, but the generation time must not advance).
+#
+# The marker is read ONLY from the header region (content before the first
+# level-two heading) and only the first line there whose entire content is the
+# canonical marker shape. The workstream body embeds the ticket description
+# and comment bodies verbatim, so a whole-file read would let a forgery inside
+# the ticket text preserve or re-date the generation. The title is collapsed
+# to a single heading line so a title containing newline+marker-shaped text
+# cannot fabricate a second marker-shaped header line (the digest itself is
+# computed over the RAW title — collapse is for heading emission only).
 set -eu
 
 TICKET_JSON="{{ .intake_root }}/{{ .ticket_id }}/ticket.json"
@@ -42,9 +51,11 @@ valid_scope_stamp() {
 scope_prev_stamp=""
 scope_prev_hash=""
 if [ -s "$WORKSTREAM" ]; then
-    scope_prev_line=$(grep -m1 'scope-generation:' "$WORKSTREAM" 2>/dev/null || true)
+    scope_prev_line=$(awk '/^## /{exit} {print}' "$WORKSTREAM" 2>/dev/null \
+        | grep -E -m1 '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' \
+        || true)
     scope_prev_hash=$(printf '%s' "$scope_prev_line" | sed -n 's/.*scope-generation: \([0-9a-f]\{12\}\) stamped:.*/\1/p')
-    scope_prev_stamp=$(printf '%s' "$scope_prev_line" | sed -n 's/.*stamped: \([0-9T:-]*Z\).*/\1/p' | head -1)
+    scope_prev_stamp=$(printf '%s' "$scope_prev_line" | sed -n 's/.*stamped: \([0-9T:-]*Z\).*/\1/p')
 fi
 if [ "$scope_prev_hash" = "$SCOPE_HASH" ] && valid_scope_stamp "$scope_prev_stamp"; then
     SCOPE_STAMP=$scope_prev_stamp
@@ -52,8 +63,10 @@ else
     SCOPE_STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 fi
 
+HEADING_TITLE=$(printf '%s' "$TITLE" | tr '\n' ' ')
+
 {
-    echo "# Workstream: $TITLE"
+    echo "# Workstream: $HEADING_TITLE"
     echo
     printf '<!-- scope-generation: %s stamped: %s -->\n' "$SCOPE_HASH" "$SCOPE_STAMP"
     echo
