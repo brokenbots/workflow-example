@@ -201,6 +201,8 @@ test: validate test-criteria-k8s
 	./kanboard_develop_v1/tests/test_develop_standalone.sh
 	@echo "Running kanboard_triage_v1 standalone extraction regression test (KB-231)..."
 	./kanboard_triage_v1/tests/test_triage_standalone.sh
+	@echo "Running qa_triage_v1 publish_workstream regression test (KB-355)..."
+	./qa_triage_v1/tests/test_publish_workstream.sh
 	@echo "Running flat WorkflowGraphs shape smoke test (CRI-300)..."
 	./k8s/tests/test_workflow_graphs_flat.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
@@ -264,6 +266,8 @@ lint: lint-go
 		k8s/tests/test_runner_events_file_default.sh \
 		kanboard_develop_v1/tests/test_develop_standalone.sh \
 		kanboard_triage_v1/tests/test_triage_standalone.sh \
+		qa_triage_v1/tests/test_publish_workstream.sh \
+		qa_triage_v1/tests/test_publish_workstream.sh \
 		k8s/tests/test_workflow_graphs_flat.sh \
 		k8s/tests/test_per_scope_digest_files.sh \
 		k8s/tests/test_runner_tree_discovery.sh \
@@ -359,6 +363,7 @@ ci: validate
 	@echo "== ci: standalone extraction suites =="
 	bash kanboard_develop_v1/tests/test_develop_standalone.sh
 	bash kanboard_triage_v1/tests/test_triage_standalone.sh
+	bash qa_triage_v1/tests/test_publish_workstream.sh
 	bash ticket_cleanup_v1/tests/test_cleanup_standalone.sh
 	bash harness_wire_v1/tests/test_wire_standalone.sh
 	bash decision_demo_v1/tests/test_decision_demo_standalone.sh
