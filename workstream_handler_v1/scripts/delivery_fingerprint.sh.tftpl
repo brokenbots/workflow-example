@@ -1,4 +1,5 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
+workstream_file={{ .workstream_file | shellquote }}
 {{ .gh_retry }}
 set -euo pipefail
 
@@ -19,6 +20,20 @@ set -euo pipefail
 # OPEN = live work, MERGED = delivered work to reconcile, CLOSED(unmerged) =
 # abandoned -> fresh development.
 #
+# KB-355 (2026-11-05): scope-generation guard for rewritten tickets. A ticket
+# rewritten in place (standing practice for stale cards) keeps its id, so any
+# merged PR whose branch/title carries the id stays a PERMANENT identity match
+# for every future refire — the predecessor scope's delivery false-closes the
+# rewritten card for a scope that was never developed (live: castle PR #54,
+# kb-322 run-viewer, merged 2026-10-24, re-closed card 322 three times after
+# the P0.5 re-scope; branch-exact identity matches it too). When the workstream
+# file carries a scope-generation marker stamped by triage at (re)write time —
+# '<!-- scope-generation: <hash> stamped: <RFC3339Z> -->' — a MERGED candidate
+# counts as current-scope delivery only when its mergedAt POSTDATES the stamp;
+# a merged identity PR older than the stamp is predecessor scope and is
+# suppressed (state:none -> fresh development). No marker (legacy file, no
+# rewrite ever observed) keeps the pre-KB-355 behavior unchanged.
+#
 # stdout protocol (switch keyed on the first line):
 #   state:none
 #   state:open pr=<n> url=<url>
@@ -28,20 +43,39 @@ set -euo pipefail
 # past gh_retry (a fingerprint that cannot be computed must fail loudly).
 
 # criteria_value_1 arrives as the workstream FILE (KB-<n>.md); the ticket id
-# is the basename without extension. Handle a bare id too.
+# is the basename without extension. Handle a bare id too. workstream_file is
+# the full source path of the same file (the scope-generation marker's carrier;
+# it may be unreadable in a given run — the guard then stays off).
 ticket="${criteria_value_1%.md}"
 ticket="${ticket##*/}"
 ticket_lc=$(printf '%s' "$ticket" | tr '[:upper:]_ ' '[:lower:]-')
 ticket_re=$(printf '%s' "$ticket_lc" | sed 's/[^a-z0-9-]/\\&/g')
 
-ticket_json=$(gh_retry gh pr list --state all --limit 60 \
-    --json number,state,headRefName,title,url,mergeCommit,updatedAt)
+# KB-355: the scope-generation stamp, read from the workstream file itself.
+# Only an exactly-shaped RFC3339 Z timestamp arms the guard — anything else
+# (no file, no marker, malformed stamp) keeps the legacy ungated behavior.
+scope_ts=""
+if [ -n "$workstream_file" ] && [ -r "$workstream_file" ]; then
+    scope_line=$(grep -m1 'scope-generation:' "$workstream_file" 2>/dev/null || true)
+    scope_ts=$(printf '%s' "$scope_line" | sed -n 's/.*stamped: \([0-9T:-]*Z\).*/\1/p' | head -1)
+    case "$scope_ts" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+        *) scope_ts="" ;;
+    esac
+fi
+if [ -n "$scope_ts" ]; then
+    echo "delivery-fingerprint: scope generation stamped $scope_ts (from ${workstream_file##*/})" >&2
+fi
 
-# TSV: state \t number \t head \t url \t sha \t updatedAt (sorted newest first)
+ticket_json=$(gh_retry gh pr list --state all --limit 60 \
+    --json number,state,headRefName,title,url,mergeCommit,updatedAt,mergedAt)
+
+# TSV: state \t number \t head \t url \t sha \t updatedAt \t mergedAt
+# (sorted newest-updated first; mergedAt feeds the KB-355 scope guard)
 rows=$(printf '%s' "$ticket_json" | jq -r '
     .[]
     | [.state, (.number|tostring), (.headRefName // ""), (.url // ""),
-      ((.mergeCommit // {}) | (.oid // "")), (.updatedAt // "")]
+      ((.mergeCommit // {}) | (.oid // "")), (.updatedAt // ""), (.mergedAt // "")]
     | @tsv' | sort -t$'\t' -k6,6r)
 
 open_row=""
@@ -73,12 +107,31 @@ title_of() {
         .[] | select(.number == $n) | (.title // "")' | head -1
 }
 
-while IFS="$(printf '\t')" read -r st num head url sha ts; do
+# KB-355 scope-generation guard: true when mergedAt is strictly BEFORE the
+# workstream's scope stamp. Both values are same-width RFC3339 Z stamps, so a
+# lexical compare is chronological. An unparseable merge time never counts as
+# predating (the legacy ungated classification survives data-shape drift).
+predates_scope() {
+    [ -n "$scope_ts" ] || return 1
+    case "$1" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+        *) return 1 ;;
+    esac
+    older=$(printf '%s\n%s\n' "$1" "$scope_ts" | sort | head -1)
+    [ "$older" = "$1" ] && [ "$1" != "$scope_ts" ]
+}
+
+while IFS="$(printf '\t')" read -r st num head url sha ts ma; do
     [ -n "$st" ] || continue
     if branch_owner "$head" || title_owner "$(title_of "$num")"; then
         case "$st" in
             OPEN)   [ -n "$open_row" ]   || open_row="$num|$url" ;;
-            MERGED) [ -n "$merged_row" ] || { [ -n "$sha" ] && merged_row="$num|$url|$sha"; } ;;
+            MERGED)
+                if predates_scope "$ma"; then
+                    echo "delivery-fingerprint: merged PR #$num ($ma) predates the current scope generation $scope_ts — predecessor scope, suppressed" >&2
+                else
+                    [ -n "$merged_row" ] || { [ -n "$sha" ] && merged_row="$num|$url|$sha"; }
+                fi ;;
             CLOSED) [ -n "$closed_row" ] || closed_row="$num|$url" ;;
         esac
     fi
