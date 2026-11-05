@@ -5,8 +5,8 @@
 # <ticket_id>.md (kanboard_triage_v1's workstream_out_dir writes there).
 #
 # Reuse: when that file already exists and is non-empty it is the triage run's
-# conclusion and is handed to the handler untouched — no re-derivation, no
-# overwrite. Write: when it is absent or empty, the workstream context is
+# conclusion and is handed to the handler — no re-derivation, no overwrite of
+# its content. Write: when it is absent or empty, the workstream context is
 # reconstructed mechanically from the fetched task itself — title, description,
 # and the comment history (per the intake design, triage outputs live in the
 # task's comments). No model call is involved on either path.
@@ -19,12 +19,25 @@
 # fetch_ticket stores the Kanboard {task, tags, comments} envelope, so every
 # field is read through .task / .comments.
 #
-# KB-355: the write path stamps a scope-generation marker —
+# KB-355: scope-generation marker —
 # '<!-- scope-generation: <hash of title+description> stamped: <RFC3339Z> -->'
-# — so the delivery-fingerprint classifier can suppress merged identity PRs
-# that predate the ticket's current scope (in-place ticket rewrites keep the
-# id; the predecessor scope's delivery must not re-close the card). The reuse
-# path hands the published file through untouched.
+# — lets the delivery-fingerprint classifier suppress merged identity PRs that
+# predate the ticket's current scope (in-place ticket rewrites keep the id;
+# the predecessor scope's delivery must not re-close the card).
+#
+# Reuse-path generation advance (KB-355 round 2): the current scope digest is
+# computed from ticket.json BEFORE the reuse early exit, because a published
+# workstream with a predecessor-scope stamp would keep letting the
+# predecessor PR re-close the rewritten card. The file's marker is read
+# ANCHORED (header region only, canonical shape — a forgery in the embedded
+# ticket text can never be authoritative): equal digest reuses the file
+# byte-for-byte; a different digest means the scope was rewritten in place and
+# ONLY the marker line is replaced (fresh stamp, every other byte unchanged,
+# advance logged on stderr). A file with NO marker (legacy) stays completely
+# untouched and gains no marker: the generation start is unknown, and a "now"
+# stamp would arm the guard against a scope that predates the stamp,
+# suppressing legitimate deliveries of an unchanged legacy scope — the guard
+# intentionally stays off on that path (documented legacy degradation).
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 set -eu
@@ -34,29 +47,77 @@ WORKSTREAM="$criteria_value_1/$criteria_value_2/workstreams/$criteria_value_2.md
 
 mkdir -p "$(dirname "$WORKSTREAM")"
 
+# KB-355 round 2: the current scope digest must be known even on the reuse
+# path (it decides whether an existing file's generation is stale). An
+# unreadable ticket.json leaves the scope unknown — reuse stays untouched and
+# the write path fails loud on the missing title.
+TITLE=""
+DESC=""
+STATE=""
+SCOPE_HASH=""
+if [ -r "$TICKET_JSON" ]; then
+    TITLE=$(jq -r '.task.title // empty' "$TICKET_JSON")
+    DESC=$(jq -r '.task.description // empty' "$TICKET_JSON")
+    STATE=$(jq -r '.task.column_id // empty' "$TICKET_JSON")
+    if [ -n "$TITLE" ]; then
+        SCOPE_HASH=$(printf '%s\n%s' "$TITLE" "$DESC" | sha256sum | cut -c1-12)
+    fi
+fi
+
 if [ -s "$WORKSTREAM" ]; then
+    scope_prev_hash=""
+    scope_prev_line=""
+    scope_prev_line=$(awk '/^## /{exit} {print}' "$WORKSTREAM" 2>/dev/null \
+        | grep -E -m1 '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' \
+        || true)
+    scope_prev_hash=$(printf '%s' "$scope_prev_line" | sed -n 's/.*scope-generation: \([0-9a-f]\{12\}\) stamped:.*/\1/p')
+    if [ -n "$SCOPE_HASH" ] && [ -n "$scope_prev_hash" ]; then
+        if [ "$scope_prev_hash" = "$SCOPE_HASH" ]; then
+            echo "workstream reused: $WORKSTREAM"
+            exit 0
+        fi
+        # Scope rewritten in place: advance the generation by replacing ONLY
+        # the marker line (fresh stamp); every other byte stays unchanged. A
+        # kept predecessor-scope stamp would let the predecessor PR re-close
+        # the rewritten card. The stdout line stays byte-identical because
+        # the workflow parses it with startswith.
+        advance_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        tmp="$WORKSTREAM.tmp.$$"
+        awk -v marker="<!-- scope-generation: $SCOPE_HASH stamped: $advance_stamp -->" '
+            BEGIN { header = 1; done = 0 }
+            header && /^## / { header = 0 }
+            {
+                if (header && !done && /^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$/) {
+                    print marker
+                    done = 1
+                    next
+                }
+                print
+            }
+        ' "$WORKSTREAM" > "$tmp"
+        mv "$tmp" "$WORKSTREAM"
+        echo "workstream-generation: scope rewritten in place; marker advanced to $SCOPE_HASH (stamped: $advance_stamp)" >&2
+        echo "workstream reused: $WORKSTREAM"
+        exit 0
+    fi
+    # Legacy file with no anchored marker (or unknown scope): the generation
+    # start is unknown, so the guard must stay OFF — see the header comment.
     echo "workstream reused: $WORKSTREAM"
     exit 0
 fi
-
-TITLE=$(jq -r '.task.title // empty' "$TICKET_JSON")
-DESC=$(jq -r '.task.description // empty' "$TICKET_JSON")
-STATE=$(jq -r '.task.column_id // empty' "$TICKET_JSON")
-
-# KB-355 scope generation: hash of the scope-bearing content (title +
-# description) and the generation time. The file is absent/empty on this path,
-# so the stamp is always a fresh generation (triage's rewriter preserves an
-# unchanged scope's stamp on its own path).
-SCOPE_HASH=$(printf '%s\n%s' "$TITLE" "$DESC" | sha256sum | cut -c1-12)
-SCOPE_STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 if [ -z "$TITLE" ]; then
     echo "ticket.json carries no task title; cannot assemble the confirmed workstream" >&2
     exit 1
 fi
 
+# KB-355 scope generation on the write path: the file is absent/empty, so the
+# stamp is always a fresh generation (triage's rewriter preserves an unchanged
+# scope's stamp on its own path).
+SCOPE_STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 {
-    echo "# Workstream: $TITLE"
+    echo "# Workstream: $(printf '%s' "$TITLE" | tr '\n' ' ')"
     echo
     printf '<!-- scope-generation: %s stamped: %s -->\n' "$SCOPE_HASH" "$SCOPE_STAMP"
     echo

@@ -720,6 +720,60 @@ assembled="$(md5sum "$workstream" | cut -d' ' -f1)"
 "$ws_script" >/dev/null
 require_equal "$assembled" "$(md5sum "$workstream" | cut -d' ' -f1)" "assembly is deterministic across repeated runs"
 
+# ── KB-355 round 2: the reuse path must advance the scope generation when the
+# ticket was rewritten in place, or a predecessor-scope PR with a kept old
+# stamp re-closes the rewritten card (live: castle #54 re-closed card 322).
+
+ws_marker_h1="1a2b3c4d5e6f"
+printf '# Workstream: Deploy job races the cache warm step\n\n<!-- scope-generation: %s stamped: 2020-01-01T00:00:00Z -->\n\n## Task description\n\npredecessor-scope body\n' "$ws_marker_h1" > "$workstream"
+ws_before_body="$(grep -v 'scope-generation' "$workstream" | md5sum | cut -d' ' -f1)"
+ws_before_lines="$(wc -l < "$workstream")"
+if out="$("$ws_script" 2>"$TMP/ws.err")" && [ "$out" = "workstream reused: $workstream" ]; then
+    ok "rewritten scope: reuse line stays byte-identical"
+else
+    fail "rewritten scope reuse: got '${out:-<no output>}', want 'workstream reused: $workstream'"
+fi
+grep -q 'scope rewritten in place; marker advanced to' "$TMP/ws.err" \
+    || fail "marker advance must be logged on stderr: $(cat "$TMP/ws.err")"
+ws_prev_title="$(jq -r '.task.title // empty' "$run_dir/ticket.json")"
+ws_new_desc="$(jq -r '.task.description // empty' "$run_dir/ticket.json")"
+ws_new_hash="$(printf '%s\n%s' "$ws_prev_title" "$ws_new_desc" | sha256sum | cut -c1-12)"
+require_equal "$(sed -n 's/.*scope-generation: \([0-9a-f]\{12\}\) stamped: .*/\1/p' "$workstream")" \
+    "$ws_new_hash" "rewritten scope: marker hash is the new canonical digest"
+[ "$(sed -n 's/.*stamped: \(.*\) -->/\1/p' "$workstream")" != "2020-01-01T00:00:00Z" ] \
+    || fail "rewritten scope: marker stamp must advance past the seeded 2020 stamp"
+require_equal "$(grep -v 'scope-generation' "$workstream" | md5sum | cut -d' ' -f1)" \
+    "$ws_before_body" "advancing the generation replaces only the marker line"
+require_equal "$(wc -l < "$workstream")" "$ws_before_lines" "advancing the generation keeps the file shape"
+
+# Cross-suite: the advanced file gates the classifier — a predecessor PR
+# merged 2026-10-24 (before the fresh-generation stamp) must not classify
+# delivered for the rewritten card (state:none).
+fp_tpl="$TREE_ROOT/../workstream_handler_v1/scripts/delivery_fingerprint.sh.tftpl"
+[ -f "$fp_tpl" ] || fail "companion classifier template missing: $fp_tpl"
+fp_fixture="$TMP/fp_c54.json"
+cat > "$fp_fixture" <<'JSON'
+[{"number":54,"state":"MERGED","headRefName":"KB-140","title":"KB-140 predecessor run-viewer","url":"https://github.com/brokenbots/castle/pull/54","mergeCommit":{"oid":"cccccccccccccccccccccccccccccccccccccccc"},"mergedAt":"2026-10-24T16:41:39Z","updatedAt":"2026-10-24T16:41:39Z"}]
+JSON
+cat > "$TMP/gh" <<'SH'
+#!/bin/sh
+cat "${FP_GH_FIXTURE:?FP_GH_FIXTURE unset}"
+SH
+chmod +x "$TMP/gh"
+awk -v wsfile="$workstream" '
+    index($0, "criteria_value_1=") == 1 && index($0, "{{") > 0 { sub(/=.*/, "=\"" wsfile "\""); print; next }
+    index($0, "workstream_file=") == 1 && index($0, "{{") > 0 { sub(/=.*/, "=\"" wsfile "\""); print; next }
+    $0 == "{{ .gh_retry }}" { next }
+    { print }
+' "$fp_tpl" > "$TMP/fp_advance.sh"
+fp_out="$(PATH="$TMP:$PATH" FP_GH_FIXTURE="$fp_fixture" bash "$TMP/fp_advance.sh" 2>/dev/null)"
+fp_out=$(printf '%s\n' "$fp_out")
+require_equal "$fp_out" "state:none" "predecessor PR predating the advanced generation classifies state:none"
+
+# Restore the fixture-shaped ticket and workstream for the later sections.
+cp "$TREE_ROOT/tests/fixtures/task_ready.json" "$run_dir/ticket.json"
+"$ws_script" > /dev/null 2>&1 || fail "workstream restore rewrite failed"
+
 # Missing ticket.json and no workstream: fail loudly (the workflow routes the
 # failure to the develop-failed comment and the review state).
 rm -f "$run_dir/ticket.json" "$workstream"
