@@ -394,7 +394,6 @@ fi
 # Every (re)write stamps which scope generation the file describes so the
 # delivery-fingerprint classifier can suppress a rewritten ticket's
 # predecessor-scope PRs instead of re-closing the card (live: castle #54).
-scope_stamp() { sed -n '/^<!-- scope-generation: /s/.*stamped: \(.*Z\) -->.*/\1/p' "$workstream" | head -1; }
 if grep -Eq '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' "$workstream"; then
     ok "workstream stamps a scope-generation marker"
 else
@@ -410,11 +409,19 @@ else
     fail "scope-generation hash must be sha256 of title + newline + description; expected $ws_hash"
 fi
 
-first_stamp=$(scope_stamp)
-if "$ws_script" > /dev/null 2>&1 && [ "$(scope_stamp)" = "$first_stamp" ]; then
+# Preservation probe with a deterministically OLD stamp: the workstream is
+# reseeded with the CANONICAL scope hash (asserted above) plus a fixed 2020
+# stamp, then the writer re-runs. A second-resolution clock collision would let
+# an always-refresh implementation pass a back-to-back re-run vacuously; a
+# seeded 2020 stamp fails it deterministically.
+seeded_stamp='2020-01-01T00:00:00Z'
+printf '# Workstream: %s\n\n<!-- scope-generation: %s stamped: %s -->\n' \
+    "$ws_title" "$ws_hash" "$seeded_stamp" > "$workstream"
+if "$ws_script" > /dev/null 2>&1 \
+    && grep -Fq "scope-generation: $ws_hash stamped: $seeded_stamp" "$workstream"; then
     ok "re-triage of an unchanged scope preserves the generation stamp"
 else
-    fail "unchanged scope re-triage must preserve the scope-generation stamp ($first_stamp)"
+    fail "unchanged scope re-triage must preserve the seeded stamp ($seeded_stamp)"
 fi
 
 jq '.task.description = "rewritten in place: P0.5 routes-CM catalog cleanup"' \
