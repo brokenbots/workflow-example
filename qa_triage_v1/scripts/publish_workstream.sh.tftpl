@@ -1,17 +1,111 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 criteria_value_3={{ .criteria_value_3 | shellquote }}
+scope_ticket_json={{ .scope_ticket_json | shellquote }}
 set -euo pipefail
+
+# Publish the supervisor-approved workstream draft to
+# <criteria_value_2>/<report-basename-without-extension>.md.
+#
+# KB-355: stamp the published file with a scope-generation marker —
+# '<!-- scope-generation: <sha256(title+"\n"+desc) as 12 hex> stamped: <RFC3339Z> -->'
+# — so the delivery-fingerprint classifier can suppress a rewritten ticket's
+# predecessor-scope merged PRs instead of re-closing the card. Stamp-or-
+# preserve: the EXISTING published file's marker is read ANCHORED (header
+# region only, canonical shape) BEFORE overwriting; a marker whose hash equals
+# the current scope digest and whose stamp is well-formed carries its stamp
+# forward (an unchanged scope re-publish must not advance the generation);
+# anything else (no file, no marker, different hash, malformed stamp) starts
+# a fresh generation. Every marker-shaped line is stripped from the agent
+# draft first, so agent output and embedded ticket text can never arm or
+# preserve a generation — exactly one authoritative marker is inserted into
+# the header region. With no scope source (empty or unreadable
+# scope_ticket_json, standalone usage) the publisher writes no marker at all:
+# the generation start would be unknown, and the guard must stay off
+# (documented legacy degradation).
+
 draft="$criteria_value_1/evidence/workstream-draft.md"
 if [ ! -s "$draft" ]; then
     echo "approved draft is missing or empty: $draft" >&2
     exit 1
 fi
+
+# Canonical scope digest: the same construction triage and develop stamp
+# (sha256 of title + newline + description, truncated to 12 hex).
+scope_hash=""
+if [ -n "$scope_ticket_json" ] && [ -r "$scope_ticket_json" ] && [ -s "$scope_ticket_json" ]; then
+    scope_title=$(jq -r '.task.title // empty' "$scope_ticket_json")
+    scope_desc=$(jq -r '.task.description // empty' "$scope_ticket_json")
+    if [ -n "$scope_title" ]; then
+        scope_hash=$(printf '%s\n%s' "$scope_title" "$scope_desc" | sha256sum | cut -c1-12)
+    fi
+fi
+
 mkdir -p "$criteria_value_2"
 slug=$(basename "$criteria_value_3")
 slug="${slug%.*}"
 out="$criteria_value_2/$slug.md"
-cp "$draft" "$out"
+
+# Stamp-or-preserve read, BEFORE the overwrite: anchored, header region only.
+scope_prev_line=$(awk '/^## /{exit} {print}' "$out" 2>/dev/null \
+    | grep -E -m1 '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' \
+    || true)
+scope_prev_hash=$(printf '%s' "$scope_prev_line" | sed -n 's/.*scope-generation: \([0-9a-f]\{12\}\) stamped:.*/\1/p')
+scope_prev_stamp=$(printf '%s' "$scope_prev_line" | sed -n 's/.*stamped: \([0-9T:-]*Z\).*/\1/p')
+
+if [ -n "$scope_hash" ]; then
+    scope_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [ "$scope_prev_hash" = "$scope_hash" ]; then
+        case "$scope_prev_stamp" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) scope_stamp="$scope_prev_stamp" ;;
+        esac
+    fi
+fi
+
+# Strip every marker-shaped line from the agent draft: exactly one
+# authoritative marker is inserted below (or none, when the scope is unknown).
+clean="$criteria_value_2/.publish-$slug.clean.$$"
+grep -vE '^<!-- scope-generation: [0-9a-f]{12} stamped: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z -->$' \
+    "$draft" > "$clean" 2>/dev/null || true
+
+if [ -n "$scope_hash" ]; then
+    marker="<!-- scope-generation: $scope_hash stamped: $scope_stamp -->"
+    # Insert the marker into the header region: immediately after the first
+    # level-one heading, at the top otherwise.
+    ins_line=$(awk '/^## /{print 0; exit} /^#/{print NR; exit}' "$clean" 2>/dev/null || printf '0')
+    tmp="$out.tmp.$$"
+    if [ "${ins_line:-0}" = "0" ]; then
+        {
+            printf '%s\n' "$marker"
+            echo
+            cat "$clean"
+        } > "$tmp"
+    else
+        {
+            head -n "$ins_line" "$clean"
+            printf '%s\n' "$marker"
+            echo
+            tail -n +"$((ins_line + 1))" "$clean"
+        } > "$tmp"
+    fi
+    rm -f "$clean"
+    mv "$tmp" "$out"
+    if [ "$scope_prev_hash" = "$scope_hash" ] && [ -n "$scope_prev_stamp" ]; then
+        : # unchanged scope: generation preserved, quiet
+    else
+        echo "workstream-generation: scope stamped as $scope_hash (stamped: $scope_stamp)" >&2
+    fi
+else
+    # No scope source: publish without a marker (documented legacy behavior),
+    # with any draft-borne marker-shaped lines stripped so nothing else can
+    # arm a guard.
+    tmp="$out.tmp.$$"
+    cp "$clean" "$tmp"
+    rm -f "$clean"
+    mv "$tmp" "$out"
+fi
+
 # printf, not echo: a trailing newline would be captured into
 # output.stdout and then interpolated into paths by the parent.
 printf '%s' "$out"
+

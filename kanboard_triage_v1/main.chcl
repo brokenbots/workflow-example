@@ -92,6 +92,9 @@ subworkflow "qa_triage" {
         // slug from it, so its evidence lands at <triage_root>/<ticket_id>/
         // and its published workstream at <workstream_out_dir>/<ticket_id>.md.
         bug_report_file    = "${var.intake_root}/${var.ticket_id}/${var.ticket_id}.md"
+        // KB-355: the ticket envelope lets the publisher stamp the scope
+        // generation (see qa_triage_v1/variables.chcl scope_ticket_json).
+        scope_ticket_json  = "${var.intake_root}/${var.ticket_id}/ticket.json"
         repo_dir           = var.repo_dir
         triage_root        = var.triage_root
         workstream_out_dir = "${var.intake_root}/${var.ticket_id}/workstreams"
