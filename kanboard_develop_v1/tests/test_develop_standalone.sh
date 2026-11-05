@@ -760,6 +760,9 @@ cat > "$TMP/gh" <<'SH'
 cat "${FP_GH_FIXTURE:?FP_GH_FIXTURE unset}"
 SH
 chmod +x "$TMP/gh"
+# gh_retry pass-through shim (retry semantics owned by test_gh_retry.sh).
+printf '#!/bin/sh\n"$@"\n' > "$TMP/gh_retry"
+chmod +x "$TMP/gh_retry"
 awk -v wsfile="$workstream" '
     index($0, "criteria_value_1=") == 1 && index($0, "{{") > 0 { sub(/=.*/, "=\"" wsfile "\""); print; next }
     index($0, "workstream_file=") == 1 && index($0, "{{") > 0 { sub(/=.*/, "=\"" wsfile "\""); print; next }
