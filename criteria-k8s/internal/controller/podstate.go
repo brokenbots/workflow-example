@@ -19,6 +19,16 @@ import (
 // observed to name. The returned reports are ordered by scope key so
 // repeated passes behave deterministically regardless of provisioning map
 // iteration order.
+//
+// KB-361: members whose scope identity resolves empty are skipped — every
+// other shape would emit a report the consumer cannot join. Two shapes
+// arrive here scope-less: the KB-253 synthetic graph members (definition
+// identities the peer manifest boot-completes with; "manifest shape, never
+// a session" — no scope instance was ever provisioned for them) and
+// degenerate engine events that omit scope_instance_id. Emitting either
+// wedged the pod-state lane: validate rejected the empty scope_instance_id
+// on every reconcile and the reject/re-emit loop flooded the operator log
+// for the run's whole lifetime (kb-159/kb-146/kb-171).
 func podStateReports(existing *corev1.PodList, memberPods map[string][]events.LifecycleEvent, now time.Time, logger logr.Logger) []events.PodStateReport {
 	reports := make([]events.PodStateReport, 0, len(memberPods))
 	for i := range existing.Items {
@@ -30,6 +40,14 @@ func podStateReports(existing *corev1.PodList, memberPods map[string][]events.Li
 				// ambiguous event.
 				logger.V(1).Info("skipping pod-state report: provision carries no adapter_type",
 					"pod", pod.Name, "adapter", scope.AdapterName, "scope_id", scope.ScopeID)
+				continue
+			}
+			if scope.ScopeID == "" {
+				// No scope instance, nothing to join: definition-only
+				// manifest members and scope-less engine events report
+				// nothing (see the KB-361 note above the function).
+				logger.V(1).Info("skipping pod-state report: member resolves no scope instance (definition-only manifest member or scope-less engine event)",
+					"pod", pod.Name, "adapter", scope.AdapterName, "adapter_type", scope.AdapterType)
 				continue
 			}
 			phase := pod.Status.Phase
