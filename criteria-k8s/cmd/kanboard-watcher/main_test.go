@@ -1079,6 +1079,11 @@ func TestTriageSucceededFiresDevelopFromReady(t *testing.T) {
 	tw := newTestWatcher(t, chainRoutesJSON)
 	tw.kbS.addTask(20, 9, "k8s-run", "internal-reproduced") // Ready, armed bypass ticket
 	tw.addRun(t, "kb-20-0000000001", "KB-20", criteriav1.RunClassTriage, criteriav1.PhaseSucceeded)
+	// KB-358: the production shape carries the workflow's own verdict —
+	// the rearm terminal stamps the run's status (final_state=
+	// ready_for_development) — the same status the bridge must mirror as a
+	// RunCompleted row. The watcher leaves this status on the ticket.
+	tw.setRunFinalStateByName(t, "kb-20-0000000001", "ready_for_development")
 
 	tw.pollOnce(t)
 

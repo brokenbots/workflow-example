@@ -465,6 +465,7 @@ func TestAgentBridgeTerminalMappings(t *testing.T) {
 		finalState string
 	}{
 		"verdict complete":                     {criteriav1.PhaseSucceeded, "handler_complete"},
+		"verdict ready for development":        {criteriav1.PhaseSucceeded, "ready_for_development"},
 		"verdict need assistance":              {criteriav1.PhaseSucceeded, "need_assistance"},
 		"verdict failed":                       {criteriav1.PhaseFailed, "failed"},
 		"succeeded without completing verdict": {criteriav1.PhaseSucceeded, ""},
@@ -483,6 +484,59 @@ func TestAgentBridgeTerminalMappings(t *testing.T) {
 			assert.Equal(t, fmt.Sprintf("%T", payload), payloadType)
 		})
 	}
+}
+
+// KB-358 regression: the kanboard triage rearm verdict is a completing
+// verdict. A castle Observation whose terminal carries success=true
+// final_state=ready_for_development used to fall out of the completing-set
+// membership check (only handler_complete), so the bridge re-stamped the
+// success terminal as RunFailed; castle folds terminal envelopes last-wins,
+// the CR then re-derived phase=Failed from the operator's own envelope, and
+// the watcher parked the card into Review — the designed rearm→develop
+// cycle never fired. The status derivation must honor the success terminal:
+// RunCompleted is produced with the verdict carried through, no RunFailed
+// payload for it, and the lane releases.
+func TestAgentBridgeTriageRearmVerdictIsCompleting(t *testing.T) {
+	status := criteriav1.CriteriaRunStatus{
+		Phase:      criteriav1.PhaseSucceeded,
+		FinalState: finalStateReadyForDevelopment,
+	}
+	payload := terminalPayload(&status)
+	completed, ok := payload.(*v1.RunCompleted)
+	require.True(t, ok, "the rearm verdict's success terminal maps to RunCompleted, not %T", payload)
+	assert.True(t, completed.GetSuccess(), "the observed success must be carried through")
+	assert.Equal(t, finalStateReadyForDevelopment, completed.GetFinalState(),
+		"the verdict itself rides the RunCompleted final_state")
+
+	agent, events, _ := agentFixture(t)
+	require.True(t, agent.bridgeStatus(context.Background(), "run-rearm", decisionFixture().WorkflowName, 1, &status),
+		"a completing-verdict terminal releases the lane")
+	require.Equal(t, 1, events.count())
+	runID, correlation, payloadType := splitEventCall(events.recorded()[0])
+	assert.Equal(t, "run-rearm", runID)
+	assert.Equal(t, fmt.Sprintf("%s-1", castle.CorrelationRunTerminal), correlation)
+	assert.Equal(t, fmt.Sprintf("%T", &v1.RunCompleted{}), payloadType)
+
+	// Guard against over-fitting: the human-gate spellings (Succeeded with
+	// the verdict, the same shape KB-338 pinned) and a Failed phase keep
+	// mapping RunFailed — none of them is a completing verdict.
+	agentProbe, eventsProbe, _ := agentFixture(t)
+	for name, tc := range map[string]criteriav1.CriteriaRunStatus{
+		"need assistance":       {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateNeedAssistance},
+		"awaiting human":        {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateAwaitingHuman},
+		"failed phase":          {Phase: criteriav1.PhaseFailed, FinalState: finalStateReadyForDevelopment},
+		"unrecognized verdict":  {Phase: criteriav1.PhaseSucceeded, FinalState: "queued_technical"},
+		"empty verdict":         {Phase: criteriav1.PhaseSucceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, ok := terminalPayload(&tc).(*v1.RunFailed)
+			assert.True(t, ok, "finalState %q with phase %q must still map RunFailed", tc.FinalState, tc.Phase)
+		})
+	}
+	require.True(t, agentProbe.bridgeStatus(context.Background(), "run-gate", decisionFixture().WorkflowName, 1,
+		&criteriav1.CriteriaRunStatus{Phase: criteriav1.PhaseSucceeded, FinalState: finalStateAwaitingHuman}),
+		"a non-completing terminal still releases the lane once emitted")
+	require.Equal(t, 1, eventsProbe.count())
 }
 
 func TestAgentBridgeTerminalRunFailedCarriesReason(t *testing.T) {
