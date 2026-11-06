@@ -32,16 +32,16 @@ jq -e '.steps[] | select(.name == "develop") | .timeout == "1h0m0s"' "${COMPILE_
 echo "==> Checking review declares the same 60m ceiling..."
 jq -e '.steps[] | select(.name == "review") | .timeout == "1h0m0s"' "${COMPILE_OUT}" >/dev/null
 
-echo "==> Checking develop routes no-verdict turns (failure) into the checkpoint loop..."
-jq -e '.steps[] | select(.name == "develop") | .outcomes[] | select(.name == "failure") | .next == "push_checkpoint"' "${COMPILE_OUT}" >/dev/null
+echo "==> Checking develop routes no-verdict turns (failure) into the ruling-2 preservation arm..."
+jq -e '.steps[] | select(.name == "develop") | .outcomes[] | select(.name == "failure") | .next == "preserve_pending"' "${COMPILE_OUT}" >/dev/null
 
 echo "==> Checking develop keeps its agent-verdict routing..."
 jq -e '.steps[] | select(.name == "develop") | .outcomes[] | select(.name == "checkpoint") | .next == "push_checkpoint"' "${COMPILE_OUT}" >/dev/null
 jq -e '.steps[] | select(.name == "develop") | .outcomes[] | select(.name == "need_help") | .next == "failed"' "${COMPILE_OUT}" >/dev/null
 jq -e '.steps[] | select(.name == "develop") | .outcomes[] | select(.name == "ready_for_review") | .next == "write_work_log"' "${COMPILE_OUT}" >/dev/null
 
-echo "==> Checking push_checkpoint still fails the run when the push never landed..."
-jq -e '.steps[] | select(.name == "push_checkpoint") | .outcomes[] | select(.name == "failure") | .next == "failed"' "${COMPILE_OUT}" >/dev/null
+echo "==> Checking push_checkpoint's failure routes into the preservation arm (push never lands via the loop)..."
+jq -e '.steps[] | select(.name == "push_checkpoint") | .outcomes[] | select(.name == "failure") | .next == "preserve_pending"' "${COMPILE_OUT}" >/dev/null
 
 echo "==> Checking develop keeps its visit bound and default catch-all..."
 # The compiler drops step-level "default" outcomes from its JSON (they are not
@@ -53,7 +53,7 @@ echo "==> Checking develop keeps its visit bound and default catch-all..."
 # assertion tolerates arbitrary body text, closes the arm explicitly, and
 # feeds a newline-flattened copy of the source so the regex works on both
 # BusyBox and GNU grep ([^}]* does not span newlines line-oriented).
-grep -Eq 'outcome "default"[[:space:]]*\{[^}]*next = step\.push_checkpoint[^}]*\}' <(tr '\n' ' ' < "${WORKFLOW_DIR}/main.chcl")
+grep -Eq 'outcome "default"[[:space:]]*\{[^}]*next = step\.preserve_pending[^}]*\}' <(tr '\n' ' ' < "${WORKFLOW_DIR}/main.chcl")
 grep -Eq 'max_visits = var\.max_agent_visits' "${WORKFLOW_DIR}/main.chcl"
 
 echo "==> All checks passed."

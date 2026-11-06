@@ -61,35 +61,35 @@ printf '%s' "$(grep -A2 'target = data\.internal\._log_file\.value' "${MAIN_CHCL
 # written exactly as shellquote would emit it — a single-quoted string with the
 # literal newline inside.
 
-ORIGIN="${WORK_DIR}/origin.git"
 REPO="${WORK_DIR}/repo"
 TICKET="CRI-295"
 
-# Recreate origin + clone from scratch; the script under test runs inside the
+# Local-only fixture (remaster ruling 1): NO remote is created — the verifier
+# under test must not need one for any arm.
 # clone (cwd of adapter.shell.sh) with origin pointing at the bare repo.
 reset_fixture() {
-    rm -rf "${ORIGIN}" "${REPO}"
-    git init --bare -q -b main "${ORIGIN}"
+    rm -rf "${REPO}"
     git init -q -b main "${REPO}"
     git -C "${REPO}" config user.email "test@example.com"
     git -C "${REPO}" config user.name "test"
-    git -C "${REPO}" remote add origin "${ORIGIN}"
-    printf 'base\n' > "${REPO}/base.txt"
+    printf 'base
+' > "${REPO}/base.txt"
     git -C "${REPO}" add -A
     git -C "${REPO}" commit -qm "base"
-    git -C "${REPO}" push -q -u origin main
     git -C "${REPO}" checkout -q -b "${TICKET}"
-    printf 'checkpoint work\n' > "${REPO}/work.txt"
+    printf 'checkpoint work
+' > "${REPO}/work.txt"
     git -C "${REPO}" add -A
     git -C "${REPO}" commit -qm "checkpoint work"
-    git -C "${REPO}" push -q origin "${TICKET}"
 }
 
-render_with_value() { # rendered_script branch_value base_value
-    local out="$1" value="$2" base="${3:-main}"
+render_with_value() { # rendered_script branch_value entry_sha_value
+    local out="$1" value="$2" entry="${3:-}"
     {
-        printf '%b\n' "criteria_value_1='${value}'"
-        printf 'criteria_value_2=%s\n' "$(printf '%s' "$base" | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/")"
+        printf '%b
+' "criteria_value_1='${value}'"
+        printf 'criteria_value_2=%s
+' "$(printf '%s' "$entry" | sed "s/'/'\''/g; s/^/'/; s/$/'/")"
         tail -n +3 "${TEMPLATE}"
     } > "${out}"
     chmod +x "${out}"
@@ -106,29 +106,29 @@ SCRIPT="${WORK_DIR}/verify_newline.sh"
 # Exact rendering of a value that is "CRI-295\n": the quote closes on the next
 # line, which is how the live failure embedded a line break into the error.
 render_with_value "${SCRIPT}" "${TICKET}
-"
+" "$(local_head)"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "newline-carrying branch value failed verification (CRI-295 false negative): ${out}"
-[[ "${out}" == *"checkpoint_pushed=$(local_head)"* ]] \
-    || fail "newline-carrying branch value did not report checkpoint_pushed: ${out}"
+[[ "${out}" == *"resumed_no_work=1"* ]] \
+    || fail "newline-carrying branch value did not hit the benign-resume arm: ${out}"
 echo "==> OK"
 
 echo "==> Scenario: CRI-295 regression — branch value carries leading whitespace"
 SCRIPT="${WORK_DIR}/verify_lead_ws.sh"
-render_with_value "${SCRIPT}" "  ${TICKET}"
+render_with_value "${SCRIPT}" "  ${TICKET}" "$(local_head)"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "whitespace-padded branch value failed verification: ${out}"
-[[ "${out}" == *"checkpoint_pushed=$(local_head)"* ]] \
-    || fail "whitespace-padded branch value did not report checkpoint_pushed: ${out}"
+[[ "${out}" == *"resumed_no_work=1"* ]] \
+    || fail "whitespace-padded branch value did not hit the benign-resume arm: ${out}"
 echo "==> OK"
 
-echo "==> Scenario: normal path — clean branch value still verifies"
+echo "==> Scenario: normal path — clean branch value, entry = HEAD -> benign resume"
 SCRIPT="${WORK_DIR}/verify_clean.sh"
-render_with_value "${SCRIPT}" "${TICKET}"
+render_with_value "${SCRIPT}" "${TICKET}" "$(local_head)"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
     || fail "clean branch value failed verification: ${out}"
-[[ "${out}" == *"checkpoint_pushed=$(local_head)"* ]] \
-    || fail "clean branch value did not report checkpoint_pushed: ${out}"
+[[ "${out}" == *"resumed_no_work=1"* ]] \
+    || fail "clean branch value did not hit the benign-resume arm: ${out}"
 echo "==> OK"
 
 echo "==> Scenario: loud failure preserved — whitespace-only branch value"
@@ -138,63 +138,37 @@ render_with_value "${SCRIPT}" "
 if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
     fail "expected failure for a whitespace-only branch value, got: ${out}"
 fi
-[[ "${out}" == *"checkpoint push verification: branch value is empty"* ]] \
+[[ "${out}" == *"checkpoint verification: branch value is empty"* ]] \
     || fail "expected the empty-branch signature, got: ${out}"
 echo "==> OK"
 
-echo "==> Scenario: KB-211 benign — branch missing, ZERO workstream commits: resume"
-# The turn-1 checkpoint shape: the agent named `checkpoint` with nothing pushed and
-# nothing committed beyond base. That is deterministic shell truth, not agent judgment:
-# exit 0 with resumed_no_work=1 (the workflow routes develop back with a correction
-# prompt), not a run-killing failure. Zero-work fixture: branch exists locally with no
-# commits beyond main (work.txt is UNTRACKED, not committed).
+echo "==> Scenario: benign resume — entry_sha == HEAD (nothing committed since entry)"
 SCRIPT="${WORK_DIR}/verify_benign.sh"
-git -C "${REPO}" checkout -q -B "${TICKET}-benign" main
-git -C "${REPO}" push -q origin --delete "${TICKET}" 2>/dev/null || true
-git -C "${REPO}" remote set-url origin "${ORIGIN}"
-printf 'uncommitted scratch\n' > "${REPO}/scratch.txt"
-render_with_value "${SCRIPT}" "${TICKET}-benign" "main"
+render_with_value "${SCRIPT}" "${TICKET}" "$(local_head)"
 out=$(cd "${REPO}" && bash "${SCRIPT}") \
-    || fail "benign no-work checkpoint should exit 0 (KB-211): ${out}"
+    || fail "benign resume should exit 0 (KB-211 re-based): ${out}"
 [[ "${out}" == *"resumed_no_work=1"* ]] \
-    || fail "benign no-work checkpoint did not report resumed_no_work=1: ${out}"
-rm -f "${REPO}/scratch.txt"
+    || fail "benign resume did not report resumed_no_work=1: ${out}"
 echo "==> OK"
 
-echo "==> Scenario: loud failure preserved — branch absent with UNPUSHED work (fatal)"
-# KB-211 fatal case: local commits beyond base exist but the push never landed —
-# continuing would run on work the next session cannot see. Exit 1 preserved.
-SCRIPT="${WORK_DIR}/verify_missing.sh"
-git -C "${REPO}" checkout -q -B "${TICKET}" main
-printf 'checkpoint work\n' > "${REPO}/work.txt"
-git -C "${REPO}" add -A
-git -C "${REPO}" commit -qm "checkpoint work"
-render_with_value "${SCRIPT}" "${TICKET}" "main"
-if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
-    fail "expected failure for unpushed commits, got: ${out}"
-fi
-[[ "${out}" == *"checkpoint push verification: remote branch ${TICKET} does not exist"* ]] \
-    || fail "expected the does-not-exist signature, got: ${out}"
-[[ "${out}" == *"unpushed commit(s)"* ]] \
-    || fail "the fatal signature must state the unpushed-commit count, got: ${out}"
-# A match spanning the whole sentence is only possible when the branch name is
-# clean: a newline-carrying value would break the line between the branch and
-# "does not exist" (the signature observed in the live failure).
-git -C "${REPO}" push -q origin "${TICKET}"
+echo "==> Scenario: committed work — entry_sha != HEAD -> checkpoint_local line"
+SCRIPT="${WORK_DIR}/verify_work.sh"
+render_with_value "${SCRIPT}" "${TICKET}" "$(git -C "${REPO}" rev-parse HEAD)"
+git -C "${REPO}" commit -q --allow-empty -m "post-entry work"
+out=$(cd "${REPO}" && bash "${SCRIPT}") \
+    || fail "committed-work case should exit 0 (push is upstream_sync's business): ${out}"
+[[ "${out}" == *"checkpoint_local=head:$(local_head) entry:"* ]] \
+    || fail "committed-work case did not report checkpoint_local: ${out}"
 echo "==> OK"
 
-echo "==> Scenario: loud failure preserved — diverged local and remote heads"
-# Amend by changing the tree: an empty amend inside the same second as the
-# prior commit can reproduce an identical sha (committer timestamp has
-# 1s granularity), which would not diverge at all.
-printf 'post-checkpoint note\n' > "${REPO}/note.txt"
-git -C "${REPO}" add -A
-git -C "${REPO}" commit -q --amend --no-edit
+echo "==> Scenario: loud failure preserved — empty entry_sha"
+SCRIPT="${WORK_DIR}/verify_noentry.sh"
+render_with_value "${SCRIPT}" "${TICKET}" ""
 if out=$(cd "${REPO}" && bash "${SCRIPT}" 2>&1); then
-    fail "expected failure for a diverged local/remote head, got: ${out}"
+    fail "expected failure for an empty entry_sha, got: ${out}"
 fi
-[[ "${out}" == *"checkpoint push verification: local $(local_head) != remote"* ]] \
-    || fail "expected the local != remote signature, got: ${out}"
+[[ "${out}" == *"entry_sha is empty"* ]] \
+    || fail "expected the empty-entry_sha signature, got: ${out}"
 echo "==> OK"
 
 echo "PASS: checkpoint branch trim verified"

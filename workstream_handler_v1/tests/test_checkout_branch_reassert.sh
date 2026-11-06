@@ -15,9 +15,10 @@
 #     carrying untracked scratch safely and preserving the branch's local
 #     (incl. unpushed) commits, and the loop completes both bodies;
 #   - the fast path (worktree already on the expected branch) is unchanged;
-#   - the re-assert is best-effort about origin: an unreachable/missing remote
-#     is reported (fetch_skipped=true) and the re-assert proceeds from the
-#     local ref;
+#   - the re-assert is LOCAL-ONLY (pair-loop remaster ruling 1): there is no
+#     fetch at all — branch_manager guarantees the branch exists locally, so
+#     even with origin removed the re-assert proceeds from the local ref and
+#     never touches the network;
 #   - a TRUE conflict (an untracked scratch file the expected branch tracks)
 #     still fails, with the observed mismatch signature preserved and a typed
 #     checkout_conflict=true reason carrying the unexpected ref — and the
@@ -157,7 +158,7 @@ grep -q "on_branch=${TICKET}" <<<"${out}" \
     || fail "next body entry did not fast-path: ${out}"
 echo "==> OK"
 
-echo "==> Scenario 4: origin unreachable (best-effort fetch) — re-assert proceeds locally"
+echo "==> Scenario 4: LOCAL-ONLY re-assert — no origin, no network, still re-asserts"
 FIX="${WORK_DIR}/s4"
 make_fixture "${FIX}"
 REPO="${FIX}/repo"
@@ -166,8 +167,9 @@ git -C "${REPO}" remote remove origin
 printf 'scratch\n' > "${REPO}/scratch.txt"
 out=$(cd "${REPO}" && bash "${FIX}/checkout_body.sh" 2>&1) \
     || fail "missing origin blocked the re-assert; the expected branch exists locally: ${out}"
-grep -q "fetch_skipped=true" <<<"${out}" \
-    || fail "missing origin was not reported: ${out}"
+if grep -q "fetch" <<<"${out}"; then
+    fail "re-assert must perform NO network surface (fetch retired by remaster ruling 1): ${out}"
+fi
 grep -q "reasserted_from=${DRIFTED}" <<<"${out}" \
     || fail "re-assert did not complete without origin: ${out}"
 [ "$(branch_of "${REPO}")" = "${TICKET}" ] || fail "re-assert (no origin) did not restore ${TICKET}"
