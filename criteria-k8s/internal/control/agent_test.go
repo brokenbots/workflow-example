@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -241,6 +242,67 @@ func TestAgentProcessFailClosedSurvivesFeedsOutage(t *testing.T) {
 	asg.WorkflowSource = "not the dispatch payload"
 	agent.process(context.Background(), asg)
 	assert.Empty(t, listCriteriaRuns(t, cl), "a feed failure on the fail-closed path must never stamp a run")
+}
+
+// TestAgentProcessReloadsRoutesBetweenAdmissions is the KB-354 regression
+// end-to-end through the assignment lane: the operator resolved the
+// assignment lane's routes payload ONCE at startup, so a post-repin
+// criteria-agent-routes ConfigMap kept stamping the stale
+// spec.workflowSource.ref into admitted runs until BOTH control-plane
+// pods restarted (the KB-322 false-close evidence chain). The lane must
+// re-read the mounted file per admission: the assignment admitted AFTER
+// the repin — same agent, same builder, no pod restart — carries the new
+// pin on both pin sites.
+func TestAgentProcessReloadsRoutesBetweenAdmissions(t *testing.T) {
+	ctx := context.Background()
+	routesFile := filepath.Join(t.TempDir(), "routes.json")
+	writePinnedRoutesFile(t, routesFile, kb322StalePin)
+
+	agent, _, cl := agentFixture(t)
+	agent.builder = &RunBuilder{
+		Defaults:   parityDefaults(),
+		Routes:     parityPayload(), // the startup snapshot, never re-read as the file source
+		RoutesFile: routesFile,
+		Client:     cl,
+		Namespace:  "criteria-jobs",
+		Log:        logr.Discard(),
+	}
+	agent.events = nil
+	agent.dispositions = nil // stamp-only posture: deliver never blocks
+
+	// Deterministic run names: the two admissions run inside one test
+	// second, and the shared "<ticket>-<unix>" seam would collide.
+	prevNow := nowUnix
+	next := int64(1770000000)
+	nowUnix = func() int64 { next++; return next }
+	t.Cleanup(func() { nowUnix = prevNow })
+
+	agent.process(ctx, assignmentFixture("run-repin-1"))
+
+	runs := listCriteriaRuns(t, cl)
+	require.Len(t, runs, 1)
+	require.NotNil(t, runs[0].Spec.WorkflowSource)
+	assert.Equal(t, kb322StalePin, runs[0].Spec.WorkflowSource.Ref,
+		"the pre-repin admission stamps the pin the mount held at boot")
+
+	// The repin: only the mounted file changes — the ConfigMap apply the
+	// 2026-11-04 evidence chain observed (d2442bd -> 7f2149cd on both the
+	// url ?ref= and the per-entry ref key). No pod restart, no builder
+	// rewire, the same agent instance keeps consuming assignments.
+	writePinnedRoutesFile(t, routesFile, kb322RepinnedPin)
+	agent.process(ctx, assignmentFixture("run-repin-2"))
+
+	runs = listCriteriaRuns(t, cl)
+	require.Len(t, runs, 2)
+	require.NotNil(t, runs[1].Spec.WorkflowSource)
+	assert.Equal(t, kb322RepinnedPin, runs[1].Spec.WorkflowSource.Ref,
+		"the post-repin admission must stamp the pin the CM currently carries: a restart must not be required")
+	assert.Contains(t, runs[1].Spec.WorkflowSource.URL, "ref="+kb322RepinnedPin,
+		"the url's ?ref= pin site carries the repin too (the second pin site the evidence chain read back)")
+	assert.Equal(t, kb322StalePin, runs[0].Spec.WorkflowSource.Ref,
+		"the earlier admission keeps its stamp: a reload never re-stamps history (runs[0] is by name older)")
+	// The snapshot itself stays untouched: the lane re-reads the file.
+	assert.Equal(t, "main", agent.builder.Routes.WorkflowLibrary["kanboard-develop-url"].Ref)
 }
 
 func TestAgentProcessStampsProvenanceAndTargets(t *testing.T) {
