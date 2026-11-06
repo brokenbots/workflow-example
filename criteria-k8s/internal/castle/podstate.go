@@ -33,6 +33,13 @@ const (
 	podStateBackoffBase    = 250 * time.Millisecond
 	podStateBackoffMax     = 2 * time.Second
 	podStateSignalTTL      = 24 * time.Hour
+	// podStateSkipLogTTL bounds how often one scope-less report is noted at
+	// Info level per (run, scope) key (KB-361): a scope-less report is
+	// structurally unjoinable, so re-noting it on every reconcile would
+	// recreate the per-second error flood the bounded skip replaces. One
+	// operator-visible note per key and window; in between the skip is
+	// debug-logged with the running count.
+	podStateSkipLogTTL = time.Hour
 )
 
 // PodStateFeedConfig configures the pod-state feed.
@@ -63,6 +70,13 @@ type PodStateFeedConfig struct {
 // (deduped per scope on phase + reason), so a healthy pod emits exactly one
 // event once it starts dialing, and a stuck pod emits one event per
 // distinct observed wait state.
+//
+// Reports whose scope identity resolves empty are never submitted (KB-361):
+// no consumer can join them to a session wait, so retrying would loop
+// forever and the fail/re-emit design would wedge the lane on the
+// unjoinable reports. They are bounded-skipped instead and noted
+// rate-limited, while the rest of the lane keeps reporting the joinable
+// scopes.
 type PodStateFeed struct {
 	addr   string
 	token  string
@@ -73,18 +87,40 @@ type PodStateFeed struct {
 	maxAttempts    int
 	backoffBase    time.Duration
 
-	// mu guards last: "runID/scopeKey" -> the last accepted phase|reason
-	// signal with its accept time. Keyed per run so concurrent runs sharing
-	// scope identities never suppress each other's reports.
-	mu        sync.Mutex
-	last      map[string]podStateSignalState
-	signalTTL time.Duration
+	// mu guards last and skips: "runID/scopeKey" -> the last accepted
+	// phase|reason signal with its accept time, keyed per run so concurrent
+	// runs sharing scope identities never suppress each other's reports.
+	mu         sync.Mutex
+	last       map[string]podStateSignalState
+	signalTTL  time.Duration
+	skips      map[string]podStateSkipState
+	skipLogTTL time.Duration
 }
 
 // podStateSignalState is the last accepted emit for one (run, scope) key.
 type podStateSignalState struct {
 	signal string
 	at     time.Time
+}
+
+// podStateSkipLog is one bounded skip observed in a reconcile pass: the
+// scope-less report plus the state needed to log it rate-limited after the
+// lock is released.
+type podStateSkipLog struct {
+	event events.PodStateReport
+	count int
+	// noted is true when the key crossed the skip-log TTL window in this
+	// pass and the caller must log at Info level; in-between passes remain
+	// debug-level.
+	noted bool
+}
+
+// podStateSkipState is the bounded-skip ledger for one (run, scope) key:
+// how many scope-less reports that key has seen since its last operator
+// note (rides the next note) and when that note was made.
+type podStateSkipState struct {
+	count  int
+	logged time.Time
 }
 
 // NewPodStateFeed builds a feed. A nil httpClient defaults to a cleartext
@@ -110,6 +146,8 @@ func NewPodStateFeed(cfg PodStateFeedConfig, httpClient *http.Client) *PodStateF
 		backoffBase:    podStateBackoffBase,
 		last:           map[string]podStateSignalState{},
 		signalTTL:      podStateSignalTTL,
+		skips:          map[string]podStateSkipState{},
+		skipLogTTL:     podStateSkipLogTTL,
 	}
 }
 
@@ -189,7 +227,8 @@ func PodStateEventEnvelope(runID string, report events.PodStateReport) (*v1.Enve
 // healthy path emits once per state a pod moves through); failures are
 // logged and retried on the next reconcile pass — Emit never returns an
 // error and never blocks reconciliation for more than its bounded retry
-// budget per changed scope.
+// budget per changed scope. Scope-less reports are bounded-skipped (see the
+// KB-361 contract on the type).
 func (f *PodStateFeed) Emit(ctx context.Context, runID string, reports []events.PodStateReport, logger logr.Logger) {
 	if f.Disabled() || runID == "" {
 		return
@@ -198,9 +237,27 @@ func (f *PodStateFeed) Emit(ctx context.Context, runID string, reports []events.
 	// Choose changed reports under one lock, then submit outside it.
 	now := time.Now()
 	pending := make([]events.PodStateReport, 0, len(reports))
+	skipped := make([]podStateSkipLog, 0, len(reports))
 	f.mu.Lock()
 	f.pruneStaleLocked(now)
 	for _, report := range reports {
+		if report.ScopeID == "" {
+			// Bounded skip (KB-361): without a scope instance no
+			// consumer can join the report, so submitting would fail
+			// validation deterministically and the fail/re-emit design
+			// would loop forever. Count and note rate-limited instead;
+			// the joinable scopes in the same pass still emit.
+			key := runID + "/" + report.ScopeKey()
+			state := f.skips[key]
+			state.count++
+			noted := state.logged.IsZero() || now.Sub(state.logged) >= f.skipLogTTL
+			if noted {
+				state.logged = now
+			}
+			f.skips[key] = state
+			skipped = append(skipped, podStateSkipLog{event: report, count: state.count, noted: noted})
+			continue
+		}
 		key := runID + "/" + report.ScopeKey()
 		signal := report.PodStateSignal()
 		if f.last[key].signal == signal {
@@ -209,6 +266,20 @@ func (f *PodStateFeed) Emit(ctx context.Context, runID string, reports []events.
 		pending = append(pending, report)
 	}
 	f.mu.Unlock()
+
+	for _, skipLog := range skipped {
+		const reason = "skipping pod-state report: no scope instance to join (bounded skip)"
+		fields := []any{
+			"run", runID, "pod", skipLog.event.Pod,
+			"adapter", skipLog.event.AdapterName, "adapter_type", skipLog.event.AdapterType,
+			"scope_name", skipLog.event.ScopeName, "count", skipLog.count,
+		}
+		if skipLog.noted {
+			logger.Info(reason, fields...)
+		} else {
+			logger.V(1).Info(reason, fields...)
+		}
+	}
 
 	for _, report := range pending {
 		if err := f.emit(ctx, runID, report); err != nil {
@@ -234,14 +305,20 @@ func (f *PodStateFeed) Emit(ctx context.Context, runID string, reports []events.
 	}
 }
 
-// pruneStaleLocked drops dedupe entries whose accept time is older than the
-// TTL so the map stays bounded over the operator's lifetime. A dropped
-// entry only causes one benign re-emit of the scope's current state on its
-// next reconcile pass.
+// pruneStaleLocked drops dedupe and bounded-skip entries whose last touch
+// is older than the TTL so both maps stay bounded over the operator's
+// lifetime. A dropped dedupe entry only causes one benign re-emit of the
+// scope's current state on its next reconcile pass; a dropped skip ledger
+// re-arms one Info-level note for the key.
 func (f *PodStateFeed) pruneStaleLocked(now time.Time) {
 	for key, state := range f.last {
 		if now.Sub(state.at) > f.signalTTL {
 			delete(f.last, key)
+		}
+	}
+	for key, state := range f.skips {
+		if now.Sub(state.logged) > f.signalTTL {
+			delete(f.skips, key)
 		}
 	}
 }

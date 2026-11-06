@@ -14,6 +14,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/http2"
@@ -283,6 +284,68 @@ func TestPodStateFeedPrunesStaleSignals(t *testing.T) {
 	// refreshed by the re-emit above, so the same signal dedupes again.
 	feed.Emit(ctx, "run-1", []events.PodStateReport{pending}, logger)
 	assert.Equal(t, 2, stub.received("run-1"))
+}
+
+// TestPodStateFeedSkipsScopeLessReports is the KB-361 convergence
+// regression: a report whose scope identity resolves empty (the kb-146 /
+// kb-159 / kb-171 signature — a KB-253 synthetic manifest member observed
+// with AdapterType set but ScopeID "") must NEVER be submitted — the
+// envelope would fail validation, dedupe state would never advance, and
+// the fail/re-emit design would loop forever. It converges instead: the
+// skip is counted and noted rate-limited (one Info note per skip-log TTL
+// window, debug otherwise), while joinable scopes in the same pass still
+// emit and the lane self-recovers once a scope resolves.
+func TestPodStateFeedSkipsScopeLessReports(t *testing.T) {
+	stub := &podStateCriteriaStub{envelopes: map[string][]*v1.Envelope{}}
+	url := newPodStateTestServer(t, stub)
+	feed := podStateEmitTestFeed(t, url, "shared-castle-token", true)
+	feed.skipLogTTL = time.Hour // no re-note within the assertion window
+	var notes []string
+	logger := funcr.NewJSON(func(obj string) { notes = append(notes, obj) }, funcr.Options{})
+
+	ctx := context.Background()
+	// The wedged-run-shaped unjoinable member: adapter identity present,
+	// scope instance empty.
+	joined := podStateTestReport(events.PodPhasePending, "Unschedulable")
+	scopeless := podStateTestReport(events.PodPhasePending, "Unschedulable")
+	scopeless.ScopeID = ""
+	require.Error(t, scopeless.Validate())
+
+	// Pass 1: the joinable report emits; the scope-less one is skipped and
+	// noted once.
+	feed.Emit(ctx, "run-1", []events.PodStateReport{joined, scopeless}, logger)
+	assert.Equal(t, 1, stub.received("run-1"), "only the joinable report submits")
+	emitted := stub.envelopesFor("run-1")
+	assert.Equal(t, "dev-001",
+		emitted[0].GetAdapterEvent().GetData().AsMap()["scope_instance_id"])
+	require.Len(t, notes, 1, "the first pass notes the skip at Info level")
+	assert.Contains(t, notes[0], "bounded skip")
+
+	// Passes 2 and 3: repeated reconcile passes keep converging — no
+	// resubmission of the skipped report and no re-note inside the TTL
+	// window (no operator-log flood, no reject/re-emit loop).
+	feed.Emit(ctx, "run-1", []events.PodStateReport{scopeless}, logger)
+	feed.Emit(ctx, "run-1", []events.PodStateReport{scopeless}, logger)
+	assert.Equal(t, 1, stub.received("run-1"),
+		"the unjoinable report never submits no matter how many passes re-emit it")
+	assert.Len(t, notes, 1, "in-window passes keep the skip note at debug level")
+
+	// The lane self-recovers by design: as soon as the same member resolves
+	// a scope instance, its report emits normally.
+	resolved := scopeless
+	resolved.ScopeID = "dev-002"
+	require.NoError(t, resolved.Validate())
+	feed.Emit(ctx, "run-1", []events.PodStateReport{resolved}, logger)
+	assert.Equal(t, 2, stub.received("run-1"),
+		"once the member resolves a scope instance the report joins its session wait")
+
+	// The note re-arms after the skip-log TTL window elapses (rate-limited,
+	// one per window — not one per fail/re-emit pass).
+	feed.skipLogTTL = time.Millisecond
+	time.Sleep(2 * time.Millisecond)
+	feed.Emit(ctx, "run-1", []events.PodStateReport{scopeless}, logger)
+	assert.Equal(t, 2, stub.received("run-1"))
+	assert.Len(t, notes, 2, "outside the TTL window the skip notes again at Info level")
 }
 
 func TestPodStateFeedBestEffortRetries(t *testing.T) {

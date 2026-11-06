@@ -403,6 +403,33 @@ func TestPerScopePeerPodNameJobName33StillSeparatesEnvironments(t *testing.T) {
 	assert.Len(t, names, 3, "develop/worktree/primary groups each get a DISTINCT name")
 }
 
+// KB-361 fingerprint pin: the peer pod names on the failing kb-146 / kb-159
+// / kb-171 runs all carry the constant `e3b0c44298fc` segment —
+// sha256("")[...12] — because the controller passes the EMPTY scope id to
+// the peer-name derivation BY DESIGN (KB-346: the name discriminates on the
+// environment hash alone; a per-scope peer pod hosts every scope instance
+// of its environment). This pins the exact live shape so a future rename of
+// the derivation is caught, and rules the naming shape out as the source of
+// the empty scope_instance_id the pod-state wedge chased: the wedge was the
+// unprovisioned KB-253 graph members' reports, not pod-name parsing.
+func TestPerScopePeerPodNameEmptyScopeShapesKB146PeerPods(t *testing.T) {
+	require.Equal(t, "e3b0c44298fc", hash12(""),
+		"the constant 12-hex fingerprint of the empty scope id: sha256(\"\")[0:12]")
+
+	run := &criteriav1.CriteriaRun{ObjectMeta: metav1.ObjectMeta{Name: "kb-146-1793884612-1c1382"}}
+	names := make(map[string]struct{}, 3)
+	for _, environment := range []string{"remote/develop", "remote/worktree", "remote/primary"} {
+		name := jobbuilder.PerScopePeerPodName(run, "", environment)
+		assert.LessOrEqual(t, len(name), 63)
+		assert.Regexp(t, `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, name)
+		assert.Equal(t,
+			"kb-146-1793884612-1c1382-peer-e3b0c44298fc-"+hash12(environment), name,
+			"the kb-146-observed shape: <job>-peer-<hash12(\"\")>-<hash12(env)>")
+		names[name] = struct{}{}
+	}
+	assert.Len(t, names, 3, "each environment's peer pod stays distinct under the empty scope id")
+}
+
 func TestBuildPerScopePeerPodEmptyMembersNil(t *testing.T) {
 	run := groupTestRun()
 	assert.Nil(t, jobbuilder.BuildPerScopePeerPod(run, jobbuilder.Defaults{}, "scope-a", "ci", nil, "10.0.0.10"))
