@@ -135,6 +135,46 @@ func TestPodStateEventEnvelopeValidation(t *testing.T) {
 	require.Error(t, err)
 	_, err = PodStateEventEnvelope("", podStateTestReport(events.PodPhaseRunning, ""))
 	require.Error(t, err)
+	// KB-353 acceptance: the empty scope_instance_id report — the shape the
+	// root-scope / unprovisioned graph-member pods produced on every
+	// reconcile — must fail the envelope gate with the exact captured
+	// rejection text (the operator's own Validate; the castle SubmitEvents
+	// gate is never reached for this shape).
+	noScope := podStateTestReport(events.PodPhaseRunning, "")
+	noScope.ScopeID = ""
+	_, err = PodStateEventEnvelope("run-1", noScope)
+	require.EqualError(t, err, "pod-state report: empty scope_instance_id")
+}
+
+// TestPodStateFeedEmitRejectsEmptyScopeInstanceID is the KB-353 acceptance
+// test mirroring the live pod-state wedge rejection. The captured runs
+// (kb-136 7c1c9d77, kb-140 c65721f7, kb-141 55a4d887, kb-142 f6673a03,
+// kb-149 588e1230, kb-150 6e771fec, kb-151 3bdb62da, kb-159 77166564)
+// flooded the operator log with exactly
+// "castle podstate: pod-state report: empty scope_instance_id": the report
+// built for a scope-less member fails the operator's own envelope
+// validation, the submit retry re-wraps the same rejection after every
+// bounded attempt, dedupe state never advances, and the next reconcile
+// re-emits — forever.
+//
+// The emit path no longer produces scope-less reports (KB-361: podStateReports
+// skips them, Emit bounded-skips any that still arrive), so this rejection is
+// now reachable only through the submit path itself — this test drives it
+// directly (bypassing the emit-side skip on purpose) to pin the rejection's
+// exact observable shape and prove a rejected report never reaches castle.
+func TestPodStateFeedEmitRejectsEmptyScopeInstanceID(t *testing.T) {
+	stub := &podStateCriteriaStub{envelopes: map[string][]*v1.Envelope{}}
+	url := newPodStateTestServer(t, stub)
+	feed := podStateEmitTestFeed(t, url, "shared-castle-token", true)
+
+	scopeless := podStateTestReport(events.PodPhasePending, "Unschedulable")
+	scopeless.ScopeID = ""
+
+	err := feed.emit(context.Background(), "run-1", scopeless)
+	require.EqualError(t, err, "castle podstate: pod-state report: empty scope_instance_id",
+		"the retry-wrapped rejection must match the live operator-log signature")
+	assert.Zero(t, stub.received("run-1"),
+		"a report the envelope gate rejects must never reach castle's SubmitEvents")
 }
 
 // TestPodStateEventEnvelopeSchemaVersion pins the envelope's event protocol
