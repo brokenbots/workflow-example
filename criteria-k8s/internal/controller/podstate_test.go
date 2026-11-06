@@ -150,6 +150,55 @@ func TestPodStateReportsSkipsUnreportableMembers(t *testing.T) {
 		map[string][]events.LifecycleEvent{}, time.Now(), logr.Discard()))
 }
 
+// TestPodStateReportsSkipsScopelessMembers is the KB-361 derivation
+// regression: a KB-253 synthetic graph member (manifest shape: adapter
+// identity and digest pinned, scope instance empty — it has never provisioned
+// so there is no session to report state for) must produce NO pod-state
+// report. Emitting one would resolve an empty scope_instance_id, fail
+// envelope validation every reconcile, and wedge the lane in the
+// fail/re-emit loop the kb-146/kb-159/kb-171 runs lived on.
+func TestPodStateReportsSkipsScopelessMembers(t *testing.T) {
+	// The exact unprovisioned-declaration shape from the failing runs: a
+	// graph-completion member derived from the compiled graphs payload.
+	syntheticMember := syntheticManifestMember(graphAdapterDef{
+		Type:         "copilot",
+		Name:         "branch_repair",
+		Environment:  "remote.worktree",
+		PinnedDigest: "sha256:bbbb",
+	})
+	require.Equal(t, "", syntheticMember.ScopeID,
+		"the wedge precondition: a manifest member carries no scope instance")
+	require.Equal(t, "provision_wanted", syntheticMember.Event)
+
+	// Sharing one peer pod with a provisioned member is the kb-146 norm.
+	provisioned := groupProvision("coordinator", "copilot", "scope-a", "remote/worktree")
+	provisioned.ScopeTag = "develop"
+	const podName = "cri-234-peer-e3b0c44298fc-a14c03cda2b2"
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	reports := podStateReports(
+		&corev1.PodList{Items: []corev1.Pod{pod}},
+		map[string][]events.LifecycleEvent{podName: {syntheticMember, provisioned}},
+		time.Now(), logr.Discard())
+
+	require.Len(t, reports, 1, "only the provisioned member produces a report")
+	require.NoError(t, reports[0].Validate(),
+		"every report must join a scope instance (Validate accepts: scope_instance_id non-empty)")
+	assert.Equal(t, "scope-a", reports[0].ScopeID)
+	assert.Equal(t, "copilot/develop/scope-a", reports[0].ScopeKey())
+	assert.Equal(t, podName, reports[0].Pod)
+
+	// The same pod with ONLY synthetic members reports nothing at all.
+	reports = podStateReports(
+		&corev1.PodList{Items: []corev1.Pod{pod}},
+		map[string][]events.LifecycleEvent{podName: {syntheticMember}},
+		time.Now(), logr.Discard())
+	assert.Empty(t, reports, "a pod hosting only manifest-shaped members has no reportable session")
+}
+
 func TestPodStateReportsOnePerPeerMember(t *testing.T) {
 	// A peer pod hosts two members of one (scope, environment) group — the
 	// KB-214 norm (intake/shell and review/copilot share one manifest). One
@@ -468,4 +517,96 @@ func TestReconcileEmitsPodStateForEveryPeerMember(t *testing.T) {
 	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", events, nil, logr.Discard())
 	require.NoError(t, err)
 	assert.Equal(t, 2, stub.received("castle-run-1"))
+}
+
+// TestReconcilePodStateSkipsUnprovisionedGraphMembers is the KB-361
+// end-to-end regression for the kb-146 / kb-159 / kb-171 wedge: a run whose
+// compiled graph declares definitions that have NOT provisioned yet carries
+// synthetic manifest members on the same peer pod as a provisioned scope
+// (the failing runs showed copilot/sh/repo members on one pod). Every
+// reconcile pass must emit exactly the JOINABLE scope's report — repeated
+// passes must converge with no wedge loop — and a late provision must
+// rejoin its own real scope id normally.
+func TestReconcilePodStateSkipsUnprovisionedGraphMembers(t *testing.T) {
+	feed, stub := podStateTestFeed(t)
+	run := perScopeTestRun(true)
+	r, cl := newPerScopeTestReconciler(t, run, groupRunnerPod(run, "10.0.0.10"))
+	r.PodState = feed
+
+	ctx := context.Background()
+	prov := groupProvision("coordinator", "copilot", "scope-a", "remote/worktree")
+	prov.Digest = "sha256:aaaa"
+	graphs := graphsPayload(t, []map[string]any{
+		{"type": "copilot", "name": "coordinator", "environment": "remote.worktree", "pinned_digest": "sha256:aaaa"},
+		{"type": "copilot", "name": "branch_repair", "environment": "remote.worktree", "pinned_digest": "sha256:bbbb"},
+	})
+
+	// Pass 1 boots the pod with the graph-complete manifest.
+	created, err := r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{prov}, graphs, logr.Discard())
+	require.NoError(t, err)
+	require.Equal(t, 1, created)
+	assert.Zero(t, stub.received("castle-run-1"), "nothing observed yet")
+
+	pods := listAdapterRolePods(t, cl, "default")
+	require.Len(t, pods, 1)
+
+	// Pin the kb-146 / kb-171 pod naming shape: the controller passes the
+	// EMPTY scope id to the peer-name derivation BY DESIGN (KB-346: the pod
+	// name discriminates on the environment hash alone), so every root-scope
+	// peer pod hashes sha256("")[...12] = e3b0c44298fc into its name. This is
+	// NOT the source of the empty scope_instance_id — the wedge was the
+	// unprovisioned graph member's report, and the naming shape is a red
+	// herring the task's hypothesis chased.
+	assert.Contains(t, pods[0].Name, "-peer-e3b0c44298fc-",
+		"peer pod names carry the constant empty-scope hash segment by design (KB-346)")
+
+	pod := pods[0].DeepCopy()
+	const stuck = "0/4 nodes are available"
+	pod.Status = corev1.PodStatus{
+		Phase: corev1.PodPending,
+		Conditions: []corev1.PodCondition{
+			{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: stuck},
+		},
+	}
+	require.NoError(t, cl.Status().Update(ctx, pod))
+
+	// Pass 2: exactly ONE envelope — the provisioned scope's. The synthetic
+	// branch_repair member (copilot, unprovisioned, no scope instance) is
+	// skipped instead of failing validation forever.
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{prov}, graphs, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, stub.received("castle-run-1"))
+	data := stub.dataFor(t, "castle-run-1", 0)
+	assert.Equal(t, "scope-a", data["scope_instance_id"], "only the joinable scope reports")
+	assert.Equal(t, "copilot", data["adapter_type"])
+	assert.Equal(t, pod.Name, data["pod"])
+
+	// Pass 3 and 4: repeated passes converge — no reject/re-emit loop.
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{prov}, graphs, logr.Discard())
+	require.NoError(t, err)
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", []events.LifecycleEvent{prov}, graphs, logr.Discard())
+	require.NoError(t, err)
+	assert.Equal(t, 1, stub.received("castle-run-1"),
+		"the unjoinable member's pass must NOT wedge the lane: no re-emit, no loop")
+
+	// The run recovers by design: once branch_repair provisions, its scope
+	// joins normally and reports under its own real scope id (coordinator's
+	// signal is unchanged, so its dedupe holds).
+	late := groupProvision("branch_repair", "copilot", "scope-b", "remote/worktree")
+	late.Digest = "sha256:bbbb"
+	history := append([]events.LifecycleEvent{prov}, late)
+	_, err = r.reconcilePerScopeAdapters(ctx, run, "castle-run-1", history, graphs, logr.Discard())
+	require.NoError(t, err)
+	joined := stub.received("castle-run-1")
+	assert.Equal(t, 2, joined, "the late-provisioned scope reports once: a new joinable signal")
+
+	secondScopeReported := false
+	for i := 1; i < joined; i++ {
+		d := stub.dataFor(t, "castle-run-1", i)
+		if d["scope_instance_id"] == "scope-b" {
+			secondScopeReported = true
+			assert.Equal(t, "Pending", d["phase"], "branch_repair reports its own session's state")
+		}
+	}
+	assert.True(t, secondScopeReported, "the late-provisioned scope reports under its real scope id")
 }
