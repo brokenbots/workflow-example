@@ -39,6 +39,10 @@
 #
 # Routing assertions run against the compiled graph; write and prompt
 # semantics are not serialized, so they are asserted on the workflow source.
+#
+# KB-151 (brief supersedence): the converge_on_state arm now also stamps
+# developer_feedback, so the branch_manager_final_say step block carries two
+# developer_feedback writes (hand_off + converge_on_state).
 
 set -euo pipefail
 
@@ -197,10 +201,10 @@ fi
 echo "==> Checking the hand-off brief travels the developer_feedback boundary..."
 brief_count="$(printf '%s' "$step_block" | grep -c 'target = data.internal.developer_feedback.value')"
 last_brief="$(printf '%s' "$step_block" | grep -c 'target = data.internal.last_hand_off_brief.value')"
-if [ "$brief_count" -eq 1 ] && [ "$last_brief" -eq 1 ]; then
-    ok "the hand_off arm re-briefs developer_feedback and records last_hand_off_brief (KB-262 pattern)"
+if [ "$brief_count" -eq 2 ] && [ "$last_brief" -eq 1 ]; then
+    ok "hand_off re-briefs developer_feedback and records last_hand_off_brief (KB-262); converge_on_state stamps the manager's verdict as the latest validated state (KB-151)"
 else
-    fail "hand_off arm does not write the brief to developer_feedback + last_hand_off_brief (found $brief_count/$last_brief)"
+    fail "hand_off + converge_on_state arms do not write the brief to developer_feedback + last_hand_off_brief (found $brief_count/$last_brief)"
 fi
 
 echo "==> Checking the manager's default verdict stays terminal..."

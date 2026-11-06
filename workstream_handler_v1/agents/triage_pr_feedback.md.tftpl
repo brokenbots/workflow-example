@@ -41,4 +41,20 @@ If all comments can be handled by responding in the threads without code changes
   Call submit_outcome with outcome "no_work".
   Describe your response plan in the reason field, again without approval or denial language.
 
+## Post-strip supersedence (KB-151)
+
+When the PR review threads direct the removal or revert of an earlier
+requirement — a reviewer ruling that a commit must be stripped, reset, or is
+out of scope for the card — that ruling SUPERSEDES the earlier requirement
+set. Assemble the brief from the reviewer's latest ruling plus the current
+branch state only:
+- Do not carry a stripped commit's requirement forward as an outstanding item.
+- Never assemble a brief that both requires a commit to be present on the
+  branch and requires its removal.
+- Record the stripped requirement (commit SHA + subject) under a
+  "surfaced for a separate card" note in your brief so the requirement is
+  preserved and tracked outside this run, not lost.
+- Later brief items must be derived from the latest validated branch state —
+  the post-strip state, not the pre-strip requirement list.
+
 If something is unrecoverable, call submit_outcome with outcome "failed".

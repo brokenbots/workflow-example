@@ -1157,7 +1157,13 @@ step "triage_pr_feedback" {
     }
     outcome "no_work" {
         schema = object({ reason = string })
+        // KB-151: the response plan is the latest validated requirement set on
+        // this path — stamp it so push_and_respond never carries a stale brief.
         next = step.push_and_respond
+        write {
+            target = data.internal.developer_feedback.value
+            value  = output.reason
+        }
     }
     outcome "failed" {
         schema = object({ reason = string })
@@ -1209,7 +1215,14 @@ step "branch_manager_final_say" {
     }
     outcome "converge_on_state" {
         next   = step.push_and_respond
+        // KB-151: the convergence verdict is the latest validated requirement
+        // set on this path (round budget spent) — stamp it so the push step
+        // carries the manager's verified state, never a stale round's brief.
         schema = object({ reason = string })
+        write {
+            target = data.internal.developer_feedback.value
+            value  = output.reason
+        }
     }
     // KB-267: the blocker is developer-actionable — emit the typed
     // remediation brief and hand it back to the develop leg through a
@@ -1419,6 +1432,16 @@ switch "validate_round_check_route" {
 // On needs_work, updates data.internal.developer_feedback with what is still missing
 // so the developer gets a targeted brief on the next pass.
 
+// KB-151: the standing brief must always hold the LATEST validated requirement
+// set. Every arm that verdicts the branch state (validated approval, no-work
+// triage plan, branch-manager convergence) re-stamps developer_feedback before
+// push_and_respond, so a reviewer-directed strip/reset of an earlier-required
+// commit supersedes the stale carry-requirements instead of co-existing with
+// them — no consumer downstream of this stamp can re-require a stripped commit.
+// push_and_respond's prompt re-derives its requirement set from that stamp and
+// is forbidden from re-judging requirements in its own (shared coordinator)
+// session context.
+
 step "validate_developer_response" {
     target      = adapter.copilot.coordinator
     allow_tools = ["*"]
@@ -1431,8 +1454,16 @@ step "validate_developer_response" {
     }
 
     outcome "approved" {
+        // KB-151: the approved verdict IS the latest validated requirement set
+        // (post-changes_requested mutations included). Re-stamp the standing
+        // brief with it so a reviewer-directed strip supersedes pre-strip
+        // carry-requirements everywhere downstream.
         schema = object({ reason = string })
         next = step.push_and_respond
+        write {
+            target = data.internal.developer_feedback.value
+            value  = output.reason
+        }
     }
     outcome "needs_work" {
         next = step.run_pair_programming_loop_with_feedback
@@ -1484,6 +1515,14 @@ step "push_and_respond" {
             pr_url = data.internal.pr_url.value
             branch = data.internal.branch.value
             helper = file("./scripts/_github_token_git_credentials.sh.tftpl")
+            // KB-151: push_and_respond shares the coordinator session with the
+            // validation steps, so earlier rounds' brief items ride its
+            // context. Its requirement set is re-derived from the LATEST
+            // validated state (re-stamped on every entry path above) instead —
+            // a reviewer-directed strip/reset supersedes earlier
+            // carry-requirements, and re-judgment (e.g. a needs_work verdict)
+            // is invalid on an already-validated state.
+            validated_state = data.internal.developer_feedback.value
         })
     }
 
