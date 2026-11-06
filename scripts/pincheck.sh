@@ -7,7 +7,8 @@
 #   A. adapters.chcl version literals == releases.chcl manifest
 #   B. no stale hardcoded adapter refs in CI/test guards
 #   C. lockfile freshness: every tree compiles strict against its current lockfile
-#   D. routes CM alignment (delegates to routes-sync.sh --check when reachable)
+#   D. routes CMs alignment — criteria-routes + criteria-agent-routes (KB-352);
+#      delegates to routes-sync.sh --check when reachable
 #   E. routes CM global run-config staleness (KB-313, ADR 307): a post-cutover
 #      payload (every projectRegistry entry cutover:done) that still carries
 #      volumes/secrets/env/adapterImages on workflowLibrary entries is a CI
@@ -100,13 +101,12 @@ done < <(git ls-files | grep -E '/$|^[^/]+$' | grep -E '^[a-z_]+_v[0-9]+$' | sor
 rm -f "$ERRF"
 if [ "$FAILED" = "$C_BEFORE" ]; then note "C: no lockfile lag in any tree"; fi
 
-# -- D: routes CM (skip cleanly off-cluster)
-D_BEFORE=$FAILED
+# -- D: routes CMs (skip cleanly off-cluster)
 if command -v kubectl >/dev/null 2>&1 && kubectl -n criteria-jobs get cm criteria-routes >/dev/null 2>&1; then
     if ./scripts/routes-sync.sh --check >/dev/null 2>&1; then
-        note "D: routes CM in sync with HEAD"
+        note "D: routes CMs in sync with HEAD (criteria-routes + criteria-agent-routes)"
     else
-        bad "routes CM drifted from HEAD (run 'make routes-sync')"
+        bad "routes CMs drifted from HEAD — criteria-routes and/or criteria-agent-routes stale (run 'make routes-sync')"
     fi
 else
     note "D: routes CM check skipped (no cluster access)"

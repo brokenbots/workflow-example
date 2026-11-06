@@ -213,6 +213,8 @@ test: validate test-criteria-k8s
 	./k8s/tests/test_kanboard_watcher_watchdog.sh
 	@echo "Running routes ConfigMap schema regression test (CRI-216)..."
 	./k8s/tests/test_routes_config.sh
+	@echo "Running routes-sync dual-CM pin alignment regression test (KB-352)..."
+	./k8s/tests/test_routes_sync.sh
 	@echo "Running pincheck class E routes staleness regression test (KB-313)..."
 	./k8s/tests/test_pincheck_routes_class.sh
 	@echo "Running castle verification harness regression test (KB-342)..."
@@ -276,6 +278,7 @@ lint: lint-go
 		k8s/tests/test_criteria_k8s_chart.sh \
 		k8s/tests/test_kanboard_watcher_watchdog.sh \
 		k8s/tests/test_routes_config.sh \
+		k8s/tests/test_routes_sync.sh \
 		k8s/tests/test_pincheck_routes_class.sh \
 		k8s/tests/test_castle_verify.sh \
 		k8s/tests/test_criteria_binding.sh \
@@ -298,6 +301,7 @@ lint: lint-go
 		k8s/tests/test_harness_expectations.sh \
 		harness_wire_v1/tests/test_wire_standalone.sh \
 		scripts/platform/platformctl \
+		scripts/routes-sync.sh \
 		tests/test_platform_setup.sh
 
 # The Go lint leg. Full-CI gate lines invoke `make lint-go` explicitly
