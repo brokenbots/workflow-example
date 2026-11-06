@@ -379,6 +379,10 @@ step "delivery_fingerprint" {
     input {
         command = templatefile("./scripts/delivery_fingerprint.sh.tftpl", {
             criteria_value_1 = basename(var.workstream_file)
+            // KB-355: the workstream file itself (absolute path) — the classifier
+            // reads the scope-generation marker triage stamps at (re)write time
+            // and suppresses merged identity PRs that predate the current scope.
+            workstream_file  = var.workstream_file
             gh_retry         = file("./scripts/gh_retry.sh.tftpl")
         })
     }

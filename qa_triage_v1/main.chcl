@@ -772,6 +772,7 @@ step "publish_workstream" {
             criteria_value_1 = data.internal.run_dir.value
             criteria_value_2 = var.workstream_out_dir
             criteria_value_3 = var.bug_report_file
+            scope_ticket_json = var.scope_ticket_json
         })
     }
     outcome "success" {

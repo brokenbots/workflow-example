@@ -119,6 +119,13 @@ jobs:
         run: |
           bash kanboard_triage_v1/tests/test_triage_standalone.sh
 
+      # KB-355: the qa_triage_v1 publisher must stamp-or-preserve the
+      # scope-generation marker so rewritten-scope identity cannot be forged
+      # through the agent draft or erased by a re-publish.
+      - name: Run qa_triage_v1 publish_workstream regression test (KB-355)
+        run: |
+          bash qa_triage_v1/tests/test_publish_workstream.sh
+
       # CRI-310: the dirty-label cleanup workflow (carrier for CRI-246,
       # validation run C) — minimal single-adapter tree, gated standalone
       # (KB-304 retired the criteria-cleanup route that used to fire it).

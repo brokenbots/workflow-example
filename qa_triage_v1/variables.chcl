@@ -35,6 +35,20 @@ variable "workstream_out_dir" {
     type        = string
 }
 
+// KB-355: the ticket scope the published workstream describes, as the
+// {task, tags, comments} envelope (the same JSON shape fetch_ticket stores).
+// The publisher stamps the workstream with a scope-generation marker
+// ('<!-- scope-generation: <sha256(title+"\n"+desc)[0:12]> stamped: <RFC3339Z> -->')
+// derived from it, and preserves that stamp across unchanged-scope re-publishes,
+// so the delivery-fingerprint classifier can suppress a rewritten ticket's
+// predecessor-scope PRs. Empty (standalone qa_triage without a Kanboard scope)
+// publishes without a marker — the documented legacy degradation.
+variable "scope_ticket_json" {
+    description = "Optional absolute path to the ticket.json envelope carrying the scope ({task, tags, comments}); empty when running standalone."
+    type        = string
+    default     = ""
+}
+
 // Durable path where the supervisor-approved reproduction plan is persisted
 // before execution begins. When a parent workflow (e.g. kanboard_triage_v1)
 // provides this path, qa_triage_v1 will copy the approved plan there on plan
