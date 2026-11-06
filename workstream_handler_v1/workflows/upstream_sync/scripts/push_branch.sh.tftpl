@@ -1,0 +1,73 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+# upstream_sync — mechanical push step
+#
+# Pushes the worktree's relevant branch to the remote. ONE script, in-step,
+# no bouncing (the newer-steps pattern). Idempotent: pushing an already-
+# pushed HEAD is a no-op success.
+#
+# Credentials (ruling 4): NO token travels in this script. Push credentials
+# arrive as plain env via the binding env map, by declared name —
+# WORKFLOW_UPSTREAM_TOKEN (+ optional WORKFLOW_UPSTREAM_USER). When absent,
+# ambient credentials (existing helper / ssh) are used as-is, matching the
+# github-today/gitlab-later migration seam.
+#
+# Force policy (ruling 9): the MECHANICAL path never forces. A rejected
+# non-fast-forward prints non_fast_forward=1 and exits 1; the repair agent
+# decides, force only when the run opted in.
+
+# The branch value travels through stdout writes on its way here and can
+# carry stray edge whitespace (a trailing newline made remote matching fail
+# on a verifiably pushed branch — CRI-295). Trim; internal whitespace in a
+# real branch name survives.
+branch="$(printf '%s' "$criteria_value_1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [ -z "$branch" ]; then
+    echo "upstream push: branch value is empty" >&2
+    exit 1
+fi
+
+# Deliver the bound upstream credential to git WITHOUT it ever appearing on a
+# command line, in repo config, or in this script's logged text: a run-time
+# inline credential helper (git evals it with sh at credential time; the
+# token expands from the environment inside that subprocess). The leading
+# empty helper clears ambient helpers for this invocation only. When no
+# token env is bound, plain ambient credentials apply.
+user="${WORKFLOW_UPSTREAM_USER:-x-access-token}"
+
+do_push() {
+    if [ -n "${WORKFLOW_UPSTREAM_TOKEN:-}" ]; then
+        git -c "credential.helper=" \
+           -c "credential.helper=!f(){ printf 'username=%s\n' \"$user\"; printf 'password=%s\n' \"\$WORKFLOW_UPSTREAM_TOKEN\"; }; f" \
+           push origin "HEAD:refs/heads/$branch" 2>&1
+    else
+        git push origin "HEAD:refs/heads/$branch" 2>&1
+    fi
+}
+
+local_sha=$(git rev-parse HEAD) || {
+    echo "upstream push: cannot resolve HEAD in $(pwd)" >&2
+    exit 1
+}
+
+# Idempotent fast-path: the remote may already carry HEAD (scope-loss
+# re-entry, or a previous leg pushed it). Reading the remote-tracking ref is
+# LOCAL data (settled ruling 1); it saves a doomed push but not a network
+# round trip.
+tracked=$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null || printf '')
+if [ -n "$tracked" ] && [ "$tracked" = "$local_sha" ]; then
+    printf 'upstream_ref=refs/heads/%s\nremote_head=%s\n' "$branch" "$local_sha"
+    exit 0
+fi
+
+push_err=$(do_push) && {
+    printf 'upstream_ref=refs/heads/%s\nremote_head=%s\n' "$branch" "$local_sha"
+    exit 0
+}
+
+# Push failed — classify for the repair agent before exiting.
+printf '%s\n' "$push_err" >&2
+case "$push_err" in
+    *"[rejected]"*|*"non-fast-forward"*|*"stale info"*)
+        echo "non_fast_forward=1" >&2
+        ;;
+esac
+exit 1

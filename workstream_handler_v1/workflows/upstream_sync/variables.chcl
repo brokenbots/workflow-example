@@ -1,0 +1,70 @@
+# upstream_sync — variable surface
+
+# Absolute path of the isolated worktree this run develops in; the push and
+# the repair agent both operate on it. Empty = process working directory.
+variable "worktree_dir" {
+    type    = string
+    default = ""
+}
+
+# Branch to place on the remote. The mechanical push targets
+# refs/heads/<branch> regardless of the worktree's current HEAD.
+variable "branch" {
+    type        = string
+    description = "Branch name to push to the remote (refs/heads/<branch>)."
+}
+
+# Identity only — never read for repo content. Keeps the interface stable if a
+# future VCS needs ticket-identity-aware naming.
+variable "workstream_file" {
+    type        = string
+    description = "Workstream file path; identity only."
+    default     = ""
+}
+
+# Settled ruling 9: force-pushing is allowed ONLY with an explicit opt-in.
+# When false/absent the repair agent gets no force flag at all — a
+# non-fast-forward with no local ff/rebase resolution escalates needs_human
+# with a typed reason. When true: --force-with-lease ONLY (never bare
+# --force), and the repair charter states which mode is active for the run.
+variable "allow_force_push" {
+    type        = bool
+    description = "Explicit opt-in for the repair agent to use --force-with-lease. Default: never force."
+    default     = false
+}
+
+variable "max_repair_visits" {
+    type        = number
+    description = "Maximum attempts for the upstream repair agent."
+    default     = 3
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the upstream repair agent."
+    type        = string
+    default     = ""
+}
+
+variable "repair_agent" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 15)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+    description = "Model configuration for the upstream repair agent."
+    default = {
+        model            = "minimax-m3:cloud"
+        max_turns        = 15
+        reasoning_effort = "high"
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

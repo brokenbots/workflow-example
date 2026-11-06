@@ -178,8 +178,6 @@ subworkflow "pair_programming_loop" {
         worktree_dir          = var.worktree_dir
         max_agent_visits      = var.max_pair_agent_visits
         provider_base_url     = var.provider_base_url
-        workflow_github_token = var.workflow_github_token
-        git_credential_helper = file("./scripts/_github_token_git_credentials.sh.tftpl")
         base_branch           = var.base_branch
     }
 }
@@ -197,8 +195,6 @@ subworkflow "pair_programming_loop_feedback" {
         worktree_dir             = var.worktree_dir
         max_agent_visits         = var.max_pair_agent_visits
         provider_base_url        = var.provider_base_url
-        workflow_github_token    = var.workflow_github_token
-        git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
         base_branch              = var.base_branch
     }
 }
@@ -227,8 +223,6 @@ subworkflow "pair_programming_loop_feedback_r2" {
         worktree_dir             = var.worktree_dir
         max_agent_visits         = var.max_pair_agent_visits
         provider_base_url        = var.provider_base_url
-        workflow_github_token    = var.workflow_github_token
-        git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
         base_branch              = var.base_branch
     }
 }
@@ -245,8 +239,6 @@ subworkflow "pair_programming_loop_feedback_r3" {
         worktree_dir             = var.worktree_dir
         max_agent_visits         = var.max_pair_agent_visits
         provider_base_url        = var.provider_base_url
-        workflow_github_token    = var.workflow_github_token
-        git_credential_helper    = file("./scripts/_github_token_git_credentials.sh.tftpl")
         base_branch              = var.base_branch
     }
 }

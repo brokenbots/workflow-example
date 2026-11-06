@@ -1,0 +1,11 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -euo pipefail; exec 2>&1
+# Extract the entry_sha line the checkout_branch step printed (the loop's
+# LOCAL durability baseline; remaster Task 2). One value, one stdout —
+# KB-351 extraction rule.
+sha=$(printf '%s\n' "$criteria_value_1" | sed -n 's/^entry_sha=//p' | tail -n 1)
+if [ -z "$sha" ]; then
+    echo "entry_sha missing from checkout_branch stdout" >&2
+    exit 1
+fi
+echo "$sha"

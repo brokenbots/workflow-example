@@ -40,10 +40,35 @@ data "internal" "review_verdict" {
     value = ""
 }
 
+// LOCAL durability baseline: HEAD sha captured by checkout_branch at loop
+// entry (remaster Task 2). The checkpoint verifier compares HEAD against
+// this sha (benign-resume becomes a local compare, KB-211 re-based); the
+// actual push is delegated to the upstream_sync subworkflow, which is the
+// only network surface left in this tree.
+data "internal" "entry_sha" {
+    type  = string
+    value = ""
+}
+
+
 data "internal" "failure_reason" {
     type  = string
     value = ""
 }
+
+// LOCAL-ONLY contract (remaster ruling 1): every network operation leaves
+// the loop through this subworkflow. Checkpoint pushes, wip checkpoints and
+// the review checkpoint all dial the same upstream_sync tree; the loop
+// itself never touches the remote (remote-tracking refs are local data).
+subworkflow "upstream_sync" {
+    source = "../upstream_sync"
+    input = {
+        worktree_dir    = var.worktree_dir
+        branch          = data.internal.branch.value
+        workstream_file = var.workstream_file
+    }
+}
+
 
 
 step "get_branch_name" {
@@ -70,7 +95,6 @@ step "read_workstream" {
             target = data.internal.branch.value
             // basename's stdout carries a trailing newline; without the trim the
             // newline rides along into every consumer of data.internal.branch —
-            // push_checkpoint rendered it into `git ls-remote origin
             // "refs/heads/CRI-287\n"`, which matched nothing and failed the
             // checkpoint loop on a branch that was verifiably pushed (CRI-295).
             value  = trimspace(steps.get_branch_name.stdout)
@@ -113,7 +137,29 @@ step "checkout_branch" {
         })
     }
     timeout = "10s"
-    outcome "success" { next = step.check_working_tree }
+    outcome "success" { next = step.capture_entry_sha }
+    outcome "failure" { next = state.failed }
+}
+
+// The loop's LOCAL durability baseline (remaster Task 2): checkout_branch
+// prints entry_sha=<sha> as part of its stdout; this step extracts that one
+// value into data.internal (KB-351 — one extraction per step, single-stdout
+// source). downstream, the checkpoint verifier compares HEAD against it.
+step "capture_entry_sha" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/capture_entry_sha.sh.tftpl", {
+            criteria_value_1 = steps.checkout_branch.stdout
+        })
+    }
+    timeout = "10s"
+    outcome "success" {
+        next = step.check_working_tree
+        write {
+            target = data.internal.entry_sha.value
+            value  = trimspace(output.stdout)
+        }
+    }
     outcome "failure" { next = state.failed }
 }
 
@@ -192,27 +238,31 @@ step "develop" {
     }
     }
     // CRI-275: a turn that ends without a verdict routes through the
-    // checkpoint loop instead of failing the run — push_checkpoint verifies
-    // the last pushed commit and the next turn resumes from it. Two sources
-    // of no-verdict turns: the engine emits outcome "failure" when the step
-    // timeout above fires (verified: "context deadline exceeded" — CRI-275)
-    // and when the copilot adapter's session dies or the agent never calls
-    // submit_outcome. need_help stays terminal (the agent itself declared it
-    // cannot proceed); max_visits still bounds the whole cycle.
+    // pending-change preservation arm (ruling 2) instead of failing the run
+    // — commit_pending_changes commits whatever the dead turn left, the
+    // push is delegated to upstream_sync, and the next turn resumes from
+    // it. Two sources of no-verdict turns: the engine emits outcome
+    // "failure" when the step timeout above fires (verified: "context
+    // deadline exceeded" — CRI-275) and when the copilot adapter's session
+    // dies or the agent never calls submit_outcome. need_help stays
+    // terminal (the agent itself declared it cannot proceed); max_visits
+    // still bounds the whole cycle.
     outcome "failure" {
-        next = step.push_checkpoint
+        next = step.preserve_pending
     schema = object({ reason = string })
 
     }
     outcome "default" {
-        next = step.push_checkpoint
+        next = step.preserve_pending
     schema = object({ reason = string })
 
     }
 }
 
-// Pushed by the agent inside the turn (checkpoint discipline); this step
-// verifies the push landed so the loop never continues on unpushed work.
+// The checkpointer (success arm) is the single failure-arm dispatcher
+// (ruling 2): it runs the LOCAL verify, and on missing-work it commits
+// pending changes and delegates the push to upstream_sync — a network op
+// outside the loop — before handing the turn back to develop.
 step "push_checkpoint" {
     target     = adapter.shell.sh
     max_visits = var.max_checkpoint_push_visits
@@ -221,7 +271,7 @@ step "push_checkpoint" {
     input {
         command = templatefile("./scripts/verify_checkpoint_pushed.sh.tftpl", {
             criteria_value_1 = data.internal.branch.value
-            criteria_value_2 = var.base_branch
+            criteria_value_2 = data.internal.entry_sha.value
         })
     }
 
@@ -229,11 +279,13 @@ step "push_checkpoint" {
     // orientation + workstream title only). Re-sending the full workstream spec on
     // every checkpoint iteration cost minutes of re-orientation per checkpoint.
     //
-    // KB-211: a checkpoint verdict with nothing pushed (benign first-turn shape) is
-    // deterministic shell truth from the verifier (`resumed_no_work=1`), not agent
-    // judgment: the continuation prompt switches to the correction template stating
-    // the checkpoint precondition. An agent is never handed an option whose
-    // preconditions cannot hold without being told what they are.
+    // KB-211: a checkpoint verdict with nothing committed (benign first-turn
+    // shape) is deterministic shell truth from the local verifier
+    // (`resumed_no_work=1`; HEAD == entry_sha), not agent judgment: the
+    // continuation prompt switches to the correction template stating the
+    // checkpoint precondition. The old remote-shape FATAL arm ("work exists
+    // but the push never landed") is gone from the loop by contract — the
+    // committed state's journey to the remote is upstream_sync's business.
     outcome "success" {
         next = step.develop
         write {
@@ -245,7 +297,59 @@ step "push_checkpoint" {
             })
         }
     }
+    outcome "failure" { next = step.preserve_pending }
+}
+
+// Ruling 2 failure arm: a dead develop turn must not evaporate pending
+// changes. Wholesale `git add -A`, own commit, `wip:` prefix, NO amend,
+// NEVER a push (the loop stays local; the caller of the push is
+// upstream_sync). Idempotent: a clean tree is a no-op success.
+step "preserve_pending" {
+    target  = adapter.shell.sh
+    timeout = "30s"
+    input {
+        command = templatefile("./scripts/commit_pending_changes.sh.tftpl", {})
+    }
+    outcome "success" { next = step.sync_checkpoint_upstream }
     outcome "failure" { next = state.failed }
+}
+
+// Delegate the upstream push (the ONLY network op after a dead turn).
+// Both outcomes route on — best-effort durability: a sync failure must not
+// fail the run; the loop's continuation prompt logic below still fires.
+step "sync_checkpoint_upstream" {
+    target = subworkflow.upstream_sync
+    outcome "success" { next = step.resume_after_preservation }
+    outcome "failure" { next = step.resume_after_preservation }
+}
+
+// Re-entry bookkeeping before the develop turn resumes from the preserved
+// commit (deterministic echo, no adapter state).
+step "resume_after_preservation" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'pending changes preserved and pushed upstream; resuming develop'"
+    }
+    outcome "success" {
+        next = step.develop
+        write {
+            target = data.internal.developer_prompt.value
+            value = templatefile("./agents/develop_continue.md.tftpl", {
+                workstream = steps.read_workstream.stdout
+            })
+        }
+    }
+    // KB-374: engine 0.5.57 static FSM verification requires the adapter
+    // failure/error path on every non-iterating step (echo-only bookkeeping
+    // is a shell adapter call like any other).
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "resume_after_preservation bookkeeping step failed before the develop re-entry (KB-374)"
+        }
+    }
 }
 
 step "write_work_log" {
@@ -275,20 +379,14 @@ step "commit_work_log" {
     outcome "failure" { next = state.failed }
 }
 
-// Durability checkpoint: push the branch so committed work survives container
-// loss (see EXPERIMENT-ANALYSIS-2026-09-02.md, recommendation 1 — CRI-54/69/75
+// Durability checkpoint: place the branch on the remote so committed work
+// survives container loss (see EXPERIMENT-ANALYSIS-2026-09-02.md, recommendation 1 — CRI-54/69/75
 // lost uncommitted developer work when the run container died mid-loop). The
-// push is best-effort and offsets work/review-log commit churn, so it fires
-// only when the branch carries real commits the remote has not seen. A
+// push is delegated to the upstream_sync subworkflow (the loop holds zero
+// credentials; LOCAL-ONLY contract, ruling 1). A
 // checkpoint miss never fails the run.
 step "push_wip_checkpoint" {
-    target = adapter.shell.sh
-    input {
-        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {
-            helper = var.git_credential_helper
-        })
-    }
-    timeout = "60s"
+    target = subworkflow.upstream_sync
     outcome "success" { next = step.verify_committed }
     outcome "failure" { next = step.verify_committed }
 }
@@ -397,15 +495,12 @@ step "review" {
         "bash:git --no-pager rev-parse", "bash:git --no-pager rev-parse *", "bash:git --no-pager rev-parse */**", "bash:git --no-pager rev-parse */**/**", "bash:git --no-pager rev-parse */**/**/**", "bash:git --no-pager rev-parse */**/**/**/**", "bash:git --no-pager rev-parse */**/**/**/**/**", "bash:git --no-pager rev-parse */**/**/**/**/**/**",
         "shell:git --no-pager branch", "shell:git --no-pager branch *", "shell:git --no-pager branch */**", "shell:git --no-pager branch */**/**", "shell:git --no-pager branch */**/**/**", "shell:git --no-pager branch */**/**/**/**", "shell:git --no-pager branch */**/**/**/**/**", "shell:git --no-pager branch */**/**/**/**/**/**",
         "bash:git --no-pager branch", "bash:git --no-pager branch *", "bash:git --no-pager branch */**", "bash:git --no-pager branch */**/**", "bash:git --no-pager branch */**/**/**", "bash:git --no-pager branch */**/**/**/**", "bash:git --no-pager branch */**/**/**/**/**", "bash:git --no-pager branch */**/**/**/**/**/**",
-        "shell:git --no-pager ls-remote", "shell:git --no-pager ls-remote *", "shell:git --no-pager ls-remote */**", "shell:git --no-pager ls-remote */**/**", "shell:git --no-pager ls-remote */**/**/**", "shell:git --no-pager ls-remote */**/**/**/**", "shell:git --no-pager ls-remote */**/**/**/**/**", "shell:git --no-pager ls-remote */**/**/**/**/**/**",
-        "bash:git --no-pager ls-remote", "bash:git --no-pager ls-remote *", "bash:git --no-pager ls-remote */**", "bash:git --no-pager ls-remote */**/**", "bash:git --no-pager ls-remote */**/**/**", "bash:git --no-pager ls-remote */**/**/**/**", "bash:git --no-pager ls-remote */**/**/**/**/**", "bash:git --no-pager ls-remote */**/**/**/**/**/**",
         "shell:git status", "shell:git status *", "shell:git status */**", "shell:git status */**/**", "shell:git status */**/**/**", "shell:git status */**/**/**/**", "shell:git status */**/**/**/**/**", "shell:git status */**/**/**/**/**/**",
         "shell:git diff", "shell:git diff *", "shell:git diff */**", "shell:git diff */**/**", "shell:git diff */**/**/**", "shell:git diff */**/**/**/**", "shell:git diff */**/**/**/**/**", "shell:git diff */**/**/**/**/**/**",
         "shell:git log", "shell:git log *", "shell:git log */**", "shell:git log */**/**", "shell:git log */**/**/**", "shell:git log */**/**/**/**", "shell:git log */**/**/**/**/**", "shell:git log */**/**/**/**/**/**",
         "shell:git show", "shell:git show *", "shell:git show */**", "shell:git show */**/**", "shell:git show */**/**/**", "shell:git show */**/**/**/**", "shell:git show */**/**/**/**/**", "shell:git show */**/**/**/**/**/**",
         "shell:git rev-parse", "shell:git rev-parse *", "shell:git rev-parse */**", "shell:git rev-parse */**/**", "shell:git rev-parse */**/**/**", "shell:git rev-parse */**/**/**/**", "shell:git rev-parse */**/**/**/**/**", "shell:git rev-parse */**/**/**/**/**/**",
         "shell:git branch", "shell:git branch *", "shell:git branch */**", "shell:git branch */**/**", "shell:git branch */**/**/**", "shell:git branch */**/**/**/**", "shell:git branch */**/**/**/**/**", "shell:git branch */**/**/**/**/**/**",
-        "shell:git ls-remote", "shell:git ls-remote *", "shell:git ls-remote */**", "shell:git ls-remote */**/**", "shell:git ls-remote */**/**/**", "shell:git ls-remote */**/**/**/**", "shell:git ls-remote */**/**/**/**/**", "shell:git ls-remote */**/**/**/**/**/**",
         "shell:git remote", "shell:git remote *", "shell:git remote */**", "shell:git remote */**/**", "shell:git remote */**/**/**", "shell:git remote */**/**/**/**", "shell:git remote */**/**/**/**/**", "shell:git remote */**/**/**/**/**/**",
         "bash:git status", "bash:git status *", "bash:git status */**", "bash:git status */**/**", "bash:git status */**/**/**", "bash:git status */**/**/**/**", "bash:git status */**/**/**/**/**", "bash:git status */**/**/**/**/**/**",
         "bash:git diff", "bash:git diff *", "bash:git diff */**", "bash:git diff */**/**", "bash:git diff */**/**/**", "bash:git diff */**/**/**/**", "bash:git diff */**/**/**/**/**", "bash:git diff */**/**/**/**/**/**",
@@ -413,7 +508,6 @@ step "review" {
         "bash:git show", "bash:git show *", "bash:git show */**", "bash:git show */**/**", "bash:git show */**/**/**", "bash:git show */**/**/**/**", "bash:git show */**/**/**/**/**", "bash:git show */**/**/**/**/**/**",
         "bash:git rev-parse", "bash:git rev-parse *", "bash:git rev-parse */**", "bash:git rev-parse */**/**", "bash:git rev-parse */**/**/**", "bash:git rev-parse */**/**/**/**", "bash:git rev-parse */**/**/**/**/**", "bash:git rev-parse */**/**/**/**/**/**",
         "bash:git branch", "bash:git branch *", "bash:git branch */**", "bash:git branch */**/**", "bash:git branch */**/**/**", "bash:git branch */**/**/**/**", "bash:git branch */**/**/**/**/**", "bash:git branch */**/**/**/**/**/**",
-        "bash:git ls-remote", "bash:git ls-remote *", "bash:git ls-remote */**", "bash:git ls-remote */**/**", "bash:git ls-remote */**/**/**", "bash:git ls-remote */**/**/**/**", "bash:git ls-remote */**/**/**/**/**", "bash:git ls-remote */**/**/**/**/**/**",
         "bash:git remote", "bash:git remote *", "bash:git remote */**", "bash:git remote */**/**", "bash:git remote */**/**/**", "bash:git remote */**/**/**/**", "bash:git remote */**/**/**/**/**", "bash:git remote */**/**/**/**/**/**",
         // build (the one allowed execution: build once, then run the binary)
         "shell:make build", "bash:make build",
@@ -554,16 +648,10 @@ step "commit_review_log" {
 
 // Second durability checkpoint after the review pass: an approved head (or a
 // changes-requested head) is exactly the state a restart must be able to find
-// on the remote. Same best-effort, churn-offsetting semantics as
-// push_wip_checkpoint.
+// on the remote. Same best-effort, upstream-delegated semantics as
+// push_wip_checkpoint (LOCAL-ONLY contract).
 step "push_review_checkpoint" {
-    target = adapter.shell.sh
-    input {
-        command = templatefile("./scripts/push_wip_checkpoint.sh.tftpl", {
-            helper = var.git_credential_helper
-        })
-    }
-    timeout = "60s"
+    target = subworkflow.upstream_sync
     outcome "success" { next = switch.triage_review }
     outcome "failure" { next = switch.triage_review }
 }

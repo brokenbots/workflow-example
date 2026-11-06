@@ -15,20 +15,17 @@ adapter "shell" "sh" {
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = remote.worktree
-    secrets {
-        GH_TOKEN = var.workflow_github_token
-    }
+    // No secrets: LOCAL-ONLY contract (remaster ruling 1). Upstream placement
+    // is delegated to the upstream_sync subworkflow; this tree holds zero
+    // credentials (credential blast radius becomes physics, not policy).
 }
 
 adapter "copilot" "developer_r2" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version = "0.5.17"
-    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
-    secrets {
-        GITHUB_TOKEN = var.workflow_github_token
-        GH_TOKEN     = var.workflow_github_token
-    }
+    // No secrets: the developer is local-only. It commits to the worktree;
+    // it never authenticates against any remote. (Remaster rulings 1+2.)
     config {
         model             = var.developer.model
         max_turns         = "${var.developer.max_turns}"
@@ -48,11 +45,8 @@ adapter "copilot" "reviewer_r2" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version = "0.5.17"
-    // copilot >= 0.5.2 requires a GitHub token over the secret channel.
-    secrets {
-        GITHUB_TOKEN = var.workflow_github_token
-        GH_TOKEN     = var.workflow_github_token
-    }
+    // No secrets: the reviewer is local-only (read-only on the worktree).
+    // (Remaster ruling 1.)
     config {
         model             = var.reviewer.model
         max_turns         = "${var.reviewer.max_turns}"

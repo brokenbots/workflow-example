@@ -1,0 +1,170 @@
+// upstream_sync — VCS-neutral upstream operations subworkflow.
+//
+// Contract (pair-loop remaster, settled rulings 1-4): the pair-programming
+// loop is LOCAL-only (worktree + local git state; remote-tracking refs it
+// already holds are local data). Every network operation leaves the loop and
+// funnels through THIS tree:
+//   - mechanical shell happy path (push_branch); NO bouncing
+//   - on failure: upstream_repair agent (mechanical git/remote ops ONLY)
+//   - outcomes: success / needs_human / failed
+//   - failure/default -> empty-reason-means-lost-session switch (KB-24)
+//
+// Credentials: NO token variable exists on this tree. Push credentials are
+// delivered via the binding env map by DECLARED env name (the
+// MERGE_CI_MAX_SECONDS pattern) — the VCS-neutral seam. github -> gitlab
+// migration = binding env rebind, zero tree change.
+
+workflow {
+    name          = "upstream_sync"
+    version       = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state = "push_branch"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 30
+    }
+}
+
+// Error output from the failed push, passed verbatim to the repair agent.
+data "internal" "triage_context" {
+    type  = string
+    value = ""
+}
+
+// KB-24: typed reason from the outcome that ended the run. Empty means the
+// failure was engine-synthesized (timeout / crash / lost scope session — no
+// output object exists), which the caller treats as a lost session.
+data "internal" "failure_reason" {
+    type  = string
+    value = ""
+}
+
+step "push_branch" {
+    target  = adapter.shell.sh
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/push_branch.sh.tftpl", {
+            criteria_value_1 = var.branch
+        })
+    }
+    outcome "success" { next = state.done }
+    outcome "failure" {
+        next = step.upstream_triage_agent
+        write {
+            target = data.internal.triage_context.value
+            value  = output.stdout
+        }
+    }
+}
+
+// ── Upstream repair agent ─────────────────────────────────────────────────────
+//
+// Called when the mechanical push fails. Diagnoses and performs ONLY
+// mechanical git/remote operations to restore the push. Does NOT make code
+// changes, resolve conflicts, or clone. Force-push is never authorized by
+// this tree unless the run declares allow_force_push=true — and then only as
+// --force-with-lease, never bare --force (settled ruling 9).
+
+step "upstream_triage_agent" {
+    target      = adapter.copilot.upstream_repair
+    allow_tools = ["*"]
+    max_visits  = var.max_repair_visits
+    timeout     = "3600s"
+
+    input {
+        prompt = templatefile("./agents/upstream_repair_prompt.md.tftpl", {
+            branch           = var.branch
+            worktree_dir     = var.worktree_dir
+            allow_force_push = format("%s", var.allow_force_push)
+            triage_context   = data.internal.triage_context.value
+            max_turns        = var.repair_agent.max_turns
+        })
+    }
+
+    outcome "success" {
+        schema = object({ reason = string })
+        next = state.done
+    }
+    outcome "needs_human" {
+        next = state.needs_human
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            // The agent decided to escalate — the session was live. The
+            // reported reason travels to the caller, which fails the run with
+            // it instead of re-provisioning. submit_outcome reason is optional
+            // and the copilot adapter reports it as an empty string when the
+            // agent supplies none, so try(...) alone would still pass ""
+            // through: guard the empty case explicitly. An empty
+            // failure_reason reaching the caller means engine-synthesized
+            // session loss, nothing else.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "upstream repair agent escalated to a human without a reason"
+        }
+    }
+    outcome "failed" {
+        next = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            // Agent-decided failure: the session was live, so this must never
+            // look like a lost scope session to the caller.
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "upstream repair agent reported failure without a reason"
+        }
+    }
+    // "failure" is the copilot adapter's built-in outcome when the provider is
+    // unreachable or the session crashes. KB-24: try() distinguishes the
+    // engine-synthesized case (no output object -> empty reason -> the caller
+    // re-provisions the scope) from a live-session response carrying a reason.
+    outcome "failure" {
+        next = switch.route_upstream_scope_loss
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            value  = try(output.reason, "")
+        }
+    }
+    outcome "default" {
+        next = switch.route_upstream_scope_loss
+        schema = object({ reason = string })
+        write {
+            target = data.internal.failure_reason.value
+            // The engine classified a response but not its outcome name, so
+            // the session was live; never leave this empty.
+            value  = try(output.reason, "malformed upstream repair response (no valid outcome)")
+        }
+    }
+}
+
+// KB-24: route the repair agent's scope-loss signal. An empty reason is an
+// engine-synthesized failure (lost session) — surface needs_human so the
+// caller can re-provision; anything else is a real result.
+switch "route_upstream_scope_loss" {
+    match {
+        condition = data.internal.failure_reason.value != ""
+        next      = state.failed
+    }
+    default {
+        next = state.needs_human
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "needs_human" {
+    terminal = true
+    success  = false
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+output "failure_reason" {
+    type  = string
+    value = data.internal.failure_reason.value
+}

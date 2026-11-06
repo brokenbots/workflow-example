@@ -209,18 +209,26 @@ for cmd in \
 done
 
 echo "==> Checking KB-61 deny shapes now match (run 747cf4ac review death)..."
+# Remaster ruling 1: ls-remote is a NETWORK surface and left the allowlist
+# with the local-only loop (the KB-61 reads survive; the remote probes do not).
 for cmd in \
     "git diff origin/main...HEAD -- proto/criteria/v2/adapter.proto" \
     "git diff origin/main...HEAD -- criteria/v2/proto_test.go" \
     "git log --oneline -15" \
-    "git ls-remote --tags origin" \
-    "git ls-remote origin main CRI-201" \
     "git remote -v" \
     "git rev-parse HEAD origin/CRI-201" \
     "git show d7abb74 --stat" \
     "echo \"---STATUS---\""; do
     if ! allow_matches "${cmd}"; then
         echo "FAIL: review allow_tools denies KB-61 charter read '${cmd}' (scope gap: 5 denies burned the reviewer's turns -> missing finalize)" >&2
+        exit 1
+    fi
+done
+
+echo "==> Checking remaster ruling 1: remote probes are network (denied)..."
+for cmd in "git ls-remote --tags origin" "git ls-remote origin main CRI-201"; do
+    if allow_matches "${cmd}"; then
+        echo "FAIL: review allow_tools permits network probe '${cmd}' (ruling 1: LOCAL-ONLY loop; upstream_sync owns the remote)" >&2
         exit 1
     fi
 done

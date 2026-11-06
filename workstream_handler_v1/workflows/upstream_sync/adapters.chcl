@@ -1,0 +1,47 @@
+# upstream_sync — adapters
+#
+# Mirrors branch_manager's environments verbatim (per_scope_sessions = true):
+# the copilot repair agent requires per-scope env — a root-scope declaration
+# would bind an eager local CLI in the runner pod and die (hosting doctrine).
+#
+# Credentials: NO token secrets on ANY adapter. Push credentials arrive as
+# ordinary env via the binding env map, by declared env name (ruling 4). The
+# names below are the VCS-neutral seam:
+#   - WORKFLOW_UPSTREAM_TOKEN : the VCS access token (github PAT today; gitlab
+#                               token after migration)
+#   - WORKFLOW_UPSTREAM_USER  : optional username the VCS wants inline
+# When absent, push falls back to ambient credentials (existing credential
+# helper / ssh) — the binding env map is the delivery mechanism.
+
+environment "remote" "worktree" {
+    per_scope_sessions = true
+    working_directory = var.worktree_dir
+    process = {
+        exec = ["*"]
+    }
+    listen_address = "0.0.0.0:0"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+# Branch-scoped git ops run inside the isolated worktree.
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.5"
+    environment = remote.worktree
+}
+
+adapter "copilot" "upstream_repair" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.repair_agent.model
+        max_turns         = "${var.repair_agent.max_turns}"
+        reasoning_effort  = var.repair_agent.reasoning_effort
+        system_prompt     = file("./agents/upstream-repair.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.repair_agent.provider.base_url
+        provider_wire_api = var.repair_agent.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}

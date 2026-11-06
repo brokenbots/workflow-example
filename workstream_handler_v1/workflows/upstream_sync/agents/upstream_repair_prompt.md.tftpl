@@ -1,0 +1,9 @@
+prompt='Upstream push repair for worktree {{ .worktree_dir }} (branch {{ .branch }}, allow_force_push {{ .allow_force_push }}).
+
+Failure context:
+{{ .triage_context }}
+
+Your operating rules are in your system prompt. Force mode for this run: allow_force_push = {{ .allow_force_push }} — when it is not "true" you have NO authorization to force-push, and a non-resolvable non-fast-forward routes to submit_outcome needs_human. Mechanical/remote operations only; never touch tree content.
+
+Call submit_outcome with outcome success | needs_human | failed and the payload reason contract.'
+max_turns='{{ .max_turns }}'
