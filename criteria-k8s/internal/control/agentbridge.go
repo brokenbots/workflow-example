@@ -7,7 +7,10 @@
 //   - Running → RunStarted (the row's status moves queued→running, which
 //     both documents the replica picked it up and frees castle's
 //     unstarted-lease slot; further rows rotate in)
-//   - Succeeded with the handler_complete verdict → RunCompleted{Success}
+//   - Succeeded with a completing verdict (handler_complete delivered the
+//     work; ready_for_development is the kanboard triage rearm terminal —
+//     its run succeeded, it hands the ticket to the develop route) →
+//     RunCompleted{Success}
 //   - Succeeded with a failed / need_assistance / awaiting_human verdict,
 //     or a Failed phase → RunFailed (the human-gate spellings surface the
 //     verdict in the reason — the same mapping the watcher's
@@ -31,8 +34,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Workflow final states the bridge maps to terminal envelopes (mirroring
-// the watcher's reconcileTaskColumn vocabulary — KB-50/KB-239).
+// Workflow final states the bridge maps to terminal envelopes. The
+// failure/human-gate spellings mirror the watcher's reconcileTaskColumn
+// vocabulary (KB-50/KB-239); ready_for_development is a bridge-only
+// completing verdict (the watcher deliberately abstains on triage-class
+// successes — KB-9 — while the bridge mirrors the row's success/failure).
 const (
 	finalStateHandlerComplete = "handler_complete"
 	finalStateFailed          = "failed"
@@ -40,7 +46,25 @@ const (
 	// The pre-KB-269 spelling of need_assistance stays valid on old pinned
 	// trees (see CriteriaRunStatus.FinalState).
 	finalStateAwaitingHuman = "awaiting_human"
+	// KB-358: the kanboard triage rearm verdict. Its success terminal
+	// hands the ticket to the develop route instead of delivering work,
+	// but the run itself succeeded — the bridge must mirror it as a
+	// RunCompleted row, never as a RunFailed (which castle folds
+	// last-wins, stamping the CR Failed and parking the card in Review).
+	finalStateReadyForDevelopment = "ready_for_development"
 )
+
+// isCompletingFinalState reports whether a FinalState is a completing
+// verdict: a success terminal whose terminal envelope must mirror as
+// RunCompleted{Success}. The human-gate spellings and the failed verdict
+// are deliberate non-completers — the run did not deliver.
+func isCompletingFinalState(fs string) bool {
+	switch fs {
+	case finalStateHandlerComplete, finalStateReadyForDevelopment:
+		return true
+	}
+	return false
+}
 
 // DispositionReader consults the assignment's current queue state
 // (GetAssignmentDisposition): the bridge's ownership gate.
@@ -201,7 +225,7 @@ func terminalPayload(status *criteriav1.CriteriaRunStatus) any {
 	if status.Phase == criteriav1.PhaseFailed {
 		return runFailedPayload(fmt.Sprintf("workflow run failed (verdict %s)", finalStateDescription(status.FinalState)))
 	}
-	if status.FinalState == finalStateHandlerComplete {
+	if isCompletingFinalState(status.FinalState) {
 		return &v1.RunCompleted{FinalState: status.FinalState, Success: true}
 	}
 	return runFailedPayload("workflow run ended without a completing verdict: " + finalStateDescription(status.FinalState))
@@ -224,6 +248,8 @@ func finalStateDescription(fs string) string {
 		return "need_assistance (human gate)"
 	case finalStateAwaitingHuman:
 		return "awaiting_human (legacy human gate)"
+	case finalStateReadyForDevelopment:
+		return "ready_for_development"
 	case "":
 		return "empty (no verdict recorded)"
 	default:
