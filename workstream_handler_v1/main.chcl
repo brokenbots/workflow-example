@@ -435,6 +435,16 @@ step "route_delivery_none" {
         command = "echo 'delivery fingerprint: no PR carries the ticket identity'"
     }
     outcome "success" { next = step.run_pair_programming_loop }
+    // KB-374: engine 0.5.57 static FSM verification requires the adapter
+    // failure/error path on every non-iterating step (echo-only bookkeeping
+    // is a shell adapter call like any other).
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "route_delivery_none bookkeeping step failed (KB-374)"
+        }
+    }
 }
 
 switch "route_delivery" {
@@ -603,6 +613,16 @@ step "fail_missing_pr_url" {
     timeout = "30s"
     input {
         command = "echo 'no PR URL after the bounded create_pr retries'"
+    }
+    // KB-374: engine 0.5.57 static FSM verification requires the adapter
+    // failure/error path here too; the success arm remains the loud-failure
+    // route (state.failed with the KB-49 reason).
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "fail_missing_pr_url bookkeeping step failed (KB-374)"
+        }
     }
     outcome "success" {
         next = state.failed
