@@ -522,11 +522,11 @@ func TestAgentBridgeTriageRearmVerdictIsCompleting(t *testing.T) {
 	// mapping RunFailed — none of them is a completing verdict.
 	agentProbe, eventsProbe, _ := agentFixture(t)
 	for name, tc := range map[string]criteriav1.CriteriaRunStatus{
-		"need assistance":       {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateNeedAssistance},
-		"awaiting human":        {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateAwaitingHuman},
-		"failed phase":          {Phase: criteriav1.PhaseFailed, FinalState: finalStateReadyForDevelopment},
-		"unrecognized verdict":  {Phase: criteriav1.PhaseSucceeded, FinalState: "queued_technical"},
-		"empty verdict":         {Phase: criteriav1.PhaseSucceeded},
+		"need assistance":      {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateNeedAssistance},
+		"awaiting human":       {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateAwaitingHuman},
+		"failed phase":         {Phase: criteriav1.PhaseFailed, FinalState: finalStateReadyForDevelopment},
+		"unrecognized verdict": {Phase: criteriav1.PhaseSucceeded, FinalState: "queued_technical"},
+		"empty verdict":        {Phase: criteriav1.PhaseSucceeded},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, ok := terminalPayload(&tc).(*v1.RunFailed)
