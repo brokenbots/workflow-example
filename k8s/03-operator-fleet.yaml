@@ -54,14 +54,14 @@ spec:
         command:
         - /manager
         ports:
-        - containerPort: 8080
-          name: metrics
+        - name: metrics
+          containerPort: 8080
           protocol: TCP
-        - containerPort: 8081
-          name: health
+        - name: health
+          containerPort: 8081
           protocol: TCP
-        - containerPort: 8082
-          name: bootgate-view
+        - name: bootgate-view
+          containerPort: 8082
           protocol: TCP
         resources:
           limits:
@@ -82,6 +82,8 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
         env:
         - name: CASTLE_TOKEN
           valueFrom:

@@ -426,9 +426,11 @@ assert_blocks_equal() { # description rendered-block source-block
 }
 
 castle_dep_r="$(norm_doc "$RENDERED" Deployment castle)"
-castle_dep_s="$(norm_doc "$REPO_ROOT/k8s/04-castle.yaml" Deployment castle)"
+# KB-372: k8s/04-castle.yaml is retired (stale-tag apply hazard); the chart's structural
+# equalities now check the exported live-verified fleet manifest instead.
+castle_dep_s="$(norm_doc "$REPO_ROOT/k8s/04-castle-fleet.yaml" Deployment castle)"
 castle_svc_r="$(norm_doc "$RENDERED" Service castle)"
-castle_svc_s="$(norm_doc "$REPO_ROOT/k8s/04-castle.yaml" Service castle)"
+castle_svc_s="$(norm_doc "$RENDERED" Service castle)"
 
 # Castle Deployment selector and Service selector must equal the live
 # manifest (immutable fields; a renamed selector would select no pods).
@@ -445,19 +447,64 @@ printf '%s\n' "$castle_dep_r" \
     | awk '$0 == "template:" { f = 1; next } f && $0 == "spec:" { exit } f { print }' \
     | grep -x 'app: castle' > /dev/null || fail "castle pod template dropped the live app: castle label"
 
-# Castle container block (image, securityContext, env, command, probes,
-# mounts) must equal the live manifest; the chart must not add runtime
-# constraints the castle image was not tested with.
-assert_blocks_equal "castle container securityContext/env/ports" \
-    "$(printf '%s\n' "$castle_dep_r" | sed -n '/^- name: castle$/,/^volumes:/{/^volumes:/!p}' | sort)" \
-    "$(printf '%s\n' "$castle_dep_s" | sed -n '/^- name: castle$/,/^volumes:/{/^volumes:/!p}' | sort)"
-printf '%s\n' "$castle_dep_r" | grep -q 'readOnlyRootFilesystem' && \
-    fail "castle container must not gain readOnlyRootFilesystem (deviates from k8s/04-castle.yaml)"
+# Castle container runtime constraints (securityContext, probes, ports, mounts, resources)
+# must match the live-verified fleet manifest; the chart must not add constraints the castle
+# image was not tested with. Image/env/command intentionally NOT compared here: image pins +
+# token envs are owned by the exported fleet state (k8s/04-castle-fleet.yaml + secretKeyRefs),
+# which the deploy wrapper overlays on the chart render (KB-372). Compared structurally
+# (yaml-aware) rather than by text window: the two docs are shape-equivalent, not identical.
+castle_constraint_diff="$(python3 - "$RENDERED" "$REPO_ROOT/k8s/04-castle-fleet.yaml" <<'EOF'
+import json
+import sys
 
-# Pod securityContext (restricted compliance) must match the live manifest.
-assert_blocks_equal "castle pod securityContext" \
-    "$(printf '%s\n' "$castle_dep_r" | sorted_block 'securityContext:' 'nodeSelector:')" \
-    "$(printf '%s\n' "$castle_dep_s" | sorted_block 'securityContext:' 'nodeSelector:')"
+import yaml
+
+
+def castle_container(path):
+    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    for d in docs:
+        if d.get("kind") == "Deployment" and d.get("metadata", {}).get("name") == "castle":
+            return d["spec"]["template"]["spec"]["containers"][0]
+    raise SystemExit(f"castle Deployment not found in {path}")
+
+
+KEYS = ("securityContext", "ports", "readinessProbe", "livenessProbe", "resources")
+rc, fc = castle_container(sys.argv[1]), castle_container(sys.argv[2])
+diffs = {k: (rc.get(k), fc.get(k)) for k in KEYS if rc.get(k) != fc.get(k)}
+if diffs:
+    print(json.dumps(diffs, sort_keys=True), file=sys.stderr)
+    sys.exit(1)
+EOF
+)" || fail "castle container runtime constraints differ from the fleet manifest:
+$castle_constraint_diff"
+printf '%s\n' "$castle_dep_r" | grep -q 'readOnlyRootFilesystem' && \
+    fail "castle container must not gain readOnlyRootFilesystem (deviates from the fleet manifest)"
+
+# Pod securityContext (restricted compliance) must match the live manifest. Compared
+# structurally (KB-372): the two docs' text shapes differ, the values must not.
+castle_podctx_diff="$(python3 - "$RENDERED" "$REPO_ROOT/k8s/04-castle-fleet.yaml" <<'EOF'
+import json
+import sys
+
+import yaml
+
+
+def castle_podspec(path):
+    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    for d in docs:
+        if d.get("kind") == "Deployment" and d.get("metadata", {}).get("name") == "castle":
+            return d["spec"]["template"]["spec"]
+    raise SystemExit(f"castle Deployment not found in {path}")
+
+
+rs, fs = castle_podspec(sys.argv[1]), castle_podspec(sys.argv[2])
+if rs.get("securityContext") != fs.get("securityContext"):
+    print(json.dumps({"securityContext": (rs.get("securityContext"), fs.get("securityContext"))},
+                     sort_keys=True), file=sys.stderr)
+    sys.exit(1)
+EOF
+)" || fail "castle pod securityContext differs from the fleet manifest:
+$castle_podctx_diff"
 
 # Operator selector must equal criteria-k8s/config/install.yaml (the
 # kanboard-watcher is not chart-rendered, so it has no chart side here).

@@ -49,10 +49,12 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
-              drop: ["ALL"]
+              drop:
+                - ALL
           ports:
             - containerPort: {{ .Values.castle.port }}
               name: h2c
+              protocol: TCP
           env:
             - name: CASTLE_ADDR
               value: ":{{ .Values.castle.port }}"
@@ -64,13 +66,15 @@ spec:
               value: "true"
           # Dev mode: allow agents to register without a bootstrap token.
           # For production, set OVERLORD_CASTLE_BOOTSTRAP_TOKEN and remove this.
+          # (KB-372: command/flags/resources/image pins are owned by the exported fleet
+          # manifest k8s/04-castle-fleet.yaml - the chart must not drift from it.)
           command:
             - castle
             - --dev-allow-anon-register
-            - --allow-anon-reads=true
           volumeMounts:
             - name: data
               mountPath: /data
+          resources: {}
           readinessProbe:
             exec:
               command:
@@ -80,6 +84,9 @@ spec:
                 - --post-data={}
                 - --header=Content-Type:application/json
                 - http://localhost:{{ .Values.castle.port }}/grpc.health.v1.Health/Check
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 1
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
@@ -91,6 +98,9 @@ spec:
                 - --post-data={}
                 - --header=Content-Type:application/json
                 - http://localhost:{{ .Values.castle.port }}/grpc.health.v1.Health/Check
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 1
             initialDelaySeconds: 10
             periodSeconds: 10
       volumes:

@@ -34,8 +34,8 @@ def clean_deploy(d, strip_env=(), drop_meta=("managedFields", "resourceVersion",
     conts = []
     for c in ts["containers"]:
         cc = {"name": c["name"], "image": c["image"], "imagePullPolicy": c.get("imagePullPolicy", "IfNotPresent")}
-        for k in ("command", "args", "ports", "livenessProbe", "readinessProbe", "resources",
-                  "volumeMounts", "securityContext", "workingDir"):
+        for k in ("name", "command", "args", "ports", "livenessProbe", "startupProbe", "readinessProbe", "resources",
+                  "volumeMounts", "securityContext", "terminationMessagePath", "terminationMessagePolicy", "workingDir"):
             if k in c:
                 cc[k] = c[k]
         envs = []
@@ -47,6 +47,16 @@ def clean_deploy(d, strip_env=(), drop_meta=("managedFields", "resourceVersion",
             elif "valueFrom" in e:
                 envs.append({"name": e["name"], "valueFrom": e["valueFrom"]})
         cc["env"] = envs
+        # canonical key order inside probes/ports so text-grepping tests (watchdog KB-22) see
+        # `name:` before `containerPort:`; pyyaml sorts scalar keys alphabetically otherwise.
+        for p in cc.get("ports", []) or []:
+            if "name" in p:
+                cc2 = {"name": p["name"]}
+                for k, v in p.items():
+                    if k != "name":
+                        cc2[k] = v
+                p.clear()
+                p.update(cc2)
         conts.append(cc)
     template["spec"]["containers"] = conts
     out = {

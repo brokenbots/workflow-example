@@ -52,8 +52,8 @@ spec:
         image: localhost:5000/parapet:P340-kb357-0557
         imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 8080
-          name: http
+        - name: http
+          containerPort: 8080
           protocol: TCP
         readinessProbe:
           failureThreshold: 3
@@ -85,6 +85,8 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
         env: []
   strategy:
     rollingUpdate:
