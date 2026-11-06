@@ -1,0 +1,434 @@
+# == KB-312 per-project namespace cutover (ADR 307) — rendered target state for
+# project TypeScript SDK (ns typescript-sdk, registry cutover: done) ==
+#
+# Rendered by k8s/project-lifecycle.sh; kubectl is not consulted at render
+# time, so re-render + diff is the drift check:
+#   ./k8s/project-lifecycle.sh render --namespace typescript-sdk
+# The binding ConfigMap below is spliced verbatim from
+# k8s/examples/binding-typescript-sdk.yaml — the KB-311 fail-closed binding schema
+# (k8s/criteria-binding.schema.json) is its contract.
+# Binding checksum (canonical JSON, operator algorithm): 5f35dc5fb18e660d1af861794cf46344703c1fb61cf3270b903e43fecee127aa
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+    project: typescript-sdk
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: criteria-k8s-operator
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+
+---
+# The OpenBao-bound job identity: the operator's runner Jobs carry it and the
+# OpenBao kubernetes auth role for this ns is bounded to it ('openbao-wire').
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: criteria-runner
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+
+---
+# Namespaced ONLY (ADR 307): no ClusterRole/ClusterRoleBinding exists here.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: criteria-k8s-operator
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+rules:
+- apiGroups: ["criteria.brokenbots.dev"]
+  resources: ["criteriaruns"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["criteria.brokenbots.dev"]
+  resources: ["criteriaruns/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["criteria.brokenbots.dev"]
+  resources: ["criteriaruns/finalizers"]
+  verbs: ["update"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log", "events"]
+  verbs: ["get", "list", "watch", "create", "update", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: criteria-k8s-operator
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+subjects:
+- kind: ServiceAccount
+  name: criteria-k8s-operator
+  namespace: typescript-sdk
+roleRef:
+  kind: Role
+  name: criteria-k8s-operator
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# The platform intake write path: the kanboard-watcher runs with the platform
+# operator identity in criteria-jobs and stamps post-cutover CriteriaRuns
+# (binding references only, KB-311) into THIS namespace, so the platform SA
+# gets a RoleBinding here. Namespaced grant; nothing cluster-scoped.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: criteria-kanboard-watcher-intake
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+subjects:
+- kind: ServiceAccount
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+roleRef:
+  kind: Role
+  name: criteria-k8s-operator
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# SPC wiring per project: OpenBao roleName bound to this ns (wire it live
+# with 'openbao-wire'). The objects reuse the EXISTING platform secret paths —
+# no new credentials, no secret schema change. Per-repo scoping lives INSIDE
+# the OpenBao paths (criteria/data/typescript-sdk/...); future project-owned keys land
+# there, today's keys stay criteria/data/linear.
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: kanboard-spc
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+spec:
+  provider: openbao
+  parameters:
+    roleName: typescript-sdk
+    objects: |
+      - objectName: kanboard_app_token
+        secretPath: criteria/data/linear
+        secretKey: kanboard_app_token
+        filePermission: 0444
+      - objectName: kanboard_url
+        secretPath: criteria/data/linear
+        secretKey: kanboard_url
+        filePermission: 0444
+
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: copilot-spc
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+spec:
+  provider: openbao
+  parameters:
+    roleName: typescript-sdk
+    objects: |
+      - objectName: workflow_github_token
+        secretPath: criteria/data/linear
+        secretKey: workflow_github_token
+        filePermission: 0444
+      - objectName: reviewer_github_token
+        secretPath: criteria/data/linear
+        secretKey: reviewer_github_token
+        filePermission: 0444
+
+---
+# KB-314 shape: the castle token for the run-archive lane (#308), served from
+# the same OpenBao role — the per-ns troubleshooting contract's archive leg.
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: castle-token-spc
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+spec:
+  provider: openbao
+  parameters:
+    roleName: typescript-sdk
+    objects: |
+      - objectName: castle_criteria_token
+        secretPath: criteria/data/linear
+        secretKey: castle_criteria_token
+        filePermission: 0444
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: criteria-data
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: criteria-repo
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+
+---
+# OpenBao role/policy reference for this project ns; the LIVE wiring is a
+# kubectl exec against the shared OpenBao pod ('openbao-wire' prints it).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-role-reference
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+data:
+  role-config.txt: |
+    auth/kubernetes/role/typescript-sdk:
+      bound_service_account_names: criteria-runner
+      bound_service_account_namespaces: typescript-sdk
+      policies: typescript-sdk
+      ttl: 1h
+
+  policy.hcl: |
+    # Project-scoped paths: future per-project/per-repo secret reads land here.
+    path "criteria/data/typescript-sdk/*" {
+      capabilities = ["read", "list"]
+    }
+    path "criteria/metadata/typescript-sdk/*" {
+      capabilities = ["read", "list"]
+    }
+    # The shared legacy platform path holds today's credentials (KB-312: no
+    # new credentials, no secret schema change at cutover).
+    path "criteria/data/linear" {
+      capabilities = ["read", "list"]
+    }
+    path "criteria/metadata/linear" {
+      capabilities = ["read", "list"]
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: criteria-k8s-operator
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+    app.kubernetes.io/name: criteria-k8s-operator
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-k8s-operator
+  template:
+    metadata:
+      labels:
+        criteria.brokenbots.dev/project: typescript-sdk
+        app.kubernetes.io/name: criteria-k8s-operator
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: catch
+        operator: Exists
+        effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: operator
+        image: localhost:5000/criteria-k8s:dev
+        imagePullPolicy: IfNotPresent
+        command: ["/manager"]
+        env:
+        # Per-project operator (ADR 307): the manager's caches and queue
+        # recovery scope to this namespace only.
+        - name: CRITERIA_NAMESPACE
+          value: typescript-sdk
+        # Source-mode base image (CRI-231): url-only runs execute here.
+        - name: CRITERIA_BASE_IMAGE
+          value: localhost:5000/criteria-base:dev
+        # Adapter image fallback (CRI-214 M14): the SHARED registry — the
+        # registry is platform-owned per ADR 307; the dev-class run executes
+        # the SAME workflow tree via the project binding's own images.
+        - name: ADAPTER_REGISTRY
+          value: localhost:5000
+        - name: ADAPTER_TAG
+          value: k8s-3
+        - name: CRITERIA_DATA_PVC
+          value: criteria-data
+        # Artifact retention sweep: off — per-ticket artifacts stay until the
+        # KB-309 toggle below is flipped (deliberately inert at render).
+        - name: RETENTION_PERIOD
+          value: 0s
+        # KB-309 retention: inert by default (no namespace allowlist on the
+        # sweep). Flip on AFTER the castle archive round-trip is proven:
+        #   ./k8s/project-lifecycle.sh retention-on --namespace typescript-sdk
+        - name: CR_RETENTION_DAYS
+          value: 0
+        - name: CR_RETENTION_KEEP_LAST
+          value: 0
+        # Castle is shared and stays in criteria-jobs: cross-namespace dial.
+        - name: CASTLE_ADDR
+          value: http://castle.criteria-jobs.svc.cluster.local:8080
+        - name: CASTLE_TOKEN_FILE
+          value: /var/run/secrets/criteria/castle/castle_criteria_token
+        # KB-344: the run-event proxy lane is OFF in per-project namespaces
+        # — there is no criteria-k8s-operator Service here (a per-project
+        # operator cannot present the platform castle-mount credential the
+        # proxy re-emit path requires), so the explicitly EMPTY addr opts
+        # the boot gate out: no listener, no derived proxy endpoint, and
+        # runner Jobs render without CASTLE_ADDR and keep their local
+        # events file. Omitting the variable would instead inherit the
+        # :8082 default and bind a proxy lane whose forward path is dead.
+        - name: BOOTGATE_VIEW_ADDR
+          value: ""
+        - name: CRITERIA_JOB_ARCH
+          value: amd64
+        - name: CRITERIA_STALL_WINDOW
+          value: 30m
+        # KB-312 resource shape: observed 43-84Mi per operator; NO quota
+        # change on catch at 6-9 namespaces.
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 256Mi
+            cpu: 500m
+        volumeMounts:
+        - name: criteria-data
+          mountPath: /data
+        - name: castle-token
+          mountPath: /var/run/secrets/criteria/castle
+          readOnly: true
+      volumes:
+      - name: criteria-data
+        persistentVolumeClaim:
+          claimName: criteria-data
+      - name: castle-token
+        csi:
+          driver: secrets-store.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: castle-token-spc
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: criteria-binding
+  namespace: typescript-sdk
+  labels:
+    criteria.brokenbots.dev/project: typescript-sdk
+data:
+  binding.json: |
+    {
+      "apiVersion": "criteria.brokenbots.dev/v1",
+      "kind": "CriteriaBinding",
+      "images": {
+        "shell": "localhost:5000/criteria-adapter-shell-peer-node:0.5.56",
+        "copilot": "localhost:5000/criteria-adapter-copilot-peer-node:0.5.56"
+      },
+      "env": {
+        "PATH": "/usr/local/node/bin:/usr/local/bin:/usr/bin:/bin",
+        "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org",
+        "NPM_CONFIG_PROXY": "http://proxy.internal:3128",
+        "NODE_OPTIONS": "--max-old-space-size=4096",
+        "CRITERIA_TOOL_TIMEOUT": "45m",
+        "MERGE_CI_MAX_SECONDS": "1200"
+      },
+      "volumes": [
+        {
+          "name": "data",
+          "kind": "pvc",
+          "claim": "criteria-data",
+          "mountPath": "/data",
+          "env": {
+            "CRITERIA_RUN_DIR_ROOT": "/data/.criteria/runs",
+            "CRITERIA_SHELL_ALLOWED_PATHS": "/data",
+            "CRITERIA_COPILOT_INCLUDE_SENSITIVE_PERMISSION_DETAILS": "1"
+          }
+        },
+        {
+          "name": "repo",
+          "kind": "pvc",
+          "claim": "criteria-repo",
+          "mountPath": "/repo"
+        },
+        {
+          "name": "scratch",
+          "kind": "tmp",
+          "mountPath": "/tmp/scratch",
+          "sizeLimit": "16Gi"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "kanboard-api-key",
+          "secretProviderClass": "kanboard-spc",
+          "mountPath": "/home/criteria/kanboard-secrets",
+          "env": {
+            "KANBOARD_APP_TOKEN": "kanboard_app_token",
+            "KANBOARD_URL": "kanboard_url"
+          }
+        },
+        {
+          "name": "github-tokens",
+          "secretProviderClass": "copilot-spc",
+          "mountPath": "/home/criteria/secrets",
+          "env": {
+            "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
+            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token",
+            "WORKFLOW_UPSTREAM_TOKEN": "workflow_github_token"
+          }
+        }
+      ],
+      "config": {
+        "baseBranch": "main",
+        "ciGateCmd": "npm run typecheck && npm run test"
+      }
+    }

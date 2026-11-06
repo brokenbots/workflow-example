@@ -7,7 +7,7 @@
 # The binding ConfigMap below is spliced verbatim from
 # k8s/examples/binding-criteria-go-dev.yaml — the KB-311 fail-closed binding schema
 # (k8s/criteria-binding.schema.json) is its contract.
-# Binding checksum (canonical JSON, operator algorithm): 6f8cd883f7bc2073a646b9748bc7e62d4addf6009d922e5642e2558bbcbdde9b
+# Binding checksum (canonical JSON, operator algorithm): 7504ee40475f7a25342f062b8db48f8213634a5f4a3fca853d329f9e1815847e
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -422,7 +422,8 @@ data:
           "mountPath": "/home/criteria/secrets",
           "env": {
             "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token",
+            "WORKFLOW_UPSTREAM_TOKEN": "workflow_github_token"
           }
         }
       ],
