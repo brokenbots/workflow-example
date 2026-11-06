@@ -520,6 +520,11 @@ func sourceRunnerContainer(run *criteriav1.CriteriaRun, image, providerBaseURL s
 	// D69: the entrypoint derives its secret --var pairs from the declared
 	// secrets (see secretVarBindings); newline-separated varname=absfile.
 	env = append(env, corev1.EnvVar{Name: "CRITERIA_SECRET_VARS", Value: secretVarBindings(plan)})
+	// KB-369: the engine's file provider confines reads to the default secrets
+	// dir plus the declared secret mounts. Both lists derive from the same
+	// plan.secrets entries, so the declared roots and the file: origin set can
+	// never drift apart.
+	env = append(env, corev1.EnvVar{Name: "CRITERIA_SECRET_FILE_ROOTS", Value: trustedSecretFileRoots(plan)})
 
 	return corev1.Container{
 		Name:            RunnerContainerName,
