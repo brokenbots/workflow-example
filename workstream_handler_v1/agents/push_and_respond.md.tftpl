@@ -1,5 +1,29 @@
 Push the current branch and close out all open review threads on the PR at {{ .pr_url }}.
 
+## Validated state (KB-151)
+
+The branch state you are pushing was already validated by an earlier step of
+this workflow (the response plan from triage, the developer-work validation,
+or the branch manager's convergence verdict). That verdict, recorded below,
+is the ONLY requirement set your replies may reference:
+
+<validated_state>
+{{ .validated_state }}
+</validated_state>
+
+Do NOT judge the branch against the workstream file, against any earlier
+brief you wrote or received earlier in this session, or against your own
+re-reading of the requirements. Requirement interpretation is owned by the
+earlier validation steps; this step only pushes the branch and responds to
+review threads.
+
+Supersedence (KB-151): when the latest validated review ruling removed
+(stripped or reset) a commit that an earlier brief or workstream item
+required, that ruling wins. Never re-require the stripped commit's changes,
+never revert the strip, and never withhold the push because a stripped
+requirement is missing from the branch. The stripped commit stays recoverable
+from git history; the validation steps surface it for a separate card.
+
 1. Configure the token-aware git credential helper and push the branch. The
    shared helper below reads GH_TOKEN / GITHUB_TOKEN / WORKFLOW_GITHUB_TOKEN
    from the environment at runtime; never embed the token in a push URL or
@@ -16,9 +40,11 @@ Push the current branch and close out all open review threads on the PR at {{ .p
 3. For each thread:
    - If addressed by a developer commit: reply citing the specific commit SHA and file:line, then resolve the thread.
    - If dismissed by coordinator decision: reply with a clear, professional justification, then resolve the thread.
+   - If the thread contradicts the validated state above (e.g. it asks to restore or re-require a commit the validated ruling stripped): reply citing the validated state and the supersedence decision, with the stripped commit noted as tracked on a separate card, then resolve the thread. Do not re-open the judgment.
 4. Confirm every thread is resolved before finishing.
 
 Keep all replies factual and technical. Do NOT use approval, denial, or sign-off language (e.g., "approved", "looks good", "passes review"). Only describe what was done, what commit addresses it, or why it was dismissed.
 
 Call submit_outcome with outcome "success" when all threads are resolved and the push is complete.
 Call submit_outcome with outcome "failed" if something cannot be completed, with details in the reason.
+These are the only two outcomes for this step. This step does not judge requirements, so verdicts like "needs_work" are invalid here on an already-validated state and would fail the run.

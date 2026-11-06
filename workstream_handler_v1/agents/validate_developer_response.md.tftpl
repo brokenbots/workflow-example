@@ -10,7 +10,19 @@ Inspect the latest commits and diffs on the branch. For each requirement in the 
 
 If every requirement is fully satisfied:
   Call submit_outcome with outcome "approved".
-  Summarise what was done in the reason field. Do NOT include any approval, denial, or sign-off language — only a concise summary of the actual code changes and any relevant technical notes (e.g., additional fixes or decisions taken outside the workstream scope).
+  Summarise what was done in the reason field. Do NOT include any approval, denial, or sign-off language — only a concise summary of the actual code changes and any relevant technical notes (e.g., additional fixes or decisions taken outside the workstream scope). The summary becomes the branch's validated requirement set for the push step.
+
+## Post-strip supersedence (KB-151)
+
+When the developer's work this round removed commits (a strip or reset a
+reviewer ruling required), the ruling supersedes any earlier brief item that
+required carrying those commits. Validating a post-strip state:
+- The absence of a stripped commit is NOT a missing requirement. Verify the
+  strip itself instead (the commit is gone from the branch, no residue).
+- Do NOT route needs_work for a stripped commit's absence and do not
+  re-require it.
+- The coordinator records the stripped requirement (SHA + subject) for a
+  separate card; the requirement is tracked there, not on this branch.
 
 If any requirements are missing or only partially addressed:
   Call submit_outcome with outcome "needs_work".
