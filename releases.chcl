@@ -5,8 +5,9 @@
 #   2. `make repin` rewrites every adapters.chcl version for that adapter,
 #   3. `make repin-check` (also inside `make validate`) fails on ANY version
 #      literal not equal to the manifest value — stragglers cannot exist,
-#   4. `make routes-sync` re-renders the criteria-routes CM url/ref pins from
-#      the current HEAD. It touches pins only: KB-313 (ADR 307) retired the
+#   4. `make routes-sync` re-renders the criteria-routes + criteria-agent-routes
+#      CM url/ref pins from the current HEAD (both pin sites of record, KB-352).
+#      It touches pins only: KB-313 (ADR 307) retired the
 #      peer_image_tags block — adapter image tags are per-project binding
 #      concerns now, and the old peer_shell_tag/peer_copilot_tag literals are
 #      gone because the global routes CM no longer carries adapterImages.
