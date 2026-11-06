@@ -85,7 +85,8 @@ data:
           "mountPath": "/home/criteria/secrets",
           "env": {
             "WORKFLOW_GITHUB_TOKEN": "workflow_github_token",
-            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"
+            "REVIEWER_GITHUB_TOKEN": "reviewer_github_token",
+            "WORKFLOW_UPSTREAM_TOKEN": "workflow_github_token"
           }
         }
       ],

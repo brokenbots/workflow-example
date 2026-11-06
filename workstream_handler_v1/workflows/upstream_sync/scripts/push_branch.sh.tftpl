@@ -26,17 +26,24 @@ if [ -z "$branch" ]; then
 fi
 
 # Deliver the bound upstream credential to git WITHOUT it ever appearing on a
-# command line, in repo config, or in this script's logged text: a run-time
-# inline credential helper (git evals it with sh at credential time; the
-# token expands from the environment inside that subprocess). The leading
-# empty helper clears ambient helpers for this invocation only. When no
-# token env is bound, plain ambient credentials apply.
+# command line, in repo config, or in this script's logged text. Delivery
+# shape (k8s adapter env contract, verified in jobbuilder adapterEnvs): the
+# env var carries the PATH of the CSI-projected credential file inside the
+# adapter container (binding env map value = openbao objectName = file name
+# under the lane's mountPath) — NOT the token itself. Read the file, never
+# echo it; feed the value to git through a run-time inline credential helper
+# (git evals it with sh at credential time). The leading empty helper clears
+# ambient helpers for this invocation only. When no credential file is bound,
+# plain ambient credentials apply (ssh / pre-configured helper).
 user="${WORKFLOW_UPSTREAM_USER:-x-access-token}"
 
 do_push() {
-    if [ -n "${WORKFLOW_UPSTREAM_TOKEN:-}" ]; then
+    token_file="${WORKFLOW_UPSTREAM_TOKEN:-}"
+    if [ -n "$token_file" ] && [ -r "$token_file" ]; then
+        export UPSTREAM_TOKEN_VALUE
+        UPSTREAM_TOKEN_VALUE="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$token_file")"
         git -c "credential.helper=" \
-           -c "credential.helper=!f(){ printf 'username=%s\n' \"$user\"; printf 'password=%s\n' \"\$WORKFLOW_UPSTREAM_TOKEN\"; }; f" \
+           -c "credential.helper=!f(){ printf 'username=%s\n' \"$user\"; printf 'password=%s\n' \"\$UPSTREAM_TOKEN_VALUE\"; }; f" \
            push origin "HEAD:refs/heads/$branch" 2>&1
     else
         git push origin "HEAD:refs/heads/$branch" 2>&1
