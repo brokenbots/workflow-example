@@ -135,3 +135,14 @@ variable "reviewer_github_token" {
     type   = string
     secret = true
 }
+
+// Upstream credential lane (pair-loop remaster): declared for interface
+// parity with secretEnv WORKFLOW_UPSTREAM_TOKEN (KB-304 class — a secretEnv
+// name must map to a secret-typed variable). The runner delivers the value
+// as env -> CSI file path via the binding env map; the tree passes it to the
+// upstream_sync subworkflow chain only as the binding env name, never
+// adapter secrets.
+variable "workflow_upstream_token" {
+    type   = string
+    secret = true
+}
