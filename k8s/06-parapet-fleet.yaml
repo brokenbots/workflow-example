@@ -1,0 +1,93 @@
+# KB-372: THIS FILE IS GENERATED GROUND TRUTH — exported from the live cluster
+# (2026-11-06, post KB-369 roll) by k8s/tests/export_fleet_state.py. Do not hand-edit image
+# tags or env here: roll live first, then re-export. The apply-safety drift test
+# (k8s/tests/test_fleet_apply_safe.sh) diffs THIS file against the live cluster and fails
+# closed on any divergence, so a stale apply can never regress the fleet.
+# Secrets stay secretKeyRef'd (nothing inline); RESTART_TS (operational restart marker)
+# intentionally stripped — it is set at deploy time, not config.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: ui
+    app.kubernetes.io/name: parapet
+  name: parapet
+  namespace: criteria-jobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: parapet
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: ui
+        app.kubernetes.io/name: parapet
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-09-11T17:30:40-06:00'
+        parapet.roll: v2
+    spec:
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - effect: NoSchedule
+        key: catch
+        operator: Exists
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - emptyDir: {}
+        name: caddy-data
+      - emptyDir: {}
+        name: caddy-config
+      automountServiceAccountToken: false
+      containers:
+      - name: parapet
+        image: localhost:5000/parapet:P340-kb357-0557
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        volumeMounts:
+        - mountPath: /data
+          name: caddy-data
+        - mountPath: /config
+          name: caddy-config
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        env: []
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate

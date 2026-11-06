@@ -1,0 +1,20 @@
+# KB-372: LIVE-verified chart values for criteria-jobs (exported 2026-11-06).
+# Feed to the deploy wrapper: helm template -f k8s/fleet/values-live.yaml.
+# Regenerate via k8s/tests/export_fleet_state.py after any live roll.
+namespace: criteria-jobs
+images:
+  operator:
+    repository: localhost:5000/criteria-k8s
+    tag: 20261106-kb369-1
+  workflow:
+    repository: localhost:5000/linear-intake-remote
+    tag: 20260919-021702-07f2a29
+  criteriaBase:
+    repository: localhost:5000/criteria-base
+    tag: v0.1-v0.5.58
+  adapter:
+    registry: localhost:5000
+    tag: k8s-0.5.58-1
+  castle:
+    repository: localhost:5000/castle
+    tag: 20261026-kb343-2141

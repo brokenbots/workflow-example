@@ -1,36 +1,17 @@
-# Kanboard watcher deployment — appended to criteria-k8s/config/install.yaml
-# (kept as a standalone overlay file so the shipped install.yaml stays
-# upstream-clean; apply this after install.yaml).
-# Requires: kanboard-spc (operator-prereqs overlay), criteria-routes ConfigMap
-# with the kanboard workflow library + routes, criteria-k8s image with the
-# kanboard-watcher binary.
----
-apiVersion: secrets-store.csi.x-k8s.io/v1
-kind: SecretProviderClass
-metadata:
-  name: kanboard-spc
-  namespace: criteria-jobs
-spec:
-  provider: openbao
-  parameters:
-    roleName: criteria-jobs
-    objects: |
-      - objectName: kanboard_app_token
-        secretPath: criteria/data/linear
-        secretKey: kanboard_app_token
-        filePermission: 0444
-      - objectName: kanboard_url
-        secretPath: criteria/data/linear
-        secretKey: kanboard_url
-        filePermission: 0444
----
+# KB-372: THIS FILE IS GENERATED GROUND TRUTH — exported from the live cluster
+# (2026-11-06, post KB-369 roll) by k8s/tests/export_fleet_state.py. Do not hand-edit image
+# tags or env here: roll live first, then re-export. The apply-safety drift test
+# (k8s/tests/test_fleet_apply_safe.sh) diffs THIS file against the live cluster and fails
+# closed on any divergence, so a stale apply can never regress the fleet.
+# Secrets stay secretKeyRef'd (nothing inline); RESTART_TS (operational restart marker)
+# intentionally stripped — it is set at deploy time, not config.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: criteria-kanboard-watcher
-  namespace: criteria-jobs
   labels:
     app.kubernetes.io/name: criteria-kanboard-watcher
+  name: criteria-kanboard-watcher
+  namespace: criteria-jobs
 spec:
   replicas: 1
   selector:
@@ -40,132 +21,101 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: criteria-kanboard-watcher
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-11-05T23:02:28-07:00'
     spec:
       serviceAccountName: criteria-k8s-operator
+      terminationGracePeriodSeconds: 30
       nodeSelector:
         kubernetes.io/arch: amd64
       tolerations:
-        - key: catch
-          operator: Exists
-          effect: NoSchedule
+      - effect: NoSchedule
+        key: catch
+        operator: Exists
       securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
         runAsNonRoot: true
         runAsUser: 10001
-        runAsGroup: 10001
-        fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      containers:
-        - name: watcher
-          image: localhost:5000/criteria-k8s:kanboard-watcher-8
-          imagePullPolicy: IfNotPresent
-          command: ["/kanboard-watcher"]
-          # Health endpoints served by the watcher (KB-22): /readyz fails
-          # once polls stop succeeding (stall detection), /livez fails only
-          # when polls stop completing at all (wedge outside the deadline).
-          # During startup /livez reports "no poll has completed since
-          # startup" until the first poll finishes, so the startupProbe
-          # below gives the startup path its full budget: project
-          # resolution and the first poll are each bounded by POLL_TIMEOUT,
-          # and the startup budget (periodSeconds * failureThreshold =
-          # 700s) exceeds twice POLL_TIMEOUT before regular liveness
-          # applies. A slow-but-healthy startup must never be restarted.
-          ports:
-            - name: health
-              containerPort: 8081
-              protocol: TCP
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: health
-            periodSeconds: 30
-            failureThreshold: 1
-          # Startup grace (KB-22): until this probe succeeds, readiness and
-          # liveness are disabled. Budget 10s * 70 = 700s > 2 * POLL_TIMEOUT
-          # (300s), covering the worst case: a deadline-bound project
-          # resolution plus a deadline-bound first poll.
-          startupProbe:
-            httpGet:
-              path: /livez
-              port: health
-            periodSeconds: 10
-            failureThreshold: 70
-          # Runs only after the startupProbe succeeds, when the first poll
-          # has completed: /livez then fails only when polls stop
-          # completing (wedge outside the per-poll deadline) — slow but
-          # completing polls stay under the app-side stall threshold.
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: health
-            periodSeconds: 60
-            failureThreshold: 2
-          env:
-            - name: NAMESPACE
-              value: "criteria-jobs"
-            # Subpath endpoint: the Kanboard instance lives at /kanboard on
-            # the catch ingress (traefik StripPrefix).
-            - name: KANBOARD_URL
-              value: "http://catch.internal.nullop.io/kanboard/jsonrpc.php"
-            - name: KANBOARD_PROJECT_NAME
-              value: "Kanboard Tickets"
-            - name: KANBOARD_TRIGGER_TAG
-              value: "k8s-run"
-            - name: KANBOARD_WORKFLOWS_TAG_GROUP
-              value: "workflows"
-            # Component/routing tags are board routing metadata, not
-            # workflow names: they join the watcher's exemption filter so
-            # route resolution never treats them as workflow-override
-            # candidates (KB-8 — two such tags on an armed ticket used to
-            # fail closed with ErrAmbiguousWorkflow every poll). Extend
-            # this list via config, no recompile needed.
-            - name: KANBOARD_ROUTING_TAGS
-              value: "criteria,operator"
-            - name: POLL_INTERVAL
-              value: "60s"
-            # Per-poll deadline (KB-22): a blocking call inside poll() used
-            # to wedge the loop silently for hours while the pod read
-            # Running 1/1. The deadline aborts a hung poll into a logged
-            # error, and the readiness/liveness probes turn a persistent
-            # stall into a visible unready/restart signal. The startupProbe
-            # above budgets 2 * this value for startup before liveness
-            # applies.
-            - name: POLL_TIMEOUT
-              value: "300s"
-            - name: CRITERIA_IMAGE
-              value: "localhost:5000/linear-intake-remote:dev"
-            - name: PROVIDER_BASE_URL
-              value: "http://192.168.17.116:11434/v1"
-            - name: MAX_AGENT_VISITS
-              value: "2"
-          volumeMounts:
-            - name: kanboard-secrets
-              mountPath: /secrets
-              readOnly: true
-            - name: routes-config
-              mountPath: /etc/criteria/routes
-              readOnly: true
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop:
-                - ALL
-          resources:
-            requests:
-              memory: "64Mi"
-              cpu: "50m"
-            limits:
-              memory: "256Mi"
-              cpu: "200m"
       volumes:
-        - name: kanboard-secrets
-          csi:
-            driver: secrets-store.csi.k8s.io
-            readOnly: true
-            volumeAttributes:
-              secretProviderClass: kanboard-spc
-        - name: routes-config
-          configMap:
-            name: criteria-routes
-            optional: true
+      - csi:
+          driver: secrets-store.csi.k8s.io
+          readOnly: true
+          volumeAttributes:
+            secretProviderClass: kanboard-spc
+        name: kanboard-secrets
+      - configMap:
+          defaultMode: 420
+          name: criteria-routes
+          optional: true
+        name: routes-config
+      containers:
+      - name: watcher
+        image: localhost:5000/criteria-k8s:20261106-kb369-1
+        imagePullPolicy: IfNotPresent
+        command:
+        - /kanboard-watcher
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        volumeMounts:
+        - mountPath: /secrets
+          name: kanboard-secrets
+          readOnly: true
+        - mountPath: /etc/criteria/routes
+          name: routes-config
+          readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        env:
+        - name: NAMESPACE
+          value: criteria-jobs
+        - name: KANBOARD_URL
+          value: http://catch.internal.nullop.io/kanboard/jsonrpc.php
+        - name: KANBOARD_PROJECT_NAME
+          value: Kanboard Tickets
+        - name: KANBOARD_TRIGGER_TAG
+          value: k8s-run
+        - name: KANBOARD_WORKFLOWS_TAG_GROUP
+          value: workflows
+        - name: KANBOARD_ROUTING_TAGS
+          value: 4,48,5,8,Array,adr,alpha,arch-rule,beta,castle,criteria,criteria-adapter-claude,criteria-adapter-copilot,criteria-adapter-proto,criteria-k8s,criteria-repo,decision,deferred,deploy,deprecation-cleanup,docs,engine,finding,hand-ruling,handshake-runtime,harness,host,k8s,kanboard,kintsugi,mcp,mechanical,operator,p0,p1,p2,parity,peer,phase-0,phase-1,phase-2,phase-3,phase-4,proto,release,resilience,routing,ruling,ruling-lite,security,stage-b,tests,unarmed,v0.6.0,v0.6.0-breaking,validation,workflow,workflow-example,settings-surface,option-b,castle-orchestrator
+        - name: POLL_INTERVAL
+          value: 60s
+        - name: CRITERIA_IMAGE
+          value: localhost:5000/linear-intake-remote:dev
+        - name: PROVIDER_BASE_URL
+          value: http://192.168.17.116:11434/v1
+        - name: MAX_AGENT_VISITS
+          value: '2'
+        - name: CRITERIA_BASE_IMAGE
+          value: localhost:5000/criteria-base:v0.1-v0.5.53
+        - name: CRITERIA_DISPATCH_MODE
+          value: castle
+        - name: CRITERIA_CASTLE_AGENT_CRITERIA_ID
+          valueFrom:
+            secretKeyRef:
+              key: criteria_id
+              name: castle-exec-agent-identity
+        - name: CRITERIA_CASTLE_AGENT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: castle-exec-agent-identity
+        - name: CRITERIA_CASTLE_ADDR
+          value: http://castle.criteria-jobs.svc.cluster.local:8080
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate

@@ -1,0 +1,121 @@
+# KB-372: THIS FILE IS GENERATED GROUND TRUTH — exported from the live cluster
+# (2026-11-06, post KB-369 roll) by k8s/tests/export_fleet_state.py. Do not hand-edit image
+# tags or env here: roll live first, then re-export. The apply-safety drift test
+# (k8s/tests/test_fleet_apply_safe.sh) diffs THIS file against the live cluster and fails
+# closed on any divergence, so a stale apply can never regress the fleet.
+# Secrets stay secretKeyRef'd (nothing inline); RESTART_TS (operational restart marker)
+# intentionally stripped — it is set at deploy time, not config.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: criteria-k8s-operator
+  name: criteria-k8s-operator
+  namespace: criteria-jobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: criteria-k8s-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: criteria-k8s-operator
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-11-05T23:02:28-07:00'
+    spec:
+      serviceAccountName: criteria-k8s-operator
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - effect: NoSchedule
+        key: catch
+        operator: Exists
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: criteria-data
+      - configMap:
+          defaultMode: 420
+          name: criteria-agent-routes
+        name: agent-routes
+      containers:
+      - name: operator
+        image: localhost:5000/criteria-k8s:20261106-kb369-1
+        imagePullPolicy: IfNotPresent
+        command:
+        - /manager
+        ports:
+        - containerPort: 8080
+          name: metrics
+          protocol: TCP
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        - containerPort: 8082
+          name: bootgate-view
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /etc/criteria/agent-routes
+          name: agent-routes
+          readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        env:
+        - name: CASTLE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: CASTLE_ORCHESTRATOR_TOKEN
+              name: criteria-castle-orchestrator
+        - name: RETENTION_PERIOD
+          value: 168h
+        - name: RETENTION_INTERVAL
+          value: 1h
+        - name: DEFAULT_CRITERIA_IMAGE
+          value: localhost:5000/linear-intake-remote:20260919-021702-07f2a29
+        - name: CASTLE_ADDR
+          value: http://castle:8080
+        - name: CRITERIA_BASE_IMAGE
+          value: localhost:5000/criteria-base:v0.1-v0.5.58
+        - name: CRITERIA_ASSIGNMENT_AGENT
+          value: 'true'
+        - name: CRITERIA_AGENT_PROJECT
+          value: Kanboard Tickets
+        - name: CRITERIA_AGENT_CASTLE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: castle-exec-agent-identity
+        - name: CRITERIA_AGENT_CRITERIA_ID
+          valueFrom:
+            secretKeyRef:
+              key: criteria_id
+              name: castle-exec-agent-identity
+        - name: CRITERIA_AGENT_ROUTES_FILE
+          value: /etc/criteria/agent-routes/routes.json
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
