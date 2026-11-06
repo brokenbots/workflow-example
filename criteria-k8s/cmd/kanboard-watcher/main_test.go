@@ -542,6 +542,52 @@ func TestPollStampsWorkflowInterface(t *testing.T) {
 	require.Equal(t, expected, runs[0].Spec.Workflow.Interface)
 }
 
+// TestPollReloadsRoutesAcrossPolls is the KB-354 watcher-side regression:
+// the watcher resolves the routes payload at the top of EVERY poll (never
+// cached at startup), so a criteria-routes ConfigMap repin — the
+// 2026-11-04 d2442bd -> 7f2149cd apply on both pin sites, the url's
+// ?ref= query and the per-entry ref key — takes effect on the next fired
+// ticket with no watcher restart. Pin this contract against
+// re-introduction of a startup cache.
+func TestPollReloadsRoutesAcrossPolls(t *testing.T) {
+	const staleRef = "0b8136650d5622381bf18a597ed93b8c272ba19b"
+	const repinnedRef = "7f2149cd"
+	tw := newTestWatcher(t, urlInterfaceRoutesJSON)
+
+	tw.kbS.addTask(30, 9, "k8s-run") // column 9 = Ready
+	tw.pollOnce(t)
+
+	runs := tw.runs(t)
+	require.Len(t, runs, 1)
+	require.NotNil(t, runs[0].Spec.WorkflowSource)
+	assert.Equal(t, staleRef, runs[0].Spec.WorkflowSource.Ref,
+		"the pre-repin fire stamps the pin the mount held")
+
+	// The repin: only the ConfigMap-backed file changes between polls —
+	// no pod restart, no watcher rewire. Both pin sites carry the new
+	// value, as the live repin did.
+	require.NoError(t, os.WriteFile(tw.w.routesFile,
+		[]byte(strings.Replace(urlInterfaceRoutesJSON, staleRef, repinnedRef, -1)), 0o600))
+
+	tw.kbS.addTask(31, 9, "k8s-run") // a fresh ticket, armed after the repin
+	tw.pollOnce(t)
+
+	runs = tw.runs(t)
+	require.Len(t, runs, 2, "the next fire must build from the repinned payload")
+	for _, run := range runs {
+		require.NotNil(t, run.Spec.WorkflowSource)
+		if run.Spec.TicketID == "KB-31" {
+			assert.Equal(t, repinnedRef, run.Spec.WorkflowSource.Ref,
+				"the post-repin fire stamps the pin the CM currently carries — the watcher must not hold a startup payload")
+			assert.Contains(t, run.Spec.WorkflowSource.URL, "ref="+repinnedRef,
+				"the url's ?ref= pin site carries the repin too")
+		} else {
+			assert.Equal(t, staleRef, run.Spec.WorkflowSource.Ref,
+				"the earlier fired run keeps its stamp: a reload never re-stamps history")
+		}
+	}
+}
+
 // convertWorkflow-level coverage of the same boundary: image mode carries
 // no interface, and a url interface is copied field-for-field without
 // aliasing the source.

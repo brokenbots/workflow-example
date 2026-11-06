@@ -2,6 +2,10 @@ package control
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -375,6 +379,128 @@ func TestBuildRunDegradesWithoutRoutes(t *testing.T) {
 	require.Nil(t, run)
 	require.Len(t, reasons, 1)
 	assert.Contains(t, reasons[0], "routes payload not configured")
+}
+
+// kb322StalePin and kb322RepinnedPin are the two pin values of the
+// KB-354 evidence chain: the 2026-11-04 routes repin moved the
+// criteria-agent-routes payload d2442bd -> 7f2149cd, and the operator's
+// startup parse kept stamping the stale d2442bd into admitted CRs until
+// the pod restarted.
+const (
+	kb322StalePin    = "d2442bd"
+	kb322RepinnedPin = "7f2149cd"
+)
+
+// writePinnedRoutesFile marshals a minimal valid routes payload whose
+// kanboard-develop-url entry pins <ref> on BOTH pin sites the routes
+// apply stamps (the workflow url's ?ref= query and the entry's top-level
+// ref — the two keys the 2026-11-04 repin read back), writes it to the
+// given path, and round-trips it through routes.LoadFile so a fixture
+// drift fails the test here instead of in the seam under test.
+func writePinnedRoutesFile(t *testing.T, path, ref string) {
+	t.Helper()
+	p := &routes.Payload{
+		APIVersion: routes.APIVersion,
+		Kind:       routes.Kind,
+		WorkflowLibrary: map[string]routes.Workflow{
+			"kanboard-develop-url": {
+				Type:  routes.TypeURL,
+				URL:   fmt.Sprintf("https://github.com/brokenbots/workflow-example.git?ref=%s", ref),
+				Ref:   ref,
+				Class: routes.ClassDefault,
+				Interface: &routes.WorkflowInterface{
+					APIVersion: routes.InterfaceAPIVersion,
+					Kind:       routes.InterfaceKind,
+					Workflow:   "kanboard_develop_v1",
+				},
+			},
+		},
+		Routes: []routes.Route{
+			{Name: "kb-develop-url", Workflow: "kanboard-develop-url", Project: "Kanboard Tickets", States: []string{"Ready"}},
+		},
+	}
+	data, err := json.Marshal(p)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	_, err = routes.LoadFile(path)
+	require.NoError(t, err, "the pinned routes fixture must parse: an unparsable payload could never boot, so it pins nothing")
+}
+
+// reloadRoutesBuilder wires the KB-354 posture on the parity fixtures:
+// the boot snapshot Routes was parsed from the file at startup and the
+// file is wired for per-build reload — the snapshot stays byte-stable for
+// the whole test, exactly like a long-lived operator process.
+func reloadRoutesBuilder(t *testing.T, file string, snapshot *routes.Payload) *RunBuilder {
+	t.Helper()
+	b := &RunBuilder{Defaults: parityDefaults(), Namespace: "criteria-jobs", Routes: snapshot, RoutesFile: file, Log: logr.Discard()}
+	require.True(t, b.Configured())
+	return b
+}
+
+// TestBuildRunReloadsRoutesBetweenBuilds is the KB-354 regression at the
+// builder seam: the operator parsed the routes payload ONCE at startup and
+// never re-read it, so a repinned routes ConfigMap stayed invisible to
+// admissions until a pod restart (KB-322's false-close). The builder must
+// resolve the payload PER BUILD from the wired RoutesFile, so the next
+// admitted CR carries the pin the ConfigMap mount currently holds — both
+// pin sites — with no restart, and never falls back to the boot snapshot
+// when the reload fails.
+func TestBuildRunReloadsRoutesBetweenBuilds(t *testing.T) {
+	ctx := context.Background()
+	t.Run("repin takes effect on the next build, no restart", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "agent-routes", "routes.json")
+		require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o700))
+		writePinnedRoutesFile(t, file, kb322StalePin)
+
+		// The boot snapshot mirrors what the operator parsed at startup
+		// (the same stale pin it would read from the file) and stays
+		// byte-stable through the whole test.
+		snapshot := &routes.Payload{WorkflowLibrary: map[string]routes.Workflow{
+			"kanboard-develop-url": {Type: routes.TypeURL, URL: "https://github.com/brokenbots/workflow-example.git?ref=" + kb322StalePin, Ref: kb322StalePin},
+		}}
+		b := reloadRoutesBuilder(t, file, snapshot)
+
+		staleRun, reasons := b.BuildRun(ctx, parityDecision())
+		require.Empty(t, reasons)
+		require.NotNil(t, staleRun.Spec.WorkflowSource)
+		assert.Equal(t, kb322StalePin, staleRun.Spec.WorkflowSource.Ref,
+			"the pre-repin build stamps the pin the mount held at boot")
+
+		// The ConfigMap repin: only the mounted file changes — no pod
+		// restart, no builder rewire, the snapshot stays stale.
+		writePinnedRoutesFile(t, file, kb322RepinnedPin)
+		freshRun, reasons := b.BuildRun(ctx, parityDecision())
+		require.Empty(t, reasons, "the same builder instance must build with the new pin: a restart must not be required")
+		require.NotNil(t, freshRun.Spec.WorkflowSource)
+		assert.Equal(t, kb322RepinnedPin, freshRun.Spec.WorkflowSource.Ref,
+			"the post-repin build stamps the pin the CM currently carries (spec.workflowSource.ref)")
+		assert.Contains(t, freshRun.Spec.WorkflowSource.URL, "ref="+kb322RepinnedPin,
+			"the url's ?ref= pin site carries the repin too (the second pin site the KB-354 evidence read back)")
+		assert.Equal(t, kb322StalePin, snapshot.WorkflowLibrary["kanboard-develop-url"].Ref,
+			"the boot snapshot is untouched: the reload must read the file, not the snapshot")
+		assert.Equal(t, kb322StalePin, staleRun.Spec.WorkflowSource.Ref,
+			"the earlier run keeps its admission-time pin: a reload never re-stamps history")
+	})
+
+	t.Run("reload failure fails closed, no snapshot fallback", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "routes.json")
+		writePinnedRoutesFile(t, file, kb322StalePin)
+		// No boot snapshot at all: RoutesFile is the only payload source,
+		// which is also the Configured-without-Routes posture.
+		b := reloadRoutesBuilder(t, file, nil)
+
+		ok, reasons := b.BuildRun(ctx, parityDecision())
+		require.Empty(t, reasons)
+		require.NotNil(t, ok.Spec.WorkflowSource)
+
+		// The mount turns unreadable mid-flight (a bad apply, a CM delete).
+		require.NoError(t, os.Remove(file))
+		run, reasons := b.BuildRun(ctx, parityDecision())
+		require.Nil(t, run, "a reload failure must fail the build closed: falling back to the boot snapshot would stamp a pin that may no longer be live")
+		require.Len(t, reasons, 1)
+		assert.Contains(t, reasons[0], "routes payload reload failed")
+		assert.Contains(t, reasons[0], file, "the loud reason names the failing file so the degrade is diagnosable")
+	})
 }
 
 // BuildRunCutoverShapeMirrorsWatcher stamps the binding-first shape: the
