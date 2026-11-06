@@ -34,7 +34,13 @@ NOT allowed:
   - git checkout -b or git branch (creating/deleting branches)
   - Any action that changes what the code does
 
-Call submit_outcome with one of:
+Call submit_outcome with outcome one of:
   "success"      — goal state achieved
   "needs_human"  — resolution requires code judgment, domain knowledge, or intent that only the developer can provide
   "failed"       — git state is corrupt or the abort itself failed
+
+Every outcome here carries a typed contract requiring a payload member named "reason" (string):
+call submit_outcome with outcome set AND a payload JSON object of the shape
+  payload: { "reason": "<your findings prose>" }
+The top-level "reason" parameter is accepted and folded in, but the payload form is the
+durable contract — prefer it.
