@@ -45,8 +45,22 @@ type RunBuilder struct {
 	// Namespace is the pre-cutover landing namespace (the operator's
 	// CRITERIA_NAMESPACE — the watcher's watch namespace).
 	Namespace string
-	// Routes is the routes payload resolved from --shadow-routes-file.
+	// Routes is the routes payload resolved at startup from
+	// --assignment-routes-file/--shadow-routes-file. It is a boot snapshot
+	// only — when RoutesFile is set, every BuildRun re-reads the file and
+	// this snapshot is bypassed (KB-354).
 	Routes *routes.Payload
+	// RoutesFile (KB-354) is the routes payload file backing the
+	// assignment lane — the same path Routes loaded at boot. The
+	// controller parses a ConfigMap-mounted file once at startup, so a
+	// repinned criteria-agent-routes CR stays invisible to admissions
+	// until a pod restart unless each build re-reads the mount: when set,
+	// BuildRun reloads the payload per build (one read per assignment /
+	// reconcile cycle), so the next admitted CR always stamps the pin the
+	// CM currently carries. A reload failure fails the build closed — the
+	// boot snapshot is never a silent fallback, because stamping it is
+	// exactly the stale-pin admission this field exists to prevent.
+	RoutesFile string
 	// Client reads the cutover-done project's binding ConfigMap for the
 	// name-only-vs-pinned project binding decision. nil is tolerated
 	// (name-only pin, mirroring the watcher's unread-binding degrade).
@@ -67,12 +81,13 @@ type RunBuilder struct {
 }
 
 // Configured reports whether the builder can actually derive a spec: a
-// routes payload is loaded. Wiring callers (the operator main, the
-// watchdog) treat an unconfigured builder as "spec mirror off" — the
-// decision-granularity comparison stays, and BuildRun's not-configured
-// degrade reason never enters any divergence set.
+// routes payload is loaded — from the boot snapshot or, when RoutesFile is
+// set, per-build from the file itself (KB-354). Wiring callers (the
+// operator main, the watchdog) treat an unconfigured builder as "spec
+// mirror off" — the decision-granularity comparison stays, and BuildRun's
+// not-configured degrade reason never enters any divergence set.
 func (b *RunBuilder) Configured() bool {
-	return b != nil && b.Routes != nil
+	return b != nil && (b.Routes != nil || b.RoutesFile != "")
 }
 
 // BuildRun derives the assignment's would-be CriteriaRun in memory.
@@ -84,12 +99,26 @@ func (b *RunBuilder) Configured() bool {
 // come from the exported CompareSpec (kept separately so callers' parity
 // tests can drive both halves).
 func (b *RunBuilder) BuildRun(ctx context.Context, d Decision, opts ...BuildOption) (*criteriav1.CriteriaRun, []string) {
-	if b == nil || b.Routes == nil {
+	if !b.Configured() {
 		return nil, []string{"routes payload not configured: spec-level comparison unavailable"}
 	}
 	o := buildOptions{}
 	for _, opt := range opts {
 		opt(&o)
+	}
+	// KB-354: resolve the payload per build. With RoutesFile wired the
+	// boot snapshot is bypassed — a ConfigMap repin takes effect on the
+	// next admitted run with no pod restart — and a reload failure fails
+	// the build closed rather than stamping the snapshot (a stale pin is
+	// the bug this reload closes).
+	routesPayload := b.Routes
+	if b.RoutesFile != "" {
+		fresh, err := routes.LoadFile(b.RoutesFile)
+		if err != nil {
+			return nil, []string{fmt.Sprintf(
+				"routes payload reload failed: %v (refusing to stamp the startup snapshot: the assignment would admit the pre-repin pin)", err)}
+		}
+		routesPayload = fresh
 	}
 	var reasons []string
 	if d.Ticket == "" {
@@ -98,14 +127,14 @@ func (b *RunBuilder) BuildRun(ctx context.Context, d Decision, opts ...BuildOpti
 	if d.RepoURL == "" {
 		reasons = append(reasons, "assignment-labels missing: "+DefaultLabelRepoURL)
 	}
-	sel, selReasons := b.selection(d)
+	sel, selReasons := b.selection(d, routesPayload)
 	if len(selReasons) > 0 {
 		return nil, append(reasons, selReasons...)
 	}
 	if len(reasons) > 0 {
 		return nil, reasons
 	}
-	return b.stamp(ctx, d, sel, o.nameSuffix), nil
+	return b.stamp(ctx, d, sel, routesPayload, o.nameSuffix), nil
 }
 
 // BuildOption customizes a single BuildRun call.
@@ -127,9 +156,10 @@ func WithNameSuffix(suffix string) BuildOption {
 // lookup is a like-for-like library resolution, not a re-route; the
 // conflict policy still resolves through routes
 // (EffectiveImageConflictPolicy), the same resolver the watcher's selection
-// stamps.
-func (b *RunBuilder) selection(d Decision) (*routes.Selection, []string) {
-	wf, ok := b.Routes.WorkflowLibrary[d.WorkflowName]
+// stamps. The payload is the one BuildRun resolved for this build (the
+// per-build reload when RoutesFile is wired — KB-354).
+func (b *RunBuilder) selection(d Decision, rp *routes.Payload) (*routes.Selection, []string) {
+	wf, ok := rp.WorkflowLibrary[d.WorkflowName]
 	if !ok {
 		return nil, []string{fmt.Sprintf(
 			"spec.workflow.name: assignment names unknown workflow %q (absent from the routes workflow library)", d.WorkflowName)}
@@ -148,10 +178,10 @@ func (b *RunBuilder) selection(d Decision) (*routes.Selection, []string) {
 		// resolves below.
 		ConfigName:     d.Slot,
 		Config:         routes.ConfigEntry{},
-		ConflictPolicy: b.Routes.EffectiveImageConflictPolicy(wf, d.Project),
+		ConflictPolicy: rp.EffectiveImageConflictPolicy(wf, d.Project),
 	}
 	if d.Slot != "" {
-		entry, ok := b.Routes.ConfigLibrary[d.Slot]
+		entry, ok := rp.ConfigLibrary[d.Slot]
 		if !ok {
 			return nil, []string{fmt.Sprintf(
 				"dispatch slot: assignment slot %q (absent from the routes configuration library)", d.Slot)}
@@ -163,8 +193,9 @@ func (b *RunBuilder) selection(d Decision) (*routes.Selection, []string) {
 
 // stamp mirrors the watcher's buildCriteriaRun lane wiring onto the
 // builder's own inputs (defaults namespace, binding pin read) and stamps
-// through the shared path.
-func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selection, nameSuffix string) *criteriav1.CriteriaRun {
+// through the shared path. The payload is the one BuildRun resolved for
+// this build (the per-build reload when RoutesFile is wired — KB-354).
+func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selection, rp *routes.Payload, nameSuffix string) *criteriav1.CriteriaRun {
 	name := fmt.Sprintf("%s-%d", strings.ToLower(d.Ticket), nowUnix())
 	if nameSuffix != "" {
 		name = fmt.Sprintf("%s-%s", name, nameSuffix)
@@ -177,7 +208,7 @@ func (b *RunBuilder) stamp(ctx context.Context, d Decision, sel *routes.Selectio
 		Defaults:  b.Defaults,
 		Namespace: b.Namespace,
 	}
-	if entry, cutover := b.Routes.Project(d.Project); cutover && entry.IsCutoverDone() {
+	if entry, cutover := rp.Project(d.Project); cutover && entry.IsCutoverDone() {
 		in.CutoverNamespace = entry.Namespace
 		in.BindingRefName = binding.CMName
 		in.BindingResourceVersion = b.bindingPin(ctx, entry.Namespace)

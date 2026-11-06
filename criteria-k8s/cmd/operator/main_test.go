@@ -402,22 +402,25 @@ func TestResolveAgentCastleTokenFallbackLogsItsConsumer(t *testing.T) {
 // seam: a deployment without a routes payload wires NO builder
 // (decision-only posture — the "routes payload not configured" degrade
 // must never reach the divergence log), and a configured payload wires the
-// builder the watchdog's Configured() gate runs.
+// builder the watchdog's Configured() gate runs — carrying the KB-354
+// routes file so every build re-reads the payload from disk (a repinned
+// routes ConfigMap takes effect on the next build with no pod restart).
 func TestNewShadowRunBuilderWiring(t *testing.T) {
 	assert.False(t, (&control.RunBuilder{}).Configured(), "a nil-Routes builder is unconfigured")
 	var absentBuilder *control.RunBuilder
 	assert.False(t, absentBuilder.Configured(), "nil builder must not panic the gate")
 
-	assert.Nil(t, newShadowRunBuilder(nil, runspec.Defaults{}, "criteria-jobs", nil, logr.Discard()),
+	assert.Nil(t, newShadowRunBuilder(nil, "", runspec.Defaults{}, "criteria-jobs", nil, logr.Discard()),
 		"no routes payload => no spec mirror; the shadow lane stays decision-only")
 
 	payload := &routes.Payload{
 		WorkflowLibrary: map[string]routes.Workflow{"kanboard-develop-url": {}},
 	}
-	b := newShadowRunBuilder(payload, runspec.Defaults{TestCmd: "make test"}, "criteria-jobs", nil, logr.Discard())
+	b := newShadowRunBuilder(payload, "routes-a.json", runspec.Defaults{TestCmd: "make test"}, "criteria-jobs", nil, logr.Discard())
 	require.NotNil(t, b, "a routes payload wires the spec mirror")
 	assert.True(t, b.Configured())
 	assert.Same(t, payload, b.Routes)
+	assert.Equal(t, "routes-a.json", b.RoutesFile, "the KB-354 reload file rides the payload: a repin takes effect on the next build, no restart")
 	assert.Equal(t, "criteria-jobs", b.Namespace)
 	assert.Equal(t, "make test", b.Defaults.TestCmd)
 	assert.NotNil(t, b.ConfigPinner,

@@ -489,7 +489,7 @@ func main() {
 			logger.Error(routesErr, "shadow-run watchdog: routes payload unreadable; the mirror degrades to decision-only",
 				"routesFile", *shadowRoutesFile)
 		}
-		watchdog.Builder = newShadowRunBuilder(routesPayload, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
+		watchdog.Builder = newShadowRunBuilder(routesPayload, *shadowRoutesFile, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
 		if watchdog.Builder == nil && routesErr == nil {
 			logger.Info("shadow-run spec mirror disabled: no routes payload configured (--shadow-routes-file empty); the watchdog stays decision-only",
 				"routesFile", *shadowRoutesFile)
@@ -543,7 +543,7 @@ func main() {
 				Name:       getenv("CRITERIA_AGENT_NAME", "criteria-k8s-operator"),
 				Project:    *agentProject,
 			}
-			builder := newShadowRunBuilder(agentRoutesPayload, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
+			builder := newShadowRunBuilder(agentRoutesPayload, agentRoutesPath, shadowRunnerDefaults(), *namespaceFlag, directClient, logger)
 			events := castle.NewAssignmentEventFeed(castle.Config{Addr: agentAddr, Token: agentToken}, nil)
 			dispositions := castle.NewServerClient(castle.Config{Addr: agentAddr, Token: agentToken}, nil)
 			agent := control.NewAssignmentAgent(agentCfg, builder, *namespaceFlag, directClient, events, dispositions, logger)
@@ -737,8 +737,12 @@ func configPinResolver(cl client.Client, log logr.Logger) runspec.CriteriaRunCon
 // the caller logs that posture once at startup (a routes-file READ ERROR
 // keeps its own louder Error-level log). The KB-103 config pinner is
 // always wired with the payload (KB-338): a named config slot must stamp
-// through to the CR, never silently resolve to lane defaults.
-func newShadowRunBuilder(routesPayload *routes.Payload, defaults runspec.Defaults, ns string, cl client.Client, log logr.Logger) *control.RunBuilder {
+// through to the CR, never silently resolve to lane defaults. routesFile
+// (KB-354) is the same path the payload loaded from: wiring it makes every
+// BuildRun re-read the file, so a repinned routes ConfigMap takes effect
+// on the next admitted run with no pod restart (the payload argument stays
+// as the Configured seam and the boot snapshot only).
+func newShadowRunBuilder(routesPayload *routes.Payload, routesFile string, defaults runspec.Defaults, ns string, cl client.Client, log logr.Logger) *control.RunBuilder {
 	if routesPayload == nil {
 		return nil
 	}
@@ -746,6 +750,7 @@ func newShadowRunBuilder(routesPayload *routes.Payload, defaults runspec.Default
 		Defaults:     defaults,
 		Namespace:    ns,
 		Routes:       routesPayload,
+		RoutesFile:   routesFile,
 		Client:       cl,
 		Log:          log,
 		ConfigPinner: configPinResolver(cl, log),
