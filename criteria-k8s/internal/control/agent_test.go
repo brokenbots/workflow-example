@@ -518,9 +518,10 @@ func TestAgentBridgeTriageRearmVerdictIsCompleting(t *testing.T) {
 	assert.Equal(t, fmt.Sprintf("%T", &v1.RunCompleted{}), payloadType)
 
 	// Guard against over-fitting: the human-gate spellings (Succeeded with
-	// the verdict, the same shape KB-338 pinned) and a Failed phase keep
-	// mapping RunFailed — none of them is a completing verdict.
-	agentProbe, eventsProbe, _ := agentFixture(t)
+	// the verdict, the same shape KB-338 pinned), a Failed phase, an
+	// unrecognized terminal and an empty verdict keep mapping RunFailed —
+	// none of them is a completing verdict. Their lane-release semantics
+	// stay covered by TestAgentBridgeTerminalRunFailedCarriesReason.
 	for name, tc := range map[string]criteriav1.CriteriaRunStatus{
 		"need assistance":      {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateNeedAssistance},
 		"awaiting human":       {Phase: criteriav1.PhaseSucceeded, FinalState: finalStateAwaitingHuman},
@@ -533,10 +534,6 @@ func TestAgentBridgeTriageRearmVerdictIsCompleting(t *testing.T) {
 			assert.True(t, ok, "finalState %q with phase %q must still map RunFailed", tc.FinalState, tc.Phase)
 		})
 	}
-	require.True(t, agentProbe.bridgeStatus(context.Background(), "run-gate", decisionFixture().WorkflowName, 1,
-		&criteriav1.CriteriaRunStatus{Phase: criteriav1.PhaseSucceeded, FinalState: finalStateAwaitingHuman}),
-		"a non-completing terminal still releases the lane once emitted")
-	require.Equal(t, 1, eventsProbe.count())
 }
 
 func TestAgentBridgeTerminalRunFailedCarriesReason(t *testing.T) {

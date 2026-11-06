@@ -34,8 +34,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Workflow final states the bridge maps to terminal envelopes (mirroring
-// the watcher's reconcileTaskColumn vocabulary — KB-50/KB-239).
+// Workflow final states the bridge maps to terminal envelopes. The
+// failure/human-gate spellings mirror the watcher's reconcileTaskColumn
+// vocabulary (KB-50/KB-239); ready_for_development is a bridge-only
+// completing verdict (the watcher deliberately abstains on triage-class
+// successes — KB-9 — while the bridge mirrors the row's success/failure).
 const (
 	finalStateHandlerComplete = "handler_complete"
 	finalStateFailed          = "failed"
