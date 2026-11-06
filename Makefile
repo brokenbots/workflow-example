@@ -203,6 +203,10 @@ test: validate test-criteria-k8s
 	./kanboard_triage_v1/tests/test_triage_standalone.sh
 	@echo "Running qa_triage_v1 publish_workstream regression test (KB-355)..."
 	./qa_triage_v1/tests/test_publish_workstream.sh
+	@echo "Running upstream_sync mechanical push regression test (pair-loop remaster)..."
+	./workstream_handler_v1/tests/test_upstream_sync.sh
+	@echo "Running pair-loop local-isolation guard (pair-loop remaster)..."
+	./workstream_handler_v1/tests/test_pair_loop_local_isolation.sh
 	@echo "Running flat WorkflowGraphs shape smoke test (CRI-300)..."
 	./k8s/tests/test_workflow_graphs_flat.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."

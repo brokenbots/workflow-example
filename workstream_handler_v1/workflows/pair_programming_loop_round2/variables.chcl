@@ -6,21 +6,19 @@ variable "developer_initial_prompt" {
     default = ""
 }
 
-// Base branch the checkpoint verifier compares the workstream branch against
-// (KB-211 benign-resume / fatal-unpushed split). Plumbed in by the parent's
-// pair_programming_loop subworkflow blocks; defaults to main.
+// LOCAL-ONLY contract (remaster ruling 1): this tree performs zero network
+// operations. Upstream placement (push) is delegated to the upstream_sync
+// subworkflow; remote-tracking refs already present in the worktree are
+// local data. Consequently the old credential surface is GONE:
+//   - git_credential_helper  (deleted — the loop never authenticates)
+//   - workflow_github_token  (deleted — zero secrets left in the loop;
+//     credential blast radius becomes physics, not policy)
+// The base_branch var is kept for interface compatibility with the handler
+// dials (they still pass it); the loop itself no longer consumes it.
 variable "base_branch" {
     type        = string
-    description = "Base branch for push_checkpoint's committed-vs-base comparison (verify_checkpoint_pushed.sh)."
+    description = "Interface-compat passthrough from the parent dials; unused by the local-only loop."
     default     = "main"
-}
-
-// Shell snippet shared with the parent workflow that sets up a Git credential
-// helper reading GH_TOKEN / GITHUB_TOKEN / WORKFLOW_GITHUB_TOKEN at runtime.
-// Injected so push steps do not duplicate the helper or embed a token.
-variable "git_credential_helper" {
-    type    = string
-    default = ""
 }
 
 variable "ci_gate_cmd" {
@@ -134,9 +132,4 @@ variable "reviewer" {
             api_key  = ""
         }
     }
-}
-
-variable "workflow_github_token" {
-    type   = string
-    secret = true
 }

@@ -6,23 +6,24 @@ set -euo pipefail
 # 'dependabot/go_modules/minor-and-patch-91744db657'; the next body's entry
 # assertion failed in 2ms and parked the run after a green develop leg).
 # A mismatch is therefore NOT a failure by itself: re-assert the expected
-# branch deterministically — best-effort fetch, then checkout — and fail
-# only when git refuses the switch (a true conflict between the incoming
-# branch and untracked scratch / modified tracked files), with a typed reason
-# carrying the unexpected ref. The branch contract stays stepped, not
-# agent-judged.
+# branch deterministically — from the LOCAL ref — and fail only when git
+# refuses the switch (a true conflict between the incoming branch and
+# untracked scratch / modified tracked files), with a typed reason carrying
+# the unexpected ref. The branch contract stays stepped, not agent-judged.
+#
+# LOCAL-ONLY (settled ruling 1): the removed best-effort `git fetch --quiet
+# origin` is gone. branch_manager already guarantees the worktree and the
+# branch exist locally; re-asserting from the local ref is sound and the
+# loop performs zero network operations on entry.
 expected=$(basename "$criteria_value_1" .md)
 current=$(git branch --show-current)
 if [ "$current" = "$expected" ]; then
-    echo "on_branch=$current"
+    # entry_sha: the loop's LOCAL durability baseline (remaster Task 2). The
+    # checkpoint verifier compares HEAD against this sha instead of polling
+    # the remote; benign-resume (KB-211) becomes a local compare.
+    entry_sha=$(git rev-parse HEAD)
+    printf 'on_branch=%s\nentry_sha=%s\n' "$expected" "$entry_sha"
     exit 0
-fi
-
-# Best-effort: the expected branch normally exists locally (branch_manager
-# attached the worktree to it), so an unreachable origin must not block the
-# re-assert from the local ref.
-if ! git fetch --quiet origin 2>/dev/null; then
-    echo "fetch_skipped=true (origin unavailable - re-asserting from the local ref)" >&2
 fi
 
 if ! checkout_err=$(git checkout -q "$expected" 2>&1); then
@@ -36,5 +37,6 @@ if ! checkout_err=$(git checkout -q "$expected" 2>&1); then
     exit 1
 fi
 
+entry_sha=$(git rev-parse HEAD)
 echo "reasserted_from=$current"
-echo "on_branch=$(git branch --show-current)"
+printf 'on_branch=%s\nentry_sha=%s\n' "$(git branch --show-current)" "$entry_sha"
