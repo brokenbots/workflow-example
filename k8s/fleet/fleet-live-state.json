@@ -1,0 +1,775 @@
+{
+ "criteria-k8s-operator": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/name": "criteria-k8s-operator"
+   },
+   "name": "criteria-k8s-operator",
+   "namespace": "criteria-jobs"
+  },
+  "spec": {
+   "replicas": 1,
+   "selector": {
+    "matchLabels": {
+     "app.kubernetes.io/name": "criteria-k8s-operator"
+    }
+   },
+   "template": {
+    "metadata": {
+     "labels": {
+      "app.kubernetes.io/name": "criteria-k8s-operator"
+     },
+     "annotations": {
+      "kubectl.kubernetes.io/restartedAt": "2026-11-05T23:02:28-07:00"
+     }
+    },
+    "spec": {
+     "serviceAccountName": "criteria-k8s-operator",
+     "terminationGracePeriodSeconds": 30,
+     "nodeSelector": {
+      "kubernetes.io/arch": "amd64"
+     },
+     "tolerations": [
+      {
+       "effect": "NoSchedule",
+       "key": "catch",
+       "operator": "Exists"
+      }
+     ],
+     "securityContext": {
+      "fsGroup": 10001,
+      "runAsGroup": 10001,
+      "runAsNonRoot": true,
+      "runAsUser": 10001,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "volumes": [
+      {
+       "name": "data",
+       "persistentVolumeClaim": {
+        "claimName": "criteria-data"
+       }
+      },
+      {
+       "configMap": {
+        "defaultMode": 420,
+        "name": "criteria-agent-routes"
+       },
+       "name": "agent-routes"
+      }
+     ],
+     "containers": [
+      {
+       "name": "operator",
+       "image": "localhost:5000/criteria-k8s:20261106-kb369-1",
+       "imagePullPolicy": "IfNotPresent",
+       "command": [
+        "/manager"
+       ],
+       "ports": [
+        {
+         "name": "metrics",
+         "containerPort": 8080,
+         "protocol": "TCP"
+        },
+        {
+         "name": "health",
+         "containerPort": 8081,
+         "protocol": "TCP"
+        },
+        {
+         "name": "bootgate-view",
+         "containerPort": 8082,
+         "protocol": "TCP"
+        }
+       ],
+       "resources": {
+        "limits": {
+         "cpu": "500m",
+         "memory": "512Mi"
+        },
+        "requests": {
+         "cpu": "100m",
+         "memory": "128Mi"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/data",
+         "name": "data"
+        },
+        {
+         "mountPath": "/etc/criteria/agent-routes",
+         "name": "agent-routes",
+         "readOnly": true
+        }
+       ],
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true
+       },
+       "terminationMessagePath": "/dev/termination-log",
+       "terminationMessagePolicy": "File",
+       "env": [
+        {
+         "name": "CASTLE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "CASTLE_ORCHESTRATOR_TOKEN",
+           "name": "criteria-castle-orchestrator"
+          }
+         }
+        },
+        {
+         "name": "RETENTION_PERIOD",
+         "value": "168h"
+        },
+        {
+         "name": "RETENTION_INTERVAL",
+         "value": "1h"
+        },
+        {
+         "name": "DEFAULT_CRITERIA_IMAGE",
+         "value": "localhost:5000/linear-intake-remote:20260919-021702-07f2a29"
+        },
+        {
+         "name": "CASTLE_ADDR",
+         "value": "http://castle:8080"
+        },
+        {
+         "name": "CRITERIA_BASE_IMAGE",
+         "value": "localhost:5000/criteria-base:v0.1-v0.5.58"
+        },
+        {
+         "name": "CRITERIA_ASSIGNMENT_AGENT",
+         "value": "true"
+        },
+        {
+         "name": "CRITERIA_AGENT_PROJECT",
+         "value": "Kanboard Tickets"
+        },
+        {
+         "name": "CRITERIA_AGENT_CASTLE_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "castle-exec-agent-identity"
+          }
+         }
+        },
+        {
+         "name": "CRITERIA_AGENT_CRITERIA_ID",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "criteria_id",
+           "name": "castle-exec-agent-identity"
+          }
+         }
+        },
+        {
+         "name": "CRITERIA_AGENT_ROUTES_FILE",
+         "value": "/etc/criteria/agent-routes/routes.json"
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "strategy": {
+    "rollingUpdate": {
+     "maxSurge": "25%",
+     "maxUnavailable": "25%"
+    },
+    "type": "RollingUpdate"
+   }
+  }
+ },
+ "criteria-kanboard-watcher": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/name": "criteria-kanboard-watcher"
+   },
+   "name": "criteria-kanboard-watcher",
+   "namespace": "criteria-jobs"
+  },
+  "spec": {
+   "replicas": 1,
+   "selector": {
+    "matchLabels": {
+     "app.kubernetes.io/name": "criteria-kanboard-watcher"
+    }
+   },
+   "template": {
+    "metadata": {
+     "labels": {
+      "app.kubernetes.io/name": "criteria-kanboard-watcher"
+     },
+     "annotations": {
+      "kubectl.kubernetes.io/restartedAt": "2026-11-05T23:02:28-07:00"
+     }
+    },
+    "spec": {
+     "serviceAccountName": "criteria-k8s-operator",
+     "terminationGracePeriodSeconds": 30,
+     "nodeSelector": {
+      "kubernetes.io/arch": "amd64"
+     },
+     "tolerations": [
+      {
+       "effect": "NoSchedule",
+       "key": "catch",
+       "operator": "Exists"
+      }
+     ],
+     "securityContext": {
+      "fsGroup": 10001,
+      "runAsGroup": 10001,
+      "runAsNonRoot": true,
+      "runAsUser": 10001,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "volumes": [
+      {
+       "csi": {
+        "driver": "secrets-store.csi.k8s.io",
+        "readOnly": true,
+        "volumeAttributes": {
+         "secretProviderClass": "kanboard-spc"
+        }
+       },
+       "name": "kanboard-secrets"
+      },
+      {
+       "configMap": {
+        "defaultMode": 420,
+        "name": "criteria-routes",
+        "optional": true
+       },
+       "name": "routes-config"
+      }
+     ],
+     "containers": [
+      {
+       "name": "watcher",
+       "image": "localhost:5000/criteria-k8s:20261106-kb369-1",
+       "imagePullPolicy": "IfNotPresent",
+       "command": [
+        "/kanboard-watcher"
+       ],
+       "ports": [
+        {
+         "name": "health",
+         "containerPort": 8081,
+         "protocol": "TCP"
+        }
+       ],
+       "livenessProbe": {
+        "failureThreshold": 2,
+        "httpGet": {
+         "path": "/livez",
+         "port": "health",
+         "scheme": "HTTP"
+        },
+        "periodSeconds": 60,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+       },
+       "startupProbe": {
+        "failureThreshold": 70,
+        "httpGet": {
+         "path": "/livez",
+         "port": "health",
+         "scheme": "HTTP"
+        },
+        "periodSeconds": 10,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+       },
+       "readinessProbe": {
+        "failureThreshold": 1,
+        "httpGet": {
+         "path": "/readyz",
+         "port": "health",
+         "scheme": "HTTP"
+        },
+        "periodSeconds": 30,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+       },
+       "resources": {
+        "limits": {
+         "cpu": "200m",
+         "memory": "256Mi"
+        },
+        "requests": {
+         "cpu": "50m",
+         "memory": "64Mi"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/secrets",
+         "name": "kanboard-secrets",
+         "readOnly": true
+        },
+        {
+         "mountPath": "/etc/criteria/routes",
+         "name": "routes-config",
+         "readOnly": true
+        }
+       ],
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true
+       },
+       "terminationMessagePath": "/dev/termination-log",
+       "terminationMessagePolicy": "File",
+       "env": [
+        {
+         "name": "NAMESPACE",
+         "value": "criteria-jobs"
+        },
+        {
+         "name": "KANBOARD_URL",
+         "value": "http://catch.internal.nullop.io/kanboard/jsonrpc.php"
+        },
+        {
+         "name": "KANBOARD_PROJECT_NAME",
+         "value": "Kanboard Tickets"
+        },
+        {
+         "name": "KANBOARD_TRIGGER_TAG",
+         "value": "k8s-run"
+        },
+        {
+         "name": "KANBOARD_WORKFLOWS_TAG_GROUP",
+         "value": "workflows"
+        },
+        {
+         "name": "KANBOARD_ROUTING_TAGS",
+         "value": "4,48,5,8,Array,adr,alpha,arch-rule,beta,castle,criteria,criteria-adapter-claude,criteria-adapter-copilot,criteria-adapter-proto,criteria-k8s,criteria-repo,decision,deferred,deploy,deprecation-cleanup,docs,engine,finding,hand-ruling,handshake-runtime,harness,host,k8s,kanboard,kintsugi,mcp,mechanical,operator,p0,p1,p2,parity,peer,phase-0,phase-1,phase-2,phase-3,phase-4,proto,release,resilience,routing,ruling,ruling-lite,security,stage-b,tests,unarmed,v0.6.0,v0.6.0-breaking,validation,workflow,workflow-example,settings-surface,option-b,castle-orchestrator"
+        },
+        {
+         "name": "POLL_INTERVAL",
+         "value": "60s"
+        },
+        {
+         "name": "CRITERIA_IMAGE",
+         "value": "localhost:5000/linear-intake-remote:dev"
+        },
+        {
+         "name": "PROVIDER_BASE_URL",
+         "value": "http://192.168.17.116:11434/v1"
+        },
+        {
+         "name": "MAX_AGENT_VISITS",
+         "value": "2"
+        },
+        {
+         "name": "CRITERIA_BASE_IMAGE",
+         "value": "localhost:5000/criteria-base:v0.1-v0.5.53"
+        },
+        {
+         "name": "CRITERIA_DISPATCH_MODE",
+         "value": "castle"
+        },
+        {
+         "name": "CRITERIA_CASTLE_AGENT_CRITERIA_ID",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "criteria_id",
+           "name": "castle-exec-agent-identity"
+          }
+         }
+        },
+        {
+         "name": "CRITERIA_CASTLE_AGENT_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "token",
+           "name": "castle-exec-agent-identity"
+          }
+         }
+        },
+        {
+         "name": "CRITERIA_CASTLE_ADDR",
+         "value": "http://castle.criteria-jobs.svc.cluster.local:8080"
+        },
+        {
+         "name": "POLL_TIMEOUT",
+         "value": "300s"
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "strategy": {
+    "rollingUpdate": {
+     "maxSurge": "25%",
+     "maxUnavailable": "25%"
+    },
+    "type": "RollingUpdate"
+   }
+  }
+ },
+ "castle": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app": "castle"
+   },
+   "name": "castle",
+   "namespace": "criteria-jobs"
+  },
+  "spec": {
+   "replicas": 1,
+   "selector": {
+    "matchLabels": {
+     "app": "castle"
+    }
+   },
+   "template": {
+    "metadata": {
+     "labels": {
+      "app": "castle"
+     },
+     "annotations": {
+      "kubectl.kubernetes.io/restartedAt": "2026-09-24T20:15:21-06:00"
+     }
+    },
+    "spec": {
+     "serviceAccountName": "criteria-runner",
+     "terminationGracePeriodSeconds": 30,
+     "nodeSelector": {
+      "kubernetes.io/arch": "amd64"
+     },
+     "tolerations": [
+      {
+       "effect": "NoSchedule",
+       "key": "node-role.kubernetes.io/control-plane",
+       "operator": "Exists"
+      }
+     ],
+     "securityContext": {
+      "fsGroup": 10001,
+      "runAsGroup": 10001,
+      "runAsNonRoot": true,
+      "runAsUser": 10001,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "volumes": [
+      {
+       "name": "data",
+       "persistentVolumeClaim": {
+        "claimName": "criteria-data"
+       }
+      }
+     ],
+     "containers": [
+      {
+       "name": "castle",
+       "image": "localhost:5000/castle:20261026-kb343-2141",
+       "imagePullPolicy": "Always",
+       "command": [
+        "castle",
+        "--dev-allow-anon-register"
+       ],
+       "ports": [
+        {
+         "name": "h2c",
+         "containerPort": 8080,
+         "protocol": "TCP"
+        }
+       ],
+       "livenessProbe": {
+        "exec": {
+         "command": [
+          "wget",
+          "-q",
+          "-O-",
+          "--post-data={}",
+          "--header=Content-Type:application/json",
+          "http://localhost:8080/grpc.health.v1.Health/Check"
+         ]
+        },
+        "failureThreshold": 3,
+        "initialDelaySeconds": 10,
+        "periodSeconds": 10,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+       },
+       "readinessProbe": {
+        "exec": {
+         "command": [
+          "wget",
+          "-q",
+          "-O-",
+          "--post-data={}",
+          "--header=Content-Type:application/json",
+          "http://localhost:8080/grpc.health.v1.Health/Check"
+         ]
+        },
+        "failureThreshold": 3,
+        "initialDelaySeconds": 3,
+        "periodSeconds": 5,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+       },
+       "resources": {},
+       "volumeMounts": [
+        {
+         "mountPath": "/data",
+         "name": "data"
+        }
+       ],
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "drop": [
+          "ALL"
+         ]
+        }
+       },
+       "terminationMessagePath": "/dev/termination-log",
+       "terminationMessagePolicy": "File",
+       "env": [
+        {
+         "name": "CASTLE_ORCHESTRATOR_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "CASTLE_ORCHESTRATOR_TOKEN",
+           "name": "criteria-castle-orchestrator"
+          }
+         }
+        },
+        {
+         "name": "CASTLE_ADDR",
+         "value": ":8080"
+        },
+        {
+         "name": "CASTLE_DB_PATH",
+         "value": "/data/castle.db"
+        },
+        {
+         "name": "CASTLE_EVENT_BUFFER_CAPACITY",
+         "value": "10000"
+        },
+        {
+         "name": "CASTLE_CONSOLE_PASSWORD",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "CASTLE_CONSOLE_PASSWORD",
+           "name": "criteria-console-auth"
+          }
+         }
+        },
+        {
+         "name": "CASTLE_CONSOLE_USER",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "CASTLE_CONSOLE_USER",
+           "name": "criteria-console-auth"
+          }
+         }
+        },
+        {
+         "name": "CASTLE_STORE",
+         "value": "pg"
+        },
+        {
+         "name": "CASTLE_PG_DSN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "dsn",
+           "name": "castle-pg-credentials"
+          }
+         }
+        },
+        {
+         "name": "CASTLE_AGENT_PROJECT_TOKENS",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "agent_project_tokens",
+           "name": "criteria-castle-tokens"
+          }
+         }
+        },
+        {
+         "name": "CASTLE_TRIGGER_TOKEN",
+         "valueFrom": {
+          "secretKeyRef": {
+           "key": "trigger_token",
+           "name": "criteria-castle-tokens"
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   },
+   "strategy": {
+    "rollingUpdate": {
+     "maxSurge": "25%",
+     "maxUnavailable": "25%"
+    },
+    "type": "RollingUpdate"
+   }
+  }
+ },
+ "parapet": {
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+   "labels": {
+    "app.kubernetes.io/component": "ui",
+    "app.kubernetes.io/name": "parapet"
+   },
+   "name": "parapet",
+   "namespace": "criteria-jobs"
+  },
+  "spec": {
+   "replicas": 1,
+   "selector": {
+    "matchLabels": {
+     "app.kubernetes.io/name": "parapet"
+    }
+   },
+   "template": {
+    "metadata": {
+     "labels": {
+      "app.kubernetes.io/component": "ui",
+      "app.kubernetes.io/name": "parapet"
+     },
+     "annotations": {
+      "kubectl.kubernetes.io/restartedAt": "2026-09-11T17:30:40-06:00",
+      "parapet.roll": "v2"
+     }
+    },
+    "spec": {
+     "terminationGracePeriodSeconds": 30,
+     "nodeSelector": {
+      "kubernetes.io/arch": "amd64"
+     },
+     "tolerations": [
+      {
+       "effect": "NoSchedule",
+       "key": "catch",
+       "operator": "Exists"
+      }
+     ],
+     "securityContext": {
+      "fsGroup": 10001,
+      "runAsGroup": 10001,
+      "runAsNonRoot": true,
+      "runAsUser": 10001,
+      "seccompProfile": {
+       "type": "RuntimeDefault"
+      }
+     },
+     "volumes": [
+      {
+       "emptyDir": {},
+       "name": "caddy-data"
+      },
+      {
+       "emptyDir": {},
+       "name": "caddy-config"
+      }
+     ],
+     "automountServiceAccountToken": false,
+     "containers": [
+      {
+       "name": "parapet",
+       "image": "localhost:5000/parapet:P340-kb357-0557",
+       "imagePullPolicy": "IfNotPresent",
+       "ports": [
+        {
+         "name": "http",
+         "containerPort": 8080,
+         "protocol": "TCP"
+        }
+       ],
+       "readinessProbe": {
+        "failureThreshold": 3,
+        "httpGet": {
+         "path": "/",
+         "port": "http",
+         "scheme": "HTTP"
+        },
+        "initialDelaySeconds": 2,
+        "periodSeconds": 10,
+        "successThreshold": 1,
+        "timeoutSeconds": 1
+       },
+       "resources": {
+        "limits": {
+         "cpu": "500m",
+         "memory": "256Mi"
+        },
+        "requests": {
+         "cpu": "50m",
+         "memory": "64Mi"
+        }
+       },
+       "volumeMounts": [
+        {
+         "mountPath": "/data",
+         "name": "caddy-data"
+        },
+        {
+         "mountPath": "/config",
+         "name": "caddy-config"
+        }
+       ],
+       "securityContext": {
+        "allowPrivilegeEscalation": false,
+        "capabilities": {
+         "add": [
+          "NET_BIND_SERVICE"
+         ],
+         "drop": [
+          "ALL"
+         ]
+        },
+        "readOnlyRootFilesystem": true
+       },
+       "terminationMessagePath": "/dev/termination-log",
+       "terminationMessagePolicy": "File",
+       "env": []
+      }
+     ]
+    }
+   },
+   "strategy": {
+    "rollingUpdate": {
+     "maxSurge": "25%",
+     "maxUnavailable": "25%"
+    },
+    "type": "RollingUpdate"
+   }
+  }
+ }
+}

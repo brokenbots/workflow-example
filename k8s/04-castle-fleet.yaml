@@ -1,0 +1,139 @@
+# KB-372: THIS FILE IS GENERATED GROUND TRUTH — exported from the live cluster
+# (2026-11-06, post KB-369 roll) by k8s/tests/export_fleet_state.py. Do not hand-edit image
+# tags or env here: roll live first, then re-export. The apply-safety drift test
+# (k8s/tests/test_fleet_apply_safe.sh) diffs THIS file against the live cluster and fails
+# closed on any divergence, so a stale apply can never regress the fleet.
+# Secrets stay secretKeyRef'd (nothing inline); RESTART_TS (operational restart marker)
+# intentionally stripped — it is set at deploy time, not config.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: castle
+  name: castle
+  namespace: criteria-jobs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: castle
+  template:
+    metadata:
+      labels:
+        app: castle
+      annotations:
+        kubectl.kubernetes.io/restartedAt: '2026-09-24T20:15:21-06:00'
+    spec:
+      serviceAccountName: criteria-runner
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/control-plane
+        operator: Exists
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: criteria-data
+      containers:
+      - name: castle
+        image: localhost:5000/castle:20261026-kb343-2141
+        imagePullPolicy: Always
+        command:
+        - castle
+        - --dev-allow-anon-register
+        ports:
+        - name: h2c
+          containerPort: 8080
+          protocol: TCP
+        livenessProbe:
+          exec:
+            command:
+            - wget
+            - -q
+            - -O-
+            - --post-data={}
+            - --header=Content-Type:application/json
+            - http://localhost:8080/grpc.health.v1.Health/Check
+          failureThreshold: 3
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          exec:
+            command:
+            - wget
+            - -q
+            - -O-
+            - --post-data={}
+            - --header=Content-Type:application/json
+            - http://localhost:8080/grpc.health.v1.Health/Check
+          failureThreshold: 3
+          initialDelaySeconds: 3
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources: {}
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        env:
+        - name: CASTLE_ORCHESTRATOR_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: CASTLE_ORCHESTRATOR_TOKEN
+              name: criteria-castle-orchestrator
+        - name: CASTLE_ADDR
+          value: :8080
+        - name: CASTLE_DB_PATH
+          value: /data/castle.db
+        - name: CASTLE_EVENT_BUFFER_CAPACITY
+          value: '10000'
+        - name: CASTLE_CONSOLE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: CASTLE_CONSOLE_PASSWORD
+              name: criteria-console-auth
+        - name: CASTLE_CONSOLE_USER
+          valueFrom:
+            secretKeyRef:
+              key: CASTLE_CONSOLE_USER
+              name: criteria-console-auth
+        - name: CASTLE_STORE
+          value: pg
+        - name: CASTLE_PG_DSN
+          valueFrom:
+            secretKeyRef:
+              key: dsn
+              name: castle-pg-credentials
+        - name: CASTLE_AGENT_PROJECT_TOKENS
+          valueFrom:
+            secretKeyRef:
+              key: agent_project_tokens
+              name: criteria-castle-tokens
+        - name: CASTLE_TRIGGER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: trigger_token
+              name: criteria-castle-tokens
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate

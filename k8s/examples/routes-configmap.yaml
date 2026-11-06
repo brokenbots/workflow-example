@@ -290,7 +290,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",
@@ -371,7 +371,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",
@@ -473,7 +473,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",
@@ -581,7 +581,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",
@@ -657,7 +657,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",
@@ -723,7 +723,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",
@@ -786,7 +786,7 @@ data:
           ],
           "adapterImages": {
             "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.56-1"
+            "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-1"
           },
           "interface": {
             "apiVersion": "criteria.brokenbots.dev/v1",

@@ -95,7 +95,21 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
-# Re-audited to 70959d34 (v0.5.56, 2026-10-18): pin moves one release past the last recorded
+# Re-audited to 25394fbd (v0.5.58, 2026-11-06): pin moves one release past the last recorded
+# AUDITED_COMMIT 70959d34 (v0.5.56). Delta 70959d34..25394fbd spans THREE commits:
+#   b9ec4a44 (KB-362, #579): engine-side outcome payload validator fold — top-level
+#     reason/comment declared params folded into the payload at submit validation
+#     (kernel-internal only: submit-time validation + error text; no proto, no event
+#     contract, no wire change).
+#   3681900f (KB-374, #243-era engine half): tree-compile fix consumed via route trees
+#     (engine-side part of the compile-gate family; no proto delta).
+#   25394fbd (KB-369, #580): multi-root secret-file containment — provider_file.go resolves
+#     an ordered root list (default secrets dir first, fail-closed; CRITERIA_SECRET_FILE_ROOTS
+#     widening) — filesystem confinement change only; proto/ delta: EMPTY (verified);
+#     castle ingest envelope-verbatim, consumer-safe; adapter wire v2 untouched.
+# Dependabot note (KB-369-era, #580): one dependabot=failure check on this sha is classified
+# scheduled-bot noise; product CI complete-green on the same sha.
+# Prior: Re-audited to 70959d34 (v0.5.56, 2026-10-18): pin moves one release past the last recorded
 # AUDITED_COMMIT d9fe5881 (v0.5.55). Delta d9fe5881..70959d34 spans TWO commits:
 #   8e44e3ae (KB-158, #541): cmd/criteria-adapter-mcp protocol negotiation — probe-first
 #     server/discover (protocol rev 2026-07-28, SEP-2549) with the legacy 2025-03-26
@@ -123,7 +137,7 @@ DOCKERFILE="$REPO_ROOT/criteria-base/Dockerfile"
 #     proto/ diff EMPTY (verified by range audit); no event contract change.
 #   v0.5.55 (d9fe5881): TEST-ONLY — KB-245 legacy shim wiring test removal (net -81 lines
 #     in internal/engine tests); zero runtime code.
-AUDITED_COMMIT="70959d34082199a2561fb5a579a964e6024e8570"
+AUDITED_COMMIT="25394fbdbb448d292058825fb2ae25250b9c3838"
 
 fail() {
     echo "FAIL: $1" >&2

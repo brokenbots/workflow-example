@@ -105,7 +105,7 @@ endif
 # #303: one-shot pin validation inside validate — every consumer checked in a
 # single pass (adapters.chcl drift, lockfile lag, hardcoded CI/test refs, routes
 # CM alignment); no CI ping-pong on stale pins.
-validate: pincheck
+validate: pincheck fleet-apply-safe
 	/usr/local/bin/criteria validate ticket_cleanup_v1
 	/usr/local/bin/criteria validate decision_demo_v1
 	/usr/local/bin/criteria validate decision_demo_local_v1
@@ -411,6 +411,11 @@ repin-check:
 
 pincheck:
 	./scripts/pincheck.sh
+
+# KB-372: apply-safety hold — exported fleet state must equal live cluster (skips clean
+# when no cluster is reachable; Class A tag/secret checks still run there).
+fleet-apply-safe:
+	./k8s/tests/test_fleet_apply_safe.sh
 
 routes-sync:
 	./scripts/routes-sync.sh
