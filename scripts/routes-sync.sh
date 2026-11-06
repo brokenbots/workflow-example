@@ -12,9 +12,7 @@
 # (live 2026-11-04: kb-131/132/133/135/136 + kb-136 first leg all died
 # wait_merge_ci at 600s because criteria-agent-routes still pinned
 # kanboard_develop_v1 while criteria-routes carried that day's #239 repin).
-# Aligns every workflowLibrary git url pin (the `ref=` query parameter and the
-# separate top-level `ref` key) to the current commit, and applies both CMs.
-# Never hand-edit the CMs again.
+# Never hand-edit either CM again.
 # KB-313 (ADR 307): the CMs' run-config surfaces are retired — the sync touches
 # url/ref pins only, never adapterImages/env/volumes/secrets; adapter image tags
 # are per-project binding concerns (binding CMs), not pins this script owns.
