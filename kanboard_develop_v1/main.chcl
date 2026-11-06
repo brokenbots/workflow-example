@@ -107,6 +107,7 @@ subworkflow "handler" {
         allow_dirty          = var.allow_dirty
         provider_base_url    = var.provider_base_url
         workflow_github_token = var.workflow_github_token
+        workflow_upstream_token = var.workflow_upstream_token
         // The handler's reviewer role must authenticate as the reviewer
         // identity (pr_reviewer_loop approves/merges under it), which differs
         // from the workflow identity that authors the PR. Thread the real

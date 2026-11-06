@@ -130,10 +130,22 @@ else
 fi
 
 # ── 6. worktree .git/config stays credential-free ─────────────────────────────
-if grep -rq "WORKFLOW_UPSTREAM_TOKEN" "$WORK/.git/config" 2>/dev/null; then
+if grep -rq "WORKFLOW_UPSTREAM_TOKEN\|UPSTREAM_TOKEN_VALUE" "$WORK/.git/config" 2>/dev/null; then
     fail "token leaked into worktree .git/config (must be run-time helper only)"
 else
     ok "no credential material at rest in worktree config"
+fi
+
+# ── 7. token-file delivery shape (k8s adapter env contract) ───────────────────
+# WORKFLOW_UPSTREAM_TOKEN carries a FILE PATH (CSI mount), not the token. With a
+# credential file bound, push must authenticate through the inline helper; with
+# none, ambient credentials apply. Assert the script reads the file path and
+# never embeds a literal token.
+if grep -q '\[ -r "$token_file" \]' "$TREE_ROOT/workflows/upstream_sync/scripts/push_branch.sh.tftpl" \
+    && ! grep -qE 'password=\$\{?WORKFLOW_UPSTREAM_TOKEN' "$TREE_ROOT/workflows/upstream_sync/scripts/push_branch.sh.tftpl"; then
+    ok "push script reads the credential FILE path (env carries a path, not a token)"
+else
+    fail "push script must read WORKFLOW_UPSTREAM_TOKEN as a FILE path (adapter env contract)"
 fi
 
 if [ "$FAILED" -ne 0 ]; then
