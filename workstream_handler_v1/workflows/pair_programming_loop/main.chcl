@@ -61,7 +61,7 @@ data "internal" "failure_reason" {
 // the review checkpoint all dial the same upstream_sync tree; the loop
 // itself never touches the remote (remote-tracking refs are local data).
 subworkflow "upstream_sync" {
-    source = "./upstream_sync"
+    source = "../upstream_sync"
     input = {
         worktree_dir    = var.worktree_dir
         branch          = data.internal.branch.value
