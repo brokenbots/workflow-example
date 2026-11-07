@@ -143,6 +143,56 @@ acceptance text and from this plan's own record (plus `PARITY.md`) — never fro
 the plan file, and nothing here is attributed to a plan-file section that could
 not be read.
 
+### The Stage-3 gate-ordering deviation — ACCEPTED and RECORDED (not silently skipped)
+
+The card's own Gate line reads: "parity run on a real card (per-step timings vs
+the v1 baseline) BEFORE deleting the round trees", and its Acceptance line reads:
+"round trees deleted; validate green everywhere; real-card parity documented".
+Read in order, the two lines put a real-card parity run FIRST and the round-tree
+deletion SECOND.
+
+KB-386 is **UN-ARMED** (no `k8s-run` — see the Task description): no card runs
+in this card, so **no real-card parity run is executable inside this card** and
+the card's two lines **cannot be satisfied in order here**. The determination
+recorded on the card (2026-11-07, authoritative) is therefore the following, and
+it is recorded here so that it is **read, not silently skipped**:
+
+- **The deviation.** The delivered order is deletion-BEFORE-parity — the reverse
+  of the card's Gate line. On an un-armed card that ordering is an **ACCEPTED
+  DEVIATION**, **deliberately recorded** in this section. It is not a silent skip
+  and it is not a parity pass.
+- **The deletion STANDS.** The round-tree deletion (commit `7dcedc1`) is the
+  delivered state of this card (§3.1); the deviation neither reopens, reverts
+  nor re-derives that determination.
+- **The in-card substitute for an in-card parity run** is the deterministic
+  comparator
+
+      sh workstream_handler_v1/tests/test_pair_loop_parity.sh --compare <v1.tsv> <v2.tsv>
+
+  together with the collection procedure and thresholds of record (`PARITY.md`
+  §2, §3 and §4). The comparator's fixtures under
+  `workstream_handler_v1/tests/fixtures/pair_loop_parity/` remain **SELF-TEST
+  ARMS** — they are **NOT a real v1 baseline** and are never evidence for this
+  gate.
+- **The real-card parity run is SURFACED, not dropped.** It is the only thing
+  that can close this gate (§3.4); it is surfaced for a **SEPARATE ARMED CARD**
+  and is **NOT a KB-386 item** — §3.4's one open item is therefore a post-merge
+  fleet action OUTSIDE this card's scope. This card does not arm the lane, does
+  not run a card and does not produce a record.
+- **The deletion stays restorable**, and the retained v1 baseline tree
+  `workstream_handler_v1/workflows/pair_programming_loop/` (§3.1) keeps the
+  comparison executable. The pre-deletion round trees are one commit back:
+
+      git checkout 7dcedc1^ -- workstream_handler_v1/workflows/pair_programming_loop_round2 workstream_handler_v1/workflows/pair_programming_loop_round3
+
+  (`PARITY.md` §5.5 carries the same command, and what to do with it).
+- **The GATE stays OPEN** until the operator's comparator run exits `0` on REAL
+  records. Every slot in `PARITY.md` §4 stays **PENDING**, and no timing is
+  estimated, interpolated, copied from a fixture or invented.
+
+This is the SAME determination as `PARITY.md` §5.1 — same facts, same wording —
+and it is **not re-derived** here: the card's determination is authoritative.
+
 ### 3.1 Fold disposition (as delivered)
 
 - **ALL FOUR handler dials point at this tree.** The handler's
@@ -171,19 +221,19 @@ not be read.
   needs, it is untouched, and it can be re-run at any time to re-measure the
   candidate against it.
 
-### 3.2 Observed validation sweep (run in this card's part 3)
+### 3.2 Observed validation sweep (run in THIS part, re-verified)
 
-Every leg below was RUN in this part and its exit code was OBSERVED. No leg is
-reported that was not run, and no result is carried over from another part's
-run. Compiler in use: `criteria` **v0.5.58**.
+Every leg below was RUN in this part and its exit code was OBSERVED in this run.
+No leg is reported that was not run, and no result is carried over from an
+earlier run's sweep. Compiler in use: `criteria` **v0.5.58**.
 
 `criteria validate` over every tree the repo's `validate` surface covers:
 
 | Leg | Exit | Observed result |
 |------|------|-----------------|
-| `ticket_cleanup_v1` | 0 | ok (warning: `shell` adapter schema unverified) |
-| `decision_demo_v1` | 0 | ok (warning: `decision` adapter schema unverified) |
-| `decision_demo_local_v1` | 0 | ok (warning: `decision` adapter schema unverified) |
+| `ticket_cleanup_v1` | 0 | ok (1 warning: `shell` adapter schema unverified) |
+| `decision_demo_v1` | 0 | ok (1 warning: `decision` adapter schema unverified) |
+| `decision_demo_local_v1` | 0 | ok (1 warning: `decision` adapter schema unverified) |
 | `harness_contracts_v1` | **1** | **compile failed — 4 outcome-completeness errors. PRE-EXISTING; see 3.3** |
 | `harness_composition_v1` | 0 | ok |
 | `harness_composition_v1/tests/fixtures/g11_dangling_env` | 0 | ok |
@@ -193,40 +243,44 @@ run. Compiler in use: `criteria` **v0.5.58**.
 | `harness_failures_v1/tests/fixtures/g12_silent_change` | 0 | ok |
 | `harness_failures_v1/tests/fixtures/g12_silent_change/workflows/callee_b` | 0 | ok |
 | `harness_fleet_smoke_v1` | 0 | ok |
-| `harness_fleet_smoke_v1/tests/fixtures/digest_miss` | 0 | ok (warning: `shell` adapter schema unverified) |
+| `harness_fleet_smoke_v1/tests/fixtures/digest_miss` | 0 | ok (1 warning: `shell` adapter schema unverified) |
 | `harness_wire_v1` | 0 | ok |
-| `workstream_handler_v1` | 0 | ok (3 informational same-step read/write warnings) |
+| `workstream_handler_v1` | 0 | ok (13 informational same-step read/write warnings) |
 
 `criteria validate` over the surviving subtrees:
 
 | Leg | Exit | Observed result |
 |------|------|-----------------|
-| `workstream_handler_v1/workflows/pair_programming_loop` (v1 baseline, RETAINED) | 0 | ok |
-| `workstream_handler_v1/workflows/pair_programming_loop_v2` (this tree) | 0 | ok |
+| `workstream_handler_v1/workflows/pair_programming_loop` (v1 baseline, RETAINED) | 0 | ok (1 informational warning) |
+| `workstream_handler_v1/workflows/pair_programming_loop_v2` (this tree) | 0 | ok (1 informational warning) |
 | `workstream_handler_v1/workflows/branch_manager` | 0 | ok |
 | `workstream_handler_v1/workflows/upstream_sync` | 0 | ok |
-| `workstream_handler_v1/workflows/pr_reviewer_loop` | 0 | ok (1 informational warning) |
+| `workstream_handler_v1/workflows/pr_reviewer_loop` | 0 | ok (4 informational warnings) |
 
 Repo-wide mechanical checks:
 
 | Leg | Exit | Observed result |
 |------|------|-----------------|
-| `node scripts/tree-outcome-flow.mjs --root .` | 0 | `OK (29 tree files, 0 violations)` |
-| `node scripts/interface_validate.mjs` | 0 | `PASS (15 trees validated, interface declarations + example routes payload consistent)` |
-| `node scripts/harness_matrix.mjs` | 0 | `sound: 49/49 items (37 base + 12 G)` |
-| `./scripts/pincheck.sh` | 0 | `ALL CLEAN` |
+| `node scripts/tree-outcome-flow.mjs --root .` | 0 | `outcome-reason flow rule: OK (29 tree files, 0 violations)` |
+| `node scripts/interface_validate.mjs` | 0 | `interface-contract: PASS (15 trees validated, interface declarations + example routes payload consistent)` |
+| `node scripts/harness_matrix.mjs` | 0 | `harness-matrix: .../docs/harness-expectations.md sound: 49/49 items (37 base + 12 G)` |
+| `./scripts/pincheck.sh` | 0 | `pincheck: ALL CLEAN` |
 | `./k8s/tests/test_fleet_apply_safe.sh` | 0 | `SKIP: cluster unreachable from this environment (Class A passed)` |
 
 **Honest note on how the `validate` surface was run:** `make` is NOT installed on
-this machine, so `make validate` as a single command could not be run. Every
-`criteria validate` leg and every `node` leg that the Makefile's `validate`
-target lists WAS run individually above (the list is identical to the target's
-body), and its two prerequisites (`pincheck`, `fleet-apply-safe`) were run as
-the underlying scripts they invoke.
+this machine (re-checked in this run: `command -v make` finds nothing), so
+`make validate` as a single command could not be run. Every `criteria validate`
+leg and every `node` leg that the Makefile's `validate` target lists WAS run
+individually above, and its two prerequisites (`pincheck`, `fleet-apply-safe`)
+were run as the underlying scripts they invoke. One leg beyond the target's body
+is also listed and was run: the `g12_silent_change` fixture's nested
+`workflows/callee_b` tree.
 
 `workstream_handler_v1/tests/test_*.sh` — the whole suite, 31 files, run one by
-one: **31/31 exit 0**, no failures. That includes the new guard test from part
-1, `test_pair_loop_fold_invariants.sh` (exit 0), and the parity comparator's own
+one (each script run under its own `#!/usr/bin/env bash` shebang, the same way
+the Makefile's test legs invoke them): **31/31 exit 0**, no failures. That
+includes the guard test
+`test_pair_loop_fold_invariants.sh` (exit 0) and the parity comparator's own
 self-test `test_pair_loop_parity.sh` (exit 0).
 
 ### 3.3 The one red leg — `harness_contracts_v1` — is PRE-EXISTING, carried as a FORWARD-POINTER
@@ -265,7 +319,10 @@ leg.
 
 **Open item (the ONLY one):** the real-card parity run — the v1 baseline card
 run plus the v2 candidate card run. KB-386 is **UN-ARMED** (no `k8s-run`), so
-this card does not perform it and claims no timing.
+this card does not perform it and claims no timing. Per the gate-ordering
+determination recorded above, that run is **surfaced for a SEPARATE ARMED CARD**
+and is **NOT a KB-386 item** — this card does not arm the lane, does not run a
+card and does not produce a record.
 
 - **Procedure (cross-referenced, not duplicated):** `PARITY.md` §2 (the
   per-step timing collection procedure C1 -> C4), §3 (the per-slot threshold rule
@@ -287,4 +344,5 @@ this card does not perform it and claims no timing.
 **There is no other open item.** The fold, the four-dial retarget, the round-tree
 deletion and the repo-wide validation sweep are closed as of this section. The
 operator's real-card parity run is a post-merge fleet action on this un-armed
-card, and it is the single thing left to close the gate.
+card — a post-merge fleet action OUTSIDE this card's scope, surfaced for a
+separate armed card — and it is the single thing left to close the gate.
