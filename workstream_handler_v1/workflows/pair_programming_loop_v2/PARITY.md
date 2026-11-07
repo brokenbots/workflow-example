@@ -4,7 +4,8 @@ Card: **KB-386** (Kanboard) — "Stage 3 - fold round plumbing onto pair-loop v2
 Plan: `.hermes/plans/2026-11-06_123002-pair-loop-remaster-local-upstream-plus-planner.md`
 (Stage-2 section "Sequencing"; Stage-3 = fold the r2/r3 round plumbing onto this
 tree's shape, retarget the `_feedback_r2`/`_feedback_r3` dials, and delete the round
-trees **after** parity on a real card).
+trees — the deletion is DONE in this card, and the real-card parity run that
+measures the fold is the operator's post-merge action, see §5).
 Rulings honoured: ruling 1 (LOCAL-ONLY — this tree performs zero pushes/fetches/
 clones; the only network surface is the `upstream_sync` subworkflow), ruling 12 (the
 handler dial stops passing `log_file`). House rule: deterministic shell truth over
@@ -210,26 +211,96 @@ Collection steps:
   `1` = a gated slot regressed (the report names the slot); exit `2` = record/rule
   error (no comparison happened). Attach the comparator's report to the card.
 
-## 5. Gate status — OPEN, and the run is the operator's
+## 5. Gate status — OPEN; the round trees are deleted, the real-card run is the operator's
 
-**GATE: OPEN. The real-card parity run is NOT performed by this card.**
+**GATE: OPEN.** No real-card parity measurement exists in this repo, and this
+card does not produce one.
 
-- KB-386 is **UN-ARMED** (no `k8s-run`): this card produces the parity RECORD (this
-  file) plus the deterministic comparator, and nothing else. No card run happens
-  here.
-- The real-card run (the v1 baseline card run + the v2 candidate card run, §2.1) is
-  the **operator's post-merge fleet action** (C1 → C4 above). It is the only thing
-  that can close this gate, and it closes it with the comparator's own exit code.
+### 5.1 The delivered tree state (final for this card)
+
+- The Stage-3 fold is applied: the `_feedback_r2`/`_feedback_r3` handler dials
+  source `workstream_handler_v1/workflows/pair_programming_loop_v2`, the
+  round-suffixed copilot instances are gone, and remediation now lives per-part
+  INSIDE the v2 tree (`pair_part_pN_remediate` → `pair_part_pN_reverify`).
+- The round trees `workstream_handler_v1/workflows/pair_programming_loop_round2/`
+  and `workstream_handler_v1/workflows/pair_programming_loop_round3/` are
+  **DELETED in this card** (commit `7dcedc1` — "KB-386 p3: delete the dead
+  round2/round3 pair-loop workflow trees"). The fold makes them dead weight: no
+  dial source, route binding, instance declaration or CI target points at them
+  anywhere in the repo
+  (`workstream_handler_v1/tests/test_pair_loop_fold_invariants.sh` asserts
+  exactly that, repo-wide).
+- The deletion does **not** impair the parity comparison: what the comparison
+  needs is the RETAINED v1 base tree
+  `workstream_handler_v1/workflows/pair_programming_loop/` (§1), which the
+  deletion never touched. The parity comparison therefore stays executable
+  after the deletion — the operator still measures the v1 baseline against the
+  v2 candidate, and the baseline card can be re-run at any time to re-measure.
+
+### 5.2 Why the gate is still OPEN
+
+- KB-386 is **UN-ARMED** (no `k8s-run`): this card delivers the parity RECORD
+  (this file) plus the deterministic comparator
+  (`workstream_handler_v1/tests/test_pair_loop_parity.sh`) and nothing else. No
+  card run happens here.
+- The real-card parity run (the v1 baseline card run + the v2 candidate card
+  run, §2.1) is the **operator's post-merge fleet action**. It is the only
+  thing that can close this gate, and it closes it with the comparator's own
+  exit code.
+- **The gate stays OPEN until the operator's comparator run exits `0` on REAL
+  records.** Until then this card's parity claim is exactly: the comparator
+  exists and is deterministic, the collection procedure is documented, and the
+  thresholds are the documented design parameters of §3 — no measured value
+  exists.
 - Every measured slot in §4 is **PENDING** until that run fills it. No timing in
-  this record is invented, estimated or interpolated.
+  this record is estimated, interpolated, copied from a fixture, or invented.
 - The comparator's fixtures under
   `workstream_handler_v1/tests/fixtures/pair_loop_parity/` are **SELF-TEST ARMS**
   with synthetic values: they exercise the comparator's arithmetic and are
   explicitly **NOT a real v1 baseline** and never evidence for this gate.
-- The round-tree deletion (`workflows/pair_programming_loop_round2/` +
-  `_round3/`) is part 3 of 3 and stays **gated** on this comparison: the trees are
-  deleted only after the comparator exits `0` on the REAL records. The base tree
-  `workflows/pair_programming_loop` is RETAINED either way (§1).
+
+### 5.3 The operator's step (the only thing that closes the gate)
+
+1. **C1 — arm the lane** (§4): pick the two comparable cards (same workstream,
+   same repo, same fleet lane) — one sourcing
+   `workflows/pair_programming_loop`, one sourcing
+   `workflows/pair_programming_loop_v2` — and record both run ids on the card.
+2. **C2 — collect the per-step timings** (§2.2, §2.3): read the whole event
+   stream, pair `stepEntered` ↔ `stepOutcome` per step id, derive `duration_ms`
+   from the envelope `ts`, and attribute nested-subworkflow inner steps to the
+   OUTER step id. An unpaired event is a collection error, not a duration.
+3. **C3 — write the two records** (§2.4): one TSV per side
+   (`<step_id>\t<duration_ms>`, one line per invocation). The v1 record is the
+   baseline; the v2 record is the candidate.
+4. **C4 — compare**:
+   `sh workstream_handler_v1/tests/test_pair_loop_parity.sh --compare <v1.tsv> <v2.tsv>`.
+   The thresholds applied are the rule table of §3 (the comparator's own table,
+   byte-identical — the self-test fails if the two drift).
+   - exit `0` = every gated slot is within threshold → **the gate closes**.
+   - exit `1` = a gated slot REGRESSED (the report names the slot).
+   - exit `2` = a record/rule error (no comparison happened — fix the record
+     and re-run; it is not a pass).
+
+   Attach the comparator's report to the card.
+
+### 5.4 If the comparator reports a regression (exit `1`)
+
+- The gate stays OPEN and the regression is reported as it is. No §4 slot value
+  may be edited to make the gate pass: a slot closes only on a value derived
+  from a real run.
+- The fix lands **inside v2's per-part lane** — `pair_part_pN_remediate` →
+  `pair_part_pN_reverify` (the `review_leg` slot of §3 is the v2-side
+  remediation leg). The retired round ladders are not where this is fixed:
+  they are deleted, and the per-part lane is the design the fold installs.
+- If the regression shows the **fold itself** must be reverted — not merely the
+  offending part — the round trees are restorable **from git history**; they
+  are not lost. The deletion commit is `7dcedc1`, so the pre-deletion trees
+  are one commit back:
+  `git checkout 7dcedc1^ -- workstream_handler_v1/workflows/pair_programming_loop_round2 workstream_handler_v1/workflows/pair_programming_loop_round3`.
+- So the operator's next step is unambiguous: remediate inside v2's per-part
+  lane, or restore the retired trees from history and revert the fold — and in
+  either case the parity comparison stays executable, because the v1 base tree
+  (§1) is RETAINED either way.
 
 ## The comparator's own self-test (deterministic, no card)
 
