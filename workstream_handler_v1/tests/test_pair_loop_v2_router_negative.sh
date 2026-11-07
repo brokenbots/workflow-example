@@ -65,6 +65,7 @@ run_case() {
             ok "${name}: the simulator passed the clean tree"
         else
             fail "${name}: the simulator failed on the CLEAN tree (check the breaks were restored): $(printf '%s' "$out" | grep -E '^FAIL:' | head -2)"
+            printf '%s\n' "$out" | tail -20 >&2
         fi
     fi
 }
