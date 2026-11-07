@@ -1,0 +1,49 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -eu
+# pair_programming_loop_v2 — the deterministic jq VALIDATION of the
+# planner's part plan (scripts/reduce_plan_parts.sh.tftpl). POSIX-only; jq
+# is in the container. Input: criteria_value_1 = the plan_json string the
+# planner's typed parts_ready arm wrote into data.internal.plan_json.
+#
+# VALIDATES (deterministic shell truth, never agent math):
+#   - the plan parses as one JSON object;
+#   - .parts == len(.per_part);
+#   - .parts is an integer in 1..4 (the tree's static slot budget);
+#   - ids are exactly p1..pN in order (p1 first, sequential, no gaps,
+#     no duplicates — the strictly-increasing p<index+1> check implies it);
+#   - every entry's effort is "fast" or "deep";
+#   - every entry's brief and acceptance are JSON strings.
+# On any violation jq errors (exit != 0, reason on stderr) and set -eu
+# aborts the script: the step's failure arm routes state.failed with a
+# typed reason. On success: prints ONLY the part count on stdout (KB-351
+# — one extraction per step, single-stdout source); the REDUCED count
+# lands in data.internal.part_count (the success arm's write) and every
+# slot chain's count gating reads it.
+
+if [ -z "$criteria_value_1" ]; then
+    echo "reduce_plan_parts: plan_json is empty (the planner wrote no plan)" >&2
+    exit 1
+fi
+
+count=$(printf '%s' "$criteria_value_1" | jq -e '
+    def effort_ok($e): $e == "fast" or $e == "deep";
+    . as $plan
+    | if ($plan | type) != "object" then error("plan is not a JSON object")
+      elif (has("parts") | not) or (has("per_part") | not) then error("plan is missing parts/per_part")
+      elif ($plan.parts | type) != "number" then error("plan.parts is not a number")
+      elif (($plan.per_part | type) != "array") then error("plan.per_part is not an array")
+      elif (($plan.parts | floor) != $plan.parts) then error("plan.parts is not an integer")
+      elif ($plan.parts) != ($plan.per_part | length) then error("plan.parts does not equal len(per_part)")
+      elif ($plan.parts < 1) or ($plan.parts > 4) then error("plan.parts is outside 1..4")
+      elif ([range(0; $plan.per_part | length)] |
+            map(. as $i |
+                ($plan.per_part[$i].id == "p\($i + 1)") and
+                (($plan.per_part[$i].effort) | effort_ok(.)) and
+                (($plan.per_part[$i].brief) | type == "string") and
+                (($plan.per_part[$i].acceptance) | type == "string")) | all) | not
+        then error("per_part entries broken (ids/effort/brief/acceptance)")
+      else $plan.parts
+      end')
+
+printf '%s\n' "$count"
+exit 0

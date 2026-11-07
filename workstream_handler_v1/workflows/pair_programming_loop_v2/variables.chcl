@@ -1,0 +1,161 @@
+// pair_programming_loop_v2 — variable surface (WAVE-2 SKELETON)
+//
+// Carries the v1 pair-loop interface verbatim (the parent workstream_handler_v1
+// dial passes workstream_file/ci_gate_cmd/log_file/allow_dirty/branch_notes/
+// worktree_dir/max_agent_visits/provider_base_url/base_branch) plus the v2
+// per-part knobs. The v2 interface.json surface declares the same env lane so
+// a binding-CM env map that already serves v1 serves v2 unchanged.
+
+variable "developer_initial_prompt" {
+    type    = string
+    default = ""
+}
+
+// LOCAL-ONLY contract (remaster ruling 1): this tree performs zero network
+// operations. Upstream placement (push) is delegated to the upstream_sync
+// subworkflow. Interface-compat passthrough from the parent dials; unused by
+// the local-only loop.
+variable "base_branch" {
+    type        = string
+    description = "Interface-compat passthrough from the parent dials; unused by the local-only loop."
+    default     = "main"
+}
+
+variable "ci_gate_cmd" {
+    type        = string
+    description = "Command the per-part verify steps run before part verdicts; should exit 0 for clean and non-zero for failed. Empty (the default) skips the gate."
+    default     = ""
+}
+
+variable "workstream_file" {
+    type        = string
+    description = "workstream file that agent will use to do work"
+}
+
+variable "worktree_dir" {
+    type        = string
+    description = "Absolute path of the isolated worktree the per-part agents operate in. Empty = process working directory."
+    default     = ""
+}
+
+variable "log_file" {
+    type        = string
+    description = "path to worklog file, if not set worklog will be kept in /tmp/uuid()/work.log"
+    default     = null
+}
+
+variable "allow_dirty" {
+    type        = bool
+    description = "skip the clean working tree check and proceed even if there are uncommitted changes"
+    default     = false
+}
+
+variable "branch_notes" {
+    type        = string
+    description = "note from the parent (e.g. branch_manager stash report) describing uncommitted work restored to the tree; surfaced when the tree is dirty"
+    default     = ""
+}
+
+variable "max_agent_visits" {
+    type        = number
+    description = "Maximum attempts for each agent step (planner, per-part developer, remediation)."
+    default     = 10
+}
+
+variable "max_checkpoint_push_visits" {
+    type        = number
+    description = "Maximum attempts for the checkpoint-push verification between part turns (CRI-271)."
+    default     = 3
+}
+
+variable "max_pair_cycles" {
+    type        = number
+    description = "Wave-2: per-part cycle budget (carried verbatim from the v1 interface for parent-dial shape parity)."
+    default     = 2
+}
+
+variable "provider_base_url" {
+    description = "Optional provider base URL override for the planner and the per-part agents."
+    type        = string
+    default     = ""
+}
+
+// Per-part developer config — carried, not consumed yet, until the body
+// pass wires the per-part briefs. Must stay in sync with the v1 developer
+// object; the four slot instances read the same model/provider fields.
+variable "developer" {
+    type = object({
+        model            = string
+        max_turns        = number
+        reasoning_effort = optional(string, "")
+        initial_prompt   = optional(string, "")
+        provider = optional(object({
+            base_url     = optional(string, "")
+            api          = optional(string, "")
+            wire_api     = optional(string, "")
+            api_key      = optional(string, "")
+            bearer_token = optional(string, "")
+        }))
+    })
+
+    // glm-5.3-flash:cloud is the coding model for the per-part developers.
+    default = {
+        model     = "glm-5.3-flash:cloud"
+        max_turns = 30
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Wave-2 planner agent — the per-run part-split call.
+variable "planner" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 15)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+    description = "Model configuration for the per-part planner agent."
+    default = {
+        model            = "minimax-m3:cloud"
+        max_turns        = 15
+        reasoning_effort = "high"
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}
+
+// Wave-2 remediation agent — the per-part help path.
+variable "remediator" {
+    type = object({
+        model            = string
+        max_turns        = optional(number, 15)
+        reasoning_effort = optional(string, "")
+        provider = optional(object({
+            base_url = optional(string, "")
+            wire_api = optional(string, "")
+            api_key  = optional(string, "")
+        }))
+    })
+    description = "Model configuration for the per-part remediation agent."
+    default = {
+        model            = "minimax-m3:cloud"
+        max_turns        = 15
+        reasoning_effort = "high"
+        provider = {
+            base_url = "http://localhost:11434/v1"
+            wire_api = "responses"
+            api_key  = ""
+        }
+    }
+}

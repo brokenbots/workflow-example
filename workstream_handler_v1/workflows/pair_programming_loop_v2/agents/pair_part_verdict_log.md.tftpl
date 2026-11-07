@@ -1,0 +1,12 @@
+// pair_programming_loop_v2 — agent pair_part_verdict_log.md.tftpl: the
+// per-part verdict log body write_review_log renders (v1's write_work_log
+// shape). The log records the loop's OWN verdicts per PLANNED part plus the
+// whole-tree aggregate; planned slots beyond part_count stay unclaimed.
+
+Pair loop v2 part verdict log.
+
+Planned parts (from the planner's part plan; part_count = {{ .part_count }}):
+{{ .per_part_lines }}
+
+Whole-tree verdict: {{ .pair_verdict }}
+{{ .failure_note }}

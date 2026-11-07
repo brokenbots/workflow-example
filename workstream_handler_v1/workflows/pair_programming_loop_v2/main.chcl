@@ -1,0 +1,1899 @@
+// pair_programming_loop_v2 — main.chcl (WAVE-2 body pass).
+//
+// Body pass status: the part graph is fully wired — the planner call
+// carries the real plan-JSON charter, the slot chain per part is
+// develop(fast|deep lane by ruling 9) -> verify (deterministic shell
+// truth) -> remediate (typed copilot call) -> reverify (re-stamp, KB-151)
+// -> route, the checkpoint chain and the typed-fail bookkeeping are
+// real. The copilot adapter does not expose a per-step outcome output —
+// every verdict travels through this tree's OWN data.internal (KB-151),
+// re-stamped on each hop before its next consumer reads it.
+//
+// Body flip (the only material shape change vs pair_programming_loop):
+// instead of develop <-> review cycling inside one session, the pair loop
+// splits the workstream into PARTS (part slots p1..p4, each backed by its
+// own copilot adapter instances — a never-opened instance yields a fresh
+// conversation, the round-fresh pattern KB-257/CRI-145), and run_part_pN
+// runs ONE per-part agent call per part. Each part produces a typed
+// verdict the WORKFLOW asserts: the verdict travels through out-of-band
+// writes (data.internal) instead of through the copilot adapter's output
+// type — mirror of pair_programming_loop's data.internal.review_verdict
+// comment: the copilot adapter does not expose an `outcome` step output
+// the workflow can read, so the workflow tracks the verdict itself.
+//
+// Loop/single-source-of-truth rule (KB-151 discipline, carried from the
+// parent handler): this tree's OWN data.internal is the loop's single
+// source of truth; downstream steps verify against it, never re-judge it.
+// The KB-151 pattern from workstream_handler_v1: every hop that carries a
+// verdict RE-STAMPS the standing data.internal before the next consumer,
+// so no consumer sees an earlier (stale) verdict state.
+
+workflow {
+    version       = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    name          = "pair_loop_v2"
+    initial_state = "get_branch_name"
+    target_state  = "done"
+
+    policy {
+        max_total_steps = 100
+    }
+}
+
+// ── data.internal surface ────────────────────────────────────────────────────
+// The loop's single source of truth (KB-151 discipline). Every downstream
+// consumer reads one of these; nobody re-judges a verdict already stamped.
+
+data "internal" "branch" {
+    type  = string
+    value = ""
+}
+
+data "internal" "_log_file" {
+    type  = string
+    value = ""
+}
+
+// The workstream text as ONE string. Written per-run by read_workstream;
+// the per-part agent briefs interpolate it per part.
+data "internal" "workstream_text" {
+    type  = string
+    value = ""
+}
+
+data "internal" "developer_prompt" {
+    type  = string
+    value = templatefile("./agents/missing_developer_prompt.md.tftpl", {})
+}
+
+data "internal" "reviewer_prompt" {
+    type  = string
+    value = ""
+}
+
+// The planner's part plan as ONE JSON string. Written by plan_parts'
+// typed parts_ready arm (output.reason, the house idiom on typed arms);
+// reduce_plan_parts jq-VALIDATES it deterministically and every slot
+// consumer jq-extracts slot fields from it (template vars stay strings:
+// files_claimed lists pre-join before templatefile).
+data "internal" "plan_json" {
+    type  = string
+    value = ""
+}
+
+// The worktree's status text at entry (uncommitted changes), captured by
+// check_working_tree; rides the part briefs' context.
+data "internal" "worktree_status" {
+    type  = string
+    value = ""
+}
+
+// Whole-loop pair verdict (mirrors v1's data.internal.review_verdict).
+// Written by the tree's own verify steps per part (the KB-151 single
+// source of truth pattern) and by switch_verdict_route's deterministic
+// aggregate; read by the interface outputs. The copilot adapter does not
+// expose a per-step outcome output, so the tree tracks the verdict itself.
+data "internal" "review_verdict" {
+    type  = string
+    value = ""
+}
+
+// LOCAL durability baseline: HEAD sha captured by capture_entry_sha at loop
+// entry (v1 verbatim, remaster Task 2). The local verifier compares HEAD
+// against this sha (benign-resume becomes a local compare, KB-211); the
+// actual push is delegated to upstream_sync, the only network surface in
+// this tree.
+data "internal" "entry_sha" {
+    type  = string
+    value = ""
+}
+
+// KB-351 discipline: ONE extraction per step, single-stdout source. The
+// per-part verify step writes the slot's verdict here (KB-151: re-stamped
+// from the verify step's stdout before the route reads it).
+data "internal" "pair_slot_p1_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pair_slot_p2_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pair_slot_p3_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pair_slot_p4_verdict" {
+    type  = string
+    value = ""
+}
+
+// Typed findings payload the remediation brief interpolates: written by
+// the develop arms (part_help) and by the verify/refute arms (the verify
+// script's stderr), read by the remediate brief and the verdict log.
+data "internal" "pair_slot_p1_findings" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pair_slot_p2_findings" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pair_slot_p3_findings" {
+    type  = string
+    value = ""
+}
+
+data "internal" "pair_slot_p4_findings" {
+    type  = string
+    value = ""
+}
+
+// Deterministic part_count: the REDUCED part count, extracted by
+// reduce_plan_parts from the validated plan_json (jq gate — one
+// extraction per step, KB-351) and routed by route_part_slots.
+data "internal" "part_count" {
+    type  = string
+    value = ""
+}
+
+// The per-part agent call's verdict for this tree's OWN routing — the
+// pair loop's fresh-per-part contract. Written per-part; the tree's own
+// data.internal is the single source of truth, not the per-part agent.
+data "internal" "part_attempted" {
+    type  = string
+    value = "0"
+}
+
+// Whole-tree aggregate verdict — "pair_ready" (the parts' verdicts
+// converge) or "none"/"pending"/etc. Written by the deterministic shell
+// truth, never agent judgment (KB-151).
+data "internal" "pair_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "failure_reason" {
+    type  = string
+    value = ""
+}
+
+// LOCAL-ONLY contract (remaster ruling 1, verbatim from v1): every network
+// operation leaves the loop through this subworkflow. v2 does NOT change
+// this — the per-part agent calls stay local; pushes stay upstream-only.
+subworkflow "upstream_sync" {
+    source = "../upstream_sync"
+    input = {
+        worktree_dir    = var.worktree_dir
+        branch          = data.internal.branch.value
+        workstream_file = var.workstream_file
+    }
+}
+
+// ── Body entry contract ─────────────────────────────────────────────────────
+
+// v1 verbatim shape.
+step "get_branch_name" {
+    target = adapter.shell.sh
+
+    input {
+        command = "basename '${var.workstream_file}' .md"
+    }
+
+    outcome "success" { next = step.read_workstream }
+    outcome "failure" { next = state.failed }
+}
+
+step "read_workstream" {
+    target = adapter.shell.sh
+
+    input {
+        command = "cat ${var.workstream_file}"
+    }
+
+    outcome "success" {
+        next = step.checkout_branch
+        write {
+            target = data.internal.branch.value
+            // basename's stdout carries a trailing newline; without the trim the
+            // newline rides along into every consumer of data.internal.branch
+            // (v1: CRI-295). Keep the trimspace.
+            value  = trimspace(steps.get_branch_name.stdout)
+        }
+        write {
+            target = data.internal._log_file.value
+            value  = (var.log_file != null && var.log_file != "") ? var.log_file : "/tmp/${trimspace(steps.get_branch_name.stdout)}.log"
+        }
+        write {
+            target = data.internal.workstream_text.value
+            value  = output.stdout
+        }
+        write {
+            target = data.internal.developer_prompt.value
+            value = var.developer_initial_prompt != "" ? var.developer_initial_prompt : (var.developer.initial_prompt != "" ? var.developer.initial_prompt : templatefile("./agents/develop_workstream.md.tftpl", {
+                workstream = output.stdout
+            }))
+        }
+        write {
+            target = data.internal.reviewer_prompt.value
+            value = templatefile("./agents/review_workstream.md.tftpl", {
+                workstream = output.stdout
+            })
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// v1 verbatim (KB-258): the worktree is SHARED across body entries, so HEAD
+// may have moved since the last body exited. The step re-asserts the branch
+// deterministically (fetch + checkout, untracked scratch carried safely)
+// instead of failing on the mere mismatch. LOCAL-ONLY.
+step "checkout_branch" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/checkout_branch.sh.tftpl", {
+            criteria_value_1 = var.workstream_file
+        })
+    }
+    timeout = "10s"
+    outcome "success" { next = step.capture_entry_sha }
+    outcome "failure" { next = state.failed }
+}
+
+// v1 verbatim (KB-351 — one extraction per step, single-stdout source): the
+// loop's LOCAL durability baseline. The per-part verify steps compare HEAD
+// against it.
+step "capture_entry_sha" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/capture_entry_sha.sh.tftpl", {
+            criteria_value_1 = steps.checkout_branch.stdout
+        })
+    }
+    timeout = "10s"
+    outcome "success" {
+        next = step.check_working_tree
+        write {
+            target = data.internal.entry_sha.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" { next = state.failed }
+}
+
+// v1 verbatim (KB-258 handoff): a dirty tree is no longer rejected. The
+// status folds into the part agents' briefs.
+step "check_working_tree" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/check_working_tree.sh.tftpl", {
+            criteria_value_1 = format("%s", var.allow_dirty)
+            criteria_value_2 = var.branch_notes
+        })
+    }
+    // KB-374: every non-iterating step carries an adapter failure/error path.
+    outcome "success" {
+        next = step.plan_parts
+        write {
+            target = data.internal.worktree_status.value
+            value  = output.stdout
+        }
+        write {
+            target = data.internal.developer_prompt.value
+            value = trimspace(output.stdout) != "" ? templatefile("./agents/developer_with_worktree_status.md.tftpl", {
+                prompt          = data.internal.developer_prompt.value
+                worktree_status = output.stdout
+            }) : data.internal.developer_prompt.value
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "check_working_tree failed before the part plan could be built: ${output.stderr}"
+        }
+    }
+}
+
+// ── Part planning ────────────────────────────────────────────────────────────
+
+// The per-run planner agent call that splits the workstream into parts.
+// The typed parts_ready arm's payload IS the plan (the reason field
+// carries the JSON plan verbatim) — written straight into this tree's own
+// data.internal.plan_json (KB-151: the plan is a verdict this tree asserts;
+// the copilot adapter exposes no per-step outcome output) and then
+// jq-VALIDATED deterministically by reduce_plan_parts before anything
+// consumes it (the slot routing's dial inputs are shell truth).
+step "plan_parts" {
+    target     = adapter.copilot.pair_part_planner
+    max_visits = var.max_agent_visits
+    // The copilot adapter does not expose a per-step outcome output; the
+    // tree writes the verdict itself (KB-151 / KB-351).
+    timeout = "60m"
+    allow_tools = ["*"]
+
+    input {
+        prompt = templatefile("./agents/pair_plan_prompt.md.tftpl", {
+            workstream = data.internal.workstream_text.value
+        })
+    }
+
+    // Every outcome is typed (contract mode is PER-STEP; never author a
+    // mixed step). Each arm's typed payload carries the verdict material
+    // the tree's OWN data.internal stores — the loop's single source of
+    // truth is this tree, never the agent body (KB-151).
+    outcome "parts_ready" {
+        next      = step.reduce_plan_parts
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.plan_json.value
+            value  = output.reason
+        }
+    }
+    outcome "need_help" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "planner_need_help"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part planning failed: ${try(output.reason, "") != "" ? try(output.reason, "") : "planner need_help without a reason"}"
+        }
+    }
+    // The copilot adapter emits "failure" if the session dies or the agent
+    // never calls submit_outcome — route it somewhere terminal.
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "planner_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part planning lost its session before parts could be planned: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "planner_malformed"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part planning returned a malformed response: ${try(output.reason, "malformed planner response (no valid outcome)")}"
+        }
+    }
+}
+
+// The deterministic part-plan VALIDATION + slot-count extraction: jq
+// gates the planner's plan (object shape, parts==len(per_part), 1..4,
+// p1..pN sequential, effort fast|deep, brief/acceptance strings), then
+// prints ONLY the count on stdout (KB-351 — one extraction per step).
+// The REDUCED count lands in data.internal.part_count — the slot chain's
+// gating input (the exit counts the STAMPED slot verdicts, not the plan:
+// TODO-8's exit semantics live in the per-slot routes).
+step "reduce_plan_parts" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/reduce_plan_parts.sh.tftpl", {
+            criteria_value_1 = data.internal.plan_json.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_part_slots
+        write {
+            target = data.internal.part_count.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "reduce_plan_parts failed: ${output.stderr}"
+        }
+    }
+}
+
+// Route on the planner's REDUCED part_count (the slot budget's dial
+// inputs are deterministic shell truth, never agent judgment — KB-151).
+// The chain's shape is FLAT: it ALWAYS enters at slot p1 (the skeleton's
+// enter-at-slot-N defect closed); the reduced count's slot gating lives
+// at the per-slot routes — after each slot's verdict stamps, route_slot_pN
+// compares the count with the slot index and either walks to the next
+// slot's select or exits to the checkpoint chain. The slot select routes
+// carry the fresh-per-part slot instances' fast/deep lanes (never-opened
+// instances = fresh conversations, KB-257/CRI-145; the effort lane rides
+// the plan's own per_part effort, a total try()-wrapped read — && is NOT
+// short-circuit in this engine, so every plan_json access is try-wrapped).
+switch "route_part_slots" {
+    match {
+        condition = data.internal.part_count.value == "0"
+        next      = step.fail_no_parts_attempted
+    }
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[0].effort, "") == "deep"
+        next      = step.run_part_p1_deep
+    }
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[0].effort, "") != "deep"
+        next      = step.run_part_p1_fast
+    }
+    default {
+        next = step.fail_parts_overflow
+    }
+}
+
+// ── Slot select switches (ruling 9's fast/deep lanes per slot) ─────────────
+// Each slot's select reads the SAME total plan_json entry (effort) and
+// routes the slot's fresh-per-part develop step down the fast or deep
+// copilot instance. Default lands at the typed overflow fail (unreachable
+// in practice — the two conditions above cover both effort values).
+
+switch "select_slot_p2" {
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "") == "deep"
+        next      = step.run_part_p2_deep
+    }
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "") != "deep"
+        next      = step.run_part_p2_fast
+    }
+    default {
+        next = step.fail_parts_overflow
+    }
+}
+
+switch "select_slot_p3" {
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "") == "deep"
+        next      = step.run_part_p3_deep
+    }
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "") != "deep"
+        next      = step.run_part_p3_fast
+    }
+    default {
+        next = step.fail_parts_overflow
+    }
+}
+
+switch "select_slot_p4" {
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "") == "deep"
+        next      = step.run_part_p4_deep
+    }
+    match {
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "") != "deep"
+        next      = step.run_part_p4_fast
+    }
+    default {
+        next = step.fail_parts_overflow
+    }
+}
+
+// ── Part slot dials ─────────────────────────────────────────────────────────
+// The part slots BACK this tree's static steps; each slot runs ONE
+// per-part agent call (SPLIT into a fast and a deep lane by ruling 9's
+// effort rule: the plan's per_part effort dials which instance runs the
+// part) with its own typed verdict, then the tree's OWN data.internal
+// carries the verdict onward. The slot dial's outcomes are typed
+// (contract mode, PER-STEP); the verdict rides the typed payload (the
+// loop itself reads no per-step outcome from the copilot adapter —
+// KB-151/KB-351). The brief interpolates the part's planned files
+// pre-joined into ONE string (template vars stay strings).
+
+step "run_part_p1_fast" {
+    target     = adapter.copilot.pair_part_p1_dev
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p1"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[0].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[0].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[0].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[0].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p1_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p1_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p1_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p1_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p1_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1 (fast lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1 (fast lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+// The deep lane of slot p1 — the same slot, the same typed verdict family,
+// the same brief; the instance config only (planner model/reasoning
+// effort/provider) differs. Never-opened elsewhere (KB-257/CRI-145).
+step "run_part_p1_deep" {
+    target     = adapter.copilot.pair_part_p1_dev_deep
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p1"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[0].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[0].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[0].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[0].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p1_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p1_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p1_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p1_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p1_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1 (deep lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1 (deep lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+// The slot's VERIFY step — deterministic shell truth (KB-151: the part's
+// OWN verdict is stamped by the verify step, not agent judgment; the
+// re-stamp happens on hop, the shared verify script asserting the slot's
+// precondition: verdict stamp, branch, HEAD != entry_sha, clean tree,
+// ci_gate when nonempty). Its stdout re-stamps the slot verdict — the
+// route switch and the checkpoint chain read it AFTER this re-stamp.
+step "p1_verify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p1
+        write {
+            target = data.internal.pair_slot_p1_verdict.value
+            // KB-151: re-stamp the slot's verdict from the deterministic
+            // verify truth BEFORE the route reads it. The re-stamp runs
+            // BEFORE the route's reads (out-of-band writes precede the
+            // next hop).
+            value  = "part_ready"
+        }
+    }
+    // The verify script's stderr carries the WHY (findings) the
+    // remediation brief consumes — the route reads pair_slot_p1_findings,
+    // written by the develop arm's part_help or the p1_refute arm below
+    // from the verify's own stdout/stderr (KB-351 single-source rule).
+    outcome "failure" { next = step.p1_refute }
+}
+
+// p1_refute stamps the deterministic findings text into the slot findings
+// so the remediation brief and the verdict log read ONE source (the
+// verify script's own stdout/stderr — KB-351).
+step "p1_refute" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "printf '%s\\n' 'slot p1 verify failed; findings follow'; exit 1"
+    }
+    // Unreachable in practice (p1_verify exits 1 on every findings lane);
+    // declared for outcome completeness (KB-374: both paths handled).
+    outcome "success" { next = step.pair_part_p1_remediate }
+    outcome "failure" {
+        next   = step.pair_part_p1_remediate
+        write {
+            target = data.internal.pair_slot_p1_findings.value
+            value  = "p1 verify: ${steps.p1_verify.stderr}"
+        }
+    }
+}
+
+// The slot's REMEDIATION call — the copilot remediation agent (TODO-4's
+// typed family; the skeleton's shell placeholder is gone). Reads ONLY the
+// slot findings (written by the develop part_help arm or p1_refute).
+// max_visits bounds the verify-failure remediation re-entries (TODO-6's
+// bounded reverify loop; NO unbounded re-develop circuit).
+step "pair_part_p1_remediate" {
+    target     = adapter.copilot.pair_part_p1_remediator
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_remediate.md.tftpl", {
+            findings       = data.internal.pair_slot_p1_findings.value
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[0].files_claimed, []))
+        })
+    }
+
+    outcome "remediated" {
+        next      = step.p1_reverify
+        schema    = object({ reason = string })
+    }
+    outcome "still_broken" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_still_broken"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1's remediation did not resolve the findings: ${try(output.reason, "") != "" ? try(output.reason, "") : "still_broken without a reason (the remediation agent's session)"}"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1's remediation lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 1's remediation returned a malformed response: ${try(output.reason, "malformed remediation response (no valid outcome)")}"
+        }
+    }
+}
+
+// The slot's REVERIFY (TODO-6): the same shared verify script re-runs;
+// on success it re-stamps pair_slot_p1_verdict from stdout (the
+// remediation's fix is the committed work the verify asserts) BEFORE
+// route_slot_p1 reads it. failure -> pair_part_p1_remediate (max_visits
+// bounds the loop; NO re-develop circuit — the verify failure stays
+// bounded to the remediation lane).
+step "p1_reverify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p1
+        write {
+            target = data.internal.pair_slot_p1_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" {
+        next   = step.pair_part_p1_remediate
+        write {
+            target = data.internal.pair_slot_p1_findings.value
+            value  = "p1 reverify: ${output.stderr}"
+        }
+    }
+}
+
+// KB-151: the part verdict is the tree's OWN data.internal. The slot's
+// route reads data.internal.pair_slot_p1_verdict (re-stamped by the
+// verify / reverify step's write) and compares the REDUCED count with
+// the slot index (TODO-8's per-slot exit semantics). Both conditions are
+// total (try-wrapped). TODO-5's stale part_help siblings are removed —
+// the remediation route enters directly from the develop arms and the
+// reverify, never via this route's reads.
+switch "route_slot_p1" {
+    match {
+        condition = data.internal.pair_slot_p1_verdict.value == "part_ready" && data.internal.part_count.value != "0"
+        next      = switch.select_slot_p2
+    }
+    match {
+        condition = data.internal.pair_slot_p1_verdict.value == "part_ready" && data.internal.part_count.value == "1"
+        next      = step.push_checkpoint
+    }
+    default {
+        next = step.fail_verdict_mismatch
+    }
+}
+
+// ── Slot 2 ──────────────────────────────────────────────────────────────────
+
+step "run_part_p2_fast" {
+    target     = adapter.copilot.pair_part_p2_dev
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p2"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[1].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[1].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[1].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p2_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p2_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p2_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p2_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2 (fast lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2 (fast lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+step "run_part_p2_deep" {
+    target     = adapter.copilot.pair_part_p2_dev_deep
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p2"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[1].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[1].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[1].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p2_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p2_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p2_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p2_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2 (deep lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2 (deep lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+step "p2_verify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p2
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" { next = step.p2_refute }
+}
+
+step "p2_refute" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "printf '%s\\n' 'slot p2 verify failed; findings follow'; exit 1"
+    }
+    // Unreachable in practice (p2_verify exits 1 on every findings lane);
+    // declared for outcome completeness (KB-374: both paths handled).
+    outcome "success" { next = step.pair_part_p2_remediate }
+    outcome "failure" {
+        next   = step.pair_part_p2_remediate
+        write {
+            target = data.internal.pair_slot_p2_findings.value
+            value  = "p2 verify: ${steps.p2_verify.stderr}"
+        }
+    }
+}
+
+step "pair_part_p2_remediate" {
+    target     = adapter.copilot.pair_part_p2_remediator
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_remediate.md.tftpl", {
+            findings       = data.internal.pair_slot_p2_findings.value
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[1].files_claimed, []))
+        })
+    }
+
+    outcome "remediated" {
+        next      = step.p2_reverify
+        schema    = object({ reason = string })
+    }
+    outcome "still_broken" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_still_broken"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2's remediation did not resolve the findings: ${try(output.reason, "") != "" ? try(output.reason, "") : "still_broken without a reason (the remediation agent's session)"}"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2's remediation lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 2's remediation returned a malformed response: ${try(output.reason, "malformed remediation response (no valid outcome)")}"
+        }
+    }
+}
+
+step "p2_reverify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p2
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" {
+        next   = step.pair_part_p2_remediate
+        write {
+            target = data.internal.pair_slot_p2_findings.value
+            value  = "p2 reverify: ${output.stderr}"
+        }
+    }
+}
+
+switch "route_slot_p2" {
+    match {
+        condition = data.internal.pair_slot_p2_verdict.value == "part_ready" && data.internal.part_count.value != "0" && data.internal.part_count.value != "1"
+        next      = switch.select_slot_p3
+    }
+    match {
+        condition = data.internal.pair_slot_p2_verdict.value == "part_ready" && data.internal.part_count.value == "2"
+        next      = step.push_checkpoint
+    }
+    default {
+        next = step.fail_verdict_mismatch
+    }
+}
+
+// ── Slot 3 ──────────────────────────────────────────────────────────────────
+
+step "run_part_p3_fast" {
+    target     = adapter.copilot.pair_part_p3_dev
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p3"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[2].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[2].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[2].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p3_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p3_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p3_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p3_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3 (fast lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3 (fast lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+step "run_part_p3_deep" {
+    target     = adapter.copilot.pair_part_p3_dev_deep
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p3"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[2].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[2].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[2].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p3_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p3_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p3_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p3_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3 (deep lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3 (deep lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+step "p3_verify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p3
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" { next = step.p3_refute }
+}
+
+step "p3_refute" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "printf '%s\\n' 'slot p3 verify failed; findings follow'; exit 1"
+    }
+    // Unreachable in practice (p3_verify exits 1 on every findings lane);
+    // declared for outcome completeness (KB-374: both paths handled).
+    outcome "success" { next = step.pair_part_p3_remediate }
+    outcome "failure" {
+        next   = step.pair_part_p3_remediate
+        write {
+            target = data.internal.pair_slot_p3_findings.value
+            value  = "p3 verify: ${steps.p3_verify.stderr}"
+        }
+    }
+}
+
+step "pair_part_p3_remediate" {
+    target     = adapter.copilot.pair_part_p3_remediator
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_remediate.md.tftpl", {
+            findings       = data.internal.pair_slot_p3_findings.value
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[2].files_claimed, []))
+        })
+    }
+
+    outcome "remediated" {
+        next      = step.p3_reverify
+        schema    = object({ reason = string })
+    }
+    outcome "still_broken" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_still_broken"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3's remediation did not resolve the findings: ${try(output.reason, "") != "" ? try(output.reason, "") : "still_broken without a reason (the remediation agent's session)"}"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3's remediation lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 3's remediation returned a malformed response: ${try(output.reason, "malformed remediation response (no valid outcome)")}"
+        }
+    }
+}
+
+step "p3_reverify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p3
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" {
+        next   = step.pair_part_p3_remediate
+        write {
+            target = data.internal.pair_slot_p3_findings.value
+            value  = "p3 reverify: ${output.stderr}"
+        }
+    }
+}
+
+switch "route_slot_p3" {
+    match {
+        condition = data.internal.pair_slot_p3_verdict.value == "part_ready" && data.internal.part_count.value != "0" && data.internal.part_count.value != "1" && data.internal.part_count.value != "2"
+        next      = switch.select_slot_p4
+    }
+    match {
+        condition = data.internal.pair_slot_p3_verdict.value == "part_ready" && data.internal.part_count.value == "3"
+        next      = step.push_checkpoint
+    }
+    default {
+        next = step.fail_verdict_mismatch
+    }
+}
+
+// ── Slot 4 ──────────────────────────────────────────────────────────────────
+
+step "run_part_p4_fast" {
+    target     = adapter.copilot.pair_part_p4_dev
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p4"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[3].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[3].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[3].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p4_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p4_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p4_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p4_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4 (fast lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4 (fast lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+step "run_part_p4_deep" {
+    target     = adapter.copilot.pair_part_p4_dev_deep
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_brief.md.tftpl", {
+            part_id        = "p4"
+            effort         = try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "deep")
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[3].files_claimed, []))
+            brief          = try(jsondecode(data.internal.plan_json.value).per_part[3].brief, "")
+            acceptance     = try(jsondecode(data.internal.plan_json.value).per_part[3].acceptance, "")
+            workstream     = data.internal.workstream_text.value
+        })
+    }
+
+    outcome "part_ready" {
+        next      = step.p4_verify
+        schema    = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p4_findings.value
+            value  = output.reason
+        }
+    }
+    outcome "part_help" {
+        next   = step.pair_part_p4_remediate
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_help"
+        }
+        write {
+            target = data.internal.pair_slot_p4_findings.value
+            value  = try(output.reason, "") != "" ? try(output.reason, "") : "part_help without a reason"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4 (deep lane) lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4 (deep lane) returned a malformed response: ${try(output.reason, "malformed part response (no valid outcome)")}"
+        }
+    }
+}
+
+step "p4_verify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p4
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" { next = step.p4_refute }
+}
+
+step "p4_refute" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "printf '%s\\n' 'slot p4 verify failed; findings follow'; exit 1"
+    }
+    // Unreachable in practice (p4_verify exits 1 on every findings lane);
+    // declared for outcome completeness (KB-374: both paths handled).
+    outcome "success" { next = step.pair_part_p4_remediate }
+    outcome "failure" {
+        next   = step.pair_part_p4_remediate
+        write {
+            target = data.internal.pair_slot_p4_findings.value
+            value  = "p4 verify: ${steps.p4_verify.stderr}"
+        }
+    }
+}
+
+step "pair_part_p4_remediate" {
+    target     = adapter.copilot.pair_part_p4_remediator
+    max_visits = var.max_agent_visits
+    timeout    = "60m"
+    allow_tools = ["*"]
+    input {
+        prompt = templatefile("./agents/pair_part_remediate.md.tftpl", {
+            findings       = data.internal.pair_slot_p4_findings.value
+            files_claimed  = join(", ", try(jsondecode(data.internal.plan_json.value).per_part[3].files_claimed, []))
+        })
+    }
+
+    outcome "remediated" {
+        next      = step.p4_reverify
+        schema    = object({ reason = string })
+    }
+    outcome "still_broken" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_still_broken"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4's remediation did not resolve the findings: ${try(output.reason, "") != "" ? try(output.reason, "") : "still_broken without a reason (the remediation agent's session)"}"
+        }
+    }
+    outcome "failure" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4's remediation lost its session before a verdict could land: ${try(output.reason, "")}"
+        }
+    }
+    outcome "default" {
+        next   = state.failed
+        schema = object({ reason = string })
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "part_remediation_lost_session"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair part slot 4's remediation returned a malformed response: ${try(output.reason, "malformed remediation response (no valid outcome)")}"
+        }
+    }
+}
+
+step "p4_reverify" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = templatefile("./scripts/pair_part_verify.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = "part_ready"
+            criteria_value_3 = data.internal.entry_sha.value
+        })
+    }
+    outcome "success" {
+        next = switch.route_slot_p4
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_ready"
+        }
+    }
+    outcome "failure" {
+        next   = step.pair_part_p4_remediate
+        write {
+            target = data.internal.pair_slot_p4_findings.value
+            value  = "p4 reverify: ${output.stderr}"
+        }
+    }
+}
+
+// The LAST slot's route — the slot chain's exit. Verdict==part_ready with
+// any remaining reduced count is IMPOSSIBLE (p4 is the last slot) — the
+// only part_ready shape here is count==4, the chain exit to the checkpoint
+// push. TODO-5's stale part_help siblings (reading p1..p3's verdicts) are
+// REMOVED — remediation re-entries are max_visits-bounded inside the
+// slot's own (verify/refute -> remediate -> reverify) sub-chains.
+switch "route_slot_p4" {
+    match {
+        condition = data.internal.pair_slot_p4_verdict.value == "part_ready" && data.internal.part_count.value == "4"
+        next      = step.push_checkpoint
+    }
+    default {
+        next = step.fail_verdict_mismatch
+    }
+}
+
+// ── Checkpoint / upstream (v1 verbatim) ─────────────────────────────────────
+
+// The LOCAL checkpoint verify after the slot chain. TODO-10's widened
+// verify inputs: the four slot verdicts + the part plan ride the script's
+// criteria inputs; the script asserts the PLANNED slots' part_ready
+// before printing checkpoint_local semantics. Keep the entry_sha compare
+// semantics (KB-211 re-based, Wave-1 verified); the push stays delegated
+// to upstream_sync.
+step "push_checkpoint" {
+    target     = adapter.shell.sh
+    max_visits = var.max_checkpoint_push_visits
+    timeout    = "120s"
+
+    input {
+        command = templatefile("./scripts/verify_checkpoint_pushed.sh.tftpl", {
+            criteria_value_1 = data.internal.branch.value
+            criteria_value_2 = data.internal.entry_sha.value
+            criteria_value_3 = data.internal.part_count.value
+            criteria_value_4 = data.internal.pair_slot_p1_verdict.value
+            criteria_value_5 = data.internal.pair_slot_p2_verdict.value
+            criteria_value_6 = data.internal.pair_slot_p3_verdict.value
+            criteria_value_7 = data.internal.pair_slot_p4_verdict.value
+        })
+    }
+
+    // v1 verbatim (CRI-272 slim continuation prompt + KB-211 benign-resume
+    // correction): the per-part verdict chain's LOCAL verify outcome.
+    outcome "success" {
+        next = step.switch_verdict_route
+        write {
+            target = data.internal.developer_prompt.value
+            value = contains(split(output.stdout, "\n"), "resumed_no_work=1") ? templatefile("./agents/checkpoint_recover.md.tftpl", {
+                workstream = data.internal.workstream_text.value
+            }) : templatefile("./agents/develop_continue.md.tftpl", {
+                workstream = data.internal.workstream_text.value
+            })
+        }
+    }
+    outcome "failure" { next = step.preserve_pending }
+}
+
+// v1 verbatim (ruling 2): a dead part turn must not evaporate pending
+// changes.
+step "preserve_pending" {
+    target  = adapter.shell.sh
+    timeout = "30s"
+    input {
+        command = templatefile("./scripts/commit_pending_changes.sh.tftpl", {})
+    }
+    outcome "success" { next = step.sync_checkpoint_upstream }
+    outcome "failure" { next = state.failed }
+}
+
+// v1 verbatim (LOCAL-ONLY contract, ruling 1): every network op leaves the
+// loop through this subworkflow. Best-effort durability; a sync failure
+// must not fail the run.
+step "sync_checkpoint_upstream" {
+    target = subworkflow.upstream_sync
+    outcome "success" { next = step.resume_after_preservation }
+    outcome "failure" { next = step.resume_after_preservation }
+}
+
+// v1 verbatim.
+step "resume_after_preservation" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'pending changes preserved and pushed upstream; resuming the part chain'"
+    }
+    outcome "success" {
+        next = step.switch_verdict_route
+        write {
+            target = data.internal.developer_prompt.value
+            value = templatefile("./agents/develop_continue.md.tftpl", {
+                workstream = data.internal.workstream_text.value
+            })
+        }
+    }
+    // KB-374: engine 0.5.57 static FSM verification requires the adapter
+    // failure/error path on every non-iterating step.
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "resume_after_preservation bookkeeping step failed before the part-chain re-entry (KB-374)"
+        }
+    }
+}
+
+// ── Whole-loop verdict ───────────────────────────────────────────────────────
+
+// The tree's OWN verdict aggregation hop: the deterministic shell truth
+// composes the whole-tree aggregate over the STAMPED slot verdicts
+// (data.internal.pair_slot_p1..p4_verdict) inside the REDUCED count —
+// the tree asserts the aggregate, never the agent (KB-151). part attempt
+// bookkeeping rides the same hop: part_attempted counts up.
+step "switch_verdict_route" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/switch_verdict_route.sh.tftpl", {
+            criteria_value_1 = data.internal.part_count.value
+            criteria_value_2 = data.internal.pair_slot_p1_verdict.value
+            criteria_value_3 = data.internal.pair_slot_p2_verdict.value
+            criteria_value_4 = data.internal.pair_slot_p3_verdict.value
+            criteria_value_5 = data.internal.pair_slot_p4_verdict.value
+        })
+    }
+    outcome "success" {
+        next = step.write_review_log
+        write {
+            target = data.internal.pair_verdict.value
+            value  = trimspace(output.stdout)
+        }
+        write {
+            target = data.internal.part_attempted.value
+            value  = "1"
+        }
+    }
+    // KB-374.
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "switch_verdict_route's verdict aggregation failed: ${output.stderr}"
+        }
+    }
+}
+
+// The per-part verdict log write (v1's write_work_log shape): the body
+// renders the per-part verdicts + findings over the PLANNED parts and the
+// whole-tree aggregate.
+step "write_review_log" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/write_review_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+            criteria_value_2 = "pair loop v2: whole-tree verdict ${data.internal.pair_verdict.value} over ${data.internal.part_count.value} planned part(s); slot verdicts ${data.internal.pair_slot_p1_verdict.value}/${data.internal.pair_slot_p2_verdict.value}/${data.internal.pair_slot_p3_verdict.value}/${data.internal.pair_slot_p4_verdict.value}; findings: ${data.internal.pair_slot_p1_findings.value} | ${data.internal.pair_slot_p2_findings.value} | ${data.internal.pair_slot_p3_findings.value} | ${data.internal.pair_slot_p4_findings.value}"
+        })
+    }
+    outcome "success" { next = step.commit_review_log }
+    outcome "failure" { next = state.failed }
+}
+
+// v1 verbatim: auto-commit the log file if it is tracked in the repo.
+step "commit_review_log" {
+    target = adapter.shell.sh
+    input {
+        command = templatefile("./scripts/commit_review_log.sh.tftpl", {
+            criteria_value_1 = data.internal._log_file.value
+        })
+    }
+    outcome "success" { next = step.push_review_checkpoint }
+    outcome "failure" { next = state.failed }
+}
+
+// v1 verbatim: the second durability checkpoint after the verdict pass —
+// an approved head (or a findings-carrying head) is exactly the state a
+// restart must be able to find on the remote. Best-effort, upstream-
+// delegated semantics (LOCAL-ONLY contract, ruling 1).
+step "push_review_checkpoint" {
+    target = subworkflow.upstream_sync
+    outcome "success" { next = switch.triage_review }
+    outcome "failure" { next = switch.triage_review }
+}
+
+// v1 verbatim SHAPE, v2 semantics: the whole-loop triage. The KB-151
+// pattern's single source of truth is this tree's own data.internal
+// (pair_verdict); the pair_ready verdict routes done, anything else is
+// the typed-fail parking lane.
+switch "triage_review" {
+    match {
+        condition = data.internal.pair_verdict.value == "pair_ready"
+        next      = state.done
+    }
+    default {
+        next = step.fail_pair_verdict_parking
+    }
+}
+
+// ── Terminal states ─────────────────────────────────────────────────────────
+
+state "done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Typed-fail bookkeeping ──────────────────────────────────────────────────
+// Every non-iterating step above carries an adapter failure/error path
+// (KB-374). The fail-* bookkeeping steps mirror v1's fail_merge_ci /
+// resume_after_preservation KB-374 shape: BOTH outcomes route to
+// state.failed and write the typed reason.
+
+step "fail_no_parts_attempted" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'fail_no_parts: the planner planned zero parts'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "no_parts_planned"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair loop v2 failed: no parts were planned (part_count=0)"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "fail_no_parts_attempted's bookkeeping step failed (KB-374)"
+        }
+    }
+}
+
+step "fail_parts_overflow" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'fail_parts_overflow: the planner planned beyond the slot budget or the effort lane was unresolvable'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "parts_overflow"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair loop v2 failed: the planner planned ${data.internal.part_count.value} parts (or a slot effort outside fast/deep) — beyond the tree's 4-slot budget (fail_parts_overflow)"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "fail_parts_overflow's bookkeeping step failed (KB-374)"
+        }
+    }
+}
+
+step "fail_verdict_mismatch" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'fail_verdict_mismatch: a slot verify landed without the expected part_ready stamp'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.pair_verdict.value
+            value  = "verdict_mismatch"
+        }
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair loop v2 failed: a slot's verdict landed without the expected part_ready stamp (fail_verdict_mismatch)"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "fail_verdict_mismatch's bookkeeping step failed (KB-374)"
+        }
+    }
+}
+
+step "fail_pair_verdict_parking" {
+    target  = adapter.shell.sh
+    timeout = "10s"
+    input {
+        command = "echo 'fail_pair_verdict_parking: the whole-tree verdict was not pair_ready'"
+    }
+    outcome "success" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "pair loop v2's whole-tree verdict was \"${data.internal.pair_verdict.value},\" not pair_ready (fail_pair_verdict_parking)"
+        }
+    }
+    outcome "failure" {
+        next = state.failed
+        write {
+            target = data.internal.failure_reason.value
+            value  = "fail_pair_verdict_parking's bookkeeping step failed (KB-374)"
+        }
+    }
+}
+
+// ── Interface outputs ───────────────────────────────────────────────────────
+// Declared subworkflow outputs read data.internal blocks. Every verdict
+// whose value the PARENT consumes copies the value into its paired
+// data.internal on its route (the "copies value = output.<field>" rule).
+// The parent's dial step routes on these — TODO-7 (the parent dial) stays
+// SKIPPED in this pass: tree-internal surface only.
+
+output "pair_verdict" {
+    type  = string
+    value = data.internal.pair_verdict.value
+}
+
+output "failure_reason" {
+    type  = string
+    value = data.internal.failure_reason.value
+}

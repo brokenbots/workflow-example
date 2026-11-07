@@ -1,0 +1,29 @@
+// pair_programming_loop_v2 — agent pair_part_brief.md.tftpl renders ONE
+// part's brief from the planner's plan (data.internal.plan_json, jq-extracted;
+// template vars stay strings — the workflow renders ONE slot's brief per
+// agent call).
+
+The pair loop v2 split the workstream into parts. Your part (as planned by
+the planner, executed verbatim — you implement it, not re-plan it):
+
+Part id: {{ .part_id }}
+Effort lane: {{ .effort }}
+Files you own (the part's full scope; nothing outside it):
+{{ .files_claimed }}
+
+Part brief:
+{{ .brief }}
+
+Part acceptance (what "done" means for this part):
+{{ .acceptance }}
+
+Workstream text (context; your edits stay inside the part's file list):
+
+{{ .workstream }}
+
+Work only inside the files listed above. Commit per unit of work; NEVER
+push, fetch, clone, or ls-remote (the workflow owns upstream placement).
+End the turn by calling the `submit_outcome` tool: `part_ready` with what
+you built and verified in the reason field when the part meets its
+acceptance, or `part_help` with the findings in the reason field when you
+cannot complete the part as planned.

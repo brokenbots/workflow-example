@@ -1,0 +1,54 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+set -eu
+# pair_programming_loop_v2 — the deterministic whole-tree VERDICT AGGREGATE
+# (scripts/switch_verdict_route.sh.tftpl; step.switch_verdict_route's body).
+# POSIX-only.
+#
+# Inputs (all rendered from the tree's OWN data.internal — KB-151; the
+# agent never judges here):
+#   criteria_value_1 = the REDUCED part_count ("0".."4")
+#   criteria_value_2 = pair_slot_p1_verdict
+#   criteria_value_3 = pair_slot_p2_verdict
+#   criteria_value_4 = pair_slot_p3_verdict
+#   criteria_value_5 = pair_slot_p4_verdict
+#
+# stdout contract on success: the whole-tree verdict token, EXACTLY ONE of
+#   - "pair_ready" — every PLANNED slot's verdict is part_ready (the
+#     aggregate over the reduced count, not all four static slots), OR
+#     the zero-part shape (count 0 with no stamped slot verdicts: the
+#     chain exits via no_parts, but a count-0 aggregate stays "none").
+#   - "none" — any planned slot missing/stamped-not-part_ready.
+# The step stamps data.internal.pair_verdict from stdout (trimspace'd);
+# switch.triage_review then routes on it ("pair_ready" -> done,
+# otherwise the fail_pair_verdict_parking typed lane).
+#
+# Unplanned slots (index > count or empty verdict) do NOT block the
+# aggregate; "part_help" leftovers inside the count DO.
+
+count=$(printf '%s' "$criteria_value_1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+case "$count" in
+    ''|*[!0-9]*|0) printf 'none\n'; exit 0 ;;
+esac
+if [ "$count" -gt 4 ]; then
+    printf 'none\n'
+    exit 0
+fi
+
+i=1
+for v in "$criteria_value_2" "$criteria_value_3" "$criteria_value_4" "$criteria_value_5"; do
+    if [ "$i" -gt "$count" ]; then
+        break
+    fi
+    if [ "$v" != "part_ready" ]; then
+        printf 'none\n'
+        exit 0
+    fi
+    i=$((i + 1))
+done
+
+printf 'pair_ready\n'
+exit 0

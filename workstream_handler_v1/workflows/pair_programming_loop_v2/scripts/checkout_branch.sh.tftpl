@@ -1,0 +1,42 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+set -euo pipefail
+# KB-258: the worktree is SHARED across body entries (initial pair loop +
+# every feedback-cycle pair loop), so HEAD may have moved since the last body
+# exited (observed: a triage leg left the worktree on
+# 'dependabot/go_modules/minor-and-patch-91744db657'; the next body's entry
+# assertion failed in 2ms and parked the run after a green develop leg).
+# A mismatch is therefore NOT a failure by itself: re-assert the expected
+# branch deterministically — from the LOCAL ref — and fail only when git
+# refuses the switch (a true conflict between the incoming branch and
+# untracked scratch / modified tracked files), with a typed reason carrying
+# the unexpected ref. The branch contract stays stepped, not agent-judged.
+#
+# LOCAL-ONLY (settled ruling 1): the removed best-effort `git fetch --quiet
+# origin` is gone. branch_manager already guarantees the worktree and the
+# branch exist locally; re-asserting from the local ref is sound and the
+# loop performs zero network operations on entry.
+expected=$(basename "$criteria_value_1" .md)
+current=$(git branch --show-current)
+if [ "$current" = "$expected" ]; then
+    # entry_sha: the loop's LOCAL durability baseline (remaster Task 2). The
+    # checkpoint verifier compares HEAD against this sha instead of polling
+    # the remote; benign-resume (KB-211) becomes a local compare.
+    entry_sha=$(git rev-parse HEAD)
+    printf 'on_branch=%s\nentry_sha=%s\n' "$expected" "$entry_sha"
+    exit 0
+fi
+
+if ! checkout_err=$(git checkout -q "$expected" 2>&1); then
+    # True conflict: git refused the switch rather than losing untracked or
+    # modified files. The worktree stays on '$current' (checkout aborts
+    # atomically) — report the observed mismatch signature plus a typed
+    # marker so the tree routes deliberately.
+    echo "expected branch '$expected' but worktree is on '$current'; re-assert refused (KB-258)" >&2
+    echo "checkout_conflict=true" >&2
+    printf '%s\n' "$checkout_err" >&2
+    exit 1
+fi
+
+entry_sha=$(git rev-parse HEAD)
+echo "reasserted_from=$current"
+printf 'on_branch=%s\nentry_sha=%s\n' "$(git branch --show-current)" "$entry_sha"

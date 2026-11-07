@@ -1,0 +1,22 @@
+// pair_programming_loop_v2 — agent pair_not_ready.md.tftpl: the typed
+// failure surface when the whole-tree verdict is anything but pair_ready.
+// No agent judgment here — the loop's data.internal carries the verdict
+// and findings it describes (KB-151).
+
+Pair loop v2 ended without a pair_ready verdict.
+
+Whole-tree verdict: {{ .pair_verdict }}
+
+Slot verdicts (as the slot chain stamped them):
+- p1: {{ .slot_p1 }}
+- p2: {{ .slot_p2 }}
+- p3: {{ .slot_p3 }}
+- p4: {{ .slot_p4 }}
+
+Per-part findings (planned slots only):
+
+{{ .findings }}
+
+This is a deterministic report of the loop's own state for the parent
+handler's failure lane — treat it as the typed failure reason, not an
+invitation to iterate the slots.

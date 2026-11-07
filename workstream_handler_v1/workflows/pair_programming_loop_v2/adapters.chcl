@@ -1,0 +1,247 @@
+// pair_programming_loop_v2 — adapters (WAVE-2 body pass). Copies the v1
+// round-dial adapter shape: one remote environment per worktree, one shell
+// adapter, one copilot adapter per agent role. Copilot instances use the
+// pair-loop v2 slot instance names so the round-fresh / never-opened
+// conversation contract holds (KB-257, CRI-145; the pair-loop v2 tree is
+// itself the fresh dial for wave 2).
+//
+// Instanced lanes (each per-slot, fresh conversations never crossing parts):
+//   planning:   pair_part_planner
+//   developing: pair_part_pN_dev (fast lane) + pair_part_pN_dev_deep
+//               (deep lane; ruling 9's effort split — same developer
+//               charter, heavier model config)
+//   remediating: pair_part_pN_remediator (one remediation call per slot;
+//               TODO-6's reverify loop max_visits bounded)
+
+environment "remote" "worktree" {
+    // Per-scope sessions: each scope gets its own adapter pod, torn down at
+    // scope exit. Requires the run data dir wiring (CRI-128). Verbatim v1.
+    per_scope_sessions = true
+    working_directory = var.worktree_dir
+    process = {
+        exec = ["*"]
+    }
+    listen_address = "0.0.0.0:0"
+    accept_token = "__CRITERIA_REMOTE_TOKEN__"
+    accept_digest_from = "lockfile"
+}
+
+adapter "shell" "sh" {
+    source  = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version = "0.5.5"
+    environment = remote.worktree
+    // No secrets: LOCAL-ONLY contract (remaster ruling 1). Upstream
+    // placement is delegated to the upstream_sync subworkflow; this tree
+    // holds zero credentials (credential blast radius becomes physics, not
+    // policy). Verbatim v1.
+}
+
+// Per-part planning agent (agents/pair_part_planner.md carries the brief).
+adapter "copilot" "pair_part_planner" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    // No secrets (remaster rulings 1+2).
+    config {
+        model             = var.planner.model
+        max_turns         = "${var.planner.max_turns}"
+        reasoning_effort  = var.planner.reasoning_effort
+        system_prompt     = file("./agents/pair_part_planner.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.planner.provider.base_url
+        provider_wire_api = var.planner.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+// Pair-part developer agents — the four SLOTS' fast lane. The slot
+// instances p1..p4 back run_part_pN_fast — one fresh agent call per part;
+// instance names never opened elsewhere so conversations never cross parts
+// (KB-257 / CRI-145).
+adapter "copilot" "pair_part_p1_dev" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    // No secrets: the developer is local-only. It commits to the worktree;
+    // it never authenticates against any remote. (Remaster rulings 1+2.)
+    config {
+        model             = var.developer.model
+        max_turns         = "${var.developer.max_turns}"
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.developer.provider.base_url
+        provider_wire_api = var.developer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p2_dev" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.developer.model
+        max_turns         = "${var.developer.max_turns}"
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.developer.provider.base_url
+        provider_wire_api = var.developer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p3_dev" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.developer.model
+        max_turns         = "${var.developer.max_turns}"
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.developer.provider.base_url
+        provider_wire_api = var.developer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p4_dev" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.developer.model
+        max_turns         = "${var.developer.max_turns}"
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.developer.provider.base_url
+        provider_wire_api = var.developer.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+// Pair-part developer agents — the four SLOTS' deep lane. Same developer
+// charter (agents/developer.md), same slot-naming discipline as above;
+// model/reasoning_effort/provider ride var.planner (ruling 6/9's effort
+// split: deep parts get the planner's heavier model config), max_turns
+// stays the developer's budget. The lockfile carries matching NEW
+// block-copies at the same digests (.criteria.lock.hcl).
+adapter "copilot" "pair_part_p1_dev_deep" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.planner.model
+        max_turns         = "${var.developer.max_turns}"
+        reasoning_effort  = var.planner.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.planner.provider.base_url
+        provider_wire_api = var.planner.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p2_dev_deep" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.planner.model
+        max_turns         = "${var.developer.max_turns}"
+        reasoning_effort  = var.planner.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.planner.provider.base_url
+        provider_wire_api = var.planner.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p3_dev_deep" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.planner.model
+        max_turns         = "${var.developer.max_turns}"
+        reasoning_effort  = var.planner.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.planner.provider.base_url
+        provider_wire_api = var.planner.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p4_dev_deep" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.planner.model
+        max_turns         = "${var.developer.max_turns}"
+        reasoning_effort  = var.planner.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.planner.provider.base_url
+        provider_wire_api = var.planner.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+// Per-part remediation agents (agents/pair_part_remediate.md.tftpl prompt;
+// pair_part_rem.md's unreferenced charter was never a system_prompt — the
+// adapter config reads agents/developer.md) — the same slot-instance-name/
+// fresh-conversation discipline as the developers. TODO-6's reverify loop
+// (verify failure -> remediate max_visits) bounds this step's re-entries.
+adapter "copilot" "pair_part_p1_remediator" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.remediator.model
+        max_turns         = "${var.remediator.max_turns}"
+        reasoning_effort  = var.remediator.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.remediator.provider.base_url
+        provider_wire_api = var.remediator.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p2_remediator" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.remediator.model
+        max_turns         = "${var.remediator.max_turns}"
+        reasoning_effort  = var.remediator.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.remediator.provider.base_url
+        provider_wire_api = var.remediator.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p3_remediator" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.remediator.model
+        max_turns         = "${var.remediator.max_turns}"
+        reasoning_effort  = var.remediator.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.remediator.provider.base_url
+        provider_wire_api = var.remediator.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
+
+adapter "copilot" "pair_part_p4_remediator" {
+    environment = remote.worktree
+    source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
+    version = "0.5.17"
+    config {
+        model             = var.remediator.model
+        max_turns         = "${var.remediator.max_turns}"
+        reasoning_effort  = var.remediator.reasoning_effort
+        system_prompt     = file("./agents/developer.md")
+        provider_base_url = var.provider_base_url != "" ? var.provider_base_url : var.remediator.provider.base_url
+        provider_wire_api = var.remediator.provider.wire_api
+        working_directory = var.worktree_dir
+    }
+}
