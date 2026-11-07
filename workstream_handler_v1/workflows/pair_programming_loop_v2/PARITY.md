@@ -216,7 +216,52 @@ Collection steps:
 **GATE: OPEN.** No real-card parity measurement exists in this repo, and this
 card does not produce one.
 
-### 5.1 The delivered tree state (final for this card)
+### 5.1 The Stage-3 gate-ordering deviation — ACCEPTED and RECORDED (not silently skipped)
+
+The card's own Gate line reads: "parity run on a real card (per-step timings vs
+the v1 baseline) BEFORE deleting the round trees", and its Acceptance line reads:
+"round trees deleted; validate green everywhere; real-card parity documented".
+Read in order, the two lines put a real-card parity run FIRST and the round-tree
+deletion SECOND.
+
+KB-386 is **UN-ARMED** (no `k8s-run` — see the Task description): no card runs
+in this card, so **no real-card parity run is executable inside this card** and
+the card's two lines **cannot be satisfied in order here**. The determination
+recorded on the card (2026-11-07, authoritative) is therefore the following, and
+it is recorded here so that it is **read, not silently skipped**:
+
+- **The deviation.** The delivered order is deletion-BEFORE-parity — the reverse
+  of the card's Gate line. On an un-armed card that ordering is an **ACCEPTED
+  DEVIATION**, **deliberately recorded** in this section. It is not a silent skip
+  and it is not a parity pass.
+- **The deletion STANDS.** The round-tree deletion (commit `7dcedc1`) is the
+  delivered state of this card (§5.2); the deviation neither reopens, reverts
+  nor re-derives that determination.
+- **The in-card substitute for an in-card parity run** is the deterministic
+  comparator
+
+      sh workstream_handler_v1/tests/test_pair_loop_parity.sh --compare <v1.tsv> <v2.tsv>
+
+  together with the collection procedure and thresholds of record (§2, §3, §4).
+  The comparator's fixtures under
+  `workstream_handler_v1/tests/fixtures/pair_loop_parity/` remain **SELF-TEST
+  ARMS** — they are **NOT a real v1 baseline** and are never evidence for this
+  gate.
+- **The real-card parity run is SURFACED, not dropped.** It is the only thing
+  that can close this gate (§5.4); it is surfaced for a **SEPARATE ARMED CARD**
+  and is **NOT a KB-386 item**.
+- **The deletion stays restorable**, and the retained v1 baseline tree
+  `workstream_handler_v1/workflows/pair_programming_loop/` (§1) keeps the
+  comparison executable. The pre-deletion round trees are one commit back:
+
+      git checkout 7dcedc1^ -- workstream_handler_v1/workflows/pair_programming_loop_round2 workstream_handler_v1/workflows/pair_programming_loop_round3
+
+  (the same command, and what to do with it, is in §5.5).
+- **The GATE stays OPEN** until the operator's comparator run exits `0` on REAL
+  records. Every slot in §4 stays **PENDING**, and no timing in this record is
+  estimated, interpolated, copied from a fixture or invented.
+
+### 5.2 The delivered tree state (final for this card)
 
 - The Stage-3 fold is applied: the `_feedback_r2`/`_feedback_r3` handler dials
   source `workstream_handler_v1/workflows/pair_programming_loop_v2`, the
@@ -237,7 +282,7 @@ card does not produce one.
   after the deletion — the operator still measures the v1 baseline against the
   v2 candidate, and the baseline card can be re-run at any time to re-measure.
 
-### 5.2 Why the gate is still OPEN
+### 5.3 Why the gate is still OPEN
 
 - KB-386 is **UN-ARMED** (no `k8s-run`): this card delivers the parity RECORD
   (this file) plus the deterministic comparator
@@ -246,7 +291,10 @@ card does not produce one.
 - The real-card parity run (the v1 baseline card run + the v2 candidate card
   run, §2.1) is the **operator's post-merge fleet action**. It is the only
   thing that can close this gate, and it closes it with the comparator's own
-  exit code.
+  exit code. Per the gate-ordering determination recorded in §5.1, that run is
+  **surfaced for a SEPARATE ARMED CARD** and is **NOT a KB-386 item** — this
+  card does not arm the lane, does not run a card and does not produce a
+  record.
 - **The gate stays OPEN until the operator's comparator run exits `0` on REAL
   records.** Until then this card's parity claim is exactly: the comparator
   exists and is deterministic, the collection procedure is documented, and the
@@ -259,7 +307,7 @@ card does not produce one.
   with synthetic values: they exercise the comparator's arithmetic and are
   explicitly **NOT a real v1 baseline** and never evidence for this gate.
 
-### 5.3 The operator's step (the only thing that closes the gate)
+### 5.4 The operator's step (the only thing that closes the gate)
 
 1. **C1 — arm the lane** (§4): pick the two comparable cards (same workstream,
    same repo, same fleet lane) — one sourcing
@@ -283,7 +331,7 @@ card does not produce one.
 
    Attach the comparator's report to the card.
 
-### 5.4 If the comparator reports a regression (exit `1`)
+### 5.5 If the comparator reports a regression (exit `1`)
 
 - The gate stays OPEN and the regression is reported as it is. No §4 slot value
   may be edited to make the gate pass: a slot closes only on a value derived
