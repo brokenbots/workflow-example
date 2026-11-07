@@ -8,8 +8,10 @@ set -euo pipefail
 # loop trees. Remote-tracking refs already present are local data and stay
 # legal (ruling 1, positive arm).
 #
-# Scope: ALL THREE live loop trees (base + round2 + round3 — full copies with
-# their own scripts/adapters/vars, live until Stage 3 folds the rounds).
+# Scope: the SURVIVING live loop trees (the v1 base + pair_programming_loop_v2
+# — the round-suffixed trees were deleted when KB-386 Stage 3 folded the
+# round plumbing onto the v2 tree; each tree keeps its own
+# scripts/adapters/vars).
 #
 # Negative arms FIRST (the guard must be able to fail): probe leaks are
 # injected into a scratch copy, the scanner must flag them, then the scratch
@@ -28,7 +30,7 @@ ok() {
     echo "ok: $1"
 }
 
-LOOP_TREES="pair_programming_loop pair_programming_loop_round2 pair_programming_loop_round3"
+LOOP_TREES="pair_programming_loop pair_programming_loop_v2"
 
 scan_file() { # $1=file  -> prints leaking lines (empty = clean)
     # Comment-only lines are contract commentary (ruling references); the
@@ -83,7 +85,7 @@ for tree in $LOOP_TREES; do
     done
 done
 if [ "$LEAKS" -eq 0 ]; then
-    ok "all three loop trees carry zero upstream surface (scripts/adapters/vars/main)"
+    ok "all surviving loop trees carry zero upstream surface (scripts/adapters/vars/main)"
 fi
 
 # agents/*.md: the developer charter must not teach push or credential
