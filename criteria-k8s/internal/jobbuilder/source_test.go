@@ -970,6 +970,38 @@ func TestSourceRunnerSecretVarPairGuard(t *testing.T) {
 	assert.NotContains(t, stubLog, "argv:", "criteria must not be invoked")
 }
 
+// A SCREAMING-keyed file: pair is not rejected — the engine ignores it via
+// exact-name lookup — but the runner must surface the defect instead of
+// passing it down blind. A lowercase pair must raise no warning.
+func TestSourceRunnerWarnsOnScreamingSecretVarPairs(t *testing.T) {
+	job := jobbuilder.BuildRunnerJob(urlRun("kb-385 warn", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://example.com/wf.git?ref=main",
+	}, ""), jobbuilder.Defaults{DataPVC: "criteria-data"})
+	script := job.Spec.Template.Spec.Containers[0].Command[2]
+	dir := t.TempDir()
+
+	code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": "WORKFLOW_UPSTREAM_TOKEN=file:/home/criteria/secrets/workflow_github_token",
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 0, code, "a screaming file: pair passes through with a warning: %s", out)
+	assert.Contains(t, out, "warning: CRITERIA_SECRET_VARS pair name is not lowercase",
+		"the runner must surface the SCREAMING pair: %s", out)
+	assert.Contains(t, out, "WORKFLOW_UPSTREAM_TOKEN")
+	assert.Contains(t, stubLog, "[--var] [WORKFLOW_UPSTREAM_TOKEN=file:/home/criteria/secrets/workflow_github_token]",
+		"the pair still reaches the engine argv unchanged")
+
+	code, out, _ = runSourceRunnerScript(t, script, map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": "workflow_upstream_token=file:/home/criteria/secrets/workflow_github_token",
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 0, code, "a lowercase pair passes cleanly: %s", out)
+	assert.NotContains(t, out, "not lowercase", "lowercase pairs must raise no warning")
+}
+
 // originRecordPath returns the record path the runner writes for a job.
 func originRecordPath(home, jobName string) string {
 	return filepath.Join(home, "runs", jobName, "run-metadata.json")

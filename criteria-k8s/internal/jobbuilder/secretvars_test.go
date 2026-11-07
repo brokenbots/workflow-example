@@ -111,3 +111,27 @@ func TestSecretVarBindings_EmptyAndNil(t *testing.T) {
 	require.Empty(t, secretVarBindings(&workflowPlan{}))
 	require.Empty(t, secretVarBindings(&workflowPlan{secrets: []criteriav1.RunWorkflowSecret{{MountPath: "/m"}}}))
 }
+
+// The dedupe rule spans secret entries too: the first declared entry in
+// plan.secrets (slice order) wins a contested varname, and the losing
+// entry's mount and file key must not appear anywhere in the pair set.
+func TestSecretVarBindings_DedupeAcrossSecretEntries(t *testing.T) {
+	plan := &workflowPlan{secrets: []criteriav1.RunWorkflowSecret{
+		{Name: "first", MountPath: "/m1", Env: map[string]string{
+			"WORKFLOW_GITHUB_TOKEN":   "wf_file",
+			"WORKFLOW_UPSTREAM_TOKEN": "up_file",
+		}},
+		{Name: "second", MountPath: "/m2", Env: map[string]string{
+			"WORKFLOW_UPSTREAM_TOKEN": "up_file_from_second_entry",
+		}},
+	}}
+
+	got := secretVarBindings(plan)
+	require.Equal(t,
+		"workflow_github_token=file:/m1/wf_file\n"+
+			"workflow_upstream_token=file:/m1/up_file",
+		got,
+		"the first declared entry owns the contested varname")
+	require.NotContains(t, got, "/m2/",
+		"the losing entry's mount must not leak into the pair set")
+}

@@ -198,7 +198,10 @@ The contract, pinned in `criteria-k8s/internal/jobbuilder/secretvars.go`:
 - `file:` origins must sit under a declared secret root
   (`CRITERIA_SECRET_FILE_ROOTS`, derived from the same secret entries); the
   engine resolves them eagerly and fails with a typed reason naming the
-  variable on any escape.
+  variable on any escape. The multi-root containment and this typed reason
+  are KB-369 engine behavior from criteria v0.5.58 — older engines confine
+  `file:` origins to the single default secrets dir and cannot express
+  them, so the probe leg skips its live-engine legs below that floor.
 
 Regression surface: the jobbuilder contract tests
 (`criteria-k8s/internal/jobbuilder/secretvars_test.go`) and the live-engine

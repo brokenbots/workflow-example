@@ -21,9 +21,11 @@ import (
 // Deriving the set keeps non-intake workflows (kanboard_triage_v1's
 // kanboard_url/kanboard_app_token) from being dropped by a hardcoded list.
 // Only mount paths appear in argv; values reach adapters over OpenSession.
-// Env lanes lowering to the same varname are deduped deterministically
-// (lexicographically first lane wins); a second binding for one tree var
-// is a route authoring defect, not a runtime choice.
+// Env lanes lowering to the same varname are deduped deterministically:
+// plan.secrets slice order decides across secret entries (the first
+// declared entry wins), lexicographic lane order decides within one
+// entry; a second binding for one tree var is a route authoring defect,
+// not a runtime choice.
 func secretVarBindings(plan *workflowPlan) string {
 	if plan == nil || len(plan.secrets) == 0 {
 		return ""

@@ -27,6 +27,16 @@ set -euo pipefail
 #   5. a SCREAMING-keyed pair NEVER resolves into the lowercase tree var.
 # The derivation itself (CRITERIA_SECRET_VARS -> --var argv) is pinned by
 # the jobbuilder contract tests (criteria-k8s/internal/jobbuilder).
+#
+# Engine floor: legs 3-5 pin KB-369 engine behavior (multi-root secret-file
+# containment, the CRITERIA_SECRET_FILE_ROOTS flag, and the typed
+# `variable "<name>" (origin file:` failure reason) that criteria only
+# carries from v0.5.58. The CI engine pin (v0.5.52-rc4,
+# .github/workflows/ci.yml) predates that floor: there, legs 3-5 SKIP with
+# a typed skip line (suite convention: k8s/tests/test_workflow_graphs_flat.sh)
+# while the version-free legs (1, 2, 2b) still run and stay green. The skip
+# is fail-closed: an engine that reports no version skips the live-engine
+# legs too.
 
 TREE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="$TREE_ROOT/tests/fixtures/probe_secret_binding"
@@ -76,6 +86,30 @@ grep -q "lower(env lane)=file:<mountPath>/<fileKey>" "$DOCS" \
     && ok "docs/jobs-setup.md pins the KB-385 binding contract" \
     || fail "docs/jobs-setup.md must pin the KB-385 binding contract"
 
+# ── engine-version gate (legs 3-5) ───────────────────────────────────────────
+# The gate compares `criteria version` against the KB-369 floor (v0.5.58)
+# with sort -V, so pre-release pins (v0.5.52-rc4) order below it.
+ENGINE_FLOOR="v0.5.58"
+if command -v "$CRITERIA" >/dev/null 2>&1; then
+    ENGINE_VERSION="$("$CRITERIA" version 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+else
+    ENGINE_VERSION=""
+fi
+if [ -n "$ENGINE_VERSION" ] \
+    && [ "$(printf '%s\n%s\n' "$ENGINE_VERSION" "$ENGINE_FLOOR" | sort -V | head -n 1)" = "$ENGINE_FLOOR" ]; then
+    echo "engine: criteria $ENGINE_VERSION (>= $ENGINE_FLOOR: KB-369 legs 3-5 run)"
+else
+    # Fail-closed skip: an engine below the floor cannot express the
+    # multi-root containment these legs pin, and an unparseable version
+    # must not unskip them by accident.
+    if [ "$FAILED" -ne 0 ]; then
+        echo "test_secret_binding: $FAILED leg(s) failed" >&2
+        exit 1
+    fi
+    echo "skip: legs 3-5 (live-engine KB-369 legs) need criteria >= $ENGINE_FLOOR; engine is '${ENGINE_VERSION:-unknown}'"
+    echo "test_secret_binding: legs 1-2b green; legs 3-5 skipped (engine floor $ENGINE_FLOOR)"
+    exit 0
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -128,7 +162,16 @@ require_contains "$APPLY_OUT" 'variable "workflow_upstream_token" (origin file:'
     "the typed failure names the bound variable and its origin"
 
 # ── 5. a screaming-keyed pair never resolves ────────────────────────────────
+# The ignored pair is not a crash: unbound secret vars do not gate
+# apply-time resolution on a resolution-only tree, so the run still
+# completes green — it just never gains the override. Asserting the green
+# completion keeps this leg meaningful (it would catch an engine that
+# crashes on unknown overrides) while the absence of the override line
+# pins the exact-name lookup.
 apply_probe --var WORKFLOW_UPSTREAM_TOKEN="file:$SECRETS/workflow_github_token"
+[ "$APPLY_EXIT" -eq 0 ] \
+    || fail "the screaming-keyed run must complete (unknown overrides are ignored, not fatal; exit $APPLY_EXIT)"
+require_contains "$APPLY_OUT" "run completed" "the screaming-keyed run completes green"
 if grep -q "var workflow_upstream_token=(sensitive) (override)" <<<"$APPLY_OUT"; then
     fail "a screaming-keyed pair must never bind into the lowercase tree var"
 else
