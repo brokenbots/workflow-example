@@ -463,11 +463,11 @@ switch "route_part_slots" {
 
 switch "select_slot_p2" {
     match {
-        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "") == "deep"
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[1].brief, "") != "" && try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "") == "deep"
         next      = step.run_part_p2_deep
     }
     match {
-        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "") != "deep"
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[1].brief, "") != "" && try(jsondecode(data.internal.plan_json.value).per_part[1].effort, "") != "deep"
         next      = step.run_part_p2_fast
     }
     default {
@@ -477,11 +477,11 @@ switch "select_slot_p2" {
 
 switch "select_slot_p3" {
     match {
-        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "") == "deep"
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[2].brief, "") != "" && try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "") == "deep"
         next      = step.run_part_p3_deep
     }
     match {
-        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "") != "deep"
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[2].brief, "") != "" && try(jsondecode(data.internal.plan_json.value).per_part[2].effort, "") != "deep"
         next      = step.run_part_p3_fast
     }
     default {
@@ -490,12 +490,16 @@ switch "select_slot_p3" {
 }
 
 switch "select_slot_p4" {
+    // PHANTOM-SLOT GUARD (live-run defect, card 386 fire 2): slot 4 runs ONLY
+    // when the plan actually has a 4th part — an absent per_part[3] try()-
+    // defaults to "" and previously fell into the fast arm with an empty brief,
+    // which remediation cannot fix (nothing to remediate in empty scope).
     match {
-        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "") == "deep"
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[3].brief, "") != "" && try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "") == "deep"
         next      = step.run_part_p4_deep
     }
     match {
-        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "") != "deep"
+        condition = data.internal.part_count.value != "0" && try(jsondecode(data.internal.plan_json.value).per_part[3].brief, "") != "" && try(jsondecode(data.internal.plan_json.value).per_part[3].effort, "") != "deep"
         next      = step.run_part_p4_fast
     }
     default {
@@ -810,7 +814,7 @@ step "p1_reverify" {
 // reverify, never via this route's reads.
 switch "route_slot_p1" {
     match {
-        condition = data.internal.pair_slot_p1_verdict.value == "part_ready" && data.internal.part_count.value != "0"
+        condition = data.internal.pair_slot_p1_verdict.value == "part_ready" && data.internal.part_count.value != "0" && data.internal.part_count.value != "1"
         next      = switch.select_slot_p2
     }
     match {
@@ -1358,7 +1362,7 @@ step "p3_reverify" {
 
 switch "route_slot_p3" {
     match {
-        condition = data.internal.pair_slot_p3_verdict.value == "part_ready" && data.internal.part_count.value != "0" && data.internal.part_count.value != "1" && data.internal.part_count.value != "2"
+        condition = data.internal.pair_slot_p3_verdict.value == "part_ready" && data.internal.part_count.value != "0" && data.internal.part_count.value != "1" && data.internal.part_count.value != "2" && data.internal.part_count.value != "3"
         next      = switch.select_slot_p4
     }
     match {
