@@ -883,7 +883,13 @@ func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
 // source runner must derive those file: OriginRef pairs (this is the KB-1
 // deadlock fix — the hardcoded linear-only list silently dropped them, so
 // every kanboard triage run died at fetch_ticket's env guard and refired in
-// a loop). The linear triples must keep arriving too.
+// a loop). The linear triples must keep arriving too. KB-385 adds the
+// remaster's upstream lane: its env lane name (WORKFLOW_UPSTREAM_TOKEN)
+// differs from its rendered file key (workflow_github_token), so the
+// --var name must derive from the lane — the exact-name engine lookup can
+// only ever bind the tree's lowercase workflow_upstream_token variable. The
+// pre-KB-385 derivation emitted no pair for that lane and the run died with
+// "missing required input(s)".
 func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 	run := urlRun("kb-1-1790222552", &criteriav1.RunWorkflowSource{
 		Type: "url",
@@ -895,7 +901,11 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 		Namespace: "criteria-jobs",
 		Secrets: []criteriav1.RunWorkflowSecret{
 			{Name: "github-tokens", SecretProviderClass: "copilot-spc", MountPath: "/home/criteria/secrets",
-				Env: map[string]string{"WORKFLOW_GITHUB_TOKEN": "workflow_github_token", "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"}},
+				Env: map[string]string{
+					"WORKFLOW_GITHUB_TOKEN":   "workflow_github_token",
+					"REVIEWER_GITHUB_TOKEN":   "reviewer_github_token",
+					"WORKFLOW_UPSTREAM_TOKEN": "workflow_github_token",
+				}},
 			{Name: "kanboard-secrets", SecretProviderClass: "kanboard-spc", MountPath: "/home/criteria/kanboard-secrets",
 				Env: map[string]string{"KANBOARD_APP_TOKEN": "kanboard_app_token", "KANBOARD_URL": "kanboard_url"}},
 		},
@@ -914,6 +924,7 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 		"kanboard_url=file:/home/criteria/kanboard-secrets/kanboard_url",
 		"workflow_github_token=file:/home/criteria/secrets/workflow_github_token",
 		"reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token",
+		"workflow_upstream_token=file:/home/criteria/secrets/workflow_github_token",
 	} {
 		assert.Contains(t, cvs, want, "derived pair set must cover every declared secret key")
 	}
@@ -927,6 +938,12 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 	require.Equal(t, 0, code, out)
 	assert.Contains(t, log, "[--var] [kanboard_app_token=file:/home/criteria/kanboard-secrets/kanboard_app_token]",
 		"the derived kanboard pair must reach the criteria apply argv: %s", log)
+	// KB-385: the upstream lane's --var name is the lowercased env lane —
+	// NOT its rendered file key, and never the screaming lane name. The
+	// exact-name engine lookup binds only this spelling.
+	assert.Contains(t, log, "[--var] [workflow_upstream_token=file:/home/criteria/secrets/workflow_github_token]",
+		"the upstream lane pair must reach the criteria apply argv under its lowercase tree-var name: %s", log)
+	assert.NotContains(t, log, "--var] [WORKFLOW", "no screaming lane name may be passed as a --var name: %s", log)
 }
 
 // originRecordPath returns the record path the runner writes for a job.
