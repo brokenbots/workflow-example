@@ -1,0 +1,85 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
+criteria_value_5={{ .criteria_value_5 | shellquote }}
+criteria_value_6={{ .criteria_value_6 | shellquote }}
+criteria_value_7={{ .criteria_value_7 | shellquote }}
+# pair_programming_loop_v2 — the checkpoint's LOCAL verify (v1's
+# verify_checkpoint_pushed.sh.tftpl shape; TODO-10's widened inputs).
+# POSIX-only. LOCAL-ONLY (settled rulings 1 and 2): the loop performs zero
+# network operations — pushed-state truth lives in upstream_sync after the
+# body; this step verifies the checkpoint verdict's LOCAL precondition.
+#
+# Inputs (all rendered from the tree's OWN data.internal, KB-151):
+#   criteria_value_1 = branch
+#   criteria_value_2 = entry_sha (captured by capture_entry_sha at entry)
+#   criteria_value_3 = the REDUCED part count ("0".."4")
+#   criteria_value_4..7 = the four slot verdicts (pair_slot_p1..p4_verdict)
+#
+# Semantics:
+#   entry_sha (captured at loop entry) == HEAD
+#     -> "resumed_no_work=1", benign resume (KB-211): the agent ended a
+#        checkpoint turn without committing anything. Deterministic, not
+#        agent judgment; the continuation prompt is the correction template.
+#   entry_sha != HEAD
+#     -> committed work exists. The checkpoint VERDICT is checked first:
+#        every PLANNED slot (slot indexes 1..count over the REDUCED count)
+#        must carry a part_ready verdict stamp — unplanned slots (index >
+#        count) carry empty verdicts and do not block. A planned slot not
+#        part_ready fails with a typed reason. Then print the protocol
+#        line (checkpoint_local=head:<sha> entry:<entry>) and let the tree
+#        delegate the actual push to upstream_sync.
+#
+# The FATAL remote cases of the old design ("local commits exist but the
+# push never landed") move wholesale to upstream_sync — the loop never
+# sees remote state, by contract.
+
+# The branch value travels through stdout writes on its way here and can
+# carry stray edge whitespace (observed: a trailing newline from an untrimmed
+# `basename` write — CRI-295). Trim the edges; internal whitespace in a real
+# branch name survives.
+branch=$(printf '%s' "$criteria_value_1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+if [ -z "$branch" ]; then
+    echo "checkpoint verification: branch value is empty" >&2
+    exit 1
+fi
+
+head_sha=$(git rev-parse HEAD)
+entry_sha="$criteria_value_2"
+if [ -z "$entry_sha" ]; then
+    echo "checkpoint verification: entry_sha is empty (checkout_branch must capture it)" >&2
+    exit 1
+fi
+
+if [ "$head_sha" = "$entry_sha" ]; then
+    echo "resumed_no_work=1"
+    exit 0
+fi
+
+part_count=$(printf '%s' "$criteria_value_3" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+case "$part_count" in
+    ''|*[!0-9]*)
+        echo "checkpoint verification: part_count is not a number ('${criteria_value_3}'); the slot chain must run first" >&2
+        exit 1
+        ;;
+esac
+if [ "$part_count" -lt 0 ] || [ "$part_count" -gt 4 ]; then
+    echo "checkpoint verification: part_count ${part_count} outside 0..4" >&2
+    exit 1
+fi
+
+i=1
+for v in "$criteria_value_4" "$criteria_value_5" "$criteria_value_6" "$criteria_value_7"; do
+    if [ "$i" -gt "$part_count" ]; then
+        break
+    fi
+    if [ "$v" != "part_ready" ]; then
+        echo "checkpoint verification: planned slot p${i} verdict is '${v}', not part_ready (the slot chain must stamp every planned verdict)" >&2
+        exit 1
+    fi
+    i=$((i + 1))
+done
+
+echo "checkpoint_local=head:${head_sha} entry:${entry_sha}"
+exit 0

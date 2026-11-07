@@ -1,0 +1,83 @@
+criteria_value_1={{ .criteria_value_1 | shellquote }}
+criteria_value_2={{ .criteria_value_2 | shellquote }}
+criteria_value_3={{ .criteria_value_3 | shellquote }}
+set -eu
+# pair_programming_loop_v2 — the deterministic per-slot verify
+# (scripts/pair_part_verify.sh.tftpl; SHARED by all four slots' verify and
+# reverify steps — same script, per-slot inputs). POSIX-only.
+#
+# Inputs (rendered by the workflow, never agent-supplied):
+#   criteria_value_1 = branch (data.internal.branch.value)
+#   criteria_value_2 = expected verdict ("part_ready")
+#   criteria_value_3 = entry_sha (data.internal.entry_sha.value)
+#
+# One input arg — the slot's verdict token as the slot chain stamped it —
+# rides $1 (argv): "part_ready" | "part_help". The verdict token is the
+# tree's OWN data.internal state (KB-151), not agent output; the script
+# VALIDATES it against the expected verdict, never re-judges the part.
+#
+# Asserts (all deterministic shell truth):
+#   1. the verdict stamp is present and the expected one ("part_ready";
+#      part_help fails here and routes the remediation lane via stderr),
+#   2. the branch is checked out (worktree never drifted mid-slot),
+#   3. HEAD != entry_sha (the part produced committed work; benign-resume
+#      KB-211 compare, local only), and
+#   4. the working tree is clean (the part ended committed).
+#   5. the CI gate (var.ci_gate_cmd via the ci_gate_cmd env passthrough)
+#      when nonempty (interface.json configSlots.ciGateCmd).
+#
+# stdout contract on SUCCESS: the literal verdict token `part_ready` — the
+# calling step re-stamps data.internal.pair_slot_pN_verdict from it (KB-151:
+# re-stamp before the next consumer). Any failure exits 1 with the reason on
+# stderr (the step's failure arm routes the findings to remediation).
+
+verdict="${1:-}"
+case "$verdict" in
+    part_ready|part_help) ;;
+    *) echo "pair part verify: verdict stamp missing (arg 1 empty or foreign)" >&2; exit 1 ;;
+esac
+
+if [ "$verdict" != "$criteria_value_2" ]; then
+    echo "pair part verify: verdict '$verdict' is not the expected '$criteria_value_2'" >&2
+    exit 1
+fi
+
+branch=$(printf '%s' "$criteria_value_1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+if [ -z "$branch" ]; then
+    echo "pair part verify: branch value is empty" >&2
+    exit 1
+fi
+head_branch=$(git branch --show-current)
+if [ "$head_branch" != "$branch" ]; then
+    echo "pair part verify: expected branch '$branch' but worktree is on '$head_branch'" >&2
+    exit 1
+fi
+
+if [ -z "$criteria_value_3" ]; then
+    echo "pair part verify: entry_sha is empty (capture_entry_sha must run first)" >&2
+    exit 1
+fi
+head_sha=$(git rev-parse HEAD)
+if [ "$head_sha" = "$criteria_value_3" ]; then
+    echo "pair part verify: HEAD still equals entry_sha ($head_sha); the part produced no committed work" >&2
+    exit 1
+fi
+
+status=$(git status --porcelain)
+if [ -n "$status" ]; then
+    echo "pair part verify: working tree is dirty at slot verify time:" >&2
+    printf '%s\n' "$status" >&2
+    exit 1
+fi
+
+# CI_GATE_CMD is optional (interface configSlots.ciGateCmd); an unset var under
+# `set -u` must mean "no gate", not a crash.
+if [ -n "${CI_GATE_CMD:-}" ]; then
+    if ! eval "$CI_GATE_CMD"; then
+        echo "pair part verify: ci_gate_cmd failed" >&2
+        exit 1
+    fi
+fi
+
+printf '%s\n' "$verdict"
+exit 0

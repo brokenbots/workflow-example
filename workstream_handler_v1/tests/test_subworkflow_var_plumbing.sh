@@ -62,39 +62,44 @@ if (blocks.length < 3) {
     fail(`expected >=3 subworkflow blocks in ${mainChcl}, parsed ${blocks.length}`);
 }
 
-const pairs = blocks.filter((b) => b.source.endsWith("pair_programming_loop"));
-if (pairs.length !== 2) {
-    fail(`expected exactly 2 pair_programming_loop subworkflow blocks, got ${pairs.length}`);
+// Pair-loop dials = every decl whose source points anywhere under
+// workflows/pair_programming_loop* (v1, v2, rounds). The KB-96 regression
+// generalizes: whichever tree a dial loads, its var.X usages must be declared
+// in that tree's variables.chcl or passed by the dial's input map.
+const pairs = blocks.filter((b) => b.source.includes("pair_programming_loop"));
+if (pairs.length !== 4) {
+    fail(`expected the 4 pair_programming_loop dials (base, feedback, r2, r3), got ${pairs.length}`);
 }
 
-// 1) var plumbing completeness for the pair loop child.
-const childDir = path.join(handler, "workflows", "pair_programming_loop");
-let declared = new Set();
-const varsChcl = path.join(childDir, "variables.chcl");
-if (fs.existsSync(varsChcl)) {
-    declared = new Set(
-        [...fs.readFileSync(varsChcl, "utf8").matchAll(/variable\s+"([^"]+)"/g)].map((x) => x[1]),
-    );
-}
-if (!declared.has("base_branch")) {
-    fail('pair_programming_loop/variables.chcl does not declare variable "base_branch"');
-}
+// 1) var plumbing completeness per dial — resolve the ACTUAL child dir.
+const handlerDir = handler;
+for (const b of pairs) {
+    const childDir = path.resolve(handlerDir, b.source);
+    if (!fs.existsSync(childDir)) {
+        fail(`pair subworkflow "${b.key}": source ${b.source} does not resolve under the handler`);
+    }
+    let declared = new Set();
+    const varsChcl = path.join(childDir, "variables.chcl");
+    if (fs.existsSync(varsChcl)) {
+        declared = new Set(
+            [...fs.readFileSync(varsChcl, "utf8").matchAll(/variable\s+"([^"]+)"/g)].map((x) => x[1]),
+        );
+    }
 
-const used = new Set();
-(function walk(dir) {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        const p = path.join(dir, e.name);
-        if (e.isDirectory()) {
-            walk(p);
-        } else if (e.name.endsWith(".chcl")) {
-            for (const u of fs.readFileSync(p, "utf8").matchAll(/var\.([a-zA-Z_][a-zA-Z0-9_]*)/g)) {
-                used.add(u[1]);
+    const used = new Set();
+    (function walk(dir) {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+            const p = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                walk(p);
+            } else if (e.name.endsWith(".chcl")) {
+                for (const u of fs.readFileSync(p, "utf8").matchAll(/var\.([a-zA-Z_][a-zA-Z0-9_]*)/g)) {
+                    used.add(u[1]);
+                }
             }
         }
-    }
-})(childDir);
+    })(childDir);
 
-for (const b of pairs) {
     for (const name of [...used].sort()) {
         if (declared.has(name)) continue;
         // passed by the parent? bare "<name> =" inside the input map
@@ -103,12 +108,14 @@ for (const b of pairs) {
             + `but not declared in its variables.chcl and not passed in the `
             + `"${b.key}" input map`);
     }
-}
-
-// 2) explicit pin: both pair blocks carry base_branch.
-for (const b of pairs) {
+    // 2) explicit pin: every pair dial passes base_branch (the KB-96 crash arm).
     if (!b.input.includes("base_branch")) {
         fail(`pair subworkflow "${b.key}" does not pass base_branch in its input map`);
+    }
+    // 3) the child tree declares variable "base_branch" so the plumb-in is
+    //    meaningful (the KB-96 contract).
+    if (!declared.has("base_branch")) {
+        fail(`pair subworkflow "${b.key}" passes base_branch but ${childDir}/variables.chcl does not declare it`);
     }
 }
 

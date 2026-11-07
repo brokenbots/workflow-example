@@ -1,0 +1,37 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "pair_programming_loop_v2",
+  "description": "Wave-2 pair-programming loop v2: splits the workstream into parts, one fresh agent call per part (fast/deep lanes per the planned effort), each producing a typed verdict the tree's own data.internal asserts. LOCAL-ONLY: pushes leave the tree only through the upstream_sync delegation.",
+  "adapters": [
+    "copilot",
+    "shell"
+  ],
+  "mounts": [
+    {
+      "name": "data",
+      "mountPath": "/data",
+      "kind": "pvc"
+    },
+    {
+      "name": "repo",
+      "mountPath": "/repo",
+      "kind": "pvc"
+    },
+    {
+      "name": "scratch",
+      "mountPath": "/tmp/scratch",
+      "kind": "tmp"
+    }
+  ],
+  "secretEnv": [],
+  "env": [],
+  "configSlots": [
+    {
+      "slot": "ciGateCmd",
+      "variable": "ci_gate_cmd",
+      "target": "pair_programming_loop_v2 per-part verify gate",
+      "description": "Command the per-part verify steps use as their CI gate before part verdicts."
+    }
+  ]
+}

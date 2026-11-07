@@ -167,12 +167,14 @@ subworkflow "pr_reviewer_loop" {
     }
 }
 
+// Stage-2 dial: the inverted pair loop (planner + per-part developers).
+// Byte-compatible parent contract (workstream_file in, done/failed + reason).
+// log_file rides v2's own default — ruling 12: the handler dial stops passing it.
 subworkflow "pair_programming_loop" {
-    source = "./workflows/pair_programming_loop"
+    source = "./workflows/pair_programming_loop_v2"
     input = {
         workstream_file       = var.workstream_file
         ci_gate_cmd           = var.ci_gate_cmd
-        log_file              = var.log_file != "" ? var.log_file : null
         allow_dirty           = var.allow_dirty
         branch_notes          = data.internal.branch_notes.value
         worktree_dir          = var.worktree_dir
@@ -183,13 +185,15 @@ subworkflow "pair_programming_loop" {
 }
 
 // Re-uses the same loop with coordinator feedback injected as the initial prompt.
+// Stage-2 dial: feedback re-entry (coordinator verdict + branch-manager
+// feedback injected via developer_initial_prompt; per-part remediation
+// rounds stay INSIDE the tree now).
 subworkflow "pair_programming_loop_feedback" {
-    source = "./workflows/pair_programming_loop"
+    source = "./workflows/pair_programming_loop_v2"
     input = {
         workstream_file          = var.workstream_file
         ci_gate_cmd              = var.ci_gate_cmd
         developer_initial_prompt = data.internal.developer_feedback.value
-        log_file                 = var.log_file != "" ? var.log_file : null
         allow_dirty              = var.allow_dirty
         branch_notes             = data.internal.branch_notes.value
         worktree_dir             = var.worktree_dir
