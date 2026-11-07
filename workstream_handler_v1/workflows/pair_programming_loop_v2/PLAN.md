@@ -110,3 +110,19 @@ consumer — KB-151). The tree — not the agent — tracks every verdict.
 - TODO-7 (the parent dial): run_pair_programming_loop_v2 + inputs + the
   failure lane's try() in workstream_handler_v1's main.chcl — the parent
   handler's own change (carded lane), not this tree's surface.
+
+
+## Wave-2 close state (2026-11-07)
+
+- TODO-1 settled-not-needed: `object({ reason = string })` payloads carry the plan
+  JSON and findings verbatim; no `{verdict, findings}` widening required.
+- TODO-7 CLOSED: the handler's `pair_programming_loop` and
+  `pair_programming_loop_feedback` subworkflow decls source-swap to
+  `pair_programming_loop_v2`; log_file no longer passed (ruling 12). Round trees
+  (`_round2`/`_round3`) stay on v1 until Stage 3 folds the round plumbing.
+- Validates: parent handler tree 0 Errors (fleet stamp v0.5.58 container);
+  v2 tree 0 Errors. harness_contracts_v1 failure verified pre-existing on clean
+  HEAD (stash baseline) — untouched trees, out of this wave's lane.
+- Tree tests: reduce_plan_parts jq gate + shared pair_part_verify exercised both
+  ways (positive + negative arms) against synthetic repos; CI_GATE_CMD unset-arm
+  defect caught in re-verification and fixed (`${CI_GATE_CMD:-}`).
