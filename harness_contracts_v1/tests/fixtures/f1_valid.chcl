@@ -36,6 +36,10 @@ data "internal" "d21_reason" {
 }
 
 step "contract_valid" {
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
     target      = adapter.copilot.main
     allow_tools = []
     input {
@@ -50,7 +54,8 @@ step "contract_valid" {
         next   = step.echo_verdict
     }
     outcome "rejected" {
-        next = state.failed
+        schema = object({ reason = string })
+        next   = state.failed
     }
 }
 

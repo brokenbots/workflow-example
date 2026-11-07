@@ -15,6 +15,9 @@ workflow {
 }
 
 step "contract_comment" {
+    outcome "failure" {
+        next   = state.failed
+    }
     target      = adapter.copilot.main
     allow_tools = []
     input {
@@ -30,4 +33,8 @@ step "contract_comment" {
 state "done" {
     terminal = true
     success  = true
+}
+state "failed" {
+    terminal = true
+    success  = false
 }

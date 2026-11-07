@@ -28,6 +28,9 @@ step "contract_default" {
     outcome "default" {
         next = state.done
     }
+    outcome "failure" {
+        next = state.done
+    }
 }
 
 state "done" {

@@ -208,6 +208,10 @@ step "contract_comment" {
         }
         next = step.contract_uncontracted
     }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
 }
 
 // C13: the uncontracted reason lane is accepted on a step with no schema.
@@ -233,6 +237,9 @@ step "contract_uncontracted" {
             value  = output.reason
         }
         next = step.contract_permissions
+    }
+    outcome "failure" {
+        next = state.failed
     }
 }
 
@@ -278,6 +285,10 @@ step "contract_permissions" {
             value  = output.reason
         }
         next = step.contract_budget
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
     }
 }
 
@@ -357,6 +368,10 @@ step "contract_unmapped" {
     outcome "approved" {
         schema = object({ reason = string })
         next   = state.done
+    }
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
     }
 }
 
