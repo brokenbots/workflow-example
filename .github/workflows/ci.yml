@@ -47,6 +47,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        # Depth >= the deepest back-reference a guarded suite reads in git
+        # history: test_pair_loop_fold_invariants.sh INVARIANT 5 resolves the
+        # round-tree deletion commit (7dcedc1a, 11 commits deep on the PR
+        # branch) and its parent. Shallow default depth-1 makes the commit
+        # invisible and the suite fails on a perfectly sound tree (hit live
+        # 2026-11-07, PR #261 — depth-6 covers the guard's horizon with margin).
+        with:
+          fetch-depth: 6
 
       # Source-mode test tooling for this suite. Rolled to v0.5.32 (b2d0b66)
       # in CRI-300: the flat WorkflowGraphs shape only exists from this
