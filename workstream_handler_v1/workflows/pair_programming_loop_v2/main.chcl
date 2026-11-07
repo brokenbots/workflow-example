@@ -923,11 +923,6 @@ step "run_part_p2_deep" {
             value  = "part_ready"
         }
     }
-        write {
-            target = data.internal.pair_slot_p2_verdict.value
-            value  = "part_ready"
-        }
-
     outcome "part_help" {
         next   = step.pair_part_p2_remediate
         schema = object({ reason = string })
@@ -1197,11 +1192,6 @@ step "run_part_p3_deep" {
             value  = "part_ready"
         }
     }
-        write {
-            target = data.internal.pair_slot_p3_verdict.value
-            value  = "part_ready"
-        }
-
     outcome "part_help" {
         next   = step.pair_part_p3_remediate
         schema = object({ reason = string })
@@ -1471,11 +1461,6 @@ step "run_part_p4_deep" {
             value  = "part_ready"
         }
     }
-        write {
-            target = data.internal.pair_slot_p4_verdict.value
-            value  = "part_ready"
-        }
-
     outcome "part_help" {
         next   = step.pair_part_p4_remediate
         schema = object({ reason = string })

@@ -496,35 +496,21 @@ for bad in "run curl" "use curl" "curl -fsSL" "wget -qO-" "use web_fetch"; do
     fi
 done
 
-echo "==> Checking KB-285: round mirrors publish the identical review allow_tools policy..."
-ROUND_OUT="$(mktemp)"
-ROUND_LIST="$(mktemp)"
-trap 'rm -f "${COMPILE_OUT}" "${ALLOWLIST}" "${PR_OUT}" "${ROUND_OUT}" "${ROUND_LIST}"' EXIT
-for round_name in pair_programming_loop_round2 pair_programming_loop_round3; do
-    criteria compile "${SCRIPT_DIR}/../workflows/${round_name}" >"${ROUND_OUT}" 2>/dev/null
-    jq -r '.steps[] | select(.name == "review") | .allow_tools[]' "${ROUND_OUT}" >"${ROUND_LIST}"
-    if ! cmp -s "${ALLOWLIST}" "${ROUND_LIST}"; then
-        echo "FAIL: ${round_name} review step allow_tools differs from pair_programming_loop (KB-285: identical ranged-read policy across rounds)" >&2
+echo "==> Checking KB-285: the pair-loop reviewer charter carries the ranged-read rule..."
+# KB-386 Stage 3 deleted the round-suffixed trees; the v1 base tree is the
+# only pair-loop tree that ships a reviewer charter (pair_programming_loop_v2
+# has no review step and no agents/reviewer.md — and none is invented here).
+charter_md="${HANDLER_DIR}/workflows/pair_programming_loop/agents/reviewer.md"
+for expect in \
+    "sed/awk/cat are refused BY DESIGN (KB-285, castle run dc50b933)" \
+    "a read kind never denies for review evidence" \
+    'reach for `head -n` / `tail -n`, plus `wc` to size a file first' \
+    'no `allow_tools` entry for them will ever exist' \
+    "Never emit one and never re-attempt after a refusal"; do
+    if ! grep -qF "${expect}" "${charter_md}"; then
+        echo "FAIL: ${charter_md} lacks the KB-285 ranged-read charter text '${expect}'" >&2
         exit 1
     fi
-done
-
-echo "==> Checking KB-285: every pair-loop reviewer charter carries the ranged-read rule..."
-for charter_md in \
-    "${HANDLER_DIR}/workflows/pair_programming_loop/agents/reviewer.md" \
-    "${HANDLER_DIR}/workflows/pair_programming_loop_round2/agents/reviewer.md" \
-    "${HANDLER_DIR}/workflows/pair_programming_loop_round3/agents/reviewer.md"; do
-    for expect in \
-        "sed/awk/cat are refused BY DESIGN (KB-285, castle run dc50b933)" \
-        "a read kind never denies for review evidence" \
-        'reach for `head -n` / `tail -n`, plus `wc` to size a file first' \
-        'no `allow_tools` entry for them will ever exist' \
-        "Never emit one and never re-attempt after a refusal"; do
-        if ! grep -qF "${expect}" "${charter_md}"; then
-            echo "FAIL: ${charter_md} lacks the KB-285 ranged-read charter text '${expect}'" >&2
-            exit 1
-        fi
-    done
 done
 
 echo "==> Checking KB-285: pr_reviewer.md carries the read-only ranged-read discipline (its policy stays [\"*\"])..."

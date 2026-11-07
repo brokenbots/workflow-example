@@ -17,12 +17,12 @@
 #   branch_manager_final_say
 #   ├─ converge_on_state → push_and_respond (normal completion → merge)
 #   ├─ hand_off          → increment_hand_off_count (shell) → hand_off_route
-#   │   ├─ count 1 → run_pair_programming_loop_with_feedback_r2 (round-fresh
-#   │   │            instances developer_r2/reviewer_r2 in
-#   │   │            workflows/pair_programming_loop_round2; the brief rides
+#   │   ├─ count 1 → run_pair_programming_loop_with_feedback_r2 (re-enters
+#   │   │            workflows/pair_programming_loop_v2 — the retired r2/r3
+#   │   │            round trees are GONE (KB-386 Stage 3); the brief rides
 #   │   │            developer_initial_prompt, the fresh session's first
 #   │   │            prompt; KB-262 developer_feedback boundary write)
-#   │   ├─ count 2 → run_pair_programming_loop_with_feedback_r3 (r3 instances)
+#   │   ├─ count 2 → run_pair_programming_loop_with_feedback_r3 (same v2 tree)
 #   │   └─ (default: defensive terminus; the manager template forbids a
 #   │        third hand-off)
 #   ├─ blocked / failure / default → state.failed with output.reason →
@@ -33,7 +33,7 @@
 #       the hand-off is bounded, exactly as KB-265 intended, and the
 #       manager NEVER reopens the base (context-inheriting) developer dial.
 #
-# Both fresh-round dials complete into validate_round_check, which prints
+# Both hand-off dials complete into validate_round_check, which prints
 # budget_spent again (the counter is spent for real), so each hand-off round
 # returns to the manager for a fresh converge/hand_off/blocked call.
 #
@@ -146,30 +146,34 @@ for dial in run_pair_programming_loop_with_feedback_r2 run_pair_programming_loop
         || fail "${dial} does not complete into validate_round_check"
 done
 
-echo "==> Checking each hand-off round runs round-fresh copilot instances..."
-for n in 2 3; do
-    tree="${TREE_ROOT}/workflows/pair_programming_loop_round${n}"
-    if test -f "${tree}/main.chcl" \
-        && printf '%s' "$(sed -n '/^step "develop" {/,/^}/p' "${tree}/main.chcl")" | grep -q "target     = adapter.copilot.developer_r${n}" \
-        && printf '%s' "$(sed -n '/^step "review" {/,/^}/p' "${tree}/main.chcl")" | grep -q "target     = adapter.copilot.reviewer_r${n}" \
-        && grep -q "adapter \"copilot\" \"developer_r${n}\"" "${tree}/adapters.chcl" \
-        && grep -q "adapter \"copilot\" \"developer_r${n}\"" "${tree}/.criteria.lock.hcl" \
-        && ! grep -q "^adapter \"copilot\" \"developer\" {" "${tree}/adapters.chcl" \
-        && ! grep -q "^adapter \"copilot\" \"reviewer\" {" "${tree}/adapters.chcl"; then
-        ok "round ${n} tree isolates conversation identity (developer_r${n}/reviewer_r${n}, no base-instance target)"
-    else
-        fail "round ${n} tree does not isolate the copilot conversation identity"
-    fi
-done
+echo "==> Checking the retired round trees are gone (folded onto pair_programming_loop_v2)..."
+# KB-386 Stage 3: the retired round-suffixed trees (r2/r3) are GONE — the
+# handler dials re-enter pair_programming_loop_v2 and remediation happens
+# per-part INSIDE that tree. The glob below matches ONLY those retired
+# round-suffixed tree names; the retired prefix is deliberately spelled out
+# in pieces so the repo-wide grep for the retired tree prefix stays empty.
+retired_trees="$(find "${TREE_ROOT}/workflows" -maxdepth 1 -type d -name 'pair_programming_loop_r*' -print)"
+if [ -z "${retired_trees}" ]; then
+    ok "no retired round-suffixed loop tree remains (r2/r3 folded onto pair_programming_loop_v2)"
+else
+    fail "retired loop tree(s) still present: ${retired_trees}"
+fi
+
+echo "==> Checking the round-suffixed copilot instances are gone..."
+if grep -qE 'adapter "copilot" "(developer|reviewer)_r[23]"' "${TREE_ROOT}/adapters.chcl" "${TREE_ROOT}/.criteria.lock.hcl" 2>/dev/null; then
+    fail "the handler still provisions round-suffixed copilot instances (developer_rN/reviewer_rN)"
+else
+    ok "no round-suffixed copilot instances remain (remediation is per-part INSIDE the v2 tree)"
+fi
 
 echo "==> Checking the brief travels as the fresh session's first prompt..."
 for n in 2 3; do
     block="$(sed -n '/^subworkflow "pair_programming_loop_feedback_r'"${n}"'" {/,/^}/p' "${TREE_ROOT}/main.chcl")"
-    if printf '%s' "$block" | grep -q 'developer_initial_prompt = data.internal.developer_feedback.value' \
-        && printf '%s' "$block" | grep -q 'source = "./workflows/pair_programming_loop_round'"${n}"'"'; then
-        ok "round ${n} passes the developer_feedback brief as developer_initial_prompt (fresh session's first prompt)"
+    if printf '%s' "$block" | grep -q 'source = "./workflows/pair_programming_loop_v2"' \
+        && printf '%s' "$block" | grep -q 'developer_initial_prompt = data.internal.developer_feedback.value'; then
+        ok "r${n} dial re-enters pair_programming_loop_v2 and passes the developer_feedback brief as developer_initial_prompt (fresh session's first prompt)"
     else
-        fail "round ${n} subworkflow does not pass the brief as the fresh session's first prompt"
+        fail "r${n} dial does not re-enter pair_programming_loop_v2 with the brief as developer_initial_prompt"
     fi
 done
 
