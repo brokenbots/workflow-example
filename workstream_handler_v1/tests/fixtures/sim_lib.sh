@@ -127,6 +127,7 @@ ____WS____
 # apply with the fleet engine, leave EV/RC for the assertion helpers.
 run_pair_v2() { # $1=name $2=plan_json
     name="$1"; plan="$2"
+    trace() { echo "[sim-trace $name] $1" >&2; }
     treeparent="${WORK}/tree-${name}"
     tree="${treeparent}/workflows/pair_programming_loop_v2"
     simroot="${WORK}/sim-${name}"
@@ -141,16 +142,21 @@ run_pair_v2() { # $1=name $2=plan_json
         MARKER_REM="$PAIR_V2_MARKER_REM" \
         node "${FIXTURES}/pair_v2_stub.mjs" >"$slog" 2>&1 &
     stub_pid=$!
+    trace "stub up pid=$stub_pid port=$port"
     STUB_PIDS="${STUB_PIDS:-} +$stub_pid"
 
+    trace "shim begin"
     STUB_PORT="$port" SIMROOT="$simroot" node "${FIXTURES}/pair_v2_shim.mjs" \
-        "$tree/adapters.chcl" "$tree/adapters.chcl"
+        "$tree/adapters.chcl" "$tree/adapters.chcl" || { trace "SHIM FAILED rc=$?"; return 1; }
+    trace "shim done"
 
 
     # Seed AFTER the shim, asserted: the shimmed shell adapter binds to the
     # worktree at apply time (live defect: bind died with "chdir no such file
     # or directory" when the seed raced the bind).
-    pair_v2_seed "${simroot}"
+    trace "seed begin"
+    pair_v2_seed "${simroot}" || { trace "SEED FAILED rc=$?"; return 1; }
+    trace "seed done"
     if [ ! -d "${simroot}/worktree/.git" ]; then
         echo "seed failed: worktree missing under ${simroot}" >&2
         ls -la "${simroot}" >&2 || true
@@ -159,6 +165,7 @@ run_pair_v2() { # $1=name $2=plan_json
     fi
     EV="${WORK}/events-${name}.log"
     RC=0
+    trace "apply begin (CRITERIA_HOME=${CRITERIA_HOME:-unset})"
     timeout "${TIMEOUT_SECS}" "$CRITERIA" apply "$tree" \
         --var workstream_file="${simroot}/intake/KB-386SIM.md" \
         --var worktree_dir="${simroot}/worktree" \
