@@ -1,0 +1,24 @@
+# SELF-TEST ARM - KB-386 pair-loop parity comparator.
+# SYNTHETIC durations. NOT a real v1 baseline: KB-386 is UN-ARMED (no
+# k8s-run), so NO real-card timing record exists anywhere in this repo.
+# These values only exercise the comparator's arithmetic - they are never a
+# measurement and never gate KB-386.
+# Format: <step_id><TAB><duration_ms>, one line per step invocation.
+get_branch_name	130
+read_workstream	not_a_number
+checkout_branch	355
+capture_entry_sha	90
+check_working_tree	140
+plan_parts	45000
+reduce_plan_parts	60
+run_part_p1_fast	120000
+run_part_p2_fast	180000
+run_part_p3_deep	240000
+p1_verify	600000
+p2_verify	650000
+p3_verify	700000
+pair_part_p2_remediate	90000
+switch_verdict_route	40
+write_review_log	100
+commit_review_log	130
+push_review_checkpoint	1600
