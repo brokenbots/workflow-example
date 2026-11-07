@@ -5,9 +5,9 @@ Given:
 - Branch under development: {{ .branch }}
 - The last outstanding brief given to the developer:
 {{ .developer_feedback }}
-- Remediation hand-offs already spent: {{ .hand_off_count }} (two round-fresh
-  developer sessions are provisioned; a hand-off after the second is not
-  available)
+- Remediation hand-offs already spent: {{ .hand_off_count }} (two hand-off
+  re-entries into the pair loop are provisioned; a hand-off after the second is
+  not available)
 - The previous hand-off's remediation brief (empty on the first decision):
 {{ .last_hand_off }}
 
@@ -30,15 +30,17 @@ Your verdict — call submit_outcome with exactly one of:
   hand-off has been spent so far AND — when a prior hand-off exists — the
   branch has actually moved since it (a second hand-off must be earned by
   new remediation work; the same finding returning unchanged is not
-  progress). The developer you brief starts a NEW session with NO memory of
-  any prior round, so the reason field must be a self-contained remediation
-  brief, typed and numbered:
+  progress). The hand-off re-enters the pair loop v2 tree (the same tree the
+  base dial runs): your brief rides in as that tree's developer_initial_prompt
+  and every part is remediated inside the tree. Do not assume the developer
+  starts a new session with NO memory of any prior round — the brief is the
+  only channel by which your findings reach the tree, so the reason field must
+  be a self-contained remediation brief, typed and numbered:
   1. what is wrong (file/line/symptom you VERIFIED, not inherited claims),
   2. what to change to fix it,
   3. how to verify the fix (commands, expected state),
   4. the branch/PR context (the branch is shared; do not reset or recreate it).
-  The brief travels as the fresh developer's first and only prompt — every
-  fact the developer needs must be in it.
+  Every fact the developer needs must be in it.
 
 - "blocked": park the run for a human. This is the verdict when
   - the blocker is NOT developer-actionable (an upstream or outside
