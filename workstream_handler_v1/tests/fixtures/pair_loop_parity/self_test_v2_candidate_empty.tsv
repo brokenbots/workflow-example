@@ -1,0 +1,6 @@
+# SELF-TEST ARM - KB-386 pair-loop parity comparator.
+# SYNTHETIC durations. NOT a real v1 baseline: KB-386 is UN-ARMED (no
+# k8s-run), so NO real-card timing record exists anywhere in this repo.
+# These values only exercise the comparator's arithmetic - they are never a
+# measurement and never gate KB-386.
+# Format: <step_id><TAB><duration_ms>, one line per step invocation.
