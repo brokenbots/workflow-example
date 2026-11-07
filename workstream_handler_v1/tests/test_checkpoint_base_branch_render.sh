@@ -21,18 +21,12 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
-command -v python3 >/dev/null || fail "python3 required"
-
+# The placeholder is rendered with sed — the same line-anchored shellquote
+# substitution test_upstream_sync.sh uses for the push script (python3 is not
+# guaranteed in every environment that runs this suite).
 BRANCH="entrysha-sanity"
-python3 - "$BRANCH" "$TEMPLATE" > "${WORK_DIR}/verify.sh" <<'PY'
-import re, shlex, sys
-branch, tpl = sys.argv[1], sys.argv[2]
-text = open(tpl).read()
-# Render criteria_value_1 (branch) exactly as the step passes it;
-# criteria_value_2 (entry_sha) is substituted per-scenario below.
-text = re.sub(r'\{\{\s*\.criteria_value_1\s*\|\s*shellquote\s*\}\}', shlex.quote(branch), text)
-sys.stdout.write(text)
-PY
+sed -e "s@^criteria_value_1=.*@criteria_value_1='${BRANCH}'@" \
+    "$TEMPLATE" > "${WORK_DIR}/verify.sh"
 
 # No remote surface in the verifier script — local-only contract (ruling 1).
 if grep -qE 'ls-remote|git fetch|git push|origin/' "${WORK_DIR}/verify.sh"; then

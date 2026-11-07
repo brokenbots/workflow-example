@@ -27,73 +27,90 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HANDLER_DIR="${SCRIPT_DIR}/.."
 
-python3 - "${HANDLER_DIR}" <<'PYCHECK'
-import json, os, re, sys
+node - "$HANDLER_DIR" <<'JSCHECK'
+const fs = require("fs");
+const path = require("path");
 
-handler = sys.argv[1]
-main_chcl = os.path.join(handler, "main.chcl")
-src = open(main_chcl).read()
+const handler = process.argv[2];
+const mainChcl = path.join(handler, "main.chcl");
+const src = fs.readFileSync(mainChcl, "utf8");
 
+function fail(msg) {
+    console.error(`FAIL: ${msg}`);
+    process.exit(1);
+}
 
-def fail(msg):
-    print(f"FAIL: {msg}", file=sys.stderr)
-    sys.exit(1)
+// Extract every subworkflow block: key, source dir, and input-map text.
+const blocks = [];
+const blockRe = /subworkflow\s+"([^"]+)"\s*\{([\s\S]*?)\n\}/g;
+let m;
+while ((m = blockRe.exec(src)) !== null) {
+    const [, key, body] = m;
+    const srcm = body.match(/source\s*=\s*"([^"]+)"/);
+    // input map: text between the first "input = {" and the line that closes
+    // the block ("}" at column 0) — greedy enough for these maps.
+    const inpm = body.match(/input\s*=\s*\{([\s\S]*)/);
+    blocks.push({
+        key,
+        source: srcm ? srcm[1] : "",
+        input: inpm ? inpm[1] : "",
+    });
+}
 
+if (blocks.length < 3) {
+    fail(`expected >=3 subworkflow blocks in ${mainChcl}, parsed ${blocks.length}`);
+}
 
-# Extract every subworkflow block: key, source dir, and input-map text.
-blocks = []
-for m in re.finditer(r'subworkflow\s+"([^"]+)"\s*\{(.*?)\n\}', src, re.S):
-    key, body = m.group(1), m.group(2)
-    srcm = re.search(r'source\s*=\s*"([^"]+)"', body)
-    # input map: text between the first "input = {" and the line that closes
-    # the block ("}" at column 0) — greedy enough for these maps.
-    inpm = re.search(r'input\s*=\s*\{(.*)', body, re.S)
-    blocks.append({
-        "key": key,
-        "source": srcm.group(1) if srcm else "",
-        "input": inpm.group(1) if inpm else "",
-    })
+const pairs = blocks.filter((b) => b.source.endsWith("pair_programming_loop"));
+if (pairs.length !== 2) {
+    fail(`expected exactly 2 pair_programming_loop subworkflow blocks, got ${pairs.length}`);
+}
 
-if len(blocks) < 3:
-    fail(f"expected >=3 subworkflow blocks in {main_chcl}, parsed {len(blocks)}")
+// 1) var plumbing completeness for the pair loop child.
+const childDir = path.join(handler, "workflows", "pair_programming_loop");
+let declared = new Set();
+const varsChcl = path.join(childDir, "variables.chcl");
+if (fs.existsSync(varsChcl)) {
+    declared = new Set(
+        [...fs.readFileSync(varsChcl, "utf8").matchAll(/variable\s+"([^"]+)"/g)].map((x) => x[1]),
+    );
+}
+if (!declared.has("base_branch")) {
+    fail('pair_programming_loop/variables.chcl does not declare variable "base_branch"');
+}
 
-pairs = [b for b in blocks if b["source"].endswith("pair_programming_loop")]
-if len(pairs) != 2:
-    fail(f"expected exactly 2 pair_programming_loop subworkflow blocks, got {len(pairs)}")
+const used = new Set();
+(function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) {
+            walk(p);
+        } else if (e.name.endsWith(".chcl")) {
+            for (const u of fs.readFileSync(p, "utf8").matchAll(/var\.([a-zA-Z_][a-zA-Z0-9_]*)/g)) {
+                used.add(u[1]);
+            }
+        }
+    }
+})(childDir);
 
-# 1) var plumbing completeness for the pair loop child.
-child_dir = os.path.join(handler, "workflows", "pair_programming_loop")
-declared = set()
-vars_chcl = os.path.join(child_dir, "variables.chcl")
-if os.path.isfile(vars_chcl):
-    declared = set(re.findall(r'variable\s+"([^"]+)"', open(vars_chcl).read()))
-if "base_branch" not in declared:
-    fail('pair_programming_loop/variables.chcl does not declare variable "base_branch"')
+for (const b of pairs) {
+    for (const name of [...used].sort()) {
+        if (declared.has(name)) continue;
+        // passed by the parent? bare "<name> =" inside the input map
+        if (new RegExp(`^\\s*${name}\\s*=`, "m").test(b.input)) continue;
+        fail(`pair subworkflow "${b.key}": var.${name} used in ${childDir} .chcl files `
+            + `but not declared in its variables.chcl and not passed in the `
+            + `"${b.key}" input map`);
+    }
+}
 
-used = set()
-for root, _dirs, files in os.walk(child_dir):
-    for f in files:
-        if not f.endswith(".chcl"):
-            continue
-        text = open(os.path.join(root, f)).read()
-        used |= set(re.findall(r'var\.([a-zA-Z_][a-zA-Z0-9_]*)', text))
+// 2) explicit pin: both pair blocks carry base_branch.
+for (const b of pairs) {
+    if (!b.input.includes("base_branch")) {
+        fail(`pair subworkflow "${b.key}" does not pass base_branch in its input map`);
+    }
+}
 
-for b in pairs:
-    for name in sorted(used):
-        if name in declared:
-            continue
-        # passed by the parent? bare "<name> =" inside the input map
-        if re.search(rf'^\s*{re.escape(name)}\s*=', b["input"], re.M):
-            continue
-        fail(f'pair subworkflow "{b["key"]}": var.{name} used in {child_dir} .chcl files '
-             f'but not declared in its variables.chcl and not passed in the '
-             f'"{b["key"]}" input map')
-
-# 2) explicit pin: both pair blocks carry base_branch.
-for b in pairs:
-    if "base_branch" not in b["input"]:
-        fail(f'pair subworkflow "{b["key"]}" does not pass base_branch in its input map')
-
-print("PASS: pair_programming_loop var plumbing complete "
-      "(base_branch declared and passed by both parent subworkflow blocks)")
-PYCHECK
+console.log("PASS: pair_programming_loop var plumbing complete "
+    + "(base_branch declared and passed by both parent subworkflow blocks)");
+JSCHECK
