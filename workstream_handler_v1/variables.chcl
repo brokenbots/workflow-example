@@ -145,4 +145,12 @@ variable "reviewer_github_token" {
 variable "workflow_upstream_token" {
     type   = string
     secret = true
+    // Defaulted EMPTY: the credential's VALUE never rides var plumbing (secret
+    // taint + run-time binding). The declaration exists for the KB-304
+    // interface-parity contract; the real value is delivered OUT-OF-BAND by
+    // the k8s lane: the adapter containers receive
+    // WORKFLOW_UPSTREAM_TOKEN=<CSI file path> via the binding env map (lanes
+    // verified in the launch manifest), and upstream_sync's push script reads
+    // that env to feed git's run-time inline credential helper.
+    default = ""
 }

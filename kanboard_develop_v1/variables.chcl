@@ -108,4 +108,9 @@ variable "reviewer_github_token" {
 variable "workflow_upstream_token" {
     type   = string
     secret = true
+    // Defaulted EMPTY (see workstream_handler_v1/variables.chcl): KB-304
+    // interface-parity declaration only; the credential value travels the k8s
+    // lane (binding env map > adapter container env > CSI file, read by
+    // upstream_sync's push script), never var plumbing.
+    default = ""
 }
