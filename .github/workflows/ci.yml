@@ -44,7 +44,12 @@ jobs:
         run: go test ./... -count=1
 
   k8s-shell-tests:
+    name: k8s-shell-tests
     runs-on: ubuntu-latest
+    # Job-level: every step (incl. the pair-loop routing simulator) resolves
+    # the pre-pulled adapter binaries from ONE cache.
+    env:
+      CRITERIA_HOME: /home/runner/.local/criteria
     steps:
       - uses: actions/checkout@v7
 
@@ -77,8 +82,6 @@ jobs:
       # and kanboard_develop_v1/.criteria.lock.hcl pin, so `criteria validate`
       # can resolve and verify their schemas from the runner's local cache.
       - name: Pre-pull triage adapter binaries into the criteria cache
-        env:
-          CRITERIA_HOME: /home/runner/.local/criteria
         run: |
           mkdir -p "$CRITERIA_HOME/adapters"
           # #303: adapter versions come from releases.chcl (single source) — never
