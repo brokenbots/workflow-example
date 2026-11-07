@@ -207,6 +207,8 @@ test: validate test-criteria-k8s
 	./workstream_handler_v1/tests/test_upstream_sync.sh
 	@echo "Running pair-loop local-isolation guard (pair-loop remaster)..."
 	./workstream_handler_v1/tests/test_pair_loop_local_isolation.sh
+	@echo "Running --var secret binding contract probe leg (KB-385, live engine)..."
+	./workstream_handler_v1/tests/test_secret_binding.sh
 	@echo "Running flat WorkflowGraphs shape smoke test (CRI-300)..."
 	./k8s/tests/test_workflow_graphs_flat.sh
 	@echo "Running Secrets Store CSI driver / OpenBao provider regression test..."
