@@ -9,7 +9,7 @@
 # prefixed `wip:` — NEVER an amend, never a push. The workflow owns upstream;
 # the caller then delegates the push to upstream_sync.
 
-set -euo pipefail 2>/dev/null || true
+set -eu 2>/dev/null || true
 
 # Nothing to do when the tree is already clean.
 if [ -z "$(git status --porcelain 2>/dev/null)" ]; then

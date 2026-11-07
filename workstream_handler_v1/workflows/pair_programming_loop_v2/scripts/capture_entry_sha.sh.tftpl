@@ -1,5 +1,5 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
-set -euo pipefail; exec 2>&1
+set -eu; exec 2>&1
 # Extract the entry_sha line the checkout_branch step printed (the loop's
 # LOCAL durability baseline; remaster Task 2). One value, one stdout —
 # KB-351 extraction rule.
