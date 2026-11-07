@@ -44,19 +44,14 @@ jobs:
         run: go test ./... -count=1
 
   k8s-shell-tests:
+    name: k8s-shell-tests
     runs-on: ubuntu-latest
+    # Job-level: every step (incl. the pair-loop routing simulator) resolves
+    # the pre-pulled adapter binaries from ONE cache.
+    env:
+      CRITERIA_HOME: /home/runner/.local/criteria
     steps:
       - uses: actions/checkout@v7
-        # Depth >= the deepest back-reference a guarded suite reads in git
-        # history: test_pair_loop_fold_invariants.sh INVARIANT 5 resolves the
-        # round-tree deletion commit (7dcedc1a, 11 commits deep on the PR
-        # branch) and its parent ON THE MERGE REF: depth-1 hides it; the merge
-        # ref adds 1 commit per open PR ahead of base plus base's own depth,
-        # so 20 covers any in-repo PR's horizon with margin (verified live:
-        # the failing PR's merge ref needs 12).
-        # 2026-11-07, PR #261.
-        with:
-          fetch-depth: 20
 
       # Source-mode test tooling for this suite. Rolled to v0.5.32 (b2d0b66)
       # in CRI-300: the flat WorkflowGraphs shape only exists from this
@@ -69,9 +64,9 @@ jobs:
       # Installed before the k8s/tests loop: KB-240's
       # test_env_listen_ports.sh drives the real engine (port-0 shim binds),
       # and the loop runs every k8s/tests/test_*.sh it finds.
-      - name: Install criteria v0.5.52-rc4 (SHA256SUMS-verified)
+      - name: Install criteria v0.5.58 (SHA256SUMS-verified; ONE engine everywhere — same stamp the fleet serves)
         run: |
-          version="v0.5.52-rc4"
+          version="v0.5.58"
           archive="criteria-${version}-linux-amd64.tar.gz"
           base="https://github.com/brokenbots/criteria/releases/download/${version}"
           curl -fL --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 "${base}/${archive}" -o "/tmp/${archive}"
@@ -80,14 +75,13 @@ jobs:
           mkdir -p /tmp/criteria-install
           tar -xzf "/tmp/${archive}" -C /tmp/criteria-install
           sudo install -m 0755 /tmp/criteria-install/criteria /usr/local/bin/criteria
+          cp /usr/local/bin/criteria /tmp/ci-criteria-fleet/criteria 2>/dev/null || { mkdir -p /tmp/ci-criteria-fleet && cp /usr/local/bin/criteria /tmp/ci-criteria-fleet/criteria; }
           rm -rf "/tmp/${archive}" /tmp/criteria-checksums.txt /tmp/criteria-install
 
       # Pre-pull the adapter binaries that kanboard_triage_v1/.criteria.lock.hcl
       # and kanboard_develop_v1/.criteria.lock.hcl pin, so `criteria validate`
       # can resolve and verify their schemas from the runner's local cache.
       - name: Pre-pull triage adapter binaries into the criteria cache
-        env:
-          CRITERIA_HOME: /home/runner/.local/criteria
         run: |
           mkdir -p "$CRITERIA_HOME/adapters"
           # #303: adapter versions come from releases.chcl (single source) — never
@@ -267,6 +261,21 @@ jobs:
             bash "$t"
             echo "::endgroup::"
           done
+
+      # The pair_loop_v2 ROUTING simulator — the standing middle tier (the
+      # 2026-11-07 zoom-out ruling): the REAL pair_loop_v2 tree runs whole on
+      # the fleet engine with a scripted provider stub; the live-run defect
+      # classes are permanent negative arms. No tree PR merges and no card
+      # fires until this is green. Skips (never fails) without node/jq.
+      - name: Run pair_loop_v2 routing simulator (positive + negative arms)
+        run: |
+          set -o pipefail
+          bash workstream_handler_v1/tests/test_pair_loop_v2_routing.sh \
+            2>&1 | tee /tmp/pairv2_sim.log
+          bash workstream_handler_v1/tests/test_pair_loop_v2_router_negative.sh \
+            2>&1 | tee /tmp/pairv2_neg.log
+          grep -qF 'routing simulator: all scenarios green' /tmp/pairv2_sim.log
+          grep -qF 'catches all three defect classes (not vacuous)' /tmp/pairv2_neg.log
 
       # KB-219: the shared gh retry wrapper is consumed by every GH call site
       # (workstream_handler_v1 loop above, plus devops_triage_v1's open_pr) —

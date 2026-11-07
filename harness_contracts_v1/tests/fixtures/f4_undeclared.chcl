@@ -14,6 +14,10 @@ workflow {
 }
 
 step "contract_valid" {
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
     target      = adapter.copilot.main
     allow_tools = []
     input {

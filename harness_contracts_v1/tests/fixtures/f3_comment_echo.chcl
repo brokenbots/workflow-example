@@ -27,6 +27,10 @@ data "internal" "c17_comment" {
 }
 
 step "contract_comment" {
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
     target      = adapter.copilot.main
     allow_tools = []
     input {

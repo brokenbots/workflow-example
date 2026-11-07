@@ -1,5 +1,5 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
-set -euo pipefail
+set -eu
 # KB-258: the worktree is SHARED across body entries (initial pair loop +
 # every feedback-cycle pair loop), so HEAD may have moved since the last body
 # exited (observed: a triage leg left the worktree on

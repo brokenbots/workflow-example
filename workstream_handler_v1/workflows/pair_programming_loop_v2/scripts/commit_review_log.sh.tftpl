@@ -1,5 +1,5 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
-set -euo pipefail
+set -eu
 log="$criteria_value_1"
 if git ls-files --error-unmatch "$log" 2>/dev/null; then
     git add "$log"
