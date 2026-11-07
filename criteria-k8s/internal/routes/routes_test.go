@@ -307,11 +307,11 @@ func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 	if wf.Type != TypeURL {
 		t.Errorf("workflow type = %q, want %q (url-only, minimal criteria base runtime)", wf.Type, TypeURL)
 	}
-	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=e55e9ddc1920b462004e91c56d6cdaa5d838b790" {
+	if wf.URL != "git::https://github.com/brokenbots/workflow-example.git//kanboard_triage_v1?ref=ecba70c910338516e53d86a75a8c48407530985e" {
 		t.Errorf("workflow url = %q, want the kanboard_triage_v1 subtree pinned to the main-landed commit", wf.URL)
 	}
 	// Ref pins track main-landed squash commits (CRI-241/CRI-243 convention).
-	if wf.Ref != "e55e9ddc1920b462004e91c56d6cdaa5d838b790" {
+	if wf.Ref != "ecba70c910338516e53d86a75a8c48407530985e" {
 		t.Errorf("workflow ref = %q, want the main-landed kanboard_triage_v1 commit", wf.Ref)
 	}
 	if wf.Image != "" {
@@ -338,7 +338,7 @@ func TestShippedExampleResolvesKanboardRoutes(t *testing.T) {
 	if developWf.Type != TypeURL || developWf.Image != "" {
 		t.Errorf("kanboard-develop-url = %+v, want url-only (no process image)", developWf)
 	}
-	if developWf.URL != "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=e55e9ddc1920b462004e91c56d6cdaa5d838b790" {
+	if developWf.URL != "git::https://github.com/brokenbots/workflow-example.git//kanboard_develop_v1?ref=ecba70c910338516e53d86a75a8c48407530985e" {
 		t.Errorf("develop workflow url = %q, want the kanboard_develop_v1 subtree pinned to the main-landed commit", developWf.URL)
 	}
 	if len(developWf.Volumes) != 3 || len(developWf.Secrets) != 2 {
@@ -484,7 +484,7 @@ func TestShippedExampleRetiredCleanupRoute(t *testing.T) {
 	if !strings.HasPrefix(cleanupWf.URL, "git::https://github.com/brokenbots/workflow-example.git//ticket_cleanup_v1") {
 		t.Errorf("cleanup workflow url = %q, want the ticket_cleanup_v1 subtree", cleanupWf.URL)
 	}
-	if cleanupWf.Ref != "e55e9ddc1920b462004e91c56d6cdaa5d838b790" {
+	if cleanupWf.Ref != "ecba70c910338516e53d86a75a8c48407530985e" {
 		t.Errorf("cleanup workflow ref = %q, want the ticket_cleanup_v1 squash-merge commit 0b813665 (pinless HEAD resolution fails on the subtree; CRI-241/CRI-243 follow-up re-pin convention)", cleanupWf.Ref)
 	}
 	if cleanupWf.Image != "" {
