@@ -47,6 +47,17 @@ step "push_branch" {
         command = templatefile("./scripts/push_branch.sh.tftpl", {
             criteria_value_1 = var.branch
         })
+        // The shell adapter's sandbox scrubs container env from command
+        // children (allowlist: HOME/USER/LOGNAME/LANG/TZ/LC_* only). The
+        // credential lane rides container env -> step-declared env; "$NAME"
+        // values resolve from the PARENT (adapter container) environment
+        // per the adapter's env grammar. Without this, push_branch.sh sees
+        // no credential file path and the push fails with
+        // 'could not read Username' (run 83ca7901, upstream wip-push).
+        env = jsonencode({
+            WORKFLOW_UPSTREAM_TOKEN = "$WORKFLOW_UPSTREAM_TOKEN"
+            WORKFLOW_UPSTREAM_USER  = "$WORKFLOW_UPSTREAM_USER"
+        })
     }
     outcome "success" { next = state.done }
     outcome "failure" {
