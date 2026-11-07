@@ -126,3 +126,42 @@ consumer — KB-151). The tree — not the agent — tracks every verdict.
 - Tree tests: reduce_plan_parts jq gate + shared pair_part_verify exercised both
   ways (positive + negative arms) against synthetic repos; CI_GATE_CMD unset-arm
   defect caught in re-verification and fixed (`${CI_GATE_CMD:-}`).
+
+## Stage-3 close state (2026-11-07 — KB-386, part 2 of 3: the card gate)
+
+Card: **KB-386** ("Stage 3 - fold round plumbing onto pair-loop v2"); plan
+`.hermes/plans/2026-11-06_123002-pair-loop-remaster-local-upstream-plus-planner.md`
+(Stage-2 section "Sequencing"). Rulings honoured: ruling 1 (LOCAL-ONLY — this part
+adds no network surface; the tree's only one is the `upstream_sync` delegation),
+and the house rule that deterministic shell truth outranks agent judgement.
+
+- **Fold disposition — ALL FOUR handler dials now source this tree.** The
+  handler's `pair_programming_loop`, `pair_programming_loop_feedback`,
+  `pair_programming_loop_feedback_r2` and `pair_programming_loop_feedback_r3`
+  subworkflow decls all carry `source = "./workflows/pair_programming_loop_v2"`
+  (the r2/r3 source-swap landed in part 1; the base + feedback dials landed in
+  wave 2).
+- **The r2/r3 hand-off re-entries RIDE this tree.** A hand-off re-enters
+  `pair_programming_loop_v2` — the same tree the base and feedback dials run —
+  so the tree splits the workstream into parts and every part is remediated
+  INSIDE the tree (per-part develop -> verify -> refute -> remediate ->
+  reverify). The round-suffixed copilot instances (`developer_r2`/`reviewer_r2`,
+  `developer_r3`/`reviewer_r3`) and the round trees' ladders are retired.
+- **The round-tree deletion is part 3 of 3** (`workflows/pair_programming_loop_round2/`
+  + `_round3/`) and stays GATED on the parity comparison below.
+- **The v1 base tree `workflows/pair_programming_loop` is RETAINED** — it is the
+  parity BASELINE, and the fold deletes only the round trees.
+- **Parity record: `PARITY.md`** (this tree) — what the v1 baseline IS, the exact
+  per-step timing collection procedure for a real card, the per-slot thresholds,
+  the evidence slots, and the gate status. The deterministic comparator that
+  enforces those thresholds is `workstream_handler_v1/tests/test_pair_loop_parity.sh`
+  (negative arms first — a regressed slot MUST fail — then the positive arm, then
+  the self-test of the comparator's own logic); its fixtures are labelled
+  SELF-TEST ARMS and are explicitly NOT a real v1 baseline.
+- **GATE STATUS (honest): OPEN.** KB-386 is UN-ARMED (no `k8s-run`) — this card
+  does NOT perform the real-card parity run and does not claim any timing. The
+  run (the v1 baseline card run + the v2 candidate card run) is the OPERATOR's
+  post-merge fleet action, and it closes the gate with the comparator's own exit
+  code. Every measured slot in `PARITY.md` is PENDING with its collection step;
+  no timing was invented, estimated or interpolated. The round trees are deleted
+  only after the comparator exits 0 on the REAL records.
