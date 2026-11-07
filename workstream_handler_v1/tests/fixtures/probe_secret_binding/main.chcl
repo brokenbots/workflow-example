@@ -1,0 +1,30 @@
+// KB-385 probe tree: the --var secret binding contract's tree-side
+// resolution target.
+//
+// The tree is resolution-only BY DESIGN: the workflow needs no adapter to
+// reach its terminal state, so a local `criteria apply` resolves the --var
+// bindings and completes in microseconds — the suite's probe leg
+// (tests/test_secret_binding.sh) runs it against the live engine without
+// an adapter pod. A file: origin pair bound under a declared secret root
+// completes green with the engine reporting the var as an override; a pair
+// bound outside every declared root fails loudly with a typed reason that
+// names the variable. The declared names are the lowercase tree-side names
+// of the operator's CRITERIA_SECRET_VARS binding lanes — including the
+// remaster's workflow_upstream_token lane, whose rendered file is the
+// WORKFLOW_GITHUB_TOKEN lane's secret file (reuse-of-file, not a distinct
+// secret). The derivation itself is pinned by the jobbuilder contract
+// tests and documented in docs/jobs-setup.md (contract section, KB-385).
+
+workflow {
+    name             = "probe_secret_binding"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+
+    initial_state = "ready"
+    target_state  = "ready"
+}
+
+state "ready" {
+    terminal = true
+    success  = true
+}

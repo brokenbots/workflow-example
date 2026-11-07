@@ -1,0 +1,23 @@
+// KB-385 probe variables: the lowercase tree-side secret variable names the
+// operator binding contract (lower(env lane)=file:<mountPath>/<fileKey>)
+// must resolve into. workflow_upstream_token is the KB-304 interface-parity
+// var for the WORKFLOW_UPSTREAM_TOKEN secretEnv lane; the binding contract
+// feeds it the WORKFLOW_GITHUB_TOKEN lane's rendered file, so reviewer and
+// workflow-side vars sit under one CSI mount. Secret-typed: the engine
+// resolves each pair's file: origin eagerly and keeps the materialized
+// value out of logs ("(sensitive) (override)").
+
+variable "workflow_upstream_token" {
+    type   = string
+    secret = true
+}
+
+variable "workflow_github_token" {
+    type   = string
+    secret = true
+}
+
+variable "reviewer_github_token" {
+    type   = string
+    secret = true
+}

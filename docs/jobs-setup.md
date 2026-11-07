@@ -173,6 +173,42 @@ delta for both lanes.
 `job verify` = the same component in dry-run: it re-checks every gate
 without writing.
 
+### Secret variable binding (the --var contract, KB-385)
+
+A job's workflow object declares its secrets as env lanes: each entry maps
+a SCREAMING binding env lane name (e.g. `WORKFLOW_UPSTREAM_TOKEN`) to the
+secret file key rendered inside the CSI mount — usually that lane's own
+lowercase file, but lanes may reuse another lane's file (the remaster's
+upstream lane binds the `WORKFLOW_GITHUB_TOKEN` file). The watcher derives
+the run's `CRITERIA_SECRET_VARS` pair set from those entries; the source
+runner turns it into `criteria apply --var` args; the lane that never
+reaches a pair dies the tree's `missing required input(s)` failure.
+
+The contract, pinned in `criteria-k8s/internal/jobbuilder/secretvars.go`:
+
+- the derived pair is `lower(env lane)=file:<mountPath>/<fileKey>` — the
+  varname comes from the lane name lowercased, NEVER from the mount file
+  key (which is another lane's file in the reuse case);
+- the engine binds `--var` overrides by exact name, so the pair name must
+  be the tree's lowercase secret-typed variable (KB-304 name parity: every
+  binding env lane SCREAMING name ↔ one lowercase tree var declared in
+  `variables.chcl` and the interface's `secretEnv`);
+- a tree variable an operator pair never feeds stays unbound — the run
+  fails loudly at run_handler (`missing required input(s)`), never silently;
+- `file:` origins must sit under a declared secret root
+  (`CRITERIA_SECRET_FILE_ROOTS`, derived from the same secret entries); the
+  engine resolves them eagerly and fails with a typed reason naming the
+  variable on any escape. The multi-root containment and this typed reason
+  are KB-369 engine behavior from criteria v0.5.58 — older engines confine
+  `file:` origins to the single default secrets dir and cannot express
+  them, so the probe leg skips its live-engine legs below that floor.
+
+Regression surface: the jobbuilder contract tests
+(`criteria-k8s/internal/jobbuilder/secretvars_test.go`) and the live-engine
+probe leg (`workstream_handler_v1/tests/test_secret_binding.sh`). Tree
+authoring side: see section 8 (criteria-workflow-trees skill).
+
+
 ## 4. Layer 3 — the card: filing, arming, the everyday loop
 
 The card is how a job instance gets work. `file_card` handles the card
@@ -280,4 +316,9 @@ tombstone keeps the castle row).
 - Binding schema: k8s/criteria-binding.schema.json; routes schema:
   k8s/routes.schema.json; interface schema: k8s/workflow-interface.schema.json
 - Tree authoring: the criteria-workflow-trees skill; repo conventions in
-  the repos' AGENTS.md
+  the repos' AGENTS.md. KB-385 lesson for that skill: a secret-typed tree
+  variable is fed by the operator's CRITERIA_SECRET_VARS pair whose varname
+  is the lane name lowercased — declare the lowercase var
+  (`variables.chcl` + interface `secretEnv` lane), never a screaming-named
+  variant, and remember the upstream lane binds the WORKFLOW_GITHUB_TOKEN
+  file while contributing no file of its own.

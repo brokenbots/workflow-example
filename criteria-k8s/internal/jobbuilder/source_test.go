@@ -883,7 +883,13 @@ func TestSourceRunnerOriginMetadataBehavior(t *testing.T) {
 // source runner must derive those file: OriginRef pairs (this is the KB-1
 // deadlock fix — the hardcoded linear-only list silently dropped them, so
 // every kanboard triage run died at fetch_ticket's env guard and refired in
-// a loop). The linear triples must keep arriving too.
+// a loop). The linear triples must keep arriving too. KB-385 adds the
+// remaster's upstream lane: its env lane name (WORKFLOW_UPSTREAM_TOKEN)
+// differs from its rendered file key (workflow_github_token), so the
+// --var name must derive from the lane — the exact-name engine lookup can
+// only ever bind the tree's lowercase workflow_upstream_token variable. The
+// pre-KB-385 derivation emitted no pair for that lane and the run died with
+// "missing required input(s)".
 func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 	run := urlRun("kb-1-1790222552", &criteriav1.RunWorkflowSource{
 		Type: "url",
@@ -895,7 +901,11 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 		Namespace: "criteria-jobs",
 		Secrets: []criteriav1.RunWorkflowSecret{
 			{Name: "github-tokens", SecretProviderClass: "copilot-spc", MountPath: "/home/criteria/secrets",
-				Env: map[string]string{"WORKFLOW_GITHUB_TOKEN": "workflow_github_token", "REVIEWER_GITHUB_TOKEN": "reviewer_github_token"}},
+				Env: map[string]string{
+					"WORKFLOW_GITHUB_TOKEN":   "workflow_github_token",
+					"REVIEWER_GITHUB_TOKEN":   "reviewer_github_token",
+					"WORKFLOW_UPSTREAM_TOKEN": "workflow_github_token",
+				}},
 			{Name: "kanboard-secrets", SecretProviderClass: "kanboard-spc", MountPath: "/home/criteria/kanboard-secrets",
 				Env: map[string]string{"KANBOARD_APP_TOKEN": "kanboard_app_token", "KANBOARD_URL": "kanboard_url"}},
 		},
@@ -914,6 +924,7 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 		"kanboard_url=file:/home/criteria/kanboard-secrets/kanboard_url",
 		"workflow_github_token=file:/home/criteria/secrets/workflow_github_token",
 		"reviewer_github_token=file:/home/criteria/secrets/reviewer_github_token",
+		"workflow_upstream_token=file:/home/criteria/secrets/workflow_github_token",
 	} {
 		assert.Contains(t, cvs, want, "derived pair set must cover every declared secret key")
 	}
@@ -927,6 +938,68 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 	require.Equal(t, 0, code, out)
 	assert.Contains(t, log, "[--var] [kanboard_app_token=file:/home/criteria/kanboard-secrets/kanboard_app_token]",
 		"the derived kanboard pair must reach the criteria apply argv: %s", log)
+	// KB-385: the upstream lane's --var name is the lowercased env lane —
+	// NOT its rendered file key, and never the screaming lane name. The
+	// exact-name engine lookup binds only this spelling.
+	assert.Contains(t, log, "[--var] [workflow_upstream_token=file:/home/criteria/secrets/workflow_github_token]",
+		"the upstream lane pair must reach the criteria apply argv under its lowercase tree-var name: %s", log)
+	assert.NotContains(t, log, "--var] [WORKFLOW", "no screaming lane name may be passed as a --var name: %s", log)
+}
+
+// The KB-385 contract's loud failure arm: a CRITERIA_SECRET_VARS entry that
+// is not a file: OriginRef must stop the run BEFORE criteria is invoked
+// (exit 66, typed reason naming the offending pair) — a screamy or raw-value
+// pair can never silently become a value-only --var.
+func TestSourceRunnerSecretVarPairGuard(t *testing.T) {
+	job := jobbuilder.BuildRunnerJob(urlRun("kb-385-guard", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://example.com/wf.git?ref=main",
+	}, ""), jobbuilder.Defaults{DataPVC: "criteria-data"})
+	script := job.Spec.Template.Spec.Containers[0].Command[2]
+	dir := t.TempDir()
+	code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": "WORKFLOW_UPSTREAM_TOKEN=raw-value",
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 66, code, "a non-file: pair must fail closed with exit 66: %s", out)
+	assert.Contains(t, out, "not a file: OriginRef",
+		"the typed reason must name the offending entry: %s", out)
+	assert.Contains(t, out, "WORKFLOW_UPSTREAM_TOKEN=raw-value",
+		"the typed reason must carry the offending pair: %s", out)
+	assert.NotContains(t, stubLog, "argv:", "criteria must not be invoked")
+}
+
+// A SCREAMING-keyed file: pair is not rejected — the engine ignores it via
+// exact-name lookup — but the runner must surface the defect instead of
+// passing it down blind. A lowercase pair must raise no warning.
+func TestSourceRunnerWarnsOnScreamingSecretVarPairs(t *testing.T) {
+	job := jobbuilder.BuildRunnerJob(urlRun("kb-385 warn", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://example.com/wf.git?ref=main",
+	}, ""), jobbuilder.Defaults{DataPVC: "criteria-data"})
+	script := job.Spec.Template.Spec.Containers[0].Command[2]
+	dir := t.TempDir()
+
+	code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": "WORKFLOW_UPSTREAM_TOKEN=file:/home/criteria/secrets/workflow_github_token",
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 0, code, "a screaming file: pair passes through with a warning: %s", out)
+	assert.Contains(t, out, "warning: CRITERIA_SECRET_VARS pair name is not lowercase",
+		"the runner must surface the SCREAMING pair: %s", out)
+	assert.Contains(t, out, "WORKFLOW_UPSTREAM_TOKEN")
+	assert.Contains(t, stubLog, "[--var] [WORKFLOW_UPSTREAM_TOKEN=file:/home/criteria/secrets/workflow_github_token]",
+		"the pair still reaches the engine argv unchanged")
+
+	code, out, _ = runSourceRunnerScript(t, script, map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": "workflow_upstream_token=file:/home/criteria/secrets/workflow_github_token",
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 0, code, "a lowercase pair passes cleanly: %s", out)
+	assert.NotContains(t, out, "not lowercase", "lowercase pairs must raise no warning")
 }
 
 // originRecordPath returns the record path the runner writes for a job.

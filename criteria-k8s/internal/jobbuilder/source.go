@@ -205,7 +205,19 @@ secret_vars="${CRITERIA_SECRET_VARS-}"
 printf '%s\n' "$secret_vars" | while IFS= read -r pair; do
     [ -n "$pair" ] || continue
     case "$pair" in
-        *=file:/*) ;;
+        *=file:/*)
+            # KB-385: the varname must be the tree's lowercase secret var;
+            # the engine binds --var by exact name, so a SCREAMING pair
+            # never resolves. The builder derives lowercase names, but an
+            # out-of-band producer would be silently ignored by the engine
+            # — surface it instead of passing it down blind.
+            pairname=${pair%%=*}
+            case "$pairname" in
+                *[A-Z]*)
+                    echo "warning: CRITERIA_SECRET_VARS pair name is not lowercase: '$pairname' — the engine binds --var by exact name, so this SCREAMING pair never resolves into the tree's lowercase secret vars" >&2
+                    ;;
+            esac
+            ;;
         *) echo "CRITERIA_SECRET_VARS entry is not a file: OriginRef: '$pair'" >&2; exit 66 ;;
     esac
     printf '%s\n' "$pair" >> "$criteria_home/secret-vars.args"
