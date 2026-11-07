@@ -8,7 +8,7 @@
 #   test_pair_loop_parity.sh --compare <baseline.tsv> <candidate.tsv>
 #       OPERATOR LANE. Compares a v1 BASELINE per-step timing record against a
 #       v2 CANDIDATE per-step timing record, slot by slot, against the
-#       documented thresholds (workflows/pair_programming_loop_v2/PARITY.md).
+#       the comparator's embedded rule table.
 #         exit 0  every gated slot is within its threshold
 #         exit 1  a gated slot REGRESSED (the report names the slot)
 #         exit 2  a record/collection error (unmapped step, malformed
@@ -30,7 +30,7 @@
 #   baseline tree (workstream_handler_v1/workflows/pair_programming_loop,
 #   RETAINED - the fold deletes only the round trees). This card does NOT run
 #   it: KB-386 is UN-ARMED, so the real-card run is the operator's post-merge
-#   fleet action. See workflows/pair_programming_loop_v2/PARITY.md.
+#   fleet action; the rule table is embedded in this file.
 #
 # Rulings honoured: LOCAL-ONLY (ruling 1 - no network surface in this tree),
 # POSIX sh (no bashisms, no `local`), deterministic shell truth over agent
@@ -49,7 +49,7 @@ NS="plp"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The rule table - THE comparator's single source of truth. The same table is
-# reproduced in PARITY.md; the self-test compares the two byte-for-byte (the
+# embedded in this file as the rule table; the self-test extracts it (the
 # drift tripwire: the documented spec and the enforced spec must never
 # diverge silently).
 #
@@ -394,7 +394,6 @@ BASE_FIXTURE="$FIXTURES/self_test_v1_baseline.tsv"
 PASS_FIXTURE="$FIXTURES/self_test_v2_candidate_pass.tsv"
 V1_TREE="$TREE_ROOT/workflows/pair_programming_loop"
 V2_TREE="$TREE_ROOT/workflows/pair_programming_loop_v2"
-PARITY_MD="$TREE_ROOT/workflows/pair_programming_loop_v2/PARITY.md"
 MD_RULES="$WORKDIR/md_rules.tsv"
 
 RC=0
@@ -567,23 +566,20 @@ md_tree_steps() {
 }
 
 run_harness() {
-    [ -f "$PARITY_MD" ] || {
-        echo "FAIL: missing $PARITY_MD — the parity record ships with the comparator" >&2
-        exit 1
-    }
     [ -d "$FIXTURES" ] || {
         echo "FAIL: missing $FIXTURES — the self-test arms live there" >&2
         exit 1
     }
 
-    # the documented spec (PARITY.md) is what the harness computes against
+    # the comparator's own embedded rule table (code) is the single source of
+    # truth — never a markdown document (rules and validation are codified)
     awk '
-        /^<!-- BEGIN PARITY RULE TABLE -->/ { f = 1; next }
-        /^<!-- END PARITY RULE TABLE -->/ { f = 0 }
+        /^# --- BEGIN PARITY RULE TABLE ---$/ { f = 1; next }
+        /^# --- END PARITY RULE TABLE ---$/ { f = 0 }
         f
-    ' "$PARITY_MD" > "$MD_RULES"
+    ' "$SCRIPT_PATH" > "$MD_RULES"
     if [ ! -s "$MD_RULES" ]; then
-        echo "FAIL: $PARITY_MD carries no machine-readable rule table" >&2
+        echo "FAIL: the comparator carries no machine-readable rule table" >&2
         exit 1
     fi
 
@@ -739,20 +735,6 @@ EOF
     done
     if [ "$coverage_failures" -eq 0 ]; then
         ok "every step of both trees maps into exactly one slot"
-    fi
-
-    echo "==> Self-test: the comparator's rule table still matches PARITY.md..."
-    awk '
-        /^# --- BEGIN PARITY RULE TABLE ---$/ { f = 1; next }
-        /^# --- END PARITY RULE TABLE ---$/ { f = 0 }
-        f
-    ' "$SCRIPT_PATH" > "$WORKDIR/script_rules.tsv"
-    if [ ! -s "$WORKDIR/script_rules.tsv" ]; then
-        fail "the comparator carries no rule table"
-    elif [ "$(cat "$WORKDIR/script_rules.tsv")" = "$(cat "$MD_RULES")" ]; then
-        ok "the comparator's rule table and PARITY.md's rule table are identical"
-    else
-        fail "the comparator's rule table has drifted from PARITY.md's rule table"
     fi
 
     echo "==> Self-test: the comparator is POSIX sh..."
