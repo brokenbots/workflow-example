@@ -537,6 +537,12 @@ step "run_part_p1_fast" {
             target = data.internal.pair_slot_p1_findings.value
             value  = output.reason
         }
+        write {
+            // THE AGENT'S REPORTED OUTCOME IS THE STAMP (KB-151: the tree's own
+            // data.internal is the verdict source the verify validates against).
+            target = data.internal.pair_slot_p1_verdict.value
+            value  = "part_ready"
+        }
     }
     outcome "part_help" {
         next   = step.pair_part_p1_remediate
@@ -602,6 +608,12 @@ step "run_part_p1_deep" {
             target = data.internal.pair_slot_p1_findings.value
             value  = output.reason
         }
+        write {
+            // THE AGENT'S REPORTED OUTCOME IS THE STAMP (KB-151: the tree's own
+            // data.internal is the verdict source the verify validates against).
+            target = data.internal.pair_slot_p1_verdict.value
+            value  = "part_ready"
+        }
     }
     outcome "part_help" {
         next   = step.pair_part_p1_remediate
@@ -655,6 +667,7 @@ step "p1_verify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p1_verdict.value
         })
     }
     outcome "success" {
@@ -769,6 +782,7 @@ step "p1_reverify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p1_verdict.value
         })
     }
     outcome "success" {
@@ -833,7 +847,12 @@ step "run_part_p2_fast" {
             target = data.internal.pair_slot_p2_findings.value
             value  = output.reason
         }
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_ready"
+        }
     }
+
     outcome "part_help" {
         next   = step.pair_part_p2_remediate
         schema = object({ reason = string })
@@ -895,7 +914,16 @@ step "run_part_p2_deep" {
             target = data.internal.pair_slot_p2_findings.value
             value  = output.reason
         }
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_ready"
+        }
     }
+        write {
+            target = data.internal.pair_slot_p2_verdict.value
+            value  = "part_ready"
+        }
+
     outcome "part_help" {
         next   = step.pair_part_p2_remediate
         schema = object({ reason = string })
@@ -942,6 +970,7 @@ step "p2_verify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p2_verdict.value
         })
     }
     outcome "success" {
@@ -1034,6 +1063,7 @@ step "p2_reverify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p2_verdict.value
         })
     }
     outcome "success" {
@@ -1091,7 +1121,12 @@ step "run_part_p3_fast" {
             target = data.internal.pair_slot_p3_findings.value
             value  = output.reason
         }
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_ready"
+        }
     }
+
     outcome "part_help" {
         next   = step.pair_part_p3_remediate
         schema = object({ reason = string })
@@ -1153,7 +1188,16 @@ step "run_part_p3_deep" {
             target = data.internal.pair_slot_p3_findings.value
             value  = output.reason
         }
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_ready"
+        }
     }
+        write {
+            target = data.internal.pair_slot_p3_verdict.value
+            value  = "part_ready"
+        }
+
     outcome "part_help" {
         next   = step.pair_part_p3_remediate
         schema = object({ reason = string })
@@ -1200,6 +1244,7 @@ step "p3_verify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p3_verdict.value
         })
     }
     outcome "success" {
@@ -1292,6 +1337,7 @@ step "p3_reverify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p3_verdict.value
         })
     }
     outcome "success" {
@@ -1349,7 +1395,12 @@ step "run_part_p4_fast" {
             target = data.internal.pair_slot_p4_findings.value
             value  = output.reason
         }
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_ready"
+        }
     }
+
     outcome "part_help" {
         next   = step.pair_part_p4_remediate
         schema = object({ reason = string })
@@ -1411,7 +1462,16 @@ step "run_part_p4_deep" {
             target = data.internal.pair_slot_p4_findings.value
             value  = output.reason
         }
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_ready"
+        }
     }
+        write {
+            target = data.internal.pair_slot_p4_verdict.value
+            value  = "part_ready"
+        }
+
     outcome "part_help" {
         next   = step.pair_part_p4_remediate
         schema = object({ reason = string })
@@ -1458,6 +1518,7 @@ step "p4_verify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p4_verdict.value
         })
     }
     outcome "success" {
@@ -1550,6 +1611,7 @@ step "p4_reverify" {
             criteria_value_1 = data.internal.branch.value
             criteria_value_2 = "part_ready"
             criteria_value_3 = data.internal.entry_sha.value
+            criteria_value_4 = data.internal.pair_slot_p4_verdict.value
         })
     }
     outcome "success" {

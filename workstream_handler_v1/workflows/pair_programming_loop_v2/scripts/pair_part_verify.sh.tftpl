@@ -1,6 +1,7 @@
 criteria_value_1={{ .criteria_value_1 | shellquote }}
 criteria_value_2={{ .criteria_value_2 | shellquote }}
 criteria_value_3={{ .criteria_value_3 | shellquote }}
+criteria_value_4={{ .criteria_value_4 | shellquote }}
 set -eu
 # pair_programming_loop_v2 — the deterministic per-slot verify
 # (scripts/pair_part_verify.sh.tftpl; SHARED by all four slots' verify and
@@ -10,6 +11,7 @@ set -eu
 #   criteria_value_1 = branch (data.internal.branch.value)
 #   criteria_value_2 = expected verdict ("part_ready")
 #   criteria_value_3 = entry_sha (data.internal.entry_sha.value)
+#   criteria_value_4 = the slot chain's stamped verdict token (data.internal.pair_slot_pN_verdict.value; argv $1 still wins when present)
 #
 # One input arg — the slot's verdict token as the slot chain stamped it —
 # rides $1 (argv): "part_ready" | "part_help". The verdict token is the
@@ -31,7 +33,7 @@ set -eu
 # re-stamp before the next consumer). Any failure exits 1 with the reason on
 # stderr (the step's failure arm routes the findings to remediation).
 
-verdict="${1:-}"
+verdict="${criteria_value_4:-${1:-}}"
 case "$verdict" in
     part_ready|part_help) ;;
     *) echo "pair part verify: verdict stamp missing (arg 1 empty or foreign)" >&2; exit 1 ;;
