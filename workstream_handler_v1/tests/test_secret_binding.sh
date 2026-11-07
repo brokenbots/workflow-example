@@ -17,7 +17,8 @@ set -euo pipefail
 # (fixtures/probe_secret_binding — resolution-only, no adapter needed):
 #   1. the probe tree validates standalone;
 #   2. the interface parity (KB-304) holds: the lane is declared in the
-#      handler interface's secretEnv, the tree declares the lowercase var;
+#      handler interface's secretEnv, the tree declares the lowercase var,
+#      and docs/jobs-setup.md carries the contract as written;
 #   3. lowering a screaming lane binding a file under a DECLARED secret
 #      root RESOLVES: the run completes green and the engine reports the
 #      var as an override;
@@ -68,6 +69,13 @@ jq -e --arg lane "WORKFLOW_UPSTREAM_TOKEN" 'any(.secretEnv[]; . == $lane)' \
     "$TREE_ROOT/interface.json" >/dev/null 2>&1 \
     && ok "interface declares the WORKFLOW_UPSTREAM_TOKEN secretEnv lane" \
     || fail "interface.json must declare the WORKFLOW_UPSTREAM_TOKEN secretEnv lane"
+
+# ── 2b. the contract is documented ───────────────────────────────────────────
+DOCS="$(cd "$TREE_ROOT/.." && pwd)/docs/jobs-setup.md"
+grep -q "lower(env lane)=file:<mountPath>/<fileKey>" "$DOCS" \
+    && ok "docs/jobs-setup.md pins the KB-385 binding contract" \
+    || fail "docs/jobs-setup.md must pin the KB-385 binding contract"
+
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

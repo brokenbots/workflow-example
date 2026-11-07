@@ -946,6 +946,30 @@ func TestSourceRunnerSecretVarsDerivedFromWorkflowSecrets(t *testing.T) {
 	assert.NotContains(t, log, "--var] [WORKFLOW", "no screaming lane name may be passed as a --var name: %s", log)
 }
 
+// The KB-385 contract's loud failure arm: a CRITERIA_SECRET_VARS entry that
+// is not a file: OriginRef must stop the run BEFORE criteria is invoked
+// (exit 66, typed reason naming the offending pair) — a screamy or raw-value
+// pair can never silently become a value-only --var.
+func TestSourceRunnerSecretVarPairGuard(t *testing.T) {
+	job := jobbuilder.BuildRunnerJob(urlRun("kb-385-guard", &criteriav1.RunWorkflowSource{
+		Type: "url",
+		URL:  "git::https://example.com/wf.git?ref=main",
+	}, ""), jobbuilder.Defaults{DataPVC: "criteria-data"})
+	script := job.Spec.Template.Spec.Containers[0].Command[2]
+	dir := t.TempDir()
+	code, out, stubLog := runSourceRunnerScript(t, script, map[string]string{
+		"WORKFLOW_URL":         "git::https://example.com/wf.git",
+		"CRITERIA_SECRET_VARS": "WORKFLOW_UPSTREAM_TOKEN=raw-value",
+		"CRITERIA_HOME":        filepath.Join(dir, "home"),
+	})
+	require.Equal(t, 66, code, "a non-file: pair must fail closed with exit 66: %s", out)
+	assert.Contains(t, out, "not a file: OriginRef",
+		"the typed reason must name the offending entry: %s", out)
+	assert.Contains(t, out, "WORKFLOW_UPSTREAM_TOKEN=raw-value",
+		"the typed reason must carry the offending pair: %s", out)
+	assert.NotContains(t, stubLog, "argv:", "criteria must not be invoked")
+}
+
 // originRecordPath returns the record path the runner writes for a job.
 func originRecordPath(home, jobName string) string {
 	return filepath.Join(home, "runs", jobName, "run-metadata.json")
