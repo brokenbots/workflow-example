@@ -213,8 +213,8 @@ assert_slot_chain_exact() {
     i=1
     while [ "$i" -le "$2" ]; do
         # fast or deep lane, exactly one entry per slot:
-        n_fast=$(grep -c "\"step\":\"run_part_p${i}_fast\"," "$EV" 2>/dev/null || echo 0)
-        n_deep=$(grep -c "\"step\":\"run_part_p${i}_deep\"," "$EV" 2>/dev/null || echo 0)
+        n_fast=$(grep -c "\"payload_type\":\"StepEntered\",\"payload\":{\"step\":\"run_part_p${i}_fast\"," "$EV" 2>/dev/null || true)
+        n_deep=$(grep -c "\"payload_type\":\"StepEntered\",\"payload\":{\"step\":\"run_part_p${i}_deep\"," "$EV" 2>/dev/null || true)
         total=$((n_fast + n_deep))
         if [ "$total" -eq 1 ]; then
             ok "$1: slot p${i} entered exactly once (fast=$n_fast deep=$n_deep)"

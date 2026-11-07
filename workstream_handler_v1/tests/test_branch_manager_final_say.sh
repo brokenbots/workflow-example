@@ -167,13 +167,16 @@ else
 fi
 
 echo "==> Checking the brief travels as the fresh session's first prompt..."
+# dave ruling 2026-11-07: live dials re-enter the PROVEN pair_programming_loop
+# tree (v2 is lab-gated) — the load-bearing leg is the brief riding as
+# developer_initial_prompt on every hand-off dial.
 for n in 2 3; do
     block="$(sed -n '/^subworkflow "pair_programming_loop_feedback_r'"${n}"'" {/,/^}/p' "${TREE_ROOT}/main.chcl")"
-    if printf '%s' "$block" | grep -q 'source = "./workflows/pair_programming_loop_v2"' \
+    if printf '%s' "$block" | grep -q 'source = "./workflows/pair_programming_loop"' \
         && printf '%s' "$block" | grep -q 'developer_initial_prompt = data.internal.developer_feedback.value'; then
-        ok "r${n} dial re-enters pair_programming_loop_v2 and passes the developer_feedback brief as developer_initial_prompt (fresh session's first prompt)"
+        ok "r${n} dial re-enters pair_programming_loop (proven tree) and passes the developer_feedback brief as developer_initial_prompt (fresh session's first prompt)"
     else
-        fail "r${n} dial does not re-enter pair_programming_loop_v2 with the brief as developer_initial_prompt"
+        fail "r${n} dial does not re-enter pair_programming_loop with the brief as developer_initial_prompt"
     fi
 done
 

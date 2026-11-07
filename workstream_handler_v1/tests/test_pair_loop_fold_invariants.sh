@@ -159,16 +159,19 @@ else
     fail "negative arm: a scan false-positives on honest fold-era shapes"
 fi
 
-# ── INVARIANT 1: all four pair-loop dial blocks re-enter the v2 tree ─────────
+# ── INVARIANT 1: all four pair-loop dial blocks re-enter the PROVEN v1 tree ──
+# (dave ruling 2026-11-07: the v2 rewrite is LAB-GATED; live routes must run
+# the pair_programming_loop tree whose behavior is proven at the fleet, with
+# its push capability removed and no in-loop full CI.)
 
-echo "==> Checking all four pair-loop dial blocks source pair_programming_loop_v2..."
+echo "==> Checking all four pair-loop dial blocks source pair_programming_loop (v1)..."
 for dial in pair_programming_loop pair_programming_loop_feedback \
     pair_programming_loop_feedback_r2 pair_programming_loop_feedback_r3; do
     block="$(sed -n "/^subworkflow \"${dial}\" {/,/^}/p" "${TREE_ROOT}/main.chcl")"
-    if printf '%s' "${block}" | grep -qF 'source = "./workflows/pair_programming_loop_v2"'; then
-        ok "INVARIANT 1: dial ${dial} carries source = ./workflows/pair_programming_loop_v2 (asserted by dial name)"
+    if printf '%s' "${block}" | grep -qF 'source = "./workflows/pair_programming_loop"'; then
+        ok "INVARIANT 1: dial ${dial} carries source = ./workflows/pair_programming_loop (proven tree served; v2 lab-gated)"
     else
-        fail "INVARIANT 1: dial ${dial} does not source ./workflows/pair_programming_loop_v2"
+        fail "INVARIANT 1: dial ${dial} does not source ./workflows/pair_programming_loop"
     fi
 done
 

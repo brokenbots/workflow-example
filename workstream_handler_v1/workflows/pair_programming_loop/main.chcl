@@ -56,18 +56,13 @@ data "internal" "failure_reason" {
     value = ""
 }
 
-// LOCAL-ONLY contract (remaster ruling 1): every network operation leaves
-// the loop through this subworkflow. Checkpoint pushes, wip checkpoints and
-// the review checkpoint all dial the same upstream_sync tree; the loop
-// itself never touches the remote (remote-tracking refs are local data).
-subworkflow "upstream_sync" {
-    source = "../upstream_sync"
-    input = {
-        worktree_dir    = var.worktree_dir
-        branch          = data.internal.branch.value
-        workstream_file = var.workstream_file
-    }
-}
+// PERMISSIONS FIX (dave ruling 2026-11-07 — "remove the ability to push"):
+// the loop carries NO network surface at all. The old best-effort checkpoint
+// dials to upstream_sync are re-targeted to local echo no-ops (same out-routes,
+// same best-effort semantics, zero remote capability); work survives locally
+// on the durable PVC worktree, the final PR push belongs to the review/post-
+// loop lane (outside this tree). The subworkflow decl is REMOVED, not just
+// unused — no credential lane can ever re-enter this tree.
 
 
 
@@ -314,11 +309,15 @@ step "preserve_pending" {
     outcome "failure" { next = state.failed }
 }
 
-// Delegate the upstream push (the ONLY network op after a dead turn).
-// Both outcomes route on — best-effort durability: a sync failure must not
-// fail the run; the loop's continuation prompt logic below still fires.
+// PERMISSIONS FIX (dave ruling 2026-11-07): the upstream push is GONE — the
+// loop cannot push. The checkpoint stays LOCAL: the commit above already
+// preserved the work on the durable PVC worktree; this step is a local echo
+// no-op keeping the original out-route.
 step "sync_checkpoint_upstream" {
-    target = subworkflow.upstream_sync
+    target = adapter.shell.sh
+    input {
+        command = "echo 'checkpoint local-only: push disabled by tree policy'"
+    }
     outcome "success" { next = step.resume_after_preservation }
     outcome "failure" { next = step.resume_after_preservation }
 }
@@ -379,14 +378,17 @@ step "commit_work_log" {
     outcome "failure" { next = state.failed }
 }
 
-// Durability checkpoint: place the branch on the remote so committed work
-// survives container loss (see EXPERIMENT-ANALYSIS-2026-09-02.md, recommendation 1 — CRI-54/69/75
-// lost uncommitted developer work when the run container died mid-loop). The
-// push is delegated to the upstream_sync subworkflow (the loop holds zero
-// credentials; LOCAL-ONLY contract, ruling 1). A
-// checkpoint miss never fails the run.
+// Checkpoint (PERMISSIONS FIX, dave ruling 2026-11-07 — "remove the ability
+// to push"): the remote checkpoint is GONE; durability rides the committed
+// work on the durable PVC worktree (the same rationale as
+// EXPERIMENT-ANALYSIS-2026-09-02.md recommendation 1, served locally). This
+// step is a local echo no-op keeping the original out-route; a checkpoint
+// miss can never fail the run.
 step "push_wip_checkpoint" {
-    target = subworkflow.upstream_sync
+    target = adapter.shell.sh
+    input {
+        command = "echo 'wip checkpoint local-only: push disabled by tree policy'"
+    }
     outcome "success" { next = step.verify_committed }
     outcome "failure" { next = step.verify_committed }
 }
@@ -646,12 +648,14 @@ step "commit_review_log" {
     outcome "failure" { next = state.failed }
 }
 
-// Second durability checkpoint after the review pass: an approved head (or a
-// changes-requested head) is exactly the state a restart must be able to find
-// on the remote. Same best-effort, upstream-delegated semantics as
-// push_wip_checkpoint (LOCAL-ONLY contract).
+// Post-review checkpoint (PERMISSIONS FIX, dave ruling 2026-11-07): remote
+// push DISABLED — the durable PVC worktree carries the reviewed head. Local
+// echo no-op; same best-effort out-route.
 step "push_review_checkpoint" {
-    target = subworkflow.upstream_sync
+    target = adapter.shell.sh
+    input {
+        command = "echo 'review checkpoint local-only: push disabled by tree policy'"
+    }
     outcome "success" { next = switch.triage_review }
     outcome "failure" { next = switch.triage_review }
 }

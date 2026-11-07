@@ -172,10 +172,10 @@ subworkflow "pr_reviewer_loop" {
 // Byte-compatible parent contract (workstream_file in, done/failed + reason).
 // log_file rides v2's own default — ruling 12: the handler dial stops passing it.
 subworkflow "pair_programming_loop" {
-    source = "./workflows/pair_programming_loop_v2"
+    source = "./workflows/pair_programming_loop"
     input = {
         workstream_file       = var.workstream_file
-        ci_gate_cmd           = var.ci_gate_cmd
+        ci_gate_cmd           = ""
         allow_dirty           = var.allow_dirty
         branch_notes          = data.internal.branch_notes.value
         worktree_dir          = var.worktree_dir
@@ -190,10 +190,10 @@ subworkflow "pair_programming_loop" {
 // feedback injected via developer_initial_prompt; per-part remediation
 // rounds stay INSIDE the tree now).
 subworkflow "pair_programming_loop_feedback" {
-    source = "./workflows/pair_programming_loop_v2"
+    source = "./workflows/pair_programming_loop"
     input = {
         workstream_file          = var.workstream_file
-        ci_gate_cmd              = var.ci_gate_cmd
+        ci_gate_cmd              = ""
         developer_initial_prompt = data.internal.developer_feedback.value
         allow_dirty              = var.allow_dirty
         branch_notes             = data.internal.branch_notes.value
@@ -204,13 +204,11 @@ subworkflow "pair_programming_loop_feedback" {
     }
 }
 
-// KB-267 (folded onto pair_programming_loop_v2, KB-386): the hand-off dials
-// no longer provision round-suffixed copilot instances (developer_r2 /
-// reviewer_r2, developer_r3 / reviewer_r3 are gone — the round trees are
-// retired). A hand-off RE-ENTERS pair_programming_loop_v2 — the same tree the
-// base and feedback dials run — so the tree splits the workstream into parts
-// and every part is remediated INSIDE the tree (per-part develop -> verify ->
-// remediate -> reverify). The branch manager's remediation brief rides in as
+// KB-267 (wave retro, 2026-11-07): the hand-off dials re-enter the PROVEN
+// pair_programming_loop tree (round-suffixed copilot instances developer_r2 /
+// reviewer_r2 / *_r3 retired with the round trees). The pair-loop v2 rewrite
+// (KB-386/KB-277 wave) is LAB-GATED per dave's ruling — not served on live
+// routes until its routing simulator ladder is complete. The branch manager's remediation brief rides in as
 // developer_initial_prompt (the KB-262 developer_feedback boundary write); it
 // is the tree's only channel for the manager's findings, so the brief stays
 // self-contained. The round-wipe rationale the round trees existed for (a
@@ -219,10 +217,10 @@ subworkflow "pair_programming_loop_feedback" {
 // The shell instance stays shared on purpose: commands are stateless and the
 // worktree/branch must stay the same.
 subworkflow "pair_programming_loop_feedback_r2" {
-    source = "./workflows/pair_programming_loop_v2"
+    source = "./workflows/pair_programming_loop"
     input = {
         workstream_file          = var.workstream_file
-        ci_gate_cmd              = var.ci_gate_cmd
+        ci_gate_cmd              = ""
         developer_initial_prompt = data.internal.developer_feedback.value
         allow_dirty              = var.allow_dirty
         branch_notes             = data.internal.branch_notes.value
@@ -234,10 +232,10 @@ subworkflow "pair_programming_loop_feedback_r2" {
 }
 
 subworkflow "pair_programming_loop_feedback_r3" {
-    source = "./workflows/pair_programming_loop_v2"
+    source = "./workflows/pair_programming_loop"
     input = {
         workstream_file          = var.workstream_file
-        ci_gate_cmd              = var.ci_gate_cmd
+        ci_gate_cmd              = ""
         developer_initial_prompt = data.internal.developer_feedback.value
         allow_dirty              = var.allow_dirty
         branch_notes             = data.internal.branch_notes.value
