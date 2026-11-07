@@ -65,7 +65,7 @@ git -C "$WORK" checkout -qb ticket-branch
 # does not exist, so a clone comes out unborn and the fixture's divergent
 # push fails silently.
 git -C "$WORK" push -q origin ticket-branch 2>/dev/null
-git -C "$ORIGIN" symbolic-ref HEAD refs/heads/ticket-branch
+git --git-dir="$ORIGIN" symbolic-ref HEAD refs/heads/ticket-branch
 
 render() { # -> $TMP/push.sh
     sed -e "s@^criteria_value_1=.*@criteria_value_1='ticket-branch'@" \
