@@ -381,13 +381,6 @@ ci: validate
 	bash k8s/tests/test_workflow_graphs_flat.sh
 	@echo "== ci: workstream_handler_v1 regression suite =="
 	@for t in workstream_handler_v1/tests/test_*.sh; do \
-		case "$$t" in \
-			*test_checkpoint_base_branch_render.sh|*test_subworkflow_var_plumbing.sh) \
-				if ! command -v python3 >/dev/null 2>&1; then \
-					echo "SKIP $$t: needs python3 (not installed on this runner; CI covers it)"; \
-					continue; \
-				fi ;; \
-		esac; \
 		echo "RUN $$t"; \
 		bash "$$t" || exit 1; \
 	done

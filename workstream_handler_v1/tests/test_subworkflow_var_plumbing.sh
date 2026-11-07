@@ -27,6 +27,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HANDLER_DIR="${SCRIPT_DIR}/.."
 
+command -v node >/dev/null 2>&1 || { echo "FAIL: node is required" >&2; exit 1; }
 node - "$HANDLER_DIR" <<'JSCHECK'
 const fs = require("fs");
 const path = require("path");

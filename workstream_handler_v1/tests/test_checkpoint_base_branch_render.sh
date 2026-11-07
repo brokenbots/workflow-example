@@ -24,7 +24,11 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 # The placeholder is rendered with the same line-anchored shellquote
 # substitution test_upstream_sync.sh uses for the push script. Rendering
 # needs only text substitution: CI runners ship python3, but minimal
-# review/dev pods (Alpine, unprivileged) do not.
+# review/dev pods (Alpine, unprivileged) do not. The render hardcodes
+# single quotes around the branch value instead of reproducing shellquote,
+# so it matches shellquote output only for branch names containing neither
+# quotes nor whitespace; the fixture branch is entrysha-sanity, so the
+# rendered output is unchanged for the covered case.
 BRANCH="entrysha-sanity"
 sed -e "s@^criteria_value_1=.*@criteria_value_1='${BRANCH}'@" \
     "$TEMPLATE" > "${WORK_DIR}/verify.sh"
