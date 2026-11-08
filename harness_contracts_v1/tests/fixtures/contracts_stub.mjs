@@ -80,9 +80,17 @@ const MODES = {
   // declared green lane.
   f2_reject: () => [
     submit({ outcome: "rejected", payload: { verdict: "wrong field set on purpose" } }),
+    // 0.5.19 fold semantics: the wrong-lane REJECTION is observed when the
+    // fold refuses — the payload supplies its own reason member while a
+    // DIFFERENT top-level reason rides the legacy lane (the fold-consumed
+    // acceptance moved to its own leg f2b, since an accepted finalize ends
+    // the step and cannot be followed by more calls in one sequence).
     submit({
       outcome: "rejected",
-      reason: "wrong lane on purpose: reason string outside the typed payload lane",
+      reason: "wrong lane on purpose: top-level reason while the payload supplies its own",
+      payload: {
+        reason: "this payload carries its own reason; the top-level one must be refused",
+      },
     }),
     submit({
       outcome: "rejected",
@@ -221,6 +229,18 @@ const MODES = {
   // comment cannot be a schema member — compile restricts outcome schema
   // fields to the adapter handshake — so the fold's own acceptance shape
   // stays pinned upstream at tag v0.5.18.)
+  f2b_foldaccept: () => [
+    // 0.5.19 fold semantics: the acceptance half of the KB-388 fix. A
+    // top-level reason on a typed submission whose contract requires a
+    // reason member the payload lacks is FOLDED into the payload and
+    // finalizes accepted — the fold delivers on the tool doc's promise
+    // instead of the v0.5.18 dead-code rejection (castle 9ad4c116/361b3d39).
+    submit({
+      outcome: "rejected",
+      reason: "f2b fold-accept probe: this top-level reason must fold into the payload and finalize accepted",
+      payload: {},
+    }),
+  ],
   f10_reasonfold: () => [
     submit({
       outcome: "approved",

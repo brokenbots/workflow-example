@@ -278,14 +278,18 @@ fi
 
 run_fixture f2_reject_echo f2_reject
 expect_rc_zero F2
-# 0.5.17 wiring: the wrong-FIELD-SET rejection is payload_invalid (schema
-# validation); the wrong-LANE rejection is a silent in-turn ToolResult
-# (declared-params guard, no event). The repair loop's boundness is proven by
-# the single payload_invalid AND the single committed outcome below.
+# 0.5.19 wiring (KB-388 fold): the wrong-FIELD-SET rejection is payload_invalid
+# (the engine schema validator sees it); the fold-REFUSED wrong-lane submission
+# (the payload supplies its own reason while a different one rides the
+# top-level lane) is rejected in-turn by the ADAPTER (typedReasonNotConsumed —
+# silent to castle events, the model repairs from the ToolResult) — so the
+# engine stream carries exactly 1 payload_invalid. A fold-CONSUMED top-level
+# reason finalizes accepted (the fold delivers on the tool doc's promise);
+# that acceptance half is its own leg F2b below.
 if [ "$(kind_count "$EV" outcome.payload_invalid)" = "1" ]; then
-    ok "F2 repair loop bounded: 1 payload_invalid (schema rejection) + 1 silent wrong-lane rejection, then success"
+    ok "F2 repair loop bounded: 1 engine payload_invalid (wrong-field) + silent in-turn fold-refusal, then success"
 else
-    fail "F2: expected exactly 1 payload_invalid repair-loop rejection (0.5.17: wrong-lane rejects silently), saw $(kind_count "$EV" outcome.payload_invalid)"
+    fail "F2: expected exactly 1 engine payload_invalid rejections (0.5.19 fold semantics), saw $(kind_count "$EV" outcome.payload_invalid)"
 fi
 expect_run_green F2 echo_done
 
@@ -329,6 +333,26 @@ if has_ev 'D19 engineered rejection routed green: wrong-field-set and wrong-lane
     ok "F2 D19 engineered reason carried verbatim in run events"
 else
     fail F2: D19 engineered reason not found verbatim in run events
+fi
+
+# ── F2b: KB-388 — the fold-consumed top-level reason ACCEPTED on a typed step
+# (0.5.19 fold semantics: the payload-reason acceptance half pinned separately
+# from F2's rejection matrix, because an accepted finalize ends the step and
+# cannot follow the rejection probes in one sequence).
+
+run_fixture f2b_foldaccept f2b_foldaccept
+expect_rc_zero F2b
+expect_run_green F2b echo_done
+if [ "$(kind_count "$EV" outcome.payload_invalid)" = "0" ]; then
+    ok "F2b: the fold-consumed top-level reason finalized accepted with zero payload_invalid (the fold delivers on the tool doc's promise)"
+else
+    fail "F2b: expected 0 payload_invalid on the folded acceptance, saw $(kind_count "$EV" outcome.payload_invalid)"
+fi
+F2B_REC="$PROOT/contracts_probe_records/d19_verdict_record"
+if grep -qF 'f2b fold-accept probe: this top-level reason must fold into the payload and finalize accepted' "$F2B_REC" 2>/dev/null; then
+    ok "F2b: the record carries the folded top-level prose verbatim (the fold lane projected into output.reason)"
+else
+    fail "F2b: record does not carry the folded reason — the fold acceptance did not project into the typed lane"
 fi
 
 # ── F3: C17 — empty adapter comment rejected loudly, observed exit green ────
