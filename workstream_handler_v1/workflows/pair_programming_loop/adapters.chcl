@@ -23,7 +23,7 @@ adapter "shell" "sh" {
 adapter "copilot" "developer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.18"
+    version = "0.5.19"
     // No secrets: the developer is local-only. It commits to the worktree;
     // it never authenticates against any remote. (Remaster rulings 1+2.)
     config {
@@ -44,7 +44,7 @@ adapter "copilot" "developer" {
 adapter "copilot" "reviewer" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.18"
+    version = "0.5.19"
     // No secrets: the reviewer is local-only (read-only on the worktree).
     // (Remaster ruling 1.)
     config {

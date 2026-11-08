@@ -1,0 +1,80 @@
+// Fixture F2b (KB-388, the 0.5.19 fold acceptance half): a top-level reason
+// submission on a typed step whose contract requires a reason member the
+// payload lacks is FOLDED into the payload and finalizes accepted — the fold
+// delivers on the submit_outcome tool doc's promise instead of the v0.5.18
+// dead-code rejection (field evidence: castle 9ad4c116, 361b3d39). The folded
+// reason is what the engine projects into output.reason; the record must
+// carry the folded prose exactly.
+workflow {
+    name             = "harness_contracts_v1_f2b_foldaccept"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_reject"
+    target_state     = "echo_done"
+    policy { max_total_steps = 4 }
+}
+
+data "internal" "d21_reason" {
+    type  = string
+    value = ""
+}
+
+data "internal" "d19_verdict" {
+    type  = string
+    value = ""
+}
+
+data "internal" "c17_comment" {
+    type  = string
+    value = ""
+}
+
+step "contract_reject" {
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_reject.md.tftpl", {})
+    }
+    outcome "rejected" {
+        schema = object({ reason = string })
+        write {
+            target = data.internal.d19_verdict.value
+            value  = output.reason
+        }
+        next = step.echo_verdict
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
+}
+
+step "echo_verdict" {
+    target      = adapter.shell.recorder
+    allow_tools = []
+    input {
+        command = templatefile("./scripts/echo_verdict.sh.tftpl", {
+            probe_root  = var.probe_root
+            d21_reason  = ""
+            c14_reason  = ""
+            d19_verdict = data.internal.d19_verdict.value
+            c17_comment = data.internal.c17_comment.value
+        })
+    }
+    outcome "success" { next = state.echo_done }
+    outcome "failure" { next = state.failed }
+}
+
+state "echo_done" {
+    terminal = true
+    success  = true
+}
+
+state "failed" {
+    terminal = true
+    success  = false
+}
