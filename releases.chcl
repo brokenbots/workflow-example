@@ -17,7 +17,7 @@
 # same file stays diff-friendly and greppable, and deliberately NOT a workflow
 # (nothing in criteria compiles it).
 
-copilot = "0.5.17" # KB-263 typed verdict payloads + KB-216 + KB-260 (published 10-16)
+copilot = "0.5.18" # KB-263/260 + KB-370 reason-fold (top-level reason/comment folded into typed payloads); published tag on origin f5d69d7, pushed 11-08
 shell   = "0.5.5"  # identical to main as of 10-18 (KB-283)
 
 # KB-313 (ADR 307): the former peer_shell_tag/peer_copilot_tag literals are

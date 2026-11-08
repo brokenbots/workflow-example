@@ -211,6 +211,36 @@ const MODES = {
     }),
   ],
 
+  // F10 (KB-387): the KB-370 fold. Call (1) is the wrong-lane probe — a
+  // top-level reason on a typed submission must still be the in-turn lane
+  // rejection (the fold never rescues it). Call (2) carries the payload
+  // reason with the documented top-level comment riding the comment lane —
+  // the plain typed-lane finalize finalizes green under the rolled adapter
+  // (0.5.18) exactly as under 0.5.17: the fold-boundary guard. (A
+  // fold-acceptance vector is not constructible through criteria compile:
+  // comment cannot be a schema member — compile restricts outcome schema
+  // fields to the adapter handshake — so the fold's own acceptance shape
+  // stays pinned upstream at tag v0.5.18.)
+  f10_reasonfold: () => [
+    submit({
+      outcome: "approved",
+      payload: {
+        reason:
+          "F10 wrong-lane probe: a top-level reason on a typed submission is rejected by the lane guard and must never commit",
+      },
+      reason:
+        "F10 wrong-lane probe: a top-level reason on a typed submission is rejected by the lane guard and must never commit",
+    }),
+    submit({
+      outcome: "approved",
+      payload: {
+        reason:
+          "F10 typed-lane finalize accepted under the rolled adapter: the wrong-lane probe above was rejected without committing, then this payload-lane finalize committed the step green (KB-370 fold boundary; the fold's own acceptance shape is pinned upstream at tag v0.5.18 and on the live CR row)",
+      },
+      comment: "F10 documented top-level comment riding the comment lane",
+    }),
+  ],
+
   // C18a/D22 + C18b: never-finalize stimuli — the turn budget exhausts and
   // the missing-finalize class (or, with no lanes mapped, the loud routing
   // error) is the designed shape.

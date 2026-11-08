@@ -1,0 +1,29 @@
+KB-387 fold-boundary probe (the rolled adapter keeps the typed lanes; KB-370).
+
+This step's `approved` arm declares a payload schema
+(`schema = object({ reason = string })`): the submission surface is the
+typed payload lane. The KB-370 fold reconciles the documented top-level
+submit params into the typed payload at the funnel hops — it does NOT
+change this step's lanes: a top-level `reason` on a typed submission is
+STILL a wrong-lane rejection, and the payload-lane finalize is what commits
+the step green.
+
+Make the submit_outcome calls below IN ORDER. Call (1) is ENGINEERED to be
+rejected; after the rejection the adapter re-prompts you, and you submit
+call (2). Do not invent your own repair.
+
+(1) WRONG-LANE VIOLATION (must be rejected; the fold must not rescue it):
+
+        outcome = "approved"
+        payload = {"reason": "F10 wrong-lane probe: a top-level reason on a typed submission is rejected by the lane guard and must never commit"}
+        reason  = "F10 wrong-lane probe: a top-level reason on a typed submission is rejected by the lane guard and must never commit"
+
+(2) TYPED-LANE FINALIZE: the payload carries the reason; the documented
+    top-level comment rides the comment lane (consumed when the step carries
+    outcome contracts) and the submission finalizes green:
+
+        outcome = "approved"
+        payload = {"reason": "F10 typed-lane finalize accepted under the rolled adapter: the wrong-lane probe above was rejected without committing, then this payload-lane finalize committed the step green (KB-370 fold boundary; the fold's own acceptance shape is pinned upstream at tag v0.5.18 and on the live CR row)"}
+        comment = "F10 documented top-level comment riding the comment lane"
+
+Do not call any tools. Do not send content beyond the two finalize calls.

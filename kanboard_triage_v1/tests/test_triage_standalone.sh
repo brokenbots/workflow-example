@@ -216,7 +216,7 @@ require_equal \
 # would pass vacuously if compile ever emitted null for both.
 # #303: the expected copilot digest is DERIVED, not hardcoded: resolve the
 # manifest version from releases.chcl to its digest via the local lockfile
-# (review_triage_v1/.criteria.lock.hcl pins copilot = manifest 0.5.17). The
+# (review_triage_v1/.criteria.lock.hcl pins the manifest's copilot version). The
 # three adapters must pin THAT digest — a stale hand pin regresses here.
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COPILOT_PIN="$(awk '/adapter "copilot"/,/}/' "$(cd "$(dirname "$0")/../.." && pwd)/review_triage_v1/.criteria.lock.hcl" | grep -m1 -oE 'sha256:[0-9a-f]+' | head -1)"
@@ -227,7 +227,7 @@ fi
 require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "review_triage_v1") | .body.adapters[] | select(.name == "triage_reviewer") | .pinned_digest' "$GRAPH")" \
     "$COPILOT_PIN" \
-    "reviewer copilot pins the releases.chcl-resolved published digest (0.5.17)"
+    "reviewer copilot pins the releases.chcl-resolved published digest"
 require_equal \
     "$(jq -r '.subworkflows[] | select(.body.name == "qa_triage_v1") | .body.adapters[] | select(.name == "investigator") | .pinned_digest' "$GRAPH")" \
     "$COPILOT_PIN" \
