@@ -349,8 +349,13 @@ fi
 # (schema collection); otherwise the guard defers to the runtime gate and the
 # fixture validates permissively. Detect which half is observable and assert
 # it — never a silent pass.
+# The referenced version derives from the FIXTURE's OWN lockfile (dave pin
+# discipline: never a hardcoded version literal in a test guard — KB-303):
+# the fixture's copilot pin version is read from its .criteria.lock.hcl.
+copilot_ver="$(awk '/adapter "copilot"/,/}/' "$G5_FIXTURE/.criteria.lock.hcl" \
+    | sed -n 's/.*version *= *"\([^"]*\)".*/\1/p' | head -1)"
 copilot_digest="$(cd "$G5_FIXTURE" && "$CRITERIA" adapter list --referenced 2>/dev/null \
-    | awk -v v=":0.5.15" '$2 ~ v"$" {print $3}')"
+    | awk -v v=":${copilot_ver}" '$2 ~ v"$" {print $3}')"
 copilot_cached=""
 if [ -n "$copilot_digest" ] && "$CRITERIA" adapter list --installed 2>/dev/null | grep "$copilot_digest" >/dev/null; then
     copilot_cached="1"
