@@ -100,14 +100,23 @@ for tree in $LOOP_TREES; do
 done
 
 # adapter pins unchanged (remaster must not drift pins silently):
-for tree in $LOOP_TREES; do
-    a="$TREE_ROOT/workflows/$tree/adapters.chcl"
-    if grep -q 'version = "0.5.17"' "$a" && grep -q 'version = "0.5.5"' "$a"; then
-        ok "$tree adapter pins intact (shell 0.5.5, copilot 0.5.17)"
-    else
-        fail "$tree adapter pins drifted"
-    fi
-done
+# the expected versions derive from releases.chcl (KB-387) so pin rolls
+# don't brick this guard with stale literals.
+PIN_RELEASES="$TREE_ROOT/../releases.chcl"
+COPILOT_PIN="$(awk '$1=="copilot" {gsub(/"/,"",$3); print $3}' "$PIN_RELEASES")"
+SHELL_PIN="$(awk '$1=="shell" {gsub(/"/,"",$3); print $3}' "$PIN_RELEASES")"
+if [ -z "$COPILOT_PIN" ] || [ -z "$SHELL_PIN" ]; then
+    fail "could not derive copilot/shell pins from releases.chcl"
+else
+    for tree in $LOOP_TREES; do
+        a="$TREE_ROOT/workflows/$tree/adapters.chcl"
+        if grep -q "version = \"$COPILOT_PIN\"" "$a" && grep -q "version = \"$SHELL_PIN\"" "$a"; then
+            ok "$tree adapter pins intact (shell $SHELL_PIN, copilot $COPILOT_PIN)"
+        else
+            fail "$tree adapter pins drifted"
+        fi
+    done
+fi
 
 if [ "$FAILED" -ne 0 ]; then
     echo "test_pair_loop_local_isolation: $FAILED failure(s)" >&2
