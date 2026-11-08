@@ -30,7 +30,7 @@ adapter "shell" "wt" {
 adapter "copilot" "manager" {
     environment = shell.worktree
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.17"
+    version     = "0.5.18"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
     }
@@ -52,7 +52,7 @@ adapter "copilot" "manager" {
 adapter "copilot" "triage" {
     environment = shell.worktree
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.17"
+    version     = "0.5.18"
     secrets {
         GITHUB_TOKEN = var.workflow_github_token
     }
