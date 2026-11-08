@@ -1,0 +1,48 @@
+// Fixture F10 (KB-387): the rolled copilot adapter's fold-boundary guard
+// (KB-370, pin 0.5.18). The KB-370 fold reconciles the documented top-level
+// submit params into the typed payload at the funnel hops (the engine-side
+// validate_developer_response class); the criteria-compiled contract surface
+// it MUST NOT change is pinned here with a two-call chain: (1) a top-level
+// reason on a typed submission is still the in-turn wrong-lane rejection —
+// the fold never rescues it and it commits nothing (the rejection path still
+// carries finalizeFailureIssues for un-foldable shapes); (2) the payload-lane
+// finalize with the documented top-level comment riding along commits green
+// (exactly one approved StepOutcome, done terminal). (A fold-acceptance
+// vector with comment as a SCHEMA member is not constructible here: compile
+// restricts outcome schema fields to the adapter handshake — outcome/reason —
+// so the fold's own acceptance shape stays pinned upstream at tag v0.5.18
+// and live on the CR acceptance row; that is also why every shipped leg
+// F1-F9 runs identically under 0.5.17 and 0.5.18.)
+workflow {
+    name             = "harness_contracts_v1_f10_reasonfold"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "contract_fold"
+    target_state     = "done"
+    policy { max_total_steps = 4 }
+}
+
+step "contract_fold" {
+    outcome "failure" {
+        schema = object({ reason = string })
+        next   = state.failed
+    }
+    target      = adapter.copilot.main
+    allow_tools = []
+    input {
+        prompt = templatefile("./agents/contract_fold.md.tftpl", {})
+    }
+    outcome "approved" {
+        schema = object({ reason = string })
+        next   = state.done
+    }
+}
+
+state "done" {
+    terminal = true
+    success  = true
+}
+state "failed" {
+    terminal = true
+    success  = false
+}

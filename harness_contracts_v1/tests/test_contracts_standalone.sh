@@ -526,6 +526,43 @@ else
 fi
 expect_run_green F6d
 
+# ── F10: KB-387 — the rolled adapter's fold-boundary guard (rejection +
+# typed-lane finalize under the 0.5.18 pin)
+
+run_fixture f10_reasonfold f10_reasonfold
+expect_rc_zero F10
+expect_run_green F10
+expect_step F10 contract_fold approved
+# The leg finalizes with ZERO payload_invalid: call (1) the wrong-lane probe
+# is the in-turn lane rejection (silent in events, re-prompted) and call (2)
+# the typed-lane finalize commits first try. The KB-370 fold itself serves
+# the funnel hops and pins upstream + on the live CR row (see fixture header);
+# what the roll must never regress on the compiled surface is exactly this:
+# wrong-lane rejection persistence + plain typed finalize green.
+if [ "$(kind_count "$EV" outcome.payload_invalid)" = "0" ]; then
+    ok "F10 finalized with zero payload_invalid on the rolled adapter (roll is behavior-preserving on the compiled surface)"
+else
+    fail "F10: expected 0 payload_invalid on the rolled adapter, saw $(kind_count "$EV" outcome.payload_invalid)"
+fi
+# Commit noise must stay bounded EXACTLY as F2 pins it for rejected
+# attempts: exactly one StepOutcome (the finalize — the wrong-lane attempt
+# wrote none) wired through exactly two engineered submit_outcome calls
+# (the silent rejection re-prompt, then the commit). The probe/reason TEXTS
+# surface only inside tool.invocation argument logs (the adapter logs every
+# model call verbatim, rejected or not — the same reality F2's record pins
+# cover); run-state carries the finalize alone.
+if [ "$(count_type "$EV" StepOutcome)" = "1" ]; then
+    ok "F10 exactly one StepOutcome (the finalize; the wrong-lane attempt committed nothing)"
+else
+    fail "F10: expected exactly 1 StepOutcome event, saw $(count_type "$EV" StepOutcome)"
+fi
+n_inv="$(kind_count "$EV" tool.invocation)"
+if [ "$n_inv" = "2" ]; then
+    ok "F10 exactly two submit_outcome calls (silent rejection + finalize)"
+else
+    fail "F10: expected exactly 2 tool.invocation events, saw $n_inv"
+fi
+
 # ── F7: C18a/D22 — turn budget exhausted routes the fallback lane ───────────
 
   # v0.5.58 engine-floor: the outcome-completeness static rule (0.5.57+)
