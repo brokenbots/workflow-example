@@ -15,6 +15,6 @@ environment "remote" "guard_env" {
 
 adapter "copilot" "guarded" {
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version     = "0.5.18"
+    version     = "0.5.19"
     environment = remote.guard_env
 }
