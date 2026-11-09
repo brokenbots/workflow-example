@@ -17,7 +17,7 @@
 # same file stays diff-friendly and greppable, and deliberately NOT a workflow
 # (nothing in criteria compiles it).
 
-copilot = "0.5.19" # KB-263/260 + KB-370 fold + KB-388 fold-honored-at-wrong-lane-gate (nil-map guard on payload:null, param-doc truth); published tag on origin cc3b50d, pushed 11-08
+copilot = "0.5.21" # KB-263/260 + KB-370 fold + KB-388 fold-honored-at-wrong-lane-gate + KB-391 per-step OutcomeContract surface (submit_outcome re-bound from step contracts at Execute, typed-strict decode); KB-396 real-CLI session-death fix: v0.5.20's ensureStepSurface re-opened the persisted SDK session mid-run and copilot-sdk/go Session.Disconnect then destroyed the resumed conversation (next session.send -> JSON-RPC -32603 Session not found); v0.5.21 swapSession skips the disconnect when the superseded wrapper shares the re-opened session's id — upstream PR brokenbots/criteria-adapter-copilot#49, merge 2ac19f25, tag v0.5.21 published 11-09, digest sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d
 shell   = "0.5.5"  # identical to main as of 10-18 (KB-283)
 
 # KB-313 (ADR 307): the former peer_shell_tag/peer_copilot_tag literals are
