@@ -718,7 +718,7 @@ variant_base[LIB]["fixture-image-v1"] = {
     ],
     "adapterImages": {
         "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-        "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-2"
+        "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.59-1"
     }
 }
 BAKED = "fixture-image-v1"
@@ -1574,7 +1574,7 @@ for kb_name, kb_subtree, kb_class, kb_pin in (
 # no-pin object).
 RECORDED_PIN_SET = {
     "shell": "localhost:5000/criteria-adapter-shell-peer:k8s-0.5.56-1",
-    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.58-2",
+    "copilot": "localhost:5000/criteria-adapter-copilot-peer:k8s-0.5.59-1",
 }
 
 
