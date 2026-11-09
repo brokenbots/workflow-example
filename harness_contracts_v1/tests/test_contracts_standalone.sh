@@ -411,7 +411,11 @@ if has_ev 'outcome_uncontracted'; then
 else
     fail F4: outcome_uncontracted schema contract diagnostic not observed
 fi
-expect_event F4 RunFailed
+if grep '"payload_type":"RunCompleted"' "$EV" | grep '"finalState":"failed"' >/dev/null; then
+    ok "F4 run completed with finalState=failed (adapter pre-flight refused the undeclared arm)"
+else
+    fail "F4: no RunCompleted payload with finalState=failed"
+fi
 
 # ── F5: C13 contrast — uncontracted reason lane accepted ────────────────────
 

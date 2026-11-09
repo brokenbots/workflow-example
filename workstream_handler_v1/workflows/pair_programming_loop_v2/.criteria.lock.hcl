@@ -1,183 +1,183 @@
 schema_version = 1
 adapter "copilot" "pair_part_p1_dev" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p1_dev_deep" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p1_remediator" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p2_dev" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p2_dev_deep" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p2_remediator" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p3_dev" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p3_dev_deep" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p3_remediator" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p4_dev" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p4_dev_deep" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_p4_remediator" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }
 adapter "copilot" "pair_part_planner" {
-  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.19"
-  version              = "0.5.19"
-  resolved_digest      = "sha256:7ea26c0b0ad5bcdf681f397265f56024105f450dc60ffdc5f3c844edcf08568c"
+  reference            = "ghcr.io/brokenbots/criteria-adapter-copilot:0.5.21"
+  version              = "0.5.21"
+  resolved_digest      = "sha256:acd4ed017668ccea354d78d8e88c31ab5c2f35d64f5d3fbd13519dc2a2007a5d"
   source_url           = "https://github.com/brokenbots/criteria-adapter-copilot"
   sdk_protocol_version = 2
   platforms            = ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
   signature {
     keyless {
       issuer  = "https://token.actions.githubusercontent.com"
-      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.19"
+      subject = "https://github.com/brokenbots/criteria-adapter-copilot/.github/workflows/publish.yml@refs/tags/v0.5.21"
     }
   }
 }

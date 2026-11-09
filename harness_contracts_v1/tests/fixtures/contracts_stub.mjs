@@ -145,11 +145,26 @@ const MODES = {
   ],
 
   // C13 carrier fired for real: the undeclared arm (declared in the tree
-  // with no schema, so no outcome_contracts entry) fails LOUD.
+  // with no schema, so no outcome_contracts entry) fails LOUD. Call (1) is
+  // the probe — it carries NO top-level reason (that member is undeclared on
+  // this step under the KB-391 surface, so a strict decode would refuse the
+  // call before the contract gate ever runs) and no payload — so the decode
+  // passes and the adapter's contract pre-flight refuses it in-turn with the
+  // pinned outcome_uncontracted issue. Call (2) is the contracted repair that
+  // ends the step deterministically on the declared failure lane
+  // (state.failed) instead of burning the fixture timeout. The refusal is
+  // asserted from the run-event stream, never by the stub.
   f4_undeclared: () => [
     submit({
       outcome: "rejected",
-      reason: "C13 undeclared-arm probe: submitting the arm with no schema on a contracted step",
+      comment: "C13 undeclared-arm probe: submitting an arm with no schema on a contracted step",
+    }),
+    submit({
+      outcome: "failure",
+      payload: {
+        reason: "C13 undeclared-arm probe: the undeclared arm was refused with the pinned outcome_uncontracted diagnostic",
+      },
+      comment: "C13 undeclared arm refused loudly; finalizing the declared failure lane",
     }),
   ],
 
