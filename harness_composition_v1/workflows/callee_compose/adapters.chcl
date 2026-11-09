@@ -46,6 +46,7 @@ environment "remote" "callee_default" {
 // The SAME definition identity the parent declares (G1 collision, G8 spelling
 // #2, G6 borrower dial) — deliberately identical to the parent's pass_in.
 adapter "shell" "pass_in" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.comp_main

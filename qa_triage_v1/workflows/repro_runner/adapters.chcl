@@ -29,6 +29,7 @@ environment "remote" "worktree" {
 }
 
 adapter "shell" "repo" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.primary
@@ -47,6 +48,7 @@ adapter "shell" "wt" {
 }
 
 adapter "copilot" "investigator" {
+    continuation = "reuse"
     environment = remote.worktree
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.19"

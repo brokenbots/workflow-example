@@ -28,13 +28,13 @@ fail() { echo "FAIL: $*" >&2; FAILURES=$((FAILURES + 1)); }
 # ── Preconditions ─────────────────────────────────────────────────────────────
 CRITERIA=""
 for c in "${CRITERIA_BIN:-}" /tmp/ci-criteria-fleet/criteria; do
-    if [ -n "$c" ] && [ -x "$c" ] && [ "$("$c" version 2>/dev/null | tr -d '[:space:]')" = "v0.5.58" ]; then
+    if [ -n "$c" ] && [ -x "$c" ] && [ "$("$c" version 2>/dev/null | tr -d '[:space:]')" = "v0.5.59" ]; then
         CRITERIA="$c"
         break
     fi
 done
 if [ -z "$CRITERIA" ]; then
-    echo "SKIP: no fleet-stamp engine v0.5.58 (set CRITERIA_BIN or extract /tmp/ci-criteria-fleet/criteria)" >&2
+    echo "SKIP: no fleet-stamp engine v0.5.59 (set CRITERIA_BIN or extract /tmp/ci-criteria-fleet/criteria)" >&2
     exit 0
 fi
 for t in node jq git; do

@@ -47,6 +47,7 @@ adapter "copilot" "coordinator" {
 
 // Runs inside the isolated worktree: all branch-scoped git/gh/coordinator ops.
 adapter "shell" "sh" {
+    continuation = "reuse"
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = remote.worktree
@@ -58,6 +59,7 @@ adapter "shell" "sh" {
 // Runs in the repo's primary working tree: worktree lifecycle (read workstream,
 // teardown) that must not depend on the per-run worktree existing.
 adapter "shell" "repo" {
+    continuation = "reuse"
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = remote.primary

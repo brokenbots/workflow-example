@@ -16,6 +16,7 @@ environment "remote" "pin_env" {
 }
 
 adapter "shell" "pass_in" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.pin_env

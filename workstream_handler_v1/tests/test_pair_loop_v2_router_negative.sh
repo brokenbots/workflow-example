@@ -24,12 +24,12 @@ fail() { echo "FAIL: $*" >&2; FAILURES=$((FAILURES + 1)); }
 
 CRITERIA=""
 for c in "${CRITERIA_BIN:-}" /tmp/ci-criteria-fleet/criteria; do
-    if [ -n "$c" ] && [ -x "$c" ] && [ "$("$c" version 2>/dev/null | tr -d '[:space:]')" = "v0.5.58" ]; then
+    if [ -n "$c" ] && [ -x "$c" ] && [ "$("$c" version 2>/dev/null | tr -d '[:space:]')" = "v0.5.59" ]; then
         CRITERIA="$c"
         break
     fi
 done
-[ -n "$CRITERIA" ] || { echo "SKIP: no fleet-stamp engine v0.5.58" >&2; exit 0; }
+[ -n "$CRITERIA" ] || { echo "SKIP: no fleet-stamp engine v0.5.59" >&2; exit 0; }
 for t in node jq git; do
     command -v "$t" >/dev/null 2>&1 || { echo "SKIP: $t not available" >&2; exit 0; }
 done
