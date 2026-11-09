@@ -25,6 +25,7 @@ environment "remote" "g12_side" {
 
 // The SAME definition identity the parent declares (cross-layer grouping).
 adapter "shell" "g12_declared" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.g12_side

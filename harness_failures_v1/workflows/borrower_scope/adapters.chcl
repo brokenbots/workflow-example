@@ -26,6 +26,7 @@ environment "remote" "fail_main" {
 // The SAME definition identity the parent declares (cross-layer grouping;
 // E27 borrower dial) — deliberately identical to the parent's pass_in.
 adapter "shell" "pass_in" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.fail_main

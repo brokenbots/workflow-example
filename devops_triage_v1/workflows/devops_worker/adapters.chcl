@@ -5,6 +5,7 @@ environment "shell" "worktree" {
 }
 
 adapter "shell" "wt" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = shell.worktree

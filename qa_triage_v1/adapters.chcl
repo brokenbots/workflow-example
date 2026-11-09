@@ -39,6 +39,7 @@ environment "remote" "scratch" {
 }
 
 adapter "shell" "repo" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.primary
@@ -55,6 +56,7 @@ adapter "shell" "repo" {
 // channel reintroduces only this workflow's non-review identity under the names
 // used by the Copilot SDK and gh CLI.
 adapter "copilot" "investigator" {
+    continuation = "reuse"
     environment = remote.scratch
     source      = "ghcr.io/brokenbots/criteria-adapter-copilot"
     version     = "0.5.19"

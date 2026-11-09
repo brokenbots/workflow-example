@@ -75,6 +75,7 @@ environment "remote" "iter_body" {
 }
 
 adapter "shell" "pass_in" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.comp_main

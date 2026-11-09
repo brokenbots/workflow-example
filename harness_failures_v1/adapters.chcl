@@ -93,6 +93,7 @@ environment "remote" "g12_side" {
 }
 
 adapter "shell" "pass_in" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.fail_main
@@ -105,6 +106,7 @@ adapter "shell" "fail_dialer" {
 }
 
 adapter "shell" "g12_declared" {
+    continuation = "reuse"
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = remote.g12_side

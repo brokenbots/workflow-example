@@ -26,6 +26,7 @@ environment "remote" "primary" {
 
 // Branch-scoped git ops run inside the isolated worktree.
 adapter "shell" "sh" {
+    continuation = "reuse"
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = remote.worktree
@@ -37,6 +38,7 @@ adapter "shell" "sh" {
 // Worktree lifecycle (fetch, worktree add) runs in the repo's primary tree —
 // it must work before the per-run worktree exists.
 adapter "shell" "repo" {
+    continuation = "reuse"
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = remote.primary
