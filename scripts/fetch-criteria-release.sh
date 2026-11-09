@@ -83,7 +83,10 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
 
     if [ "$stage_ok" -eq 1 ]; then
         mkdir -p "$(dirname "$DEST")"
-        cp -- "${STAGE}/${ARCHIVE}" "${DEST}"
+        # Temp-file + rename: a mid-copy failure must never leave a truncated DEST.
+        tmp_dest="${DEST}.tmp.$$"
+        cp -- "${STAGE}/${ARCHIVE}" "${tmp_dest}"
+        mv -f -- "${tmp_dest}" "${DEST}"
         echo "fetch-criteria-release: verified ${ARCHIVE}, wrote ${DEST}"
         exit 0
     fi
