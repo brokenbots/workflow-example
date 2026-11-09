@@ -27,6 +27,8 @@ environment "remote" "worktree" {
 }
 
 adapter "shell" "sh" {
+    // ADR-0014 D3: re-declared by callee upstream_sync — declare the agreeing fate.
+    continuation = "reuse"
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = remote.worktree

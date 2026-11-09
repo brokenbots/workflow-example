@@ -50,6 +50,10 @@ variable "workstream_file" {
     default = ""
 }
 adapter "shell" "sh" {
+    // ADR-0014 D3: this twin is the callee re-declaring the parent's shell.sh —
+    // it must declare the agreeing fate or the engine's compile-time re-entry
+    // rule rejects the whole tree.
+    continuation = "reuse"
     source  = "ghcr.io/brokenbots/criteria-adapter-shell"
     version = "0.5.5"
     environment = shell.sim_root_env
