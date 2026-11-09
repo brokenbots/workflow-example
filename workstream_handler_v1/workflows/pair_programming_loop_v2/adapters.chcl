@@ -42,7 +42,7 @@ adapter "shell" "sh" {
 adapter "copilot" "pair_part_planner" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     // No secrets (remaster rulings 1+2).
     config {
         model             = var.planner.model
@@ -62,7 +62,7 @@ adapter "copilot" "pair_part_planner" {
 adapter "copilot" "pair_part_p1_dev" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     // No secrets: the developer is local-only. It commits to the worktree;
     // it never authenticates against any remote. (Remaster rulings 1+2.)
     config {
@@ -78,7 +78,7 @@ adapter "copilot" "pair_part_p1_dev" {
 adapter "copilot" "pair_part_p2_dev" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.developer.model
         max_turns         = "${var.developer.max_turns}"
@@ -92,7 +92,7 @@ adapter "copilot" "pair_part_p2_dev" {
 adapter "copilot" "pair_part_p3_dev" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.developer.model
         max_turns         = "${var.developer.max_turns}"
@@ -106,7 +106,7 @@ adapter "copilot" "pair_part_p3_dev" {
 adapter "copilot" "pair_part_p4_dev" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.developer.model
         max_turns         = "${var.developer.max_turns}"
@@ -126,7 +126,7 @@ adapter "copilot" "pair_part_p4_dev" {
 adapter "copilot" "pair_part_p1_dev_deep" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.planner.model
         max_turns         = "${var.developer.max_turns}"
@@ -141,7 +141,7 @@ adapter "copilot" "pair_part_p1_dev_deep" {
 adapter "copilot" "pair_part_p2_dev_deep" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.planner.model
         max_turns         = "${var.developer.max_turns}"
@@ -156,7 +156,7 @@ adapter "copilot" "pair_part_p2_dev_deep" {
 adapter "copilot" "pair_part_p3_dev_deep" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.planner.model
         max_turns         = "${var.developer.max_turns}"
@@ -171,7 +171,7 @@ adapter "copilot" "pair_part_p3_dev_deep" {
 adapter "copilot" "pair_part_p4_dev_deep" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.planner.model
         max_turns         = "${var.developer.max_turns}"
@@ -191,7 +191,7 @@ adapter "copilot" "pair_part_p4_dev_deep" {
 adapter "copilot" "pair_part_p1_remediator" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.remediator.model
         max_turns         = "${var.remediator.max_turns}"
@@ -206,7 +206,7 @@ adapter "copilot" "pair_part_p1_remediator" {
 adapter "copilot" "pair_part_p2_remediator" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.remediator.model
         max_turns         = "${var.remediator.max_turns}"
@@ -221,7 +221,7 @@ adapter "copilot" "pair_part_p2_remediator" {
 adapter "copilot" "pair_part_p3_remediator" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.remediator.model
         max_turns         = "${var.remediator.max_turns}"
@@ -236,7 +236,7 @@ adapter "copilot" "pair_part_p3_remediator" {
 adapter "copilot" "pair_part_p4_remediator" {
     environment = remote.worktree
     source  = "ghcr.io/brokenbots/criteria-adapter-copilot"
-    version = "0.5.19"
+    version = "0.5.20"
     config {
         model             = var.remediator.model
         max_turns         = "${var.remediator.max_turns}"
