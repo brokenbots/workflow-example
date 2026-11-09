@@ -1,10 +1,16 @@
-// Fixture F2b (KB-388, the 0.5.19 fold acceptance half): a top-level reason
+// Fixture F2b (KB-388, the fold acceptance half): a top-level reason
 // submission on a typed step whose contract requires a reason member the
 // payload lacks is FOLDED into the payload and finalizes accepted — the fold
 // delivers on the submit_outcome tool doc's promise instead of the v0.5.18
-// dead-code rejection (field evidence: castle 9ad4c116, 361b3d39). The folded
-// reason is what the engine projects into output.reason; the record must
-// carry the folded prose exactly.
+// dead-code rejection (field evidence: castle 9ad4c116, 361b3d39). Since
+// KB-391 (0.5.20+) the top-level reason lane is declared on a step only when
+// at least one of its kept contracts carries an empty schema_json (a
+// schema-less outcome block with none of schema/require_comment/fallback is
+// only an allowed outcome and never opens the lane); the `escalated` arm
+// below is what provides that empty-schema contract for the contract_reject
+// step — without it the submission is refused in-turn and replayed until the
+// fixture timeout. The folded reason is what the engine projects into
+// output.reason; the record must carry the folded prose exactly.
 workflow {
     name             = "harness_contracts_v1_f2b_foldaccept"
     version          = "1"
@@ -50,6 +56,14 @@ step "contract_reject" {
     outcome "approved" {
         schema = object({ reason = string })
         next   = state.failed
+    }
+    // KB-391 surface: this schema-less require_comment arm is what declares
+    // the top-level reason lane for the step (an empty-schema contract —
+    // engine outcomeContractsForStep emits it because require_comment is
+    // set); the scripted submission never finalizes on it.
+    outcome "escalated" {
+        require_comment = true
+        next            = state.failed
     }
 }
 
