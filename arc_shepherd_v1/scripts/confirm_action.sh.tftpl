@@ -109,6 +109,20 @@ arm)
     # Author pin is verified BEFORE arming: the child has no PR yet, so the pin
     # is an assertion on the manifest entry (develop runs open PRs as the
     # pinned identity; a mismatch surfaces at gate-check time as a violation).
+    #
+    # Arming also carries the compile-gate precondition: the route's pinned
+    # trees must compile under the engine stamp carried by the criteria-base
+    # image the run will fire on (the last vX.Y.Z token in the tag; a tree is
+    # compiled only when the card fires, so the base-roll gate does not cover
+    # a roll that lands while a card sits armed — the card inherits whatever
+    # image the operator carries at fire time). The gate runs BEFORE the arm
+    # is decided — tools/armgate/arm-gate.sh in the criteria repo
+    # (github.com/brokenbots/criteria), one --tree per pinned tree, with a
+    # criteria binary at/above the base image's engine stamp (a tag-exact
+    # local build suffices when the published release lags); exit 0 = safe to
+    # arm, exit 1 = gate failed closed, exit 2 = usage error. A non-zero gate
+    # result refuses the arm: the card stays dormant instead of armed, and
+    # the round re-plans rather than firing on an unvalidated engine.
     TID=$(jq -r '.task_id' "$ACTION_FILE")
     SURVIVING=$(kb_task_tags "$TID" | jq -c '[.[]] ')
     # add k8s-run if absent, preserve repo criteria internal-reproduced rules
