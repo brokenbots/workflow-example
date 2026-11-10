@@ -277,14 +277,15 @@ const MODES = {
   ],
 
   // C18a/D22 + C18b: never-finalize stimuli — the turn budget exhausts and
-  // the missing-finalize class (or, with no lanes mapped, the loud routing
-  // error) is the designed shape.
+  // the missing-finalize class is the designed shape; the step's declared
+  // fallback lane (f8_unmapped) or explicit default lane (f8b_default)
+  // catches it.
   f7_budget: () => [plain("KB-277 C18a/D22 probe: this step never finalizes on purpose (turn budget must exhaust)")],
   // C18 default mapping: never-finalize on a step with an explicit
   // `outcome "default"` arm — the synthetic unmapped failure name routes the
   // default lane green (the mapped-by-default contrast to f8_unmapped).
   f8b_default: () => [plain("KB-277 C18 default-lane probe: this step never finalizes on purpose (the synthetic failure outcome must route the default arm)")],
-  f8_unmapped: () => [plain("KB-277 C18b probe: this step never finalizes on purpose (the synthetic failure outcome must hit the loud routing error)")],
+  f8_unmapped: () => [plain("KB-277 C18b probe: this step never finalizes on purpose (the declared fallback lane must catch the missing finalize)")],
 };
 
 // Step markers -> per-step dispatch mode for full_chain (the shipped-tree
