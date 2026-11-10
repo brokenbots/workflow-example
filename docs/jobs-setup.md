@@ -239,11 +239,10 @@ Hard guards enforced by the tool (all from live incidents, do not bypass):
   compiled only when the card fires, so a card armed before a base roll
   inherits the rolled image on its first fire. A gate failure refuses the arm
   and the card stays disarmed. Gate: `tools/armgate/arm-gate.sh` in the
-  criteria repo ([github.com/brokenbots/criteria]
-  (https://github.com/brokenbots/criteria)), one `--tree` per pinned tree,
-  run with a criteria binary at/above that engine stamp (a tag-exact local
-  build suffices when the published release lags); exit 0 = safe to arm,
-  1 = gate failed closed, 2 = usage error (nothing was checked).
+  criteria repo (github.com/brokenbots/criteria), one `--tree` per pinned
+  tree, run with a criteria binary at/above that engine stamp (a tag-exact
+  local build suffices when the published release lags); exit 0 = safe to
+  arm, 1 = gate failed closed, 2 = usage error (nothing was checked).
 - file writes NO tag; a "filed-looking" card that never fires is the
   missing-arm state, visible via `card show`.
 
