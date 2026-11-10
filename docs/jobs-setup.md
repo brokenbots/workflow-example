@@ -231,6 +231,19 @@ Hard guards enforced by the tool (all from live incidents, do not bypass):
   arming surface; finished work must stay un-runnable. File a new card.
 - arm aborts on any tag read-back mismatch (the silent no-fire class:
   tags written as ids, digits-as-values, partial sets).
+- arm runs the arm-time compile gate before it arms: the route's pinned trees
+  must compile under the engine stamp carried by the criteria-base image the
+  run will fire on (the last `vX.Y.Z` token in the tag,
+  `criteria-base:v0.1-v0.5.56` → engine v0.5.56). The base-roll gate (no roll
+  while a run is RUNNING) is orthogonal to compile exposure: a tree is
+  compiled only when the card fires, so a card armed before a base roll
+  inherits the rolled image on its first fire. A gate failure refuses the arm
+  and the card stays disarmed. Gate: `tools/armgate/arm-gate.sh` in the
+  criteria repo ([github.com/brokenbots/criteria]
+  (https://github.com/brokenbots/criteria)), one `--tree` per pinned tree,
+  run with a criteria binary at/above that engine stamp (a tag-exact local
+  build suffices when the published release lags); exit 0 = safe to arm,
+  1 = gate failed closed, 2 = usage error (nothing was checked).
 - file writes NO tag; a "filed-looking" card that never fires is the
   missing-arm state, visible via `card show`.
 
@@ -242,12 +255,17 @@ The everyday loop for "run this ticket through the workflow":
    — the description carries repo URL line one + acceptance (the workflow
    agents see ONLY this body)
 4. review the dormant card on the board (it is the human checkpoint)
-5. `platformctl card arm --task-id <id> --repo <owner/name>
+5. run the arm-time compile gate (the third arm guard above): gate the
+   route's pinned trees under the engine stamp carried by the
+   CRITERIA_BASE_IMAGE the run will fire on — registration compile-checked
+   the image as it stood at registration time, so a gate that passed then
+   does not cover a base roll that landed while the card sat dormant
+6. `platformctl card arm --task-id <id> --repo <owner/name>
    [--classification p1] [--internal-reproduced]`
-6. verify fire: the watcher log greps `created CriteriaRun` with the ticket
+7. verify fire: the watcher log greps `created CriteriaRun` with the ticket
    (`kubectl -n criteria-jobs logs deploy/criteria-kanboard-watcher
    --since=3m | grep <id>`) — the card flips WIP itself within one poll
-7. verify done: the PR merged in the bound repo, THEN the card Done. A green
+8. verify done: the PR merged in the bound repo, THEN the card Done. A green
    run without a merged PR is not done.
 
 ## 5. Retiring a project
