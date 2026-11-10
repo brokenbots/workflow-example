@@ -89,14 +89,6 @@ if [ -n "$SKIP" ]; then
 fi
 
 
-# leg_floor SKIP_FLAG run-fixture... : runs the fixture unless the engine floor
-# retires its stimulus (0.5.57+ outcome-completeness rule retires the mapped
-# synthetic-failure shapes; recorded 2026-11-07, PR #264).
-engine_retires_stimulus() {
-    "$CRITERIA" version 2>/dev/null | grep -qE "0\\.5\\.(5[7-9]|6[0-9])|v0\\.6" && return 0
-    return 1
-}
-
 cleanup() {
     local pid
     for pid in "${STUB_PIDS[@]:-}"; do
@@ -163,6 +155,12 @@ run_shipped() {
         --output json --ui=false >"$EV" 2>&1 || RC=$?
     kill "$stub_pid" 2>/dev/null
 
+    # The redacting sink masks the registered --var secret values inside
+    # payload text, which fragments the probe outcome names mid-string; the
+    # single-char probe secret is restored so the assertions below pin exact
+    # payload text. No payload legitimately contains a [REDACTED] literal.
+    sed 's/\[REDACTED\]/x/g' "$EV" >"$EV.norm" && mv "$EV.norm" "$EV"
+
     if [ "${SUITE_DEBUG:-}" = "1" ]; then
         echo "--- events $name (rc=$RC) ---" >&2
         tail -c 4000 "$EV" >&2
@@ -203,6 +201,10 @@ run_fixture() {
         --var probe_root="$PROOT" \
         --output json --ui=false >"$EV" 2>&1 || RC=$?
     kill "$stub_pid" 2>/dev/null
+
+    # Same un-redaction as run_shipped: the runner's sink masks the probe
+    # secret mid-string, and the assertions pin exact payload text.
+    sed 's/\[REDACTED\]/x/g' "$EV" >"$EV.norm" && mv "$EV.norm" "$EV"
 
     if [ "${SUITE_DEBUG:-}" = "1" ]; then
         echo "--- events $name (rc=$RC) ---" >&2
@@ -592,59 +594,62 @@ else
 fi
 
 # ── F7: C18a/D22 — turn budget exhausted routes the fallback lane ───────────
+# The fixture mirrors main.chcl's contract_budget step: the adapter burns the
+# turn budget without finalize, the pinned evaluator finalizes the step with
+# the declared fallback arm by name, and the run lands green on echo_done.
 
-  # v0.5.58 engine-floor: the outcome-completeness static rule (0.5.57+)
-  # MANDATES a declared failure arm, which retires the never-finalize synthetic
-  # failure stimulus this leg probes (the synthetic name now maps the declared
-  # failure arm instead of firing outcome_not_allowed). The C18b/F8 shape is
-  # retired WITH the engine version; v0.6.0 re-derives it as a first-class
-  # adapter probe. Recorded 2026-11-07, PR #264 review.
-  if "$CRITERIA" version 2>/dev/null | grep -qE '0\.5\.(5[7-9]|6[0-9]|v0\.6)'; then
-    echo "SKIP: F-engines >= 0.5.57 retire the unmapped-synthetic-failure stimulus (outcome-completeness rule); leg re-derived upstream"
-    ENGINE_FLOOR_SKIP=1
-  fi
-if engine_retires_stimulus; then
-    echo "SKIP: F7 (unmapped-synthetic-failure stimulus retired by the 0.5.57+ outcome-completeness rule; v0.6.0 re-derives)"
-    F7_SKIPPED=1
-else
 run_fixture f7_budget_echo f7_budget
-fi
-
-if [ "${F7_SKIPPED:-}" = "1" ]; then
-    echo "ok: F7 leg skipped by engine floor (stimulus retired; see the leg note)"
+expect_rc_zero F7
+expect_step F7 contract_budget failure
+if [ "$(kind_count "$EV" turn.finalize_exhausted)" -ge 1 ] 2>/dev/null; then
+    ok "F7 turn budget exhaustion observed"
 else
-    expect_rc_zero F7
-    if [ "$(kind_count "$EV" turn.finalize_exhausted)" -ge 1 ] 2>/dev/null; then
-        ok "F7 turn budget exhaustion observed"
-    else
-        fail F7: turn.finalize_exhausted not observed
-    fi
-    if has_ev '"finalize_kind":"missing"'; then
-        ok "F7 missing-finalize class marked"
-    else
-        fail F7: finalize_kind=missing class not observed
-    fi
-    expect_run_green F7 echo_done
+    fail F7: turn.finalize_exhausted not observed
 fi
-
-# ── F8: C18b — unmapped outcome name fails loud ─────────────────────────────
-
-if engine_retires_stimulus; then
-    echo "SKIP: F8 (unmapped-synthetic-failure stimulus retired by the 0.5.57+ outcome-completeness rule; v0.6.0 re-derives)"
-    F8_SKIPPED=1
+if has_ev '"finalize_kind":"missing"'; then
+    ok "F7 missing-finalize class marked"
 else
+    fail F7: finalize_kind=missing class not observed
+fi
+expect_run_green F7 echo_done
+
+# ── F8: C18b — the never-finalize stimulus routes the declared fallback lane ─
+# Compile-compliant recomposition of the retired unmapped-loud probe: the
+# session never calls submit_outcome, the turn budget exhausts, the pinned
+# evaluator finalizes the step with the declared fallback arm BY NAME, and the
+# commit lands on the failed terminal — loud AND routed (a committed
+# StepOutcome carrying the typed name), not an engine routing error. The
+# retired unmapped-loud class is a compile-verified impossibility; its absence
+# is asserted explicitly so a regression to it fails the leg.
+
 run_fixture f8_unmapped f8_unmapped
-fi
-if [ "${F8_SKIPPED:-}" = "1" ]; then
-    echo "ok: F8 leg skipped by engine floor (stimulus retired; see the leg note)"
+expect_rc_loud F8
+expect_step F8 contract_unmapped finalize_exhausted
+if [ "$(kind_count "$EV" turn.finalize_exhausted)" -ge 1 ] 2>/dev/null; then
+    ok "F8 turn budget exhaustion observed"
 else
-    expect_rc_loud F8
-    if has_ev 'outcome_not_allowed'; then
-        ok "F8 unmapped outcome failed loud (outcome_not_allowed routing error)"
-    else
-        fail F8: outcome_not_allowed routing error not observed
-    fi
-    expect_event F8 RunFailed
+    fail F8: turn.finalize_exhausted not observed
+fi
+if has_ev '"finalize_kind":"missing"'; then
+    ok "F8 missing-finalize class marked"
+else
+    fail F8: finalize_kind=missing class not observed
+fi
+expect_event F8 RunCompleted
+if has_ev '"finalState":"failed"'; then
+    ok "F8 the routed fallback reached the failed terminal through the standard completion path"
+else
+    fail F8: the run did not complete on the failed terminal
+fi
+if [ "$(count_type "$EV" RunFailed)" = "0" ]; then
+    ok "F8 no engine-error path fired"
+else
+    fail F8: an engine-error path fired instead of the terminal completion
+fi
+if has_ev 'outcome_not_allowed'; then
+    fail F8: the retired unmapped-loud class fired
+else
+    ok "F8 the retired unmapped-loud class is absent"
 fi
 
 # ── F8b: C18 default mapping — the synthetic unmapped name routes the default
@@ -657,19 +662,28 @@ fi
 run_fixture f8b_default f8b_default
 expect_rc_zero F8b
 if has_ev 'outcome_not_allowed'; then
-    ok "F8b synthetic failure name loudly unmapped even with the default arm (outcome_not_allowed)"
+    fail F8b: the retired unmapped-loud class fired on the default-routed step
 else
-    ok "F8b: the outcome-completeness rule (0.5.57+) declares the failure arm, so the synthetic name maps the DECLARED lane rather than firing outcome_not_allowed — C18's unmapped-loud shape is retired with the engine version (recorded, PR #264)"
+    ok "F8b the retired unmapped-loud class is absent on the default-routed step"
 fi
 if has_ev '"to":"done","viaOutcome":"default"'; then
     ok "F8b unmapped synthetic failure name routed the explicit default arm (viaOutcome=default)"
 else
     fail F8b: the default arm did not route the unmapped synthetic failure name
 fi
+# The 0.5.57+ engine rejects the synthetic name through the step's outcome
+# contract surface (the observed notice on the invalid attempt) before the
+# repair resolves the default lane — the same contract-rejection shape the
+# shipped chain's default-routed step emits.
+if has_ev 'outcome_uncontracted: outcome \\"failure\\" has no outcome_contracts entry'; then
+    ok "F8b synthetic failure name rejected through the outcome-contract surface before the repair"
+else
+    fail F8b: the outcome-contract rejection notice for the synthetic name was not observed
+fi
 if [ "$(kind_count "$EV" turn.finalize_exhausted)" = "1" ] && has_ev '"finalize_kind":"missing"'; then
     ok "F8b burn bounded: exactly 1 finalize_exhausted turn before the default lane"
 else
-    ok "F8b burn unobserved: with the declared failure arm the synthetic name maps a declared lane, so the turn-budget burn shape changes under 0.5.58 (recorded, PR #264)"
+    fail F8b: expected exactly 1 finalize_exhausted turn saw "$(kind_count "$EV" turn.finalize_exhausted)" or finalize_kind=missing unobserved, before the default lane
 fi
 expect_run_green F8b
 
@@ -692,32 +706,49 @@ expect_step F9 contract_uncontracted approved
 expect_step F9 contract_permissions approved
 expect_step F9 contract_budget failure
 expect_step F9 echo_verdict success
-# The default-routed step emits no StepOutcome: the synthetic name is loudly
-# un-mapped (StepOutcomeInvalid outcome_not_allowed) and the engine resolves
+# The default-routed step emits no committed StepOutcome: its synthetic name
+# is rejected through the outcome-contract surface (StepOutcomeInvalid, the
+# outcome_not_allowed issue on the failure submission) and the engine resolves
 # the routing through the explicit default arm — visible only in the
-# StepTransition viaOutcome. The mapped-by-default vs unmapped-loud contrast
-# with the terminal contract_unmapped step is exactly: same loud notice, but
-# a viaOutcome=default transition (green) instead of a dead end (RunFailed).
+# StepTransition viaOutcome. The mapped-by-default vs routed-terminal contrast
+# with contract_unmapped: identical never-finalize stimulus, but the contract
+# surface names the lane (a viaOutcome=default transition, green) where the
+# terminal's declared fallback arm commits the lane BY NAME on state.failed.
 expect_step F9 contract_default failure
-expect_step F9 contract_unmapped failure
+expect_step F9 contract_unmapped finalize_exhausted
 if has_ev '"from":"contract_default","to":"contract_unmapped","viaOutcome":"default"'; then
     ok "F9 default-lane routing observed (viaOutcome=default after the loud notice)"
 else
     fail F9: the explicit default arm did not route the synthetic failure outcome
 fi
-expect_event F9 RunFailed
-# The unmapped routing error surfaces as a StepOutcomeInvalid issue string
-# ("outcome_not_allowed: outcome ... not in allowed_outcomes") and an
-# AdapterEvent kind outcome.failure — the same loud shape F8 asserts.
-if has_ev 'outcome_not_allowed'; then
-    ok "F9 unmapped-arm routing error observed loud (outcome_not_allowed)"
+expect_event F9 RunCompleted
+# The routed run completes on the failed terminal through the standard
+# completion path: a RunCompleted carrying finalState=failed (a failed
+# terminal reports finalState; the engine-error path would emit RunFailed).
+if has_ev '"finalState":"failed"'; then
+    ok "F9 the routed chain completed on the failed terminal (finalState=failed)"
 else
-    fail F9: outcome_not_allowed routing error not observed
+    fail F9: the run did not complete on the failed terminal
+fi
+if [ "$(count_type "$EV" RunFailed)" = "0" ]; then
+    ok "F9 no engine-error path fired"
+else
+    fail F9: an engine-error path fired instead of the terminal completion
 fi
 if grep -q '"finalState":"done"' "$EV"; then
     fail "F9: the loud-terminal chain must not complete with finalState=done"
 else
     ok "F9 no done completion on the loud-terminal chain"
+fi
+if [ "$(count_type "$EV" StepOutcomeInvalid)" = "1" ]; then
+    ok "F9 exactly one invalid submission notice across the chain (the default-routed step)"
+else
+    fail "F9: expected exactly 1 StepOutcomeInvalid across the chain, saw $(count_type "$EV" StepOutcomeInvalid)"
+fi
+if has_ev 'outcome_not_allowed: outcome \\"failure\\" is not in allowed_outcomes'; then
+    ok "F9 the lone invalid notice is the default-routed step's outcome_not_allowed rejection"
+else
+    fail F9: the outcome_not_allowed rejection notice on the default-routed step not observed
 fi
 if has_ev 'outcome_uncontracted'; then
     fail "F9: uncontracted contrast step must accept the reason lane green (see F4 for the loud shape)"
@@ -739,15 +770,13 @@ fi
 n_fin="$(kind_count "$EV" turn.finalize_exhausted)"
 if [ "$n_fin" = "3" ]; then
     ok "F9 all three never-finalize steps exhausted their turn budget"
-elif [ "$n_fin" -ge 1 ] 2>/dev/null || [ "$n_fin" = "0" ]; then
-    ok "F9 finalize-exhaustion count $n_fin: under 0.5.58 the outcome-completeness rule maps each never-finalize stimulus to its DECLARED failure arm, so the burned-turn shape changes (recorded, PR #264)"
 else
-    fail F9: finalize_exhausted count unreadable
+    fail F9: expected exactly 3 turn.finalize_exhausted saw "$n_fin" — budget + default + terminal
 fi
 if has_ev '"finalize_kind":"missing"'; then
     ok "F9 missing-finalize class marked on the exhausted turns"
 else
-    ok "F9 missing-finalize class unobserved: mapped synthetic names under 0.5.58 (recorded, PR #264)"
+    fail F9: finalize_kind=missing class not observed
 fi
 
 # D21 attribution on the shipped step: the granted/denied split and the
@@ -777,16 +806,17 @@ C14_REC="$PROOT/contracts_probe_records/c14_reason_record"
 D19_REC="$PROOT/contracts_probe_records/d19_verdict_record"
 C17_REC="$PROOT/contracts_probe_records/c17_comment_record"
 # C16 on the shipped chain, same rule as F2: exactly one outcome event per
-# non-unmapped step, the d19 record equals the final engineered reason
+# finalized step, the d19 record equals the final engineered reason
 # alone, and no rejected probe string reached run state (typed-lane submits
 # carry the payload reason through the projection; rejected payloads never
-# commit). 7 StepOutcome events = 5 finalize commits + the budget-exhausted
-# contract_budget failure + the echo_verdict success; the unmapped loud
-# terminal emits StepOutcomeInvalid (never a committed StepOutcome).
-if [ "$(count_type "$EV" StepOutcome)" = "7" ]; then
-    ok "F9 exactly one outcome event per finalized step (5 commits + 1 failure + 1 echo; the default-routed step emits none)"
+# commit). 8 StepOutcome events = 5 green commits + the fallback-routed
+# contract_budget failure + the echo_verdict success + the committed
+# finalize_exhausted terminal lane; the default-routed step emits none (its
+# routing is visible in the StepTransition viaOutcome).
+if [ "$(count_type "$EV" StepOutcome)" = "8" ]; then
+    ok "F9 exactly one outcome event per finalized step (7 commits incl. the terminal fallback lane + echo; the default-routed step emits none)"
 else
-    fail "F9: expected exactly 7 StepOutcome events across the chain, saw $(count_type "$EV" StepOutcome)"
+    fail "F9: expected exactly 8 StepOutcome events across the chain, saw $(count_type "$EV" StepOutcome)"
 fi
 # C14 projection observed on the shipped chain too: the c14 record carries the
 # schema-validated payload reason verbatim (typed-lane projection).
