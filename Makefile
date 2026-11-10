@@ -146,6 +146,12 @@ validate: pincheck fleet-apply-safe
 	# anchor) — its guard fails closed on a missing/duplicate item id, a
 	# broken series-slice assignment, or a conventions regression.
 	@node scripts/harness_matrix.mjs
+	# KB-367: the compile-expectations matrix of record — its guard fails
+	# closed on a missing/duplicate tree row, a malformed or open version
+	# band, an installed engine outside a row's band, or a row contradicting
+	# a live `criteria validate` of its tree (the engine binary is
+	# CRITERIA_BIN or /usr/local/bin/criteria).
+	@node scripts/compile_matrix.mjs
 	# KB-310: every tree carries a machine-readable interface.json (ADR 307)
 	# and the example routes payload embeds consistent copies; the operator's
 	# admission validation uses whichever side carries the contract.

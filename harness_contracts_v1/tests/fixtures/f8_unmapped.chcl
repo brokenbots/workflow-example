@@ -1,8 +1,9 @@
-// Fixture F8 (C18b): budget exhaustion with EVERY lane absent — the
-// synthetic failure outcome name from finalize_kind=missing is unmapped (no
-// default arm, no fallback arm), so the engine must fail the run LOUD with
-// the outcome_not_allowed routing error instead of swallowing it. The run
-// fails on purpose; the fixture asserts that loud shape.
+// Fixture F8 (C18b): the never-finalize stimulus — the session produces no
+// finalize, so the turn budget exhausts. The step's declared fallback arm
+// catches that no-finalize path BY NAME and routes it to the failed
+// terminal: the observation is loud AND routed (a committed StepOutcome
+// carrying the typed fallback name, the run ends on the failure terminal),
+// not the retired outcome_not_allowed routing class.
 workflow {
     name             = "harness_contracts_v1_f8_unmapped"
     version          = "1"
@@ -13,18 +14,18 @@ workflow {
 }
 
 step "contract_unmapped" {
-    outcome "failure" {
+    outcome "approved" {
         schema = object({ reason = string })
-        next   = state.failed
+        next   = state.done
+    }
+    outcome "finalize_exhausted" {
+        fallback = true
+        next     = state.failed
     }
     target      = adapter.copilot.main
     allow_tools = []
     input {
         prompt = templatefile("./agents/contract_unmapped.md.tftpl", {})
-    }
-    outcome "approved" {
-        schema = object({ reason = string })
-        next   = state.done
     }
 }
 

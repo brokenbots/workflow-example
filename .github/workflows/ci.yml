@@ -93,6 +93,14 @@ jobs:
           criteria adapter pull "ghcr.io/brokenbots/criteria-adapter-shell:${SHELL_V}"
           criteria adapter pull "ghcr.io/brokenbots/criteria-adapter-copilot:${COPILOT_V}"
 
+      # KB-367: the compile-expectations matrix of record must agree with the
+      # installed engine: the row of record asserts harness_contracts_v1
+      # compiles green under >=0.5.57,<0.6.0 (the CI engine above). Fail
+      # closed on a missing/duplicate tree row, a malformed or open band, an
+      # engine outside a row's band, or a row contradicting a live validate.
+      - name: Run compile-expectations matrix guard (KB-367)
+        run: node scripts/compile_matrix.mjs
+
       # The copilot adapter's CLI server execs the `copilot` CLI from PATH
       # (run 39098317753: bind adapter "copilot.main" ... "failed to start
       # CLI server: exec: "copilot": executable file not found in $PATH").

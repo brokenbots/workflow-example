@@ -54,13 +54,16 @@
 //                        (no fallback): the adapter's synthetic failure
 //                        outcome name is unmapped as a submission, so the
 //                        engine maps it through the default arm and routes
-//                        GREEN — the mapped-by-default contrast to the loud
-//                        terminal that follows.
-//   contract_unmapped    C18b: never-finalize again, but with EVERY lane
-//                        absent (no default, no fallback): the synthetic
-//                        failure outcome name is unmapped, so the engine
-//                        fails LOUD with an explicit routing error instead of
-//                        swallowing it — the designed loud terminal.
+//                        GREEN — the mapped-by-default contrast to the fail-
+//                        routed terminal that follows.
+//   contract_unmapped    C18b: never-finalize again, but with the declared
+//                        fallback arm catching the missing finalize BY NAME
+//                        and routing it to the failed terminal — the
+//                        observation is loud AND routed (a committed
+//                        StepOutcome carrying the typed fallback name, the
+//                        run ends on the failure terminal), the compiled
+//                        recompose of the retired outcome_not_allowed loud
+//                        terminal.
 //
 // One copilot session: every copilot step targets the same copilot.main
 // identity (fixed prompt per step, fixed model, low max-turns). No real
@@ -352,13 +355,18 @@ step "contract_default" {
     }
 }
 
-// C18b: budget exhaustion with EVERY lane absent — the synthetic failure
-// outcome name is unmapped (no default arm, no fallback arm), so the engine
-// must fail the run LOUD with an explicit routing error. The designed loud
-// terminal of this run: the shepherd reads StepOutcomeInvalid (not allowed)
-// + the run failure as the C18b observation, never a silent swallow. If the
-// session disobeys the never-finalize prompt and finalizes approved, the run
-// lands green (the stimulus miss is visible in the run events either way).
+// C18b: budget exhaustion fail-routed through a declared fallback arm. The
+// stimulus is a session that never calls submit_outcome, so the turn budget
+// exhausts without a finalize. The step is compile-compliant under the
+// absolute 0.5.57+ outcome-completeness verifier (no opt-out exists): the
+// declared fallback arm catches that no-finalize path BY NAME and routes it
+// to the failed terminal, so the observation is loud AND routed — a committed
+// StepOutcome carrying the typed fallback name and a run that ends on the
+// failure terminal, not the retired "engine screams an unmapped outcome"
+// class (that class is a compile-verified impossibility whose coverage lives
+// in the criteria engine test suite). If the session disobeys the
+// never-finalize prompt and finalizes approved, the run lands green (the
+// stimulus miss is visible in the run events either way).
 step "contract_unmapped" {
     target      = adapter.copilot.main
     allow_tools = []
@@ -369,9 +377,9 @@ step "contract_unmapped" {
         schema = object({ reason = string })
         next   = state.done
     }
-    outcome "failure" {
-        schema = object({ reason = string })
-        next   = state.failed
+    outcome "finalize_exhausted" {
+        fallback = true
+        next     = state.failed
     }
 }
 
