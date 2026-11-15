@@ -142,6 +142,10 @@ validate: pincheck fleet-apply-safe
 	# KB-276: the wire/composition harness tree — same validate leg as the
 	# production trees; its standalone suite carries the compile-level checks.
 	/usr/local/bin/criteria validate harness_wire_v1
+	# KB-406: devops_maint_v1 inventory-collect tree — same validate leg as
+	# the production trees; the grammar check covers the sweep template
+	# splices and the adapter interface contract.
+	/usr/local/bin/criteria validate devops_maint_v1
 	# KB-254: the harness-expectations matrix of record (the harness series
 	# anchor) — its guard fails closed on a missing/duplicate item id, a
 	# broken series-slice assignment, or a conventions regression.
@@ -388,6 +392,8 @@ ci: validate
 	done
 	@echo "== ci: shared gh retry wrapper integration tests (KB-219) =="
 	bash devops_triage_v1/tests/test_open_pr_retry.sh
+	@echo "== ci: devops_maint_v1 collect-step regression suite (KB-406) =="
+	bash devops_maint_v1/tests/test_collect_standalone.sh
 	@echo "== ci: secret-free shipped configs gate (CRI-250) =="
 	bash k8s/tests/test_secret_free_gate.sh
 	@echo "== ci: validate-manifests (structural YAML parse; CI also kubectl-dry-runs, non-gating) =="

@@ -240,8 +240,9 @@ chmod +x "${BIN_STUB_GH}/gh"
 cat >"${BIN_STUB_TOOLS}/govulncheck" <<'EOF'
 #!/usr/bin/env bash
 # Whole-sweep flags model single-repo or every-has-go.mod scenarios. Dir-mode
-# (TEST_GOV_FIXTURE=<dir>) injects per-repo lanes (<dir>/<repo>.{json,unpars,fail});
-# the repo is taken from the trailing clone-dir argument, mirroring osv-scanner.
+# (TEST_GOV_FIXTURE=<dir>) injects per-repo lanes (<dir>/<repo>.{json,unpars,fail}).
+# govulncheck is invoked with cwd=clone dir and `./...` (no dir argument),
+# so derive the scan repo from $PWD; osv-scanner takes the dir as argv.
 if [ "${TEST_GOV_FAIL:-0}" = "1" ]; then
     echo "govulncheck: fixture-injected failure" >&2
     exit 1
