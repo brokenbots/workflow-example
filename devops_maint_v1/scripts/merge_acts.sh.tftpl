@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — merge step (KB-407, ADR-0015 wave 2 / Lane A).
+#
+# The brokenbot lane: executes the consolidated plan from the classification
+# artifact. For every non-parked group the carrier PR is gated first — the
+# decision-adapter verdict sets the plan, these gates enforce it per PR:
+#
+#   reviewDecision == APPROVED
+#   mergeable == MERGEABLE
+#   mergeStateStatus == CLEAN
+#   statusCheckRollup: every entry completed+success (empty rollup passes)
+#
+# Gated carriers are merged with `gh pr merge --merge`. After a successful
+# carrier merge the close-out runs: every superseded member PR is closed with
+# a comment pointing at the carrier (the ONE consolidated PR that closes the
+# N dependabot PRs) and the carrier gets an evidence comment naming the
+# sweep, the group and the closed members.
+#
+# A carrier that misses ANY gate is deferred with a typed reason
+# (awaiting_review, not_mergeable, base_dirty, checks_pending, or a failed
+# gate view) — deferral is bookkeeping, never a failure. A gated merge
+# command that still fails is a merge failure: it is recorded in the
+# evidence, the step exits non-zero AFTER writing merged.json (whose path
+# rides in the typed failure line), like the collect step's partial-artifact
+# hint. An empty plan trivially succeeds.
+#
+# stdout carries ONLY the merged.json path; diagnostics go to stderr. All gh
+# traffic runs under the spliced gh_retry wrapper with the adapter-injected
+# GH_TOKEN — the brokenbot lane identity (var.brokenbot_github_token).
+set -euo pipefail
+
+# KB-219: the shared retry wrapper is spliced as raw content (file() returns
+# the file's content, not a path) and installs the gh drop-in shadow, so
+# every gh call below is transport-wrapped exactly like the collect sweep.
+{{ .gh_retry }}
+
+ORG={{ .org | shellquote }}
+CLASSIFICATION_PATH={{ .classification_file | shellquote }}
+
+log() { printf 'merge: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'merge_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+fail_merge() {
+  printf 'merge_failed: %s (evidence artifact kept: %s)\n' "$*" "$MERGED_PATH" >&2
+  exit 1
+}
+
+cleanup() {
+  rm -f "$RUN_DIR/.merge.rows.ndjson" "$RUN_DIR/.merge.compose.$$.err" \
+        "$RUN_DIR/.merge.selfcheck.$$.err"
+  rm -rf "$RAW_DIR"
+}
+
+err_text() {
+  # Missing or empty capture (or nothing left after stripping): honest
+  # placeholder, never a failure under set -e.
+  if [ ! -s "$1" ]; then
+    printf '<no stderr>'
+  else
+    grep -v '^gh_retry: ' "$1" | head -c 200 || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Config validation (fail loud, before any network call)
+# ---------------------------------------------------------------------------
+[ -n "$CLASSIFICATION_PATH" ] || fail "classification_file is empty (classify step bug or misbinding)"
+[ -f "$CLASSIFICATION_PATH" ] || fail "classification artifact not found: $CLASSIFICATION_PATH"
+case "$CLASSIFICATION_PATH" in
+  *..*) fail "classification path must not contain '..' components: $CLASSIFICATION_PATH" ;;
+esac
+
+jq -e '.schema == "devops_maint_v1.classification.v1"' "$CLASSIFICATION_PATH" >/dev/null 2>&1 ||
+  fail "input is not a devops_maint_v1.classification.v1 artifact: $CLASSIFICATION_PATH"
+jq -e '(.run.sweep_id | type == "string" and length > 0) and
+      (.run.org | type == "string" and length > 0) and
+      (.summary.groups_total | type == "number" and . >= 0)' "$CLASSIFICATION_PATH" >/dev/null 2>&1 ||
+  fail "classification artifact is missing a valid run/summary block (classify self-check should have caught this): $CLASSIFICATION_PATH"
+
+jq -e -n --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+  fail "org must match ^[A-Za-z0-9][A-Za-z0-9-]{0,99}\$ (got: $(printf '%s' "$ORG" | head -c 40))"
+
+RUN_DIR="$(dirname "$CLASSIFICATION_PATH")"
+MERGED_PATH="$RUN_DIR/merged.json"
+RAW_DIR="$RUN_DIR/.merge.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+trap cleanup EXIT
+
+GROUP_COUNT="$(jq -r '.summary.groups_total' "$CLASSIFICATION_PATH")"
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+log "merge plan: $GROUP_COUNT carrier(s) from $CLASSIFICATION_PATH"
+
+mkdir -p "$RAW_DIR"
+: >"$RUN_DIR/.merge.rows.ndjson"
+
+merged=0
+deferred=0
+merge_failures=0
+closes_done=0
+
+# ---------------------------------------------------------------------------
+# Per-carrier gate + merge + close-out
+# ---------------------------------------------------------------------------
+i=0
+while [ "$i" -lt "$GROUP_COUNT" ]; do
+  group="$(jq -c '.groups['"$i"']' "$CLASSIFICATION_PATH")"
+  i=$((i + 1))
+  gid="$(printf '%s' "$group" | jq -r '.group_id')"
+  repo="$(printf '%s' "$group" | jq -r '.repo')"
+  module="$(printf '%s' "$group" | jq -r '.module')"
+  action="$(printf '%s' "$group" | jq -r '.action_class')"
+  carrier="$(printf '%s' "$group" | jq -r '.carrier.number')"
+  closes_list="$(printf '%s' "$group" | jq -r '[.closes[]] | join(" ")')"
+  REPO_FULL="$ORG/$repo"
+
+  log "group $gid in $REPO_FULL: gate carrier #$carrier (action=$action)"
+
+  view_json="$(gh pr view "$carrier" -R "$REPO_FULL" --json reviewDecision,mergeable,mergeStateStatus,statusCheckRollup 2>"$RAW_DIR/view.$i.err")" || view_json=""
+  if [ -z "$view_json" ]; then
+    deferred=$((deferred + 1))
+    log "group $gid DEFERRED: carrier gate view failed: $(err_text "$RAW_DIR/view.$i.err")"
+    printf '%s\n' "$(jq -cn --arg repo "$repo" --arg gid "$gid" --arg action "$action" --argjson carrier "$carrier" \
+      --arg why "$(err_text "$RAW_DIR/view.$i.err")" \
+      '{repo: $repo, group_id: $gid, carrier: $carrier, action: $action, merged: false,
+        deferred: true, reason: ("carrier gate view failed: " + $why), closes: [], closes_failed: [],
+        carrier_comment: 0}')" >>"$RUN_DIR/.merge.rows.ndjson"
+    continue
+  fi
+
+  gate="$(printf '%s' "$view_json" | jq -r '
+    . as $v
+    | if ($v.reviewDecision // "") != "APPROVED" then "awaiting_review"
+      elif ($v.mergeable // "") != "MERGEABLE" then "not_mergeable"
+      elif ($v.mergeStateStatus // "") != "CLEAN" then "base_dirty"
+      elif ((all(($v.statusCheckRollup // [])[];
+            ((.status == "COMPLETED" and .conclusion == "SUCCESS") or
+             (.state == "SUCCESS") or
+             (.conclusion == "SUCCESS"))) | not)) then "checks_pending"
+      else "ok"
+      end')"
+
+  if [ "$gate" != "ok" ]; then
+    deferred=$((deferred + 1))
+    log "group $gid DEFERRED ($gate)"
+    printf '%s\n' "$(jq -cn --arg repo "$repo" --arg gid "$gid" --arg action "$action" --argjson carrier "$carrier" \
+      --arg why "$gate" \
+      '{repo: $repo, group_id: $gid, carrier: $carrier, action: $action, merged: false,
+        deferred: true, reason: $why, closes: [], closes_failed: [],
+        carrier_comment: 0}')" >>"$RUN_DIR/.merge.rows.ndjson"
+    continue
+  fi
+
+  # All gates green: the carrier comment text (evidence on the consolidated
+  # PR) and the per-member close message are composed via jq --arg so the
+  # module/group strings can never be interpreted as shell or gh syntax.
+  evidence_body="$(jq -cn \
+    --arg sid "$(jq -r '.run.sweep_id' "$CLASSIFICATION_PATH")" \
+    --arg module "$module" \
+    --arg gid "$gid" \
+    --arg nums "$(printf '%s' "$group" | jq -r '[.closes[] | "#\(.)"] | join(", ")')" \
+    '("devops_maint_v1 (sweep " + $sid + "): consolidated the " + $module + " bump (group " + $gid
+      + "); superseded dependabot PRs closed after this merge: "
+      + (if $nums == "" then "none" else $nums end) + ".")')"
+
+  if ! gh pr merge "$carrier" -R "$REPO_FULL" --merge >/dev/null 2>"$RAW_DIR/merge.$i.err"; then
+    merge_failures=$((merge_failures + 1))
+    log "group $gid: gated merge of #$carrier FAILED: $(err_text "$RAW_DIR/merge.$i.err")"
+    printf '%s\n' "$(jq -cn --arg repo "$repo" --arg gid "$gid" --arg action "$action" --argjson carrier "$carrier" \
+      --arg why "$(err_text "$RAW_DIR/merge.$i.err")" \
+      '{repo: $repo, group_id: $gid, carrier: $carrier, action: $action, merged: false,
+        deferred: false, reason: ("gated merge command failed: " + $why), closes: [], closes_failed: [],
+        carrier_comment: 0}')" >>"$RUN_DIR/.merge.rows.ndjson"
+    continue
+  fi
+
+  merged=$((merged + 1))
+  log "group $gid: #$carrier merged"
+
+  # Close-out. A close failure is recorded, not fatal: the carrier is already
+  # merged and the superseded PRs stay open for a human next pass.
+  closes_done_rows=""
+  closes_failed_rows=""
+  for member in $closes_list; do
+    member_msg="$(jq -cn --arg carrier "$carrier" --arg module "$module" \
+      '("Closing as superseded by #" + $carrier + " (consolidated " + $module + " bump).")')"
+    if gh pr close "$member" -R "$REPO_FULL" --comment "$member_msg" >/dev/null 2>"$RAW_DIR/close.$i.$member.err"; then
+      closes_done=$((closes_done + 1))
+      closes_done_rows="$closes_done_rows $member"
+    else
+      log "group $gid: close-out of #$member failed: $(err_text "$RAW_DIR/close.$i.$member.err")"
+      closes_failed_rows="$closes_failed_rows $member"
+    fi
+  done
+
+  carrier_comment=1
+  if ! gh pr comment "$carrier" -R "$REPO_FULL" --body "$evidence_body" >/dev/null 2>"$RAW_DIR/comment.$i.err"; then
+    carrier_comment=0
+    log "group $gid: carrier evidence comment failed: $(err_text "$RAW_DIR/comment.$i.err")"
+  fi
+
+  printf '%s\n' "$(jq -cn --arg repo "$repo" --arg gid "$gid" --arg action "$action" --argjson carrier "$carrier" \
+    --arg done "$(printf '%s' "$closes_done_rows" | sed 's/^ //')" \
+    --arg failed "$(printf '%s' "$closes_failed_rows" | sed 's/^ //')" \
+    --argjson comment "$carrier_comment" \
+    '{repo: $repo, group_id: $gid, carrier: $carrier, action: $action, merged: true,
+      deferred: false, reason: null,
+      closes: (if $done == "" then [] else $done | split(" ") | map(tonumber) end),
+      closes_failed: (if $failed == "" then [] else $failed | split(" ") | map(tonumber) end),
+      carrier_comment: $comment}')" >>"$RUN_DIR/.merge.rows.ndjson"
+done
+
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+# ---------------------------------------------------------------------------
+# merged.json + structural self-check
+# ---------------------------------------------------------------------------
+if ! jq -cn \
+  --arg inv "$CLASSIFICATION_PATH" \
+  --arg sid "$(jq -r '.run.sweep_id' "$CLASSIFICATION_PATH")" \
+  --arg org "$ORG" \
+  --arg started "$started_at" \
+  --arg finished "$finished_at" \
+  --argjson rows "$(cat "$RUN_DIR/.merge.rows.ndjson" | jq -s '.')" \
+  --argjson merged "$merged" \
+  --argjson deferred "$deferred" \
+  --argjson failures "$merge_failures" \
+  --argjson closes "$closes_done" \
+  '
+  {
+    schema: "devops_maint_v1.merged.v1",
+    run: {
+      sweep_id: $sid,
+      org: $org,
+      classification_path: $inv,
+      started_at: $started,
+      finished_at: $finished
+    },
+    summary: {
+      carriers_total: ($rows | length),
+      merged: $merged,
+      deferred: $deferred,
+      merge_failures: $failures,
+      closes_done: $closes
+    },
+    groups: $rows
+  }' >"$MERGED_PATH" 2>"$RUN_DIR/.merge.compose.$$.err"; then
+  fail "merged artifact compose failed: $(head -c 200 "$RUN_DIR/.merge.compose.$$.err" 2>/dev/null)"
+fi
+
+jq -e '
+  . as $root
+  | ($root.schema == "devops_maint_v1.merged.v1") and
+  ($root.run.org | type == "string" and length > 0) and
+  ($root.run.classification_path | type == "string" and length > 0) and
+  ($root.summary.carriers_total == ($root.groups | length)) and
+  ($root.summary.carriers_total == $root.summary.merged + $root.summary.deferred + $root.summary.merge_failures) and
+  ($root.summary.merged == ([$root.groups[] | select(.merged)] | length)) and
+  ($root.summary.deferred == ([$root.groups[] | select(.deferred and (.merged | not))] | length)) and
+  ($root.summary.closes_done == ([$root.groups[].closes | length] | add // 0)) and
+  (all($root.groups[];
+      . as $g
+      | ($g.repo | type == "string" and length > 0) and
+        ($g.group_id | type == "string" and length > 3) and
+        ($g.carrier | type == "number") and
+        ($g.action | IN("mechanical_bump", "vuln_clear", "needs_rebase")) and
+        ($g.merged | type == "boolean") and
+        ($g.deferred | type == "boolean") and
+        (if $g.merged then ($g.reason == null) and ($g.deferred == false)
+         else ($g.reason | type == "string" and length > 0)
+         end) and
+        ($g.closes | type == "array" and all(.[]; type == "number")) and
+        ($g.closes_failed | type == "array" and all(.[]; type == "number")) and
+        ($g.carrier_comment | IN(0, 1))))
+' "$MERGED_PATH" >/dev/null 2>"$RUN_DIR/.merge.selfcheck.$$.err" ||
+  fail "merged artifact failed its structural self-check: $(head -c 200 "$RUN_DIR/.merge.selfcheck.$$.err" 2>/dev/null)"
+
+cleanup
+
+log "merge plan done: carriers=$GROUP_COUNT merged=$merged deferred=$deferred failures=$merge_failures closes_done=$closes_done"
+
+if [ "$merge_failures" -gt 0 ]; then
+  fail_merge "gated merge failed for $merge_failures carrier(s)"
+fi
+
+printf '%s\n' "$MERGED_PATH"

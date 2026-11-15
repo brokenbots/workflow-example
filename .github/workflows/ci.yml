@@ -284,6 +284,16 @@ jobs:
         run: |
           bash devops_triage_v1/tests/test_open_pr_retry.sh
 
+      # KB-406/KB-407: the whole devops_maint_v1 family in one CI leg
+      # (collect gate + classify buckets + Lane A act/merge via stub gh +
+      # the route gate / route_brief suite from KB-407).
+      - name: Run devops_maint_v1 standalone regression suites (KB-407)
+        run: |
+          bash devops_maint_v1/tests/test_collect_standalone.sh
+          bash devops_maint_v1/tests/test_classify_standalone.sh
+          bash devops_maint_v1/tests/test_lane_a_acts.sh
+          bash devops_maint_v1/tests/test_route_gate_standalone.sh
+
   secret-free-gate:
     name: Secret-free shipped configs (CRI-250)
     runs-on: ubuntu-latest

@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — classify step (KB-407, ADR-0015 wave 2 / Lane A).
+#
+# Deterministic bucketing of the collect artifact into the four ADR-0015
+# buckets, entirely from the inventory JSON — no network, no gh calls, no
+# model turns. Emits ONE classification artifact NEXT TO the inventory
+# (its run directory), so a sweep's collect/classify/act/merge evidence
+# stays one directory:
+#
+#   <inventory dir>/classification.json
+#
+# Priority order of the gate ladder (single if/elif chain, first match wins;
+# a fired gate records at most one reason in the row's reasons — empty
+# reasons array = no gate fired):
+#   1. Title does not parse as "Bump <module> [ in <path>] from <from> to
+#      <to>[ in <path>]" — covers grouped titles ("Bump the go_modules
+#      group across ..."), release waves, manual retitles   -> needs_judgment
+#   2. Version tokens uncomparable OR of mixed kinds (an integer-action
+#      token vs a dotted token): digests, dates, "from 4 to 4.1.0" -> judgment
+#   3. Major gate: to-major greater than from-major (actions-style integer
+#      bump or dotted semver bump)                          -> needs_judgment
+#   4. Base drift: merge_state in {BEHIND, DIRTY, UNKNOWN}, CI confirmably
+#      green-or-none                                       -> needs_rebase
+#      (DEVIATION from the literal ADR text "DIRTY / UNKNOWN", documented
+#      here on purpose: BEHIND is the months-stale drifted-but-mergeable
+#      member; parking it in judgment would leave every stale drift
+#      untouched forever. The gate stays affirmative — a MISSING/null
+#      merge_state is NEVER read as drift. A drifted bump whose CI is
+#      red/pending/error is NOT rebased; it parks in judgment below.)
+#   5. CI verdict red with a clean base                    -> needs_judgment
+#   6. CI verdict pending/error/unenumerated ("not confirmably green") -> judgment
+#   7. Version-only same-major bump whose module path-matches an advisory
+#      finding in the SAME repo (govulncheck/osv, status ok, exact package
+#      or "/" path-suffix match, any version)              -> vuln_clear
+#   8. Otherwise (version-only bump, confirmably green-or-none CI) -> mechanical_bump
+#
+# Rows from repos whose inventory record is non-collected (partial sweep)
+# never auto-act: they park as report_only/class=report_hold with a typed
+# reason, before any grouping.
+#
+# Consolidation (ADR-0015 D2): every actionable row (not judgment, not
+# report-only) joins exactly one group keyed (repo, module, to_version).
+# Groups with mixed base_refs park report-only ("consolidation blocked").
+# The carrier — the PR that carries the action and gets merged — is
+# max_by(non-rebase-preferred, freshest updated_at, higher number); all
+# other members are superseded and closed AFTER the carrier merge (the
+# merge step's close-out). Carriers are existing member PRs: NO new
+# branches or PRs are created. Judgment rows never join groups.
+#
+# stdout carries ONLY the classification artifact path; diagnostics go to
+# stderr like every other deterministic surface in this tree.
+set -euo pipefail
+
+INVENTORY_PATH={{ .inventory_file | shellquote }}
+
+log() { printf 'classify: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'classify_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Config validation (fail loud, before reading anything)
+# ---------------------------------------------------------------------------
+[ -n "$INVENTORY_PATH" ] || fail "inventory_file is empty (collect step bug or misbinding)"
+[ -f "$INVENTORY_PATH" ] || fail "inventory artifact not found: $INVENTORY_PATH"
+case "$INVENTORY_PATH" in
+  *..*) fail "inventory path must not contain '..' components: $INVENTORY_PATH" ;;
+esac
+
+jq -e '.schema == "devops_maint_v1.inventory.v1"' "$INVENTORY_PATH" >/dev/null 2>&1 ||
+  fail "input is not a devops_maint_v1.inventory.v1 artifact: $INVENTORY_PATH"
+
+RUN_DIR="$(dirname "$INVENTORY_PATH")"
+CLASSIFICATION_PATH="$RUN_DIR/classification.json"
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+
+TMP_ROWS="$RUN_DIR/.classify.rows.$$.tmp"
+TMP_PASS2="$RUN_DIR/.classify.pass2.$$.tmp"
+cleanup() {
+  rm -f "$RUN_DIR/.classify.rows.$$.tmp" "$RUN_DIR/.classify.pass2.$$.tmp" \
+        "$RUN_DIR/.classify.pass1.$$.err" "$RUN_DIR/.classify.pass2.$$.err" \
+        "$RUN_DIR/.classify.assemble.$$.err" "$RUN_DIR/.classify.selfcheck.$$.err"
+}
+trap cleanup EXIT
+
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+log "input inventory $INVENTORY_PATH"
+
+# ---------------------------------------------------------------------------
+# Pass 1 — per-PR gate ladder (deterministic, pure-jq over the artifact)
+# ---------------------------------------------------------------------------
+jq '
+  def isint_s: test("^[0-9]+$");
+  # Bump-token parse: strip the conventional leading v, then recognize either
+  # a bare integer (actions-style bumps) or a dotted token whose leading
+  # segment is an integer (semver). Anything else (digests, dates) is opaque.
+  def ver_major:
+    (ltrimstr("v") | ltrimstr("V")) as $c
+    | if ($c | isint_s) then {kind: "int", major: ($c | tonumber)}
+      elif (($c | split(".")[0]) | isint_s) then {kind: "dotted", major: ($c | split(".")[0] | tonumber)}
+      else {kind: "opaque"} end;
+  # Title grammar of a bump PR: <module> optionally qualified with " in <path>"
+  # before or after the from/to pair. Unparseable titles (grouped bumps,
+  # release waves, retitles) yield null; \\S+ keeps from/to free of spaces.
+  def parse_title:
+    capture("^Bump (?<module>.+?)(?: in .+?)? from (?<from>\\S+) to (?<to>\\S+)(?: in .+?)?$") // null;
+  # Advisory path-match: the finding targets the same package path, any
+  # version. Exact module equality, or the module as a "/" path-suffix of
+  # the package field ("npm/left-pad" matches module "left-pad").
+  def advisory_hit($module):
+    ((.package // "") == $module) or
+    ((.package // "") | endswith("/" + $module));
+  # Advisory ids matching one module within this repo record; a surface
+  # that is not ok contributes nothing (never a clean bill).
+  def closed_ids($module):
+    ((if .advisories.govulncheck.status == "ok" then .advisories.govulncheck.findings else [] end)
+     + (if .advisories.osv.status == "ok" then .advisories.osv.findings else [] end))
+    | map(select((.id | type == "string") and (.id | length) > 0))
+    | map(select(advisory_hit($module)))
+    | map(.id);
+  def drifted: (.merge_state | IN("BEHIND", "DIRTY", "UNKNOWN")) or false;
+  [
+    .repos[]
+    | . as $rec
+    | .prs.dependabot[]
+    | {
+        repo: $rec.repo,
+        number: .number,
+        title: .title,
+        module: null, from_version: null, to_version: null,
+        base_ref: .base_ref, merge_state: .merge_state,
+        ci_verdict: .ci.verdict, updated_at: .updated_at,
+        class: null, reasons: [], advisory_ids: [],
+        group_id: null, is_carrier: false,
+        report_only: ($rec.collected | not),
+        report_reason: (if $rec.collected
+                        then null
+                        else ("repo inventory partially collected: " + $rec.collected_reason)
+                        end)
+      }
+    | (.title | parse_title) as $pt
+    | ([$pt,
+        ((if $pt == null then null else $pt.from end) | if . == null then null else ver_major end),
+        ((if $pt == null then null else $pt.to end) | if . == null then null else ver_major end)]
+      ) as [$pm, $fm, $tm]
+    # The gate ladder, priority order; class = FIRST fired gate.
+    | ([
+        if $pm == null
+        then {class: "needs_judgment",
+              reason: "title does not parse as \u0027Bump <module> from <from> to <to>\u0027 (grouped or retitled PR)"}
+        elif $fm.kind == "opaque" or $tm.kind == "opaque"
+        then {class: "needs_judgment", reason: "version tokens not comparable (digest or non-numeric)"}
+        elif $fm.kind != $tm.kind
+        then {class: "needs_judgment", reason: "version tokens mix integer and semver kinds"}
+        elif $tm.major > $fm.major
+        then {class: "needs_judgment",
+              reason: (if $fm.kind == "int"
+                        then "actions-style major bump (from \($pm.from) to \($pm.to))"
+                        else "semver major bump (from \($pm.from) to \($pm.to))" end)}
+        elif drifted and (.ci_verdict | IN("green", "none"))
+        then {class: "needs_rebase", reason: "base drifted (merge_state \(.merge_state)); rebase required"}
+        elif .ci_verdict == "red"
+        then {class: "needs_judgment", reason: "CI verdict red; a failing bump needs human review"}
+        elif (.ci_verdict | IN("pending", "error", "unenumerated"))
+        then {class: "needs_judgment", reason: "CI verdict \(.ci_verdict) is not confirmably green"}
+        else {class: null, reason: null}
+        end
+      ]) as $ladder
+    | ($ladder[0].class) as $base_class
+    | .module = (if $pm == null then null else $pm.module end)
+    | .from_version = (if $pm == null then null else $pm.from end)
+    | .to_version = (if $pm == null then null else $pm.to end)
+    | .reasons = [$ladder[] | select(.reason != null) | .reason]
+    | .advisory_ids = (if $pm == null or ($base_class != null and $base_class != "needs_rebase")
+                        then []
+                        else ($rec | closed_ids($pm.module)) end)
+    | .class = (if .report_only then "report_hold"
+                elif $base_class != null then $base_class
+                elif (.advisory_ids | length) > 0 then "vuln_clear"
+                else "mechanical_bump"
+                end)
+    | if .report_only then .module = null | .from_version = null | .to_version = null | .advisory_ids = [] else . end
+  ]' "$INVENTORY_PATH" >"$TMP_ROWS" 2>"$RUN_DIR/.classify.pass1.$$.err" ||
+  fail "classifying pass rejected the artifact: $(head -c 200 "$RUN_DIR/.classify.pass1.$$.err" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# Pass 2 — consolidation groups, carriers, rebase list
+# ---------------------------------------------------------------------------
+jq '
+  def actionable: (.class != "needs_judgment") and (.class != "report_hold") and (.report_only | not);
+  def gkey: [.repo, .module, (if .to_version == "" then "?" else .to_version end)];
+  def pad($n): ($n | tostring | ("00" + .)[-3:]);
+  [.[] | select(actionable)] as $actionable
+  | ($actionable
+      | group_by(gkey)
+      | map({
+          repo: .[0].repo,
+          module: .[0].module,
+          to_version: .[0].to_version,
+          base_refs: (map(.base_ref) | unique),
+          members: (map(.number)),
+          advisory_ids: ((map(.advisory_ids) | add // []) | unique),
+          # carrier = max_by(non-rebase first, freshest updated_at, higher number)
+          carrier: (max_by([(if .class == "needs_rebase" then 0 else 1 end), (.updated_at // ""), .number])),
+          parked: false
+        })
+      | map(if (.base_refs | length) == 1 then .base_ref = .base_refs[0] else .parked = true end)
+      # ids assigned over ALL groups (parked included) in sorted key order —
+      # deterministic per input, gaps where a later key parked
+      | sort_by([.repo, .module, (.to_version // "")])
+      | to_entries
+      | map(.value + {group_id: ("g" + pad(.key + 1))})
+    ) as $all_groups
+  | ($all_groups | map(select(.parked))) as $parked_groups
+  | ($all_groups
+      | map(select(.parked | not)
+        | select(.carrier.class == "needs_rebase")
+        | {repo, number: .carrier.number, group_id, module, to_version,
+           merge_state: .carrier.merge_state, base_ref: .base_ref})
+    ) as $rebases
+  | ($all_groups
+      | map(select(.parked | not)
+        | {group_id, repo, module, to_version, base_ref,
+           action_class: .carrier.class,
+           carrier: {repo: .carrier.repo, number: .carrier.number,
+                     title: .carrier.title, updated_at: .carrier.updated_at},
+           members: .members,
+           # superseded members close AFTER the carrier merge (merge step)
+           closes: ([.members[]] - [.carrier.number]),
+           advisory_ids, parked: false})
+    ) as $groups
+  # rows updates: parked members become report-only; the rest key to groups
+  | map(
+      . as $r
+      | (($all_groups[] | select((.members | index($r.number)) != null) | select(.repo == $r.repo)) // null) as $grp
+      | if $grp == null then .
+        elif $grp.parked then .report_only = true
+          | .class = "report_hold"
+          | .report_reason = ("consolidation blocked: mixed base refs (" + ($grp.base_refs | join(", ")) + ") in group of " + (($grp.members | length) | tostring) + " PR(s) bumping " + ($r.module // "?"))
+        else .group_id = $grp.group_id
+          | .is_carrier = ($grp.carrier.number == $r.number)
+        end
+      | .
+    )
+  | {rows: ., groups: $groups, parked: $parked_groups, rebases: $rebases}
+  ' "$TMP_ROWS" >"$TMP_PASS2" 2>"$RUN_DIR/.classify.pass2.$$.err" ||
+  fail "consolidation pass failed: $(head -c 200 "$RUN_DIR/.classify.pass2.$$.err" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# Final artifact: run block + summary + report lane. Empty inventories
+# classify to an empty-bucket artifact — the act/merge steps succeed
+# trivially on empty plans.
+# ---------------------------------------------------------------------------
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+jq -cn \
+  --arg inv "$INVENTORY_PATH" \
+  --arg sid "$(jq -r '.sweep.sweep_id' "$INVENTORY_PATH")" \
+  --arg org "$(jq -r '.sweep.org' "$INVENTORY_PATH")" \
+  --arg repos_json "$(jq -r '.sweep.repos | tostring' "$INVENTORY_PATH")" \
+  --arg started "$started_at" \
+  --arg finished "$finished_at" \
+  --argjson body "$(cat "$TMP_PASS2")" \
+  '
+  ($body.rows) as $rows
+  | ($body.groups) as $groups
+  | ($body.rebases) as $rebases
+  | ($body.parked) as $parked
+  | {
+      schema: "devops_maint_v1.classification.v1",
+      run: {
+        sweep_id: $sid,
+        org: $org,
+        repos: ($repos_json | fromjson?),
+        inventory_path: $inv,
+        started_at: $started,
+        finished_at: $finished
+      },
+      summary: {
+        rows_total: ($rows | length),
+        mechanical_bump: ([$rows[] | select(.class == "mechanical_bump")] | length),
+        vuln_clear: ([$rows[] | select(.class == "vuln_clear")] | length),
+        needs_rebase: ([$rows[] | select(.class == "needs_rebase")] | length),
+        needs_judgment: ([$rows[] | select(.class == "needs_judgment")] | length),
+        report_hold: ([$rows[] | select(.class == "report_hold")] | length),
+        report_only: ([$rows[] | select(.report_only)] | length),
+        parked_groups: ($parked | length),
+        groups_total: ($groups | length),
+        carriers_total: ($groups | length),
+        closes_total: (([$groups[].closes | length] | add) // 0),
+        rebases_total: ($rebases | length)
+      },
+      rows: $rows,
+      groups: $groups,
+      rebases: $rebases,
+      report: [$rows[] | select(.report_only)
+               | {repo: .repo, number: .number, title: .title, class: .class, reason: .report_reason}]
+    }
+  ' >"$CLASSIFICATION_PATH" 2>"$RUN_DIR/.classify.assemble.$$.err" ||
+  fail "classification artifact compose failed: $(head -c 200 "$RUN_DIR/.classify.assemble.$$.err" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# Structural self-check
+# ---------------------------------------------------------------------------
+jq -e '
+  . as $root
+  | ($root.schema == "devops_maint_v1.classification.v1") and
+  ($root.run.sweep_id | type == "string") and
+  ($root.run.org | type == "string" and length > 0) and
+  ($root.run.repos | type == "array") and
+  ($root.run.inventory_path | type == "string" and length > 0) and
+  ($root.run.started_at | type == "string" and length > 0) and
+  ($root.run.finished_at | type == "string" and length > 0) and
+  ($root.summary | type == "object") and
+  (all($root.summary | to_entries[]; .value | type == "number")) and
+  ($root.summary.rows_total == ($root.rows | length)) and
+  ($root.summary.groups_total == ($root.groups | length)) and
+  ($root.summary.carriers_total == ($root.groups | length)) and
+  ($root.summary.rebases_total == ($root.rebases | length)) and
+  ($root.summary.closes_total == (([$root.groups[].closes | length] | add) // 0)) and
+  ($root.summary.report_only == ([$root.rows[] | select(.report_only)] | length)) and
+  ($root.summary.mechanical_bump == ([$root.rows[] | select(.class == "mechanical_bump")] | length)) and
+  ($root.summary.vuln_clear == ([$root.rows[] | select(.class == "vuln_clear")] | length)) and
+  ($root.summary.needs_rebase == ([$root.rows[] | select(.class == "needs_rebase")] | length)) and
+  ($root.summary.needs_judgment == ([$root.rows[] | select(.class == "needs_judgment")] | length)) and
+  ($root.summary.report_hold == ([$root.rows[] | select(.class == "report_hold")] | length)) and
+  (([$root.rows[] | [.repo, .number]] | unique | length) == ($root.rows | length)) and
+  (all($root.rows[];
+      . as $row
+      | ($row.repo | type == "string" and length > 0) and
+        ($row.number | type == "number") and
+        ($row.title | type == "string") and
+        ($row.class | IN("mechanical_bump", "vuln_clear", "needs_rebase", "needs_judgment", "report_hold")) and
+        ($row.reasons | type == "array" and all(.[]; type == "string" and length > 0)) and
+        ($row.advisory_ids | type == "array" and all(.[]; type == "string" and length > 0)) and
+        ($row.is_carrier | type == "boolean") and
+        ($row.report_only | type == "boolean") and
+        (if $row.report_only
+         then ($row.class == "report_hold") and ($row.group_id == null) and ($row.is_carrier == false) and
+              (($row.report_reason | type == "string") and ($row.report_reason | length) > 0)
+         elif $row.class == "needs_judgment"
+         then ($row.group_id == null) and ($row.is_carrier == false)
+         else ($row.group_id | type == "string" and length > 0)
+         end))) and
+  ([$root.rows[] | select(.is_carrier)] | length == ($root.groups | length)) and
+  ([$root.groups[].group_id] | length == (. | unique | length)) and
+  (all($root.groups[];
+      . as $g
+      | ($g.group_id | type == "string" and length > 3) and
+        ($g.repo | type == "string" and length > 0) and
+        ($g.module | type == "string" and length > 0) and
+        ($g.to_version | type == "string") and
+        ($g.base_ref | type == "string") and
+        ($g.action_class | IN("mechanical_bump", "vuln_clear", "needs_rebase")) and
+        ($g.carrier | type == "object" and ($g.carrier.repo | type == "string") and ($g.carrier.number | type == "number")) and
+        ($g.members | type == "array" and all(.[]; type == "number") and ((. | unique) == .)) and
+        ($g.closes | type == "array" and all(.[]; type == "number") and ((. | unique) == .) and ((. | index($g.carrier.number)) == null)) and
+        ($g.members | index($g.carrier.number) != null) and
+        ($g.advisory_ids | type == "array") and
+        ($g.parked == false))) and
+  (all($root.rebases[];
+      (.repo | type == "string" and length > 0) and
+      (.number | type == "number") and
+      (.group_id | type == "string" and length > 3) and
+      (.module | type == "string") and
+      (.to_version | type == "string") and
+      (.base_ref | type == "string") and
+      (.merge_state | type == "string" and length > 0))) and
+  (all($root.rebases[];
+      . as $rb
+      | any($root.groups[];
+          .group_id == $rb.group_id and
+          .repo == $rb.repo and
+          .carrier.number == $rb.number and
+          .action_class == "needs_rebase"))) and
+  ($root.rebases | length == ([$root.groups[] | select(.action_class == "needs_rebase")] | length)) and
+  (all($root.report[];
+      (.repo | type == "string" and length > 0) and
+      (.number | type == "number") and
+      (.title | type == "string") and
+      (.reason | type == "string" and length > 0)) and
+    ($root.report | length == $root.summary.report_only))
+' "$CLASSIFICATION_PATH" >/dev/null 2>"$RUN_DIR/.classify.selfcheck.$$.err" ||
+  fail "classification artifact failed its structural self-check: $(head -c 200 "$RUN_DIR/.classify.selfcheck.$$.err" 2>/dev/null)"
+
+log "buckets: mechanical=$(jq -r '.summary.mechanical_bump' "$CLASSIFICATION_PATH") vuln=$(jq -r '.summary.vuln_clear' "$CLASSIFICATION_PATH") rebase=$(jq -r '.summary.needs_rebase' "$CLASSIFICATION_PATH") judgment=$(jq -r '.summary.needs_judgment' "$CLASSIFICATION_PATH") report_only=$(jq -r '.summary.report_only' "$CLASSIFICATION_PATH"); groups=$(jq -r '.summary.groups_total' "$CLASSIFICATION_PATH") closes=$(jq -r '.summary.closes_total' "$CLASSIFICATION_PATH")"
+
+printf '%s\n' "$CLASSIFICATION_PATH"

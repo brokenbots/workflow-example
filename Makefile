@@ -392,8 +392,11 @@ ci: validate
 	done
 	@echo "== ci: shared gh retry wrapper integration tests (KB-219) =="
 	bash devops_triage_v1/tests/test_open_pr_retry.sh
-	@echo "== ci: devops_maint_v1 collect-step regression suite (KB-406) =="
+	@echo "== ci: devops_maint_v1 standalone regression suites (KB-406/KB-407) =="
 	bash devops_maint_v1/tests/test_collect_standalone.sh
+	bash devops_maint_v1/tests/test_classify_standalone.sh
+	bash devops_maint_v1/tests/test_lane_a_acts.sh
+	bash devops_maint_v1/tests/test_route_gate_standalone.sh
 	@echo "== ci: secret-free shipped configs gate (CRI-250) =="
 	bash k8s/tests/test_secret_free_gate.sh
 	@echo "== ci: validate-manifests (structural YAML parse; CI also kubectl-dry-runs, non-gating) =="

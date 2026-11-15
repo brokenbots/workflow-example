@@ -282,7 +282,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
   dependabot_rows_file="$rdir/dependabot.ndjson"
 
   gh pr list -R "$ORG/$repo" --state open --limit 200 \
-    --json number,title,author,headRefName,baseRefName,url,updatedAt \
+    --json number,title,author,headRefName,baseRefName,url,updatedAt,mergeStateStatus \
     >"$rdir/pr_list.json" 2>"$rdir/pr_list.err" \
     && prs_rc=0 || prs_rc=$?
 
@@ -307,7 +307,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
     jq -r '
       .[]
       | select(((.author.login // "") | test("dependabot"; "i")))
-      | [(.number | tostring), (.title // ""), (.author.login // ""), (.headRefName // ""), (.baseRefName // ""), (.url // ""), (.updatedAt // "")]
+      | [(.number | tostring), (.title // ""), (.author.login // ""), (.headRefName // ""), (.baseRefName // ""), (.url // ""), (.updatedAt // ""), (.mergeStateStatus // "")]
       | join("\u0001")
     ' "$rdir/pr_list.json" >"$rdir/dependabot.list"
 
@@ -324,9 +324,11 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           --arg base "$(printf '%s' "$pr_line" | cut -d$'\001' -f5)" \
           --arg url "$(printf '%s' "$pr_line" | cut -d$'\001' -f6)" \
           --arg updated "$(printf '%s' "$pr_line" | cut -d$'\001' -f7)" \
+          --arg mss "$(printf '%s' "$pr_line" | cut -d$'\001' -f8)" \
           --arg err "per-PR checks not enumerated (COLLECT_MAX_PR_CHECKS=$CHECKS_CAP cap reached)" \
           '{number: $number, title: $title, author: $author, head_ref: $head, base_ref: $base, url: (if $url == "" then null else $url end),
             updated_at: (if $updated == "" then null else $updated end),
+            merge_state: (if $mss == "" then null else $mss end),
             ci: {verdict: "unenumerated", check_count: 0, checks: [], error: $err}}' \
           >>"$dependabot_rows_file"
         continue
@@ -339,6 +341,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
       pr_base="$(printf '%s' "$pr_line" | cut -d$'\001' -f5)"
       pr_url="$(printf '%s' "$pr_line" | cut -d$'\001' -f6)"
       pr_updat="$(printf '%s' "$pr_line" | cut -d$'\001' -f7)"
+      pr_mss="$(printf '%s' "$pr_line" | cut -d$'\001' -f8)"
 
       gh pr checks "$pr_number" -R "$ORG/$repo" \
         >"$rdir/checks.$pr_number.tsv" 2>"$rdir/checks.$pr_number.err" \
@@ -392,6 +395,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           --arg base "$pr_base" \
           --arg url "$pr_url" \
           --arg updated "$pr_updat" \
+          --arg mss "$pr_mss" \
           --arg verdict "$verdict" \
           --arg cierr "$pr_ci_err" \
           --argjson rows "$(jq -s '.' "$rdir/checks.$pr_number.rows")" \
@@ -406,6 +410,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
               base_ref: $base,
               url: (if $url == "" then null else $url end),
               updated_at: (if $updated == "" then null else $updated end),
+              merge_state: (if $mss == "" then null else $mss end),
               ci: {
                 verdict: $verdict,
                 check_count: $nr,
@@ -426,9 +431,11 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           --arg base "$pr_base" \
           --arg url "$pr_url" \
           --arg updated "$pr_updat" \
+          --arg mss "$pr_mss" \
           --arg err "$pr_err" \
           '{number: $number, title: $title, author: $author, head_ref: $head, base_ref: $base, url: (if $url == "" then null else $url end),
             updated_at: (if $updated == "" then null else $updated end),
+            merge_state: (if $mss == "" then null else $mss end),
             ci: {verdict: "error", check_count: 0, checks: [], error: $err}}' \
           >>"$dependabot_rows_file"
       fi
@@ -756,6 +763,7 @@ jq -e '
       (all(.prs.dependabot[];
           (.number | type == "number") and
           (.title | type == "string") and
+          (.merge_state | type == "string" and length > 0 or .merge_state == null) and
           (.ci | type == "object") and
           (.ci.verdict | IN("green", "red", "pending", "none", "error", "unenumerated")) and
           (.ci.check_count | type == "number") and

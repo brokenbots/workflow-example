@@ -1,10 +1,10 @@
-// devops_maint_v1 variables (KB-406, ADR-0015 wave 1: per-repo inventory collect).
+// devops_maint_v1 variables (KB-406 collect + KB-407 Lane A graph).
 //
-// The sweep runs unattended as deterministic shell (no copilot adapters, no
-// model turns), so its scope is fail-loud: org must be bound (no default) and
-// repos ships EMPTY by design so an unconfigured sweep can never silently
-// collect unconfigured repositories. The guided sweep binding (KB-410) makes
-// both explicit per run.
+// The sweep runs unattended as deterministic shell (no model turns), so its
+// scope is fail-loud: org must be bound (no default) and repos ships EMPTY by
+// design so an unconfigured sweep can never silently collect unconfigured
+// repositories. The route gate's backend must be explicitly bound too — a
+// default base_url would let a missing binding point the gate at nothing.
 variable "org" {
     description = "GitHub org whose repos the sweep enumerates; org/repo pairs feed every gh call (PRs, checks, advisories, code-scanning, rulesets)."
     type        = string
@@ -29,7 +29,7 @@ variable "data_root" {
 }
 
 // Durable root for sweep workspaces + inventory artifacts. Kept across runs
-// so KB-407's delta-driven cadence can read prior inventories back.
+// so the delta-driven cadence can read prior inventories back.
 variable "sweep_root" {
     description = "Durable root for sweep workspaces + inventory.json artifacts (prior sweeps stay readable for the delta-driven cadence)."
     type        = string
@@ -39,7 +39,7 @@ variable "sweep_root" {
 // Advisory surfaces are on by default (the card's full column set); a caller
 // may disable one to trade wall clock for a faster partial sweep — the
 // artifact records the skipped surface honestly rather than reporting it
-// clean, so KB-407 can never classify UNKNOWN as "no advisories".
+// clean, so classify can never classify UNKNOWN as "no advisories".
 variable "scan_govulncheck" {
     description = "Run govulncheck per cloned repo when the tool is present (status lanes: ok | not_applicable | unavailable | error; a disabled surface records not_applicable, never a clean bill)."
     type        = bool
@@ -53,7 +53,53 @@ variable "scan_osv" {
 }
 
 variable "workflow_github_token" {
-    description = "Workflow GitHub identity the shell adapter injects as GH_TOKEN via the engine's secret providers (ADR-0015 D4)."
+    description = "Workflow GitHub identity the shell adapter injects as GH_TOKEN via the engine's secret providers (ADR-0015 D4). Collect + act run under it; merge does not."
+    type        = string
+    secret      = true
+}
+
+// ── Lane A (KB-407): route gate + brokenbot merge lane ───────────────────────
+
+// The decision gate: a choice below this confidence is not trusted to
+// auto-act and holds the run, mirroring decision_demo_v1's routing gate.
+variable "route_conf_floor" {
+    type        = number
+    default     = 0.9
+    description = "Minimum acceptable decision confidence for the route gate to auto-proceed the consolidated plan; anything below holds the run."
+}
+
+// The route gate's backend endpoint override carries a production fallback
+// (the decision_demo_v1 production shape) because adapter config attributes
+// must be compile-time known; an explicit binding still wins.
+// No default on the override itself: an unbound override falls back rather
+// than pointing the gate at a guessed endpoint.
+variable "route_decision_base_url" {
+    type        = string
+    default     = ""
+    description = "Optional System One decision backend base URL for the route gate (the adapter appends /v1/systemone). Empty falls back to the production endpoint."
+}
+
+variable "route_decision_model" {
+    type        = string
+    default     = "jev-latest"
+    description = "Model id the route gate runs."
+}
+
+// Optional bearer credential for the decision backend; left empty the gate
+// calls anonymously (the adapter treats an empty api_key as anonymous).
+// Secret-tainted: it reaches the adapter only through the secret channel.
+variable "route_decision_api_key" {
+    type        = string
+    default     = ""
+    secret      = true
+    description = "Optional API key for the decision backend the route gate calls."
+}
+
+// The brokenbot merge identity: the ONLY token allowed to merge carriers and
+// close superseded members (ADR-0015 D4: separate lanes). No default — an
+// unbound brokenbot identity must fail loud before any merge runs.
+variable "brokenbot_github_token" {
+    description = "Brokenbot lane GitHub identity the merge step uses for gating, merging and close-out; separate from the workflow identity by design."
     type        = string
     secret      = true
 }
