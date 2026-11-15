@@ -162,6 +162,58 @@ require_equal "$(jq -rc '[.states[] | select(.name == "held")][]' "${G}")" \
 require_equal "$(jq -rc '[.states[] | select(.name == "completed")][]' "${G}")" \
     '{"name":"completed","terminal":true,"success":true}' "A completed is terminal+successful"
 
+# KB-412: the route step runs the decision adapter, whose declared failure
+# outputs are the typed ADR-0013 payload {error: {kind, status, message,
+# retryable}} — there is no shell stderr channel on that adapter. The failure
+# write must read output.error.message: the strict engine validates write
+# reads against the adapter's declared output projection and rejects
+# output.stderr at compile. The compiled JSON carries no write blocks, so
+# these assertions pin the workflow source directly.
+block_src() { # <start-regex> <file> — brace-balanced block from the first match
+    awk -v start="$1" '
+        !in_block {
+            if ($0 ~ start) { in_block = 1; depth = 0 }
+            else { next }
+        }
+        {
+            line = $0
+            # comments never contribute braces that balance a block
+            sub(/\/\/.*/, "", line)
+            depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+            print $0
+            if (depth <= 0) exit
+        }
+    ' "$2"
+}
+
+ROUTE_STEP_SRC="$(block_src '^step "route" \{' "${ROOT_DIR}/main.chcl")"
+if [ -n "${ROUTE_STEP_SRC}" ]; then
+    ok "A route step block extracted for source assertions"
+else
+    fail "A route step block missing from main.chcl"
+fi
+
+if printf '%s\n' "${ROUTE_STEP_SRC}" | grep -q 'trimspace(output.error.message)'; then
+    ok "A route failure write reads the decision adapter's typed failure payload output.error.message"
+else
+    fail "A route failure write must read output.error.message — the decision adapter declares no stderr channel (ADR-0013 typed failure payload; KB-412)"
+fi
+if printf '%s\n' "${ROUTE_STEP_SRC}" | grep -q 'output\.stderr'; then
+    fail "A route step still reads output.stderr — the strict projection validation rejects it at compile on the decision adapter (KB-412)"
+else
+    ok "A route step reads no shell stderr channel"
+fi
+
+# KB-412 note for future editors: the adapter's strict input contract enforces
+# questions-as-array. The committed jsonencode([…]) form is deliberate — a map
+# form was tried and rejected by the adapter; do not reshape it.
+ROUTE_QUESTIONS_SRC="$(block_src '^local "route_questions" \{' "${ROOT_DIR}/main.chcl")"
+if printf '%s\n' "${ROUTE_QUESTIONS_SRC}" | grep -q 'value = jsonencode(\['; then
+    ok "A route_questions keeps the committed questions-as-array (jsonencode([…])) form"
+else
+    fail "A route_questions must stay questions-as-array (jsonencode([…])) — the adapter's strict input contract rejects a map form"
+fi
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Part B — route_brief.sh.tftpl: happy path
 # ═════════════════════════════════════════════════════════════════════════════
