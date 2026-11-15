@@ -232,6 +232,86 @@ cur_bytes_to() { # target_file
 #   0 -> write verified or (idempotent) none needed; caller records it
 #   1 -> write landed but read-back mismatched (typed failure upstream)
 #   2 -> API/transport failure
+# ---------------------------------------------------------------------------
+# PR route (protected-main fallback): clone, commit both pack files on a
+# maintenance branch, push, open a PR into the default branch. The branch's
+# bytes are read back and byte-compared (the same compliance gate as the
+# direct path); a row landing here is status 'pr_opened' — merge belongs to
+# review, never to this sweep. Idempotent: an existing open PR for the same
+# (repo, branch) is reused, not duplicated.
+# ---------------------------------------------------------------------------
+pr_apply_pack() { # repo specs_csv commit_title -> sets PR_INFO; PR_FILES
+  # specs_csv: comma-separated name:path:tpl_file triples (no colons inside members);
+  # the whole pack lands as ONE commit on ONE maintenance branch with ONE PR — a
+  # per-file branch/repush would delete+recreate the branch under its own PR.
+  local repo="$1" specs_csv="$2" commit_title="$3"
+  local work branch rb PR_URL spec name path tpl_file
+  branch="devops-maint/compliance-$(basename "$(dirname "$ANCHOR_PATH")")"
+  work="$RAW_DIR/pr.$repo"
+  rm -rf "$work"
+
+  if ! git clone --quiet --depth 1 "https://x-access-token:${GH_TOKEN:?}@github.com/$ORG/$repo.git" "$work" 2>"$RAW_DIR/prclone.$repo.err"; then
+    log "pr route: clone failed for $repo: $(tail -1 "$RAW_DIR/prclone.$repo.err" 2>/dev/null || echo '?')"
+    return 1
+  fi
+  git -C "$work" config user.email "hermes@brokenbots.dev"
+  git -C "$work" config user.name "hermes2"
+
+  if git -C "$work" rev-parse --verify --quiet "origin/$branch" >/dev/null; then
+    git -C "$work" push --quiet --delete origin "$branch" 2>/dev/null || true
+  fi
+  git -C "$work" checkout --quiet -b "$branch"
+  IFS=',' read -r -a SPECS <<<"$specs_csv"
+  for spec in "${SPECS[@]}"; do
+    name="${spec%%:*}"; rest="${spec#*:}"; path="${rest%%:*}"; tpl_file="${rest#*:}"
+    [ -f "$tpl_file" ] || { log "pr route: template missing for $path"; return 1; }
+    mkdir -p "$(dirname "$work/$path")"
+    cp "$tpl_file" "$work/$path"
+    git -C "$work" add "$path"
+  done
+  git -C "$work" commit --quiet -m "$commit_title" || { log "pr route: commit failed"; return 1; }
+  if ! git -C "$work" push --quiet origin "$branch" 2>"$RAW_DIR/prpush.$repo.err"; then
+    log "pr route: push failed for $repo: $(tail -1 "$RAW_DIR/prpush.$repo.err" 2>/dev/null || echo '?')"
+    return 1
+  fi
+
+  # Read-back gate (same as direct path): branch bytes must match exactly.
+  # contents_get is called DIRECTLY (not in $() capture): it sets the CUR_JSON
+  # global, and a subshell capture would discard it, leaving cur_bytes_to to
+  # encode a stale fetch (the pre-PUT main bytes) -> false mismatch (seen live).
+  PR_FILES=""
+  for spec in "${SPECS[@]}"; do
+    name="${spec%%:*}"; rest="${spec#*:}"; path="${rest%%:*}"; tpl_file="${rest#*:}"
+    local grc=0
+    contents_get "$repo" "$path" "$branch" || grc=$?
+    if [ "$grc" -ne 0 ]; then
+      log "pr route: read-back get failed for $path on $branch (rc=$grc)"
+      return 1
+    fi
+    rb="$RAW_DIR/pr_rbk.$repo.$(printf '%s' "$path" | tr '/' '_')"
+    cur_bytes_to "$rb" || { log "pr route: read-back decode failed for $path"; return 1; }
+    cmp -s "$rb" "$tpl_file" || { log "pr route: read-back MISMATCH for $path on $branch"; return 1; }
+    PR_FILES="$PR_FILES $name"
+  done
+
+  # Reuse an existing open PR for this branch; else open one.
+  PR_URL="$(gh pr list -R "$ORG/$repo" --state open --head "$branch" \
+      --json number,url --jq '.[0].url // ""' 2>/dev/null || true)"
+  if [ -z "$PR_URL" ]; then
+    PR_URL="$(gh pr create -R "$ORG/$repo" --base main --head "$branch" \
+      --title "devops_maint_v1: apply Lane B compliance pack ($(basename "$(dirname "$ANCHOR_PATH")"))" \
+      --body "Automated compliance pack from devops_maint_v1 sweep $(basename "$(dirname "$ANCHOR_PATH")").\n\nDirect write to main was refused (protected branch). Opening this PR per the PR-route fallback ruling: review, then merge. Files carry the KB-408 templates byte-exact; read-back verified on the branch. Files:$(printf " %s" $PR_FILES)" \
+      2>"$RAW_DIR/prcreate.$repo.err" || true)"
+  fi
+  if [ -z "$PR_URL" ]; then
+    log "pr route: pr create failed for $repo: $(tail -1 "$RAW_DIR/prcreate.$repo.err" 2>/dev/null || echo '?')"
+    return 1
+  fi
+  PR_INFO="$branch $PR_URL"
+  log "pr route: $repo $path verified on $branch; PR $PR_URL"
+  return 0
+}
+
 file_apply() { # repo rel_path branch tpl_file commit_msg
   local repo="$1" path="$2" branch="$3" tpl_file="$4" commit_msg="$5"
   local stem cur_file readback_file body_file sha new_sha content_b64 attempt grc
@@ -283,7 +363,18 @@ file_apply() { # repo rel_path branch tpl_file commit_msg
   if ! out="$(gh api --method PUT "repos/$ORG/$repo/contents/$path" -H "Accept: application/vnd.github+json" \
       --input "$body_file" 2>"$RAW_DIR/put.$repo.$stem.err")"; then
     rm -f "$body_file"
-    FA_ERR="contents API put failed: $(err_text "$RAW_DIR/put.$repo.$stem.err")"
+    put_err="$(err_text "$RAW_DIR/put.$repo.$stem.err")"
+    # 409 (protected main) -> PR-route fallback (dave ruling 2026-11-16: never force
+    # a protected main; open a compliance PR and let review merge it). Direct write
+    # stays the fast path. rc 3 = protected-main: the PACK loop batches every
+    # remaining file into ONE commit/branch/PR (a per-file fallback would recreate
+    # the branch under its own PR). FA_ERR carries the refusing path.
+    if printf '%s' "$put_err" | grep -q 'HTTP 409'; then
+      FA_ERR="$path"
+      log "direct put refused (409, protected main): $path"
+      return 3
+    fi
+    FA_ERR="contents API put failed: $put_err"
     log "$FA_ERR"
     return 2
   fi
@@ -374,13 +465,35 @@ for repo in $REPOS_LIST; do
       tpl_db="$(tpl_db_for "$prow_pack" "$starter_language")"
       [ -f "$tpl_ci" ] || { add_error ci "resolved template file missing for pack $prow_pack"; apply_ok=0; }
       [ -f "$tpl_db" ] || { add_error dependabot "resolved template file missing for pack $prow_pack"; apply_ok=0; }
+      pending_specs=""
+      pr_batch_done=0
       for spec in "ci:$CI_REL:$tpl_ci:$COMMIT_MSG_CI" "dependabot:$DB_REL:$tpl_db:$COMMIT_MSG_DB"; do
         [ "$apply_ok" -eq 1 ] || break
         IFS=':' read -r file_name rel_path tpl_file commit_msg <<EOFS
 $spec
 EOFS
+        if [ "$pr_batch_done" -eq 1 ]; then
+          # the PR batch carried this file; mark it from PR_FILES
+          case " $PR_FILES " in
+            *" $file_name "*)
+              files_json="$(printf '%s' "$files_json" | jq -c \
+                --arg f "$file_name" --arg pr "$PACK_PR_URL" --arg br "$PACK_PR_BRANCH" \
+                '.[$f].action = "pr_opened" | .[$f].readback_verified = true | .[$f].pr = $pr | .[$f].pr_branch = $br')"
+              files_updated_total=$((files_updated_total + 1))
+              ;;
+          esac
+          continue
+        fi
         if file_apply "$repo" "$rel_path" "$default_branch" "$tpl_file" "$commit_msg"; then
-          if [ "$FACTION" != "none" ]; then
+          if [ -n "${PR_INFO:-}" ]; then
+            files_json="$(printf '%s' "$files_json" | jq -c \
+              --arg f "$file_name" --arg action "pr_opened" --argjson rb "true" \
+              --arg pr "$(printf '%s' "$PR_INFO" | cut -d' ' -f2)" \
+              --arg br "$(printf '%s' "$PR_INFO" | cut -d' ' -f1)" \
+              '.[$f].action = $action | .[$f].readback_verified = $rb | .[$f].pr = $pr | .[$f].pr_branch = $br')"
+            PR_INFO=""
+            files_updated_total=$((files_updated_total + 1))
+          elif [ "$FACTION" != "none" ]; then
             files_json="$(printf '%s' "$files_json" | jq -c \
               --arg f "$file_name" --arg action "$FACTION" --argjson rb "$FREADBACK" \
               '.[$f].action = $action | .[$f].readback_verified = $rb')"
@@ -396,6 +509,34 @@ EOFS
           fi
         else
           apply_rc=$?
+          if [ "$apply_rc" -eq 3 ]; then
+            # Protected main: batch THIS file + every remaining spec into ONE
+            # commit/branch/PR, verify each on the branch, then mark all.
+            batch_specs="$file_name:$rel_path:$tpl_file"
+            case "$spec" in
+              ci:*) batch_specs="$batch_specs,dependabot:$DB_REL:$tpl_db" ;;
+              dependabot:*) batch_specs="$batch_specs,ci:$CI_REL:$tpl_ci" ;;
+            esac
+            PR_FILES=""
+            if pr_apply_pack "$repo" "$batch_specs" "devops_maint_v1: apply Lane B compliance pack (sweep $(basename "$(dirname "$ANCHOR_PATH")"))"; then
+              pr_batch_done=1
+              PACK_PR_URL="$(printf '%s' "$PR_INFO" | cut -d' ' -f2)"
+              PACK_PR_BRANCH="$(printf '%s' "$PR_INFO" | cut -d' ' -f1)"
+              case " $PR_FILES " in
+                *" $file_name "*)
+                  files_json="$(printf '%s' "$files_json" | jq -c \
+                    --arg f "$file_name" --arg pr "$PACK_PR_URL" --arg br "$PACK_PR_BRANCH" \
+                    '.[$f].action = "pr_opened" | .[$f].readback_verified = true | .[$f].pr = $pr | .[$f].pr_branch = $br')"
+                  files_updated_total=$((files_updated_total + 1))
+                  ;;
+              esac
+            else
+              apply_ok=0
+              add_error "${file_name}_apply" "protected main (409) and PR-route fallback failed; see step stderr"
+              files_json="$(printf '%s' "$files_json" | jq -c --arg f "$file_name" '.[$f] = null')"
+            fi
+            continue
+          fi
           files_json="$(printf '%s' "$files_json" | jq -c --arg f "$file_name" '.[$f] = null')"
           case "$apply_rc" in
             1)
@@ -503,7 +644,7 @@ jq -e --argjson plan "$PLAN_JSON" '
        | [.[] | select(.action == "created")] | length)) and
   (.summary.files_updated_total ==
      ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
-       | [.[] | select(.action == "updated")] | length)) and
+       | [.[] | select(.action == "updated" or .action == "pr_opened")] | length)) and
   # File rows of files that were never attempted (after an earlier failure)
   # keep their initial none/false placeholder: they are NOT idempotent-unchanged
   # entries, and read-back mismatches are evidenced by their *_readback error
