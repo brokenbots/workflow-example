@@ -664,6 +664,41 @@ check "S3c flags off -> not_applicable lanes" jq -e '.repos[0].advisories.govuln
 check "S3c no clone attempted (flags off)" test "$(grep -c '^repo clone' "${FX3B}/call.log")" = "0"
 check "S3c scan flags recorded false" test "$(jq -c '[.sweep.scan_govulncheck, .sweep.scan_osv]' "${ART3C}")" = '[false,false]'
 
+# malformed govulncheck rows (valid parse, missing osv id) degrade THAT repo
+# to the error lane; the artifact self-check keeps passing and clean repos
+# still collect (was: a null-id row hard-failed the entire sweep).
+FX3D="${WORK_ROOT}/fx3d"
+make_fixtures "${FX3D}"
+mkdir -p "${FX3D}/govd"
+cat >"${FX3D}/govd/tau.malformed" <<'EOF'
+{"finding": {"osv": "GO-2024-0007", "frames": [{"module": "example.com/tau/dep", "version": "0.9.0"}]}}
+{"finding": {"frames": [{"module": "example.com/tau/other", "version": "1.2.3"}]}}
+{"finding": {"osv": "", "frames": [{"module": "example.com/tau/empty", "version": "0.1.0"}]}}
+EOF
+mkdir -p "${FX3D}/tau" "${FX3D}/ups"
+printf 'module example.com/tau\ngo 1.21\n' >"${FX3D}/tau/gomod"
+printf '[%s]' "$(pr 50 'dependabot[bot]')" >"${FX3D}/tau/prlist.json"
+printf 'build\tsuccess\t' >"${FX3D}/tau/checks.50.tsv"
+printf '[]' >"${FX3D}/tau/codeql.json"
+printf '[]' >"${FX3D}/tau/rulesets.json"
+printf 'module example.com/ups\ngo 1.21\n' >"${FX3D}/ups/gomod"
+printf '[%s]' "$(pr 51 'dependabot[bot]')" >"${FX3D}/ups/prlist.json"
+printf 'build\tsuccess\t' >"${FX3D}/ups/checks.51.tsv"
+printf '[]' >"${FX3D}/ups/codeql.json"
+printf '[]' >"${FX3D}/ups/rulesets.json"
+mkdir -p "${FX3D}/osv"
+render_sweep testorg '["tau","ups"]' "${WORK_ROOT}/sw3d" true true "${WORK_ROOT}/sweep3d.sh"
+SWEEP_RC3D=0
+run_sweep "${WORK_ROOT}/sweep3d.sh" "${FX3D}" "${WORK_ROOT}/s3d.out" "${WORK_ROOT}/s3d.err" "TEST_GOV_FIXTURE=${FX3D}/govd" "TEST_OSV_FIXTURE=${FX3D}/osv" || SWEEP_RC3D=$?
+expect_count "S3d sweep exits zero (malformed gov rows are per-repo, not fatal)" 0 "${SWEEP_RC3D}"
+ART3D="$(tr -d '[:space:]' <"${WORK_ROOT}/s3d.out")"
+check "S3d tau degraded to error lane with precise reason" jq -e '.repos[0].advisories.govulncheck.status == "error" and (.repos[0].advisories.govulncheck.reason | contains("osv id"))' "${ART3D}" >/dev/null
+check "S3d tau error row names govulncheck" jq -e '[.repos[0].errors[].surface] | index("govulncheck") != null' "${ART3D}" >/dev/null
+check "S3d tau not collected" jq -e '.repos[0].repo == "tau" and .repos[0].collected == false' "${ART3D}" >/dev/null
+check "S3d ups collected clean" jq -e '.repos[1].repo == "ups" and .repos[1].collected == true and .repos[1].advisories.govulncheck.status == "ok"' "${ART3D}" >/dev/null
+expect_count "S3d summary collected=1 failed=1" "1" "$(jq -r '.summary.repos_failed' "${ART3D}")"
+expect_count "S3d summary advisory findings only from clean rows" "0" "$(jq -r '.summary.advisory_findings_total' "${ART3D}")"
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 5. Per-repo PR enumeration failure + ALL-repos failure (rc 1, artifact kept)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -818,6 +853,10 @@ if [ "${FAILURES}" -gt 0 ]; then
     exit 1
 fi
 # Every fixture dir is explicit (WORK_ROOT-anchored); assert the suite never
-# leaks scratch into its own directory or the repo tree.
+# leaks scratch into its own directory, the repo root, or the tree root.
+# (The deleted probe-era suite used relative fixture paths and left empty
+# testorg/ dirs behind — invisible to git status and exactly the class of
+# leak these assertions guard against.)
 check "suite leaves no scratch leak beside its fixtures" test ! -e "${SCRIPT_DIR}/testorg"
+check "suite leaves no scratch leak at the tree root" test ! -e "${ROOT_DIR}/../testorg"
 echo "PASS: devops_maint_v1 collect-step regression suite verified"
