@@ -6,10 +6,14 @@
 #   - gh_retry shim is byte-identical to the canonical wrapper copy
 #   - normalized artifact: schema/sweep/summary, per-repo records
 #   - PR normalization: dependabot filter, open/other lanes, truncation flags
-#   - per-PR CI verdicts: green/red/pending/none/error/unenumerated (cap)
+#   - per-PR CI verdicts: green/red/pending/none/error/unenumerated (cap),
+#     incl. the real gh rc-1 shapes (no-checks stderr -> none, zero-rows
+#     tool failure -> error) and the 5-column non-TTY checks parse
 #   - advisory lanes: ok / not_applicable / unavailable / error + findings
 #   - CodeQL lanes: ok / disabled (404) / error; multi-page-safe alert counts
-#   - ruleset lanes: applied / none / error
+#   - ruleset lanes: applied / none / error, multi-page --paginate flatten
+#   - cross-repo pr-list leak guard: a later repo's pr-list failure keeps
+#     its own (empty) PR rows and stays a per-repo partial failure
 #   - per-repo partial failure recorded, sweep continues; all-failed sweep
 #     ends rc 1 with the partial artifact kept
 #   - fail-loud config validation (org/repo safe-name shapes, empty repos,
@@ -222,7 +226,11 @@ case "$mode" in
                     cat "${fx}/${api_repo}/rulesets.err" 2>/dev/null || echo "gh: HTTP 500: rulesets error" >&2
                     exit "${rc}"
                 fi
-                if [ ! -f "${fx}/${api_repo}/rulesets.json" ]; then
+                if [ -f "${fx}/${api_repo}/rulesets.pages.json" ]; then
+                    # Multi-page shape: concatenated JSON documents (one per
+                    # page), exactly the stream gh --paginate emits.
+                    cat "${fx}/${api_repo}/rulesets.pages.json"
+                elif [ ! -f "${fx}/${api_repo}/rulesets.json" ]; then
                     echo "stub: missing fixture rulesets.json for ${api_repo}" >&2
                     exit 9
                 fi
@@ -435,9 +443,9 @@ make_fixtures "${FX1}"
 mkdir -p "${FX1}/alpha"
 printf '[%s, %s, %s]' \
     "$(pr 12 "dependabot[bot]")" "$(pr 13 "dependabot[bot]")" "$(pr 5 "octocat")" >"${FX1}/alpha/prlist.json"
-printf 'build\tsuccess\thttps://ci/build/12\ndeploy\tsuccess\t\n' >"${FX1}/alpha/checks.12.tsv"
+printf 'build\tsuccess\t49s\thttps://ci/build/12\tBuild and test\ndeploy\tsuccess\t0\t\t\n' >"${FX1}/alpha/checks.12.tsv"
 printf '1 failing check\tsomething' >"${FX1}/alpha/checks.13.err"
-printf 'build\tfailure\thttps://ci/build/13\nlint\tskipped\t' >"${FX1}/alpha/checks.13.tsv"
+printf 'build\tfailure\t12s\thttps://ci/build/13\tBuild and test\nlint\tskipped\t1s\t\tlint job skipped\n' >"${FX1}/alpha/checks.13.tsv"
 echo "1" >"${FX1}/alpha/checks.13.rc"
 printf 'module example.com/alpha\ngo 1.22\n' >"${FX1}/alpha/gomod"
 cat >"${FX1}/alpha/codeql.json" <<'EOF'
@@ -453,7 +461,7 @@ EOF
 # beta: 1 dependabot PR pending + 2 other PRs; no go.mod (not_applicable); osv finds; codeql 404; no rulesets
 mkdir -p "${FX1}/beta"
 printf '[%s, %s, %s]' "$(pr 20 "dependabot[bot]")" "$(pr 21 "hubot")" "$(pr 22 "hubot")" >"${FX1}/beta/prlist.json"
-printf 'ci\tpending\t' >"${FX1}/beta/checks.20.tsv"
+printf 'ci\tpending\t5s\t\tslow build\n' >"${FX1}/beta/checks.20.tsv"
 echo "8" >"${FX1}/beta/checks.20.rc"
 printf '2 of 5 checks pending' >"${FX1}/beta/checks.20.err"
 # per-repo osv fixtures live in one directory; repos without a file scan clean
@@ -504,6 +512,8 @@ check "S1 alpha open_total" test "$(jq -r '.repos[0].prs.open_total' "${A_ALPHA}
 check "S1 alpha other_open_total" test "$(jq -r '.repos[0].prs.other_open_total' "${A_ALPHA}")" = "1"
 check "S1 alpha pr12 verdict green" test "$(jq -r '.repos[0].prs.dependabot[0].ci.verdict' "${A_ALPHA}")" = "green"
 check "S1 alpha pr12 2 checks normalized" test "$(jq -r '.repos[0].prs.dependabot[0].ci.checks | length' "${A_ALPHA}")" = "2"
+check "S1 alpha pr12 check url parsed from column 4" test "$(jq -r '.repos[0].prs.dependabot[0].ci.checks[0].url' "${A_ALPHA}")" = "https://ci/build/12"
+check "S1 alpha pr12 check url carries no tab corruption" jq -e '.repos[0].prs.dependabot[0].ci.checks[0].url | contains("\t") | not' "${A_ALPHA}" >/dev/null
 check "S1 alpha pr12 check with empty url -> null" jq -e '.repos[0].prs.dependabot[0].ci.checks[1].url == null' "${A_ALPHA}" >/dev/null
 check "S1 alpha pr13 verdict red" test "$(jq -r '.repos[0].prs.dependabot[1].ci.verdict' "${A_ALPHA}")" = "red"
 check "S1 alpha pr13 failure state normalized" test "$(jq -r '.repos[0].prs.dependabot[1].ci.checks[0].state' "${A_ALPHA}")" = "fail"
@@ -511,7 +521,7 @@ check "S1 alpha pr13 skipped state normalized" test "$(jq -r '.repos[0].prs.depe
 check "S1 alpha dependabot authors kept" test "$(jq -r '.repos[0].prs.dependabot[0].author' "${A_ALPHA}")" = "dependabot[bot]"
 check "S1 alpha gov ok with 2 findings" jq -e '.repos[0].advisories.govulncheck.status == "ok" and (.repos[0].advisories.govulncheck.findings | length) == 2' "${A_ALPHA}" >/dev/null
 check "S1 alpha gov finding id/module/version" test "$(jq -r '.repos[0].advisories.govulncheck.findings[0].id' "${A_ALPHA}")/"$(jq -r '.repos[0].advisories.govulncheck.findings[0].package' "${A_ALPHA}")"" = "GO-2024-0001/golang.org/x/net"
-check "S1 alpha osv ok empty (clean tool run)" jq -e '.repos[0].advisories.osv.status == "ok" and (.advisories.osv.findings | length) == 0' "${A_ALPHA}" >/dev/null
+check "S1 alpha osv ok empty (clean tool run)" jq -e '.repos[0].advisories.osv.status == "ok" and (.repos[0].advisories.osv.findings | length) == 0' "${A_ALPHA}" >/dev/null
 check "S1 alpha codeql ok critical=1 medium=1" jq -e '.repos[0].codeql.status == "ok" and .repos[0].codeql.open_alerts == 2 and .repos[0].codeql.by_severity.critical == 1 and .repos[0].codeql.by_severity.medium == 1 and .repos[0].codeql.by_severity.other == 0' "${A_ALPHA}" >/dev/null
 check "S1 alpha rulesets applied with 1 rule" jq -e '.repos[0].rulesets.applied == true and (.repos[0].rulesets.rules | length) == 1 and .repos[0].rulesets.rules[0].bypass_actors == 1' "${A_ALPHA}" >/dev/null
 
@@ -597,7 +607,7 @@ FX3="${WORK_ROOT}/fx3"
 make_fixtures "${FX3}"
 mkdir -p "${FX3}/eps"
 printf '[%s]' "$(pr 40 'dependabot[bot]')" >"${FX3}/eps/prlist.json"
-printf 'build\tsuccess\t' >"${FX3}/eps/checks.40.tsv"
+printf 'build\tsuccess\t7s\thttps://ci/build/40\tok\n' >"${FX3}/eps/checks.40.tsv"
 mkdir -p "${FX3}/eps" "${FX3}/eps"
 printf 'module example.com/eps\ngo 1.22\n' >"${FX3}/eps/gomod"
 printf '[]' >"${FX3}/eps/codeql.json"
@@ -627,7 +637,7 @@ FX3B="${WORK_ROOT}/fx3b"
 make_fixtures "${FX3B}"
 mkdir -p "${FX3B}/eps"
 printf '[%s]' "$(pr 40 'dependabot[bot]')" >"${FX3B}/eps/prlist.json"
-printf 'build\tsuccess\t' >"${FX3B}/eps/checks.40.tsv"
+printf 'build\tsuccess\t7s\thttps://ci/build/40\tok\n' >"${FX3B}/eps/checks.40.tsv"
 printf 'module example.com/eps\ngo 1.22\n' >"${FX3B}/eps/gomod"
 printf '[]' >"${FX3B}/eps/codeql.json"
 printf '[]' >"${FX3B}/eps/rulesets.json"
@@ -639,7 +649,7 @@ echo "1" >"${FX3B}/govd/eps.unpars"
 # though eps' advisory lanes error on unparseable output.
 mkdir -p "${FX3B}/eta"
 printf '[%s]' "$(pr 41 'dependabot[bot]')" >"${FX3B}/eta/prlist.json"
-printf 'build\tsuccess\t' >"${FX3B}/eta/checks.41.tsv"
+printf 'build\tsuccess\t8s\thttps://ci/build/41\tok\n' >"${FX3B}/eta/checks.41.tsv"
 printf 'module example.com/eta\ngo 1.23\n' >"${FX3B}/eta/gomod"
 printf '[]' >"${FX3B}/eta/codeql.json"
 printf '[]' >"${FX3B}/eta/rulesets.json"
@@ -677,12 +687,12 @@ EOF
 mkdir -p "${FX3D}/tau" "${FX3D}/ups"
 printf 'module example.com/tau\ngo 1.21\n' >"${FX3D}/tau/gomod"
 printf '[%s]' "$(pr 50 'dependabot[bot]')" >"${FX3D}/tau/prlist.json"
-printf 'build\tsuccess\t' >"${FX3D}/tau/checks.50.tsv"
+printf 'build\tsuccess\t6s\thttps://ci/build/50\tok\n' >"${FX3D}/tau/checks.50.tsv"
 printf '[]' >"${FX3D}/tau/codeql.json"
 printf '[]' >"${FX3D}/tau/rulesets.json"
 printf 'module example.com/ups\ngo 1.21\n' >"${FX3D}/ups/gomod"
 printf '[%s]' "$(pr 51 'dependabot[bot]')" >"${FX3D}/ups/prlist.json"
-printf 'build\tsuccess\t' >"${FX3D}/ups/checks.51.tsv"
+printf 'build\tsuccess\t6s\thttps://ci/build/51\tok\n' >"${FX3D}/ups/checks.51.tsv"
 printf '[]' >"${FX3D}/ups/codeql.json"
 printf '[]' >"${FX3D}/ups/rulesets.json"
 mkdir -p "${FX3D}/osv"
@@ -727,8 +737,8 @@ make_fixtures "${FX5}"
 mkdir -p "${FX5}/iota"
 # 3 dependabot PRs, cap 2 -> third is unenumerated, not an error
 printf '[%s, %s, %s]' "$(pr 41 'dependabot[bot]')" "$(pr 42 'dependabot[bot]')" "$(pr 43 'dependabot[bot]')" >"${FX5}/iota/prlist.json"
-printf 'build\tsuccess\t' >"${FX5}/iota/checks.41.tsv"
-printf 'build\tfailure\t' >"${FX5}/iota/checks.42.tsv"
+printf 'build\tsuccess\t9s\thttps://ci/build/41\tok\n' >"${FX5}/iota/checks.41.tsv"
+printf 'build\tfailure\t9s\thttps://ci/build/42\tbad\n' >"${FX5}/iota/checks.42.tsv"
 echo "1" >"${FX5}/iota/checks.42.rc"
 printf '[]' >"${FX5}/iota/codeql.json"
 printf '[]' >"${FX5}/iota/rulesets.json"
@@ -750,7 +760,7 @@ FX5B="${WORK_ROOT}/fx5b"
 make_fixtures "${FX5B}"
 mkdir -p "${FX5B}/kappa"
 jq -n '[range(0; 200) | {number: ., title: "pr", author: {login: "dependabot[bot]"}, headRefName: "h", baseRefName: "main", url: ("u" + (. | tostring)), updatedAt: "2026-11-14T10:00:00Z"}]' >"${FX5B}/kappa/prlist.json"
-printf 'build\tsuccess\t' >"${FX5B}/kappa/checks.0.tsv"
+printf 'build\tsuccess\t1s\tu0\tok\n' >"${FX5B}/kappa/checks.0.tsv"
 printf '[]' >"${FX5B}/kappa/codeql.json"
 printf '[]' >"${FX5B}/kappa/rulesets.json"
 
@@ -833,7 +843,7 @@ make_fixtures "${FX10}"
 mkdir -p "${FX10}/rho"
 printf '[%s]' "$(pr 32 'dependabot[bot]')" >"${FX10}/rho/prlist.json"
 echo "1" >"${FX10}/rho/prlist.tr"
-printf 'build\tsuccess\t' >"${FX10}/rho/checks.32.tsv"
+printf 'build\tsuccess\t6s\thttps://ci/build/32\tok\n' >"${FX10}/rho/checks.32.tsv"
 printf '[]' >"${FX10}/rho/codeql.json"
 printf '[]' >"${FX10}/rho/rulesets.json"
 
@@ -846,6 +856,101 @@ ART10="$(tr -d '[:space:]' <"${WORK_ROOT}/s10.out")"
 check "S10 rho collected after retry" jq -e '.repos[0].repo == "rho" and .repos[0].collected == true and .repos[0].prs.dependabot_total == 1' "${ART10}" >/dev/null
 expect_count "S10 pr list attempted twice for one repo" "2" "$(grep -c '^pr list' "${FX10}/call.log")"
 check "S10 retry evidence recorded on stderr capture" test "$(find "${WORK_ROOT}/sw10" -name pr_list.err | head -1 | xargs grep -c 'result=retry class=connection_reset')" = "1"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 11. Real gh rc-1 verdict shapes: rc 1 + zero parsed rows + the "no checks
+#     reported on the" stderr -> none (gh 2.47.x rc 1s the no-checks case);
+#     rc 1 + zero rows without that text -> tool failure -> error lane. The PR
+#     row is recorded in both cases so the dependabot-row self-check holds.
+# ═════════════════════════════════════════════════════════════════════════════
+FX11="${WORK_ROOT}/fx11"
+make_fixtures "${FX11}"
+# d2: its only PR has no checks -> gh exits 1 with the no-checks stderr; the
+# repo still collects with verdict none (and a green sibling-style record).
+mkdir -p "${FX11}/d2"
+printf '[%s]' "$(pr 61 'dependabot[bot]')" >"${FX11}/d2/prlist.json"
+echo "1" >"${FX11}/d2/checks.61.rc"
+: >"${FX11}/d2/checks.61.tsv"
+printf "no checks reported on the 'd2' branch" >"${FX11}/d2/checks.61.err"
+printf '[]' >"${FX11}/d2/codeql.json"
+printf '[]' >"${FX11}/d2/rulesets.json"
+# d3: rc 1 + zero parsed rows + NO no-checks stderr -> tool/API failure lane.
+mkdir -p "${FX11}/d3"
+printf '[%s]' "$(pr 70 'dependabot[bot]')" >"${FX11}/d3/prlist.json"
+echo "1" >"${FX11}/d3/checks.70.rc"
+: >"${FX11}/d3/checks.70.tsv"
+printf 'gh: HTTP 500: checks exploded 70' >"${FX11}/d3/checks.70.err"
+printf '[]' >"${FX11}/d3/codeql.json"
+printf '[]' >"${FX11}/d3/rulesets.json"
+
+render_sweep testorg '["d2","d3"]' "${WORK_ROOT}/sw11" true true "${WORK_ROOT}/sweep11.sh"
+SWEEP_RC11=0
+run_sweep "${WORK_ROOT}/sweep11.sh" "${FX11}" "${WORK_ROOT}/s11.out" "${WORK_ROOT}/s11.err" || SWEEP_RC11=$?
+expect_count "S11 sweep exits 0 (verdict lanes are per-PR, not sweep failures)" 0 "${SWEEP_RC11}"
+ART11="$(tr -d '[:space:]' <"${WORK_ROOT}/s11.out")"
+check "S11 artifact exists" test -f "${ART11}"
+check "S11 d2 no-checks rc 1 -> none with null error and empty checks" jq -e '.repos[0].prs.dependabot[0].ci.verdict == "none" and .repos[0].prs.dependabot[0].ci.error == null and .repos[0].prs.dependabot[0].ci.check_count == 0 and (.repos[0].prs.dependabot[0].ci.checks | length) == 0' "${ART11}" >/dev/null
+check "S11 d2 no-checks repo still collected" jq -e '.repos[0].repo == "d2" and .repos[0].collected == true and .repos[0].prs.dependabot_total == 1' "${ART11}" >/dev/null
+check "S11 d3 zero-rows rc 1 without no-checks text -> error lane" jq -e '.repos[1].prs.dependabot[0].ci.verdict == "error" and .repos[1].prs.dependabot[0].ci.check_count == 0 and (.repos[1].prs.dependabot[0].ci.checks | length) == 0 and (.repos[1].prs.dependabot[0].ci.error | contains("HTTP 500"))' "${ART11}" >/dev/null
+check "S11 d3 ci_verdicts errors row recorded" jq -e '[.repos[1].errors[].surface] | index("ci_verdicts") != null' "${ART11}" >/dev/null
+check "S11 d3 PR row still recorded in the error lane (self-check holds)" jq -e '.repos[1].repo == "d3" and (.repos[1].prs.dependabot | length) == 1 and .repos[1].prs.dependabot_total == 1' "${ART11}" >/dev/null
+check "S11 d3 collected=false (error lane is a partial)" jq -e '.repos[1].repo == "d3" and .repos[1].collected == false' "${ART11}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 12. Cross-repo leak guard: a LATER repo's pr-list failure must not slurp the
+#     previous repo's dependabot rows into its own record (was: whole-sweep
+#     collect_failed via the dependabot-row self-check).
+# ═════════════════════════════════════════════════════════════════════════════
+FX12="${WORK_ROOT}/fx12"
+make_fixtures "${FX12}"
+mkdir -p "${FX12}/prl"
+printf '[%s, %s]' "$(pr 80 'dependabot[bot]')" "$(pr 81 'dependabot[bot]')" >"${FX12}/prl/prlist.json"
+printf 'build\tsuccess\t6s\thttps://ci/build/80\tok\n' >"${FX12}/prl/checks.80.tsv"
+printf 'build\tfailure\t6s\thttps://ci/build/81\tbad\n' >"${FX12}/prl/checks.81.tsv"
+printf '[]' >"${FX12}/prl/codeql.json"
+printf '[]' >"${FX12}/prl/rulesets.json"
+mkdir -p "${FX12}/prfail"
+printf 'gh: HTTP 500: pr list exploded' >"${FX12}/prfail/prlist.failmsg"
+echo "1" >"${FX12}/prfail/prlist.fail"
+printf '[]' >"${FX12}/prfail/codeql.json"
+printf '[]' >"${FX12}/prfail/rulesets.json"
+
+render_sweep testorg '["prl","prfail"]' "${WORK_ROOT}/sw12" true true "${WORK_ROOT}/sweep12.sh"
+SWEEP_RC12=0
+run_sweep "${WORK_ROOT}/sweep12.sh" "${FX12}" "${WORK_ROOT}/s12.out" "${WORK_ROOT}/s12.err" || SWEEP_RC12=$?
+expect_count "S12 sweep exits 0 (later-repo pr-list failure is per-repo, not collect_failed)" 0 "${SWEEP_RC12}"
+ART12="$(tr -d '[:space:]' <"${WORK_ROOT}/s12.out")"
+check "S12 artifact exists" test -f "${ART12}"
+check "S12 prl record unchanged (2 rows, total 2, collected)" jq -e '.repos[0].repo == "prl" and .repos[0].collected == true and (.repos[0].prs.dependabot | length) == 2 and .repos[0].prs.dependabot_total == 2 and .repos[0].prs.dependabot[0].number == 80 and .repos[0].prs.dependabot[1].number == 81' "${ART12}" >/dev/null
+check "S12 prfail skipped with empty rows" jq -e '.repos[1].repo == "prfail" and .repos[1].prs.prs_skipped == true and .repos[1].prs.dependabot == [] and .repos[1].prs.dependabot_total == 0' "${ART12}" >/dev/null
+check "S12 no prl PR rows leak into prfail" jq -e '[.repos[1].prs.dependabot[].number] | length == 0' "${ART12}" >/dev/null
+check "S12 prfail pull_requests error row" jq -e '[.repos[1].errors[].surface] | index("pull_requests") != null' "${ART12}" >/dev/null
+expect_count "S12 summary collected=1 failed=1" "1" "$(jq -r '.summary.repos_failed' "${ART12}")"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 13. Rulesets pagination: ?per_page=100 + --paginate must keep the active
+#     branch ruleset when it sits past the default first page.
+# ═════════════════════════════════════════════════════════════════════════════
+FX13="${WORK_ROOT}/fx13"
+make_fixtures "${FX13}"
+mkdir -p "${FX13}/mps"
+printf '[%s]' "$(pr 90 'dependabot[bot]')" >"${FX13}/mps/prlist.json"
+printf 'build\tsuccess\t6s\thttps://ci/build/90\tok\n' >"${FX13}/mps/checks.90.tsv"
+printf '[]' >"${FX13}/mps/codeql.json"
+# Two concatenated JSON documents, exactly the stream gh --paginate emits.
+cat >"${FX13}/mps/rulesets.pages.json" <<'EOF'
+[{"id": 201, "name": "tag-protect", "target": "push", "enforcement": "active", "bypass": []}]
+[{"id": 202, "name": "protect-main-p2", "target": "branch", "enforcement": "active", "bypass": [{"actor_id": 7}, {"actor_id": 8}]}]
+EOF
+
+render_sweep testorg '["mps"]' "${WORK_ROOT}/sw13" true true "${WORK_ROOT}/sweep13.sh"
+SWEEP_RC13=0
+run_sweep "${WORK_ROOT}/sweep13.sh" "${FX13}" "${WORK_ROOT}/s13.out" "${WORK_ROOT}/s13.err" || SWEEP_RC13=$?
+expect_count "S13 sweep exits 0 with paginated rulesets" 0 "${SWEEP_RC13}"
+ART13="$(tr -d '[:space:]' <"${WORK_ROOT}/s13.out")"
+check "S13 artifact exists" test -f "${ART13}"
+check "S13 rules flattened across both pages" jq -e '(.repos[0].rulesets.rules | length) == 2 and .repos[0].rulesets.rules[0].id == 201 and .repos[0].rulesets.rules[1].id == 202' "${ART13}" >/dev/null
+check "S13 applied from the page-2 branch ruleset" jq -e '.repos[0].rulesets.applied == true and .repos[0].rulesets.rules[1].bypass_actors == 2' "${ART13}" >/dev/null
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2
