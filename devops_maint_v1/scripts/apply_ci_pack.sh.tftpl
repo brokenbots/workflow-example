@@ -180,22 +180,19 @@ tpl_ci_for() {
   esac
 }
 
-tpl_db_for() { # pack starter_language
-  if [ "$1" = "starter" ]; then
-    case "$2" in
-      go) printf '%s' "$RAW_DIR/tpl.db.go" ;;
-      ts) printf '%s' "$RAW_DIR/tpl.db.ts" ;;
-      py) printf '%s' "$RAW_DIR/tpl.db.py" ;;
-      *)  printf '' ;;
-    esac
-  else
-    case "$1" in
-      go) printf '%s' "$RAW_DIR/tpl.db.go" ;;
-      ts) printf '%s' "$RAW_DIR/tpl.db.ts" ;;
-      py) printf '%s' "$RAW_DIR/tpl.db.py" ;;
-      *)  printf '' ;;
-    esac
+tpl_db_for() { # pack starter_language -> dependabot template path; the starter
+               # pack's language selects the template, other packs are
+               # self-describing
+  local key="$1"
+  if [ "$key" = "starter" ]; then
+    key="$2"   # starter_language: go|ts|py by contract
   fi
+  case "$key" in
+    go) printf '%s' "$RAW_DIR/tpl.db.go" ;;
+    ts) printf '%s' "$RAW_DIR/tpl.db.ts" ;;
+    py) printf '%s' "$RAW_DIR/tpl.db.py" ;;
+    *)  printf '' ;;
+  esac
 }
 
 # Single-line base64 encoder for PUT payloads (GNU and BusyBox compatible).
@@ -239,7 +236,7 @@ cur_bytes_to() { # target_file
 #   2 -> API/transport failure
 file_apply() { # repo rel_path branch tpl_file commit_msg
   local repo="$1" path="$2" branch="$3" tpl_file="$4" commit_msg="$5"
-  local stem cur_file readback_file body_file sha new_sha content_b64 attempt
+  local stem cur_file readback_file body_file sha new_sha content_b64 attempt grc
   FACTION="none"
   FREADBACK=false
   FA_ERR=""
@@ -248,8 +245,12 @@ file_apply() { # repo rel_path branch tpl_file commit_msg
   readback_file="$RAW_DIR/rb.$repo.$stem"
   body_file="$RUN_DIR/.compliance.body.$$.json"
 
-  if ! contents_get "$repo" "$path" "$branch"; then
-    local grc=$?
+  # Capture the rc directly: `if ! contents_get; then local rc=$?` would see
+  # $? = 0 (negation resets it) and the absent-file (404) lane would never
+  # engage — every probe failure would masquerade as a transport error.
+  grc=0
+  contents_get "$repo" "$path" "$branch" || grc=$?
+  if [ "$grc" -ne 0 ]; then
     if [ "$grc" -eq 1 ]; then
       FACTION="created"
       sha=""
@@ -305,8 +306,11 @@ file_apply() { # repo rel_path branch tpl_file commit_msg
       cur_bytes_to "$readback_file" || break
       if cmp -s "$readback_file" "$tpl_file"; then
         FREADBACK=true
+        return 0
       fi
-      return 0   # a byte mismatch is not a transport race; report it at once
+      # The stored bytes differ from the template: a typed mismatch, never a
+      # silent "done" — the caller counts it and the step fails the run.
+      return 1
     fi
     attempt=$((attempt + 1))
     sleep "${READBACK_SLEEP:-2}"
