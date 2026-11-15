@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 # sweep_delta.sh.tftpl — per-repo before/after delta report (KB-410, ADR-0015 D6).
 #
-# Renders from main.chcl with:
-#   {{ .gh_retry }}              — the vendored bounded-backoff retry wrapper,
-#                                  spliced ONCE as shell source (it defines a
-#                                  gh() function that shadows the binary).
-#   {{ .org | shellquote }}      — org (validated before any network call).
-#   {{ .repos_json | shellquote }} — sweep scope, JSON array of repo names.
-#   {{ .plan_json | shellquote }}  — the Lane B application plan (protection_plan:
-#                                    [{repo, pack, starter_language}]); repos not
-#                                    in the plan are reported with pack null.
-#   {{ .inventory_file | shellquote }} — the BEFORE snapshot: the collect step's
-#                                    inventory artifact (schema
-#                                    devops_maint_v1.inventory.v1), read back
-#                                    for per-repo before counts.
+# Renders from main.chcl with (all shellquote args arrive single-quoted):
+#   gh_retry         — the vendored bounded-backoff retry wrapper, spliced
+#                      ONCE as shell source (it defines a gh() function that
+#                      shadows the binary).
+#   org              — org (validated before any network call).
+#   repos_json       — sweep scope, JSON array of repo names.
+#   plan_json        — the Lane B application plan (protection_plan:
+#                      [{repo, pack, starter_language}]); repos not in the
+#                      plan are reported with pack null.
+#   inventory_file   — the BEFORE snapshot: the collect step's inventory
+#                      artifact (schema devops_maint_v1.inventory.v1), read
+#                      back for per-repo before counts.
 #
 # The delta report turns the guided sweep into the delta-driven weekly cadence:
 # the collect inventory captured at the start of the run is the before, and a
@@ -87,7 +86,7 @@ err_text() {
 # ---------------------------------------------------------------------------
 # Config gates — typed, fail-loud, BEFORE any network call
 # ---------------------------------------------------------------------------
-printf '%s' "$ORG" | jq -n --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+printf '%s' "$ORG" | jq -ne --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
     fail "org failed its shape check (RFC-1035 segment of at most 100 chars)"
 
 printf '%s' "$REPOS_JSON" | jq -e '
