@@ -1,52 +1,64 @@
-// devops_maint_v1 — per-repo inventory adapter step (KB-406, ADR-0015 wave 1).
+// devops_maint_v1 — Lane A: classify/route/act graph (KB-407, ADR-0015 wave 2).
 //
-// Wave 1 of the devops_maint_v1 series (anchor KB-405): the collect step is a
-// DETERMINISTIC SHELL step (no copilot adapters, no model turns) that sweeps a
-// bound org/repo set and emits ONE normalized JSON inventory artifact:
+// Wave 2 of the devops_maint_v1 series (anchor KB-405, predecessor KB-406):
+// the wave-1 collect step stays byte-compatible and is extended into a
+// 6-step graph — every step deterministic shell except the one decision-
+// adapter gate that rules on the automatable plan:
 //
-//   - open dependabot PRs per repo (enumerated from gh pr list) with the
-//     non-dependabot open PRs kept as a counted lane (the card's column set),
-//   - per-PR CI verdicts (gh pr checks text mode: red = any failing check,
-//     pending = any pending/unknown check, green = all passing, none = no
-//     checks on the head branch),
-//   - repo advisory state (govulncheck + osv-scanner on a depth-1 clone;
-//     honest status lanes so an unscanned surface never reads as clean),
-//   - CodeQL open-alert counts (code-scanning alerts API; disabled lane when
-//     code scanning is not enabled on the repo),
-//   - protection ruleset state (rulesets API; applied = an active branch
-//     ruleset exists).
+//   collect       (shell)    normalized inventory sweep               [KB-406]
+//   classify      (shell)    deterministic buckets + consolidation:
+//                            mechanical-bump / vuln-clear / needs-rebase /
+//                            needs-judgment, ONE group per (repo, module,
+//                            to_version) — the consolidated plan
+//   route_prepare (shell)    compact decision-model brief from the
+//                            classification artifact (pure jq)
+//   route         (decision) the gate: a System One model rules the plan
+//                            safe to run automatically. Confidence below
+//                            route_conf_floor, a "hold" choice, or any
+//                            undeclared choice holds the run (no act).
+//   act           (shell)    rebase lane: needs_rebase carriers get
+//                            update-branch read-back bookkeeping
+//   merge         (shell)    brokenbot lane: gate (APPROVED/MERGEABLE/
+//                            CLEAN/green rollup) then merge each carrier,
+//                            close superseded members after the carrier
+//                            merge. The workflow identity (collect/act) and
+//                            the brokenbot identity (merge) are different
+//                            tokens by design (ADR-0015: separate lanes).
 //
-// KB-407's classify/route graph consumes the artifact path, so the step's
-// stdout carries ONLY the artifact path; evidence and diagnostics go to
-// stderr like every other deterministic surface in this repo.
+// Determinism contract (ADR-0015 D1/D2): buckets and the consolidated plan
+// come from pure jq in classify — identical inventories classify identically.
+// The model cannot widen scope: the route step's only actionable choices are
+// proceed (run the deterministic plan) or hold; judgment rows and parked/
+// report-only rows are never auto-acted, they are carried into the
+// classification artifact's report for the human lane (KB-409/410).
 //
 // Endings:
-//   collected       — the sweep wrote a structurally valid artifact and at
-//                     least one repo collected; per-repo partial failures
-//                     stay recorded inside the artifact (KB-407 sees them).
-//   collect_failed  — honest failure: bad sweep config (empty org/repos, a
-//                     repo name outside the safe-name shape), every repo
-//                     collected failed, or the artifact failed its structural
-//                     self-check. The partial artifact still exists in that
-//                     case and its path is reported in the error line.
-
+//   completed            — plan executed (or empty plan) and the merge lane
+//                          finished; the acts + merged artifacts record it.
+//   held                 — the route gate held: below route_conf_floor, the
+//                          model chose hold, or its choice was undeclared
+//                          (the conservative default arm). No act, no merge;
+//                          the classification report stands on its own.
+//   *_failed             — honest failure of one lane, with the typed
+//                          failure line in the matching error output; the
+//                          merge failure keeps its evidence artifact and
+//                          names its path in the line.
 workflow {
     name             = "devops_maint_v1"
-    version          = "1"
+    version          = "2"
     criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
     initial_state    = "collect"
-    target_state     = "collected"
+    target_state     = "completed"
 
     policy {
-        max_total_steps = 4
+        max_total_steps = 10
     }
 }
 
 // ── Run state ────────────────────────────────────────────────────────────────
 
 // Absolute path of the normalized inventory artifact (one sweep). Set by the
-// collect step's success arm — the handle the classify/route graph (KB-407)
-// and the guided sweep (KB-410) read back.
+// collect step's success arm — the handle the classify step reads back.
 data "internal" "inventory_file" {
     type  = string
     value = ""
@@ -61,8 +73,99 @@ data "internal" "collect_error" {
     value = ""
 }
 
-// ── The single collect step ──────────────────────────────────────────────────
+// Absolute path of the classification artifact (buckets + consolidated plan
+// + rebase plan + report), the handle the route/act/merge steps read back.
+data "internal" "classification_file" {
+    type  = string
+    value = ""
+}
 
+// Typed failure line when the classify step fails (bad inventory artifact or
+// a structural self-check failure).
+data "internal" "classify_error" {
+    type  = string
+    value = ""
+}
+
+// The compact decision-model brief (single-line JSON the route_prepare step
+// composes from the classification artifact). It becomes the decision step's
+// state, so the model reasons over the deterministic plan, not the raw
+// inventory.
+data "internal" "route_brief" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the route_prepare step fails (bad classification
+// artifact, brief count mismatch).
+data "internal" "route_brief_error" {
+    type  = string
+    value = ""
+}
+
+// The route gate's recorded verdict is read at terminal states from
+// steps.route directly (with try guards) — a write inside the step's own
+// outcome cannot reference steps.route (compile-time guard), and the shared
+// output lets every ending report the same routing facts.
+
+// Typed failure line when the route step fails (decision backend failure).
+data "internal" "route_error" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the acts artifact (rebase bookkeeping rows).
+data "internal" "acts_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the act step fails. Per-carrier rebase failures are
+// bookkeeping rows inside the acts artifact, not step failures.
+data "internal" "act_error" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the merged artifact (per-carrier gate + close-out rows);
+// also written when a gated merge fails, so the evidence survives the
+// non-zero exit.
+data "internal" "merge_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the merge step fails (with the evidence-artifact
+// path when a gated merge failed).
+data "internal" "merge_error" {
+    type  = string
+    value = ""
+}
+
+// ── The route gate's questions ───────────────────────────────────────────────
+
+// One choice question: run the deterministic plan (rebases + consolidated
+// carrier merges) as automated maintenance, or hold for a human. The brief
+// carries the plan and the explicit note that judgment/report rows are never
+// auto-acted, so a hold choice is the model's whole veto surface — it can
+// narrow nothing, widen nothing, and invent no actions.
+local "route_questions" {
+    value = jsonencode([
+        {
+            id           = "action"
+            type         = "choice"
+            instructions = "You are reviewing the consolidated dependency-maintenance plan for one sweep: bump carriers to merge, superseded PRs to close after each carrier merge, and PRs to rebase. The plan is deterministic and already scoped: bump/rebase rows only, human-judgment rows are excluded and report-only. Choose proceed to let automation execute the plan exactly as stated, or hold if anything in the brief looks wrong for automated execution (ambiguity, a module the plan mis-identifies, evidence of broader dependency work that should be human-decided)."
+            criteria     = {
+                proceed = "The consolidated bump/rebase plan in the brief is unambiguous and safe to execute automatically as stated; human-review rows are already excluded from it."
+                hold    = "Something in the brief is wrong or ambiguous for automated execution: hold the whole plan for a human instead of acting."
+            }
+        }
+    ])
+}
+
+// ── Graph ────────────────────────────────────────────────────────────────────
+
+// Wave-1 collect step, unchanged (the header documents its sweep surfaces).
 step "collect" {
     target  = adapter.shell.collect
     // Step timeouts must be compile-time-known literals in the step grammar
@@ -83,7 +186,7 @@ step "collect" {
         })
     }
     outcome "success" {
-        next = state.collected
+        next = step.classify
         write {
             target = data.internal.inventory_file.value
             // stdout carries ONLY the machine artifact path (exact trimmatch).
@@ -101,14 +204,195 @@ step "collect" {
     }
 }
 
+// Deterministic buckets + consolidated plan (pure jq; identical inventories
+// classify identically and the artifact self-checks its own structure).
+step "classify" {
+    target  = adapter.shell.classify
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/classify_prs.sh.tftpl", {
+            inventory_file = data.internal.inventory_file.value
+        })
+    }
+    outcome "success" {
+        next = step.route_prepare
+        write {
+            target = data.internal.classification_file.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.classify_failed
+        write {
+            target = data.internal.classify_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// Compact brief for the route gate (pure jq; count-gated against the
+// classification summary).
+step "route_prepare" {
+    target  = adapter.shell.route_prepare
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/route_brief.sh.tftpl", {
+            classification_file = data.internal.classification_file.value
+        })
+    }
+    outcome "success" {
+        next = step.route
+        write {
+            target = data.internal.route_brief.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.route_prepare_failed
+        write {
+            target = data.internal.route_brief_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// The decision-adapter gate. One System One call over the brief; the answers
+// are routed by the switch below (outcome-pure step, like decision_demo_v1).
+step "route" {
+    target  = adapter.decision.route_gate
+    timeout = "120s"
+    input {
+        questions = local.route_questions
+        state     = data.internal.route_brief.value
+    }
+    outcome "success" {
+        next = switch.route_gate
+    }
+    outcome "failure" {
+        next = state.route_failed
+        write {
+            target = data.internal.route_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// Gate routing. Match arms are evaluated in declaration order and the first
+// truthy condition wins, so the confidence gate must stay first: an
+// unconfident choice always lands on hold, never on auto-action below it.
+// hold is also the default arm — an undeclared choice can never act.
+switch "route_gate" {
+    match {
+        condition = steps.route.answers.action.confidence < var.route_conf_floor
+        next      = state.held
+    }
+    match {
+        condition = steps.route.answers.action.choice == "hold"
+        next      = state.held
+    }
+    match {
+        condition = steps.route.answers.action.choice == "proceed"
+        next      = step.act
+    }
+    default { next = state.held }
+}
+
+// Rebase lane: bookkeeping over the needs_rebase plan; per-carrier failures
+// stay rows in the acts artifact.
+step "act" {
+    target  = adapter.shell.act
+    timeout = "3600s"
+    input {
+        command = templatefile("./scripts/act_rebase_consolidate.sh.tftpl", {
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
+            org                 = var.org
+            classification_file = data.internal.classification_file.value
+        })
+    }
+    outcome "success" {
+        next = step.merge
+        write {
+            target = data.internal.acts_file.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.act_failed
+        write {
+            target = data.internal.act_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// The brokenbot lane: gate + merge carriers, close superseded members.
+step "merge" {
+    target  = adapter.shell.merge
+    timeout = "3600s"
+    input {
+        command = templatefile("./scripts/merge_acts.sh.tftpl", {
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
+            org                 = var.org
+            classification_file = data.internal.classification_file.value
+        })
+    }
+    outcome "success" {
+        next = state.completed
+        write {
+            target = data.internal.merge_file.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.merge_failed
+        write {
+            target = data.internal.merge_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
 // ── Endings ──────────────────────────────────────────────────────────────────
 
-state "collected" {
+state "completed" {
     terminal = true
     success  = true
 }
 
+// The route gate held the run (low confidence, hold choice, or an undeclared
+// choice). A held run is an honest non-success: no act, no merge; the
+// classification report is the deliverable for the human lane.
+state "held" {
+    terminal = true
+    success  = false
+}
+
 state "collect_failed" {
+    terminal = true
+    success  = false
+}
+
+state "classify_failed" {
+    terminal = true
+    success  = false
+}
+
+state "route_prepare_failed" {
+    terminal = true
+    success  = false
+}
+
+state "route_failed" {
+    terminal = true
+    success  = false
+}
+
+state "act_failed" {
+    terminal = true
+    success  = false
+}
+
+state "merge_failed" {
     terminal = true
     success  = false
 }
@@ -125,4 +409,67 @@ output "collect_error" {
     description = "Typed failure line of the collect step (with the partial-artifact path when one exists); empty on success."
     type        = string
     value       = data.internal.collect_error.value
+}
+
+output "classification_file" {
+    description = "Path of the classification artifact (buckets, consolidated plan, rebase plan, report); empty when the classify step failed."
+    type        = string
+    value       = data.internal.classification_file.value
+}
+
+output "classify_error" {
+    description = "Typed failure line of the classify step; empty on success."
+    type        = string
+    value       = data.internal.classify_error.value
+}
+
+output "route_brief" {
+    description = "The single-line brief the route gate ruled on; empty when the route_prepare step failed."
+    type        = string
+    value       = data.internal.route_brief.value
+}
+
+output "route_decision" {
+    description = "The route gate's verdict (choice + confidence) as JSON, or the conservative undeclared marker when the backend gave no usable answer."
+    type        = string
+    value = jsonencode({
+        choice     = try(steps.route.answers.action.choice, "undeclared")
+        confidence = try(steps.route.answers.action.confidence, -1)
+    })
+}
+
+output "route_brief_error" {
+    description = "Typed failure line of the route_prepare step; empty on success."
+    type        = string
+    value       = data.internal.route_brief_error.value
+}
+
+output "route_error" {
+    description = "Typed failure line of the route step (decision backend failure); empty on success."
+    type        = string
+    value       = data.internal.route_error.value
+}
+
+output "acts_file" {
+    description = "Path of the acts artifact (rebase bookkeeping rows); empty when the act step failed."
+    type        = string
+    value       = data.internal.acts_file.value
+}
+
+output "act_error" {
+    description = "Typed failure line of the act step; empty on success. Per-carrier rebase failures live in the acts artifact, not here."
+    type        = string
+    value       = data.internal.act_error.value
+}
+
+output "merge_file" {
+    description = "Path of the merged artifact (gate + close-out rows); also set when a gated merge failed, so the evidence survives the failure."
+    type        = string
+    value       = data.internal.merge_file.value
+}
+
+output "merge_error" {
+    description = "Typed failure line of the merge step (with the evidence-artifact path on a gated merge failure); empty on success."
+    type        = string
+    value       = data.internal.merge_error.value
 }

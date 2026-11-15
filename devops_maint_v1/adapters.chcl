@@ -1,11 +1,29 @@
-// devops_maint_v1 (KB-406): one deterministic collect step — no copilot
-// adapters, no model turns. The sweep shell writes every artifact under the
-// sweep root inside the data lane the interface declares.
+// devops_maint_v1 (KB-406 + KB-407): five determinstic shell steps and the
+// one decision-adapter gate. The shell steps write every artifact under the
+// sweep root inside the data lane the interface declares; the merge step runs
+// on a DIFFERENT GitHub identity than the collect/act steps (ADR-0015: the
+// workflow lane enumerates and rebases, the brokenbot lane merges).
 
 // Exec lane: the mounted data path always exists (PVC mount), so the adapter
-// cwd is anchorable there while the sweep script itself mkdir -ps the deeper
-// sweep_root/<sweep_id>/ workspace.
+// cwd is anchorable there while the scripts themselves mkdir -ps the deeper
+// sweep_root/<sweep_id>/ workspaces.
 environment "shell" "collect" {
+    working_directory = var.data_root
+}
+
+environment "shell" "classify" {
+    working_directory = var.data_root
+}
+
+environment "shell" "route_prepare" {
+    working_directory = var.data_root
+}
+
+environment "shell" "act" {
+    working_directory = var.data_root
+}
+
+environment "shell" "merge" {
     working_directory = var.data_root
 }
 
@@ -18,5 +36,62 @@ adapter "shell" "collect" {
         // GITHUB_TOKEN would silently override the per-adapter secret. Same
         // discipline as qa_triage_v1, review_triage_v1 and workstream_handler_v1.
         GH_TOKEN = var.workflow_github_token
+    }
+}
+
+// jq-only: bucket classification + consolidation. No network, no secrets.
+adapter "shell" "classify" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.classify
+}
+
+// jq-only: the compact route brief. No network, no secrets.
+adapter "shell" "route_prepare" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.route_prepare
+}
+
+// Rebase lane: workflow GitHub identity only (update-branch + gate views).
+adapter "shell" "act" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.act
+    secrets {
+        GH_TOKEN = var.workflow_github_token
+    }
+}
+
+// Brokenbot lane: merge carriers and close superseded members under the
+// brokenbot identity (ADR-0015: the lane that merges is not the lane that
+// classifies).
+adapter "shell" "merge" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.merge
+    secrets {
+        GH_TOKEN = var.brokenbot_github_token
+    }
+}
+
+// The route gate (KB-407/ADR-0015 D3-diff-scoped): one decision call rules
+// the deterministic plan safe to proceed or held for a human. The adapter is
+// engine-internal (decision_demo_v1 shape): no image, no storage lanes, and
+// only the api_key crosses the secret channel.
+adapter "decision" "route_gate" {
+    config {
+        // The adapter appends /v1/systemone. The override is optional
+        // (default "") with a production fallback, same pattern as the
+        // provider overrides in workstream_handler_v1/review_triage_v1.
+        base_url = var.route_decision_base_url != "" ? var.route_decision_base_url : "https://api.typesafe.ai"
+        model    = var.route_decision_model
+        timeout  = "60s"
+        retries  = 1
+    }
+    secrets {
+        // Empty api_key = anonymous call, same as decision_demo_v1's optional
+        // credential lane.
+        api_key = var.route_decision_api_key
     }
 }

@@ -2,10 +2,10 @@
   "apiVersion": "criteria.brokenbots.dev/v1",
   "kind": "WorkflowInterface",
   "workflow": "devops_maint_v1",
-  "description": "Per-repo inventory sweep (KB-406, ADR-0015 wave 1): one deterministic collect step enumerates open dependabot PRs + per-PR CI verdicts, govulncheck/osv advisory state, CodeQL open-alert counts and protection ruleset state for a bound org/repo set, and emits one normalized inventory.json artifact under the sweep root. All traffic authenticates with the workflow GitHub identity; sweep artifacts live on the data lane.",
+  "description": "Dependency-maintenance Lane A (KB-407, ADR-0015 wave 2): one deterministic collect sweep (KB-406) feeds a pure-jq classify step (deterministic buckets + consolidated one-carrier-per-module plan), a pure-jq route brief, a decision-adapter gate (proceed or hold; unconfident or undeclared choices hold), a rebase lane (gh pr update-branch with read-back) and a brokenbot-lane merge step (gated carrier merges + close-out of superseded PRs). Artifacts (inventory, classification, acts, merged) are written under the sweep root on the data lane.",
   "adapters": ["shell"],
   "mounts": [{"name": "data", "mountPath": "/data", "kind": "pvc"}],
-  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN", "BROKENBOT_GITHUB_TOKEN", "ROUTE_API_KEY"],
   "env": [],
   "configSlots": []
 }
