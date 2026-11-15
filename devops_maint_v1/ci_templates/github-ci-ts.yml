@@ -1,0 +1,178 @@
+# devops_maint_v1 Lane B — language CI template: TypeScript (KB-408, ADR-0015
+# wave 3).
+#
+# Applied per TypeScript repo as .github/workflows/ci.yml. Application wiring
+# and the branch-protection mapping of the check contexts below are KB-409's
+# contract — this template guarantees the stable job `name:` values that
+# KB-409 records as required checks (changes, typecheck, test, osv).
+#
+# Job set (ADR-0015 Lane B language template, TypeScript leg):
+#   typecheck  tsc --noEmit against a clean lockfile install
+#   test       vitest run inside a pinned Node container ("vitest container
+#              run"); the interpreter pin is the container image tag
+#   osv        pinned osv-scanner image over the whole tree; scanner exit 1
+#              (findings) reds the job. Repos must carry a lockfile
+#              (package-lock.json) — npm ci already fails without one.
+#
+# KB-404 docs-only design (ADR-0015): the repo-state heavy jobs SKIP on a
+# docs-only PR, always run on push-to-main, and always run on a mixed diff.
+# The `changes` gate job classifies the PR's changed-file set (fail-safe: any
+# detection failure or ambiguous path keeps the full run) and every heavy job
+# gates on it. Required-check note for KB-409: on docs-only PRs the heavy jobs
+# record a skipped conclusion, which GitHub branch protection treats as a
+# satisfied check, so the contexts below stay listed without blocking
+# docs-only PRs.
+#
+# Keep the two Node pins (setup-node in typecheck, container tag in test) in
+# lockstep — the template suite asserts both carry the same major.
+#
+# Why a plain .yml and not a .sh.tftpl: GitHub Actions `${{ }}` expressions
+# are Go text/template syntax; the devops_maint_v1 engine renders templates
+# through templatefile(3) and would mangle them. Application (KB-409) writes
+# these files byte-exact via file() and reads them back for verification.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      reason: ${{ steps.classify.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: detect docs-only change (KB-404 design)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # ── KB-404 docs-only detection (every heavy job gates on it) ──
+          set -euo pipefail
+
+          # Fail-safe contract: the skip needs positive evidence that EVERY
+          # changed file is documentation. Any detection failure or ambiguous
+          # path keeps the full run and exits 0, so the gate itself never
+          # red-blocks a PR for infra reasons and never skips without
+          # evidence.
+          docs_only=false
+          reason="push or non-PR event: always full (${EVENT_NAME})"
+
+          finish() {
+            printf 'docs_only=%s\n' "${docs_only}" >>"${GITHUB_OUTPUT:?GITHUB_OUTPUT not set}"
+            printf 'reason=%s\n' "${reason}" >>"${GITHUB_OUTPUT:?GITHUB_OUTPUT not set}"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              if [ "${docs_only}" = "true" ]; then
+                verdict="heavy jobs SKIP (docs-only PR)"
+              else
+                verdict="heavy jobs RUN (full)"
+              fi
+              printf '%s\n' "docs-only gate: ${reason} -> ${verdict}" >>"${GITHUB_STEP_SUMMARY}"
+            fi
+            exit 0
+          }
+
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            finish
+          fi
+
+          # Changed-file set = diff from the merge-base of the base branch and
+          # the PR head (robust to rebase and force-push; no API calls, no
+          # pagination).
+          base_commit=""
+          if ! base_commit="$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}" 2>/dev/null)"; then
+            reason="merge-base against origin/${PR_BASE_REF} failed: running full"
+            finish
+          fi
+
+          changed=""
+          if ! changed="$(git diff --name-only "${base_commit}" "${PR_HEAD_SHA}" 2>/dev/null)"; then
+            reason="git diff failed: running full"
+            finish
+          fi
+
+          if [ -z "${changed}" ]; then
+            reason="no changed files resolved: running full"
+            finish
+          fi
+
+          docs_only=true
+          while IFS= read -r path; do
+            case "${path}" in
+            *.md | *.markdown | *.mdx | *.rst | LICENSE | LICENSE.* | CODEOWNERS)
+              : ;;
+            docs/*.png | docs/*.jpg | docs/*.jpeg | docs/*.svg | docs/*.gif | docs/*.webp | docs/*.drawio)
+              : ;;
+            *)
+              # Anything else — including anything under .github/ (workflows,
+              # dependabot.yml) and any code file regardless of directory —
+              # keeps the full run.
+              docs_only=false
+              reason="full run: ${path} is not a docs path"
+              break ;;
+            esac
+          done <<<"${changed}"
+
+          if [ "${docs_only}" = "true" ]; then
+            reason="every changed file is a fail-safe docs path: skipping heavy jobs"
+          fi
+          finish
+          # ── end KB-404 docs-only detection ──
+
+  typecheck:
+    name: typecheck
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: install (clean copy of the lockfile state)
+        run: npm ci
+      - name: tsc (emit-none type gate)
+        run: npx tsc --noEmit
+
+  test:
+    name: test
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
+    runs-on: ubuntu-latest
+    # Vitest runs against a pinned Node container (ADR Lane B: "vitest
+    # container run"); the full (non-slim) image carries git so the checkout
+    # action works inside the container.
+    container:
+      image: node:24-bookworm
+    steps:
+      - uses: actions/checkout@v7
+      - name: install (clean copy of the lockfile state)
+        run: npm ci
+      - name: vitest (run mode; container-hosted interpreter)
+        run: npx vitest run
+
+  osv:
+    name: osv
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: osv-scanner (pinned image; findings exit 1 = red job)
+        run: docker run --rm --entrypoint osv-scanner -v "$PWD:/repo" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo
