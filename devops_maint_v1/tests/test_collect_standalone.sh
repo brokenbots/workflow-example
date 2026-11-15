@@ -408,7 +408,7 @@ make_fixtures() {
 }
 
 pr() { # pr <number> <author-login>
-    printf '{"number": %s, "title": "Bump deps to v%s", "author": {"login": "%s"}, "headRefName": "dep-%s", "baseRefName": "main", "url": "https://example.com/%s", "updatedAt": "2026-11-14T10:00:00Z"}' "$1" "$1" "$2" "$1" "$1"
+    printf '{"number": %s, "title": "Bump deps to v%s", "author": {"login": "%s"}, "headRefName": "dep-%s", "baseRefName": "main", "url": "https://example.com/%s", "updatedAt": "2026-11-14T10:00:00Z", "mergeStateStatus": "CLEAN"}' "$1" "$1" "$2" "$1" "$1"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -524,6 +524,7 @@ check "S1 alpha gov finding id/module/version" test "$(jq -r '.repos[0].advisori
 check "S1 alpha osv ok empty (clean tool run)" jq -e '.repos[0].advisories.osv.status == "ok" and (.repos[0].advisories.osv.findings | length) == 0' "${A_ALPHA}" >/dev/null
 check "S1 alpha codeql ok critical=1 medium=1" jq -e '.repos[0].codeql.status == "ok" and .repos[0].codeql.open_alerts == 2 and .repos[0].codeql.by_severity.critical == 1 and .repos[0].codeql.by_severity.medium == 1 and .repos[0].codeql.by_severity.other == 0' "${A_ALPHA}" >/dev/null
 check "S1 alpha rulesets applied with 1 rule" jq -e '.repos[0].rulesets.applied == true and (.repos[0].rulesets.rules | length) == 1 and .repos[0].rulesets.rules[0].bypass_actors == 1' "${A_ALPHA}" >/dev/null
+check "S1 alpha merge_state captured from mergeStateStatus" jq -e '[.repos[0].prs.dependabot[].merge_state] == ["CLEAN", "CLEAN"]' "${A_ALPHA}" >/dev/null
 
 # beta record
 check "S1 beta collected" jq -e '.repos[1] | .repo == "beta" and .collected == true' "${A_ALPHA}" >/dev/null
@@ -951,6 +952,40 @@ ART13="$(tr -d '[:space:]' <"${WORK_ROOT}/s13.out")"
 check "S13 artifact exists" test -f "${ART13}"
 check "S13 rules flattened across both pages" jq -e '(.repos[0].rulesets.rules | length) == 2 and .repos[0].rulesets.rules[0].id == 201 and .repos[0].rulesets.rules[1].id == 202' "${ART13}" >/dev/null
 check "S13 applied from the page-2 branch ruleset" jq -e '.repos[0].rulesets.applied == true and .repos[0].rulesets.rules[1].bypass_actors == 2' "${ART13}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 14. Merge-state capture (KB-407): mergeStateStatus flows through the rows so
+#     the classify step can gate rebase drift; a missing field stays null and
+#     is never read as drift.
+# ═════════════════════════════════════════════════════════════════════════════
+FX14="${WORK_ROOT}/fx14"
+make_fixtures "${FX14}"
+mkdir -p "${FX14}/drift"
+cat >"${FX14}/drift/prlist.json" <<'EOF'
+[
+  {"number": 200, "title": "Bump lodash to v4.17.21", "author": {"login": "dependabot[bot]"}, "headRefName": "d1", "baseRefName": "main", "url": "https://example.com/200", "updatedAt": "2026-11-14T10:00:00Z", "mergeStateStatus": "BEHIND"},
+  {"number": 201, "title": "Bump lodash to v4.17.22", "author": {"login": "dependabot[bot]"}, "headRefName": "d2", "baseRefName": "main", "url": "https://example.com/201", "updatedAt": "2026-11-14T10:01:00Z", "mergeStateStatus": "DIRTY"},
+  {"number": 202, "title": "Bump lodash to v4.17.23", "author": {"login": "dependabot[bot]"}, "headRefName": "d3", "baseRefName": "main", "url": "https://example.com/202", "updatedAt": "2026-11-14T10:02:00Z", "mergeStateStatus": "CLEAN"},
+  {"number": 203, "title": "Bump lodash to v4.17.24", "author": {"login": "dependabot[bot]"}, "headRefName": "d4", "baseRefName": "main", "url": "https://example.com/203", "updatedAt": "2026-11-14T10:03:00Z"}
+]
+EOF
+printf 'build\tsuccess\t6s\thttps://ci/build/200\tok\n' >"${FX14}/drift/checks.200.tsv"
+printf 'build\tsuccess\t6s\thttps://ci/build/201\tok\n' >"${FX14}/drift/checks.201.tsv"
+printf 'build\tsuccess\t6s\thttps://ci/build/202\tok\n' >"${FX14}/drift/checks.202.tsv"
+printf 'build\tsuccess\t6s\thttps://ci/build/203\tok\n' >"${FX14}/drift/checks.203.tsv"
+printf '[]' >"${FX14}/drift/codeql.json"
+printf '[]' >"${FX14}/drift/rulesets.json"
+
+render_sweep testorg '["drift"]' "${WORK_ROOT}/sw14" true true "${WORK_ROOT}/sweep14.sh"
+SWEEP_RC14=0
+run_sweep "${WORK_ROOT}/sweep14.sh" "${FX14}" "${WORK_ROOT}/s14.out" "${WORK_ROOT}/s14.err" || SWEEP_RC14=$?
+expect_count "S14 sweep exits 0 with mixed merge states" 0 "${SWEEP_RC14}"
+ART14="$(tr -d '[:space:]' <"${WORK_ROOT}/s14.out")"
+check "S14 artifact exists" test -f "${ART14}"
+check "S14 BEHIND flows through as merge_state" test "$(jq -r '.repos[0].prs.dependabot[0].merge_state' "${ART14}")" = "BEHIND"
+check "S14 DIRTY flows through as merge_state" test "$(jq -r '.repos[0].prs.dependabot[1].merge_state' "${ART14}")" = "DIRTY"
+check "S14 CLEAN flows through as merge_state" test "$(jq -r '.repos[0].prs.dependabot[2].merge_state' "${ART14}")" = "CLEAN"
+check "S14 missing mergeStateStatus -> null, never a drift signal" jq -e '.repos[0].prs.dependabot[3].merge_state == null' "${ART14}" >/dev/null
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2
