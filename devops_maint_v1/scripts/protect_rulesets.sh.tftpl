@@ -62,7 +62,7 @@ STRICT_STATUS_POLICY=false     # branches need not be strictly up to date
 # Pack -> REQUIRED status-check contexts (KB-408 application contract).
 # Kept in EXACT pack order; the suite cross-checks the table against
 # ci_templates/README.md and the template job names.
-PACK_CONTEXTS='{go:["changes","lint","test","govulncheck","osv"],ts:["changes","typecheck","test","osv"],py:["changes","lint","test","osv"],starter:["changes","build-parity","smoke"]}'
+PACK_CONTEXTS='{"go":["changes","lint","test","govulncheck","osv"],"ts":["changes","typecheck","test","osv"],"py":["changes","lint","test","osv"],"starter":["changes","build-parity","smoke"]}'
 
 log() { printf 'protect: %s\n' "$*" >&2; }
 
@@ -309,8 +309,8 @@ verify_mismatches() {
 
 # Bounded read-back retry: a GET immediately after a write can race the API
 # index; up to READBACK_ATTEMPTS attempts READBACK_SLEEP seconds apart.
-READBACK_ATTEMPTS=3
-READBACK_SLEEP=2
+READBACK_ATTEMPTS="${READBACK_ATTEMPTS:-3}"
+READBACK_SLEEP="${READBACK_SLEEP:-2}"
 
 # ---------------------------------------------------------------------------
 # Protection application
