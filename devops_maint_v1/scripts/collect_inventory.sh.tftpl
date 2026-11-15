@@ -123,11 +123,16 @@ append_repo_error() {
 # Per-PR CI checks surface
 # ---------------------------------------------------------------------------
 normalize_checks_tsv() {
-  # stdin: `<name>\t<state>\t<url>` rows as produced by `gh pr checks` text mode.
+  # stdin: `<name>\t<status>\t<elapsed>\t<url>\t<description>` rows as
+  # produced by `gh pr checks` in non-TTY mode (real gh 2.47.x; headers are
+  # TTY-only). ELAPSED is parsed but unused (real gh emits "0" when elapsed
+  # is unknown; an empty field would shift the URL into column 3, since
+  # read collapses tab runs and ignores trailing tabs). DESCRIPTION absorbs
+  # the remainder of the line (a description may itself contain tabs).
   # stdout: JSONL rows {name, state (pass|fail|pending|skip|other), url|null}.
   # A tab-malformed line lands in the "other" state bucket where it stays
   # visible in the artifact instead of silently vanishing.
-  while IFS=$'\t' read -r check_name check_state check_url || [ -n "${check_name:-}" ]; do
+  while IFS=$'\t' read -r check_name check_state check_elapsed check_url check_desc || [ -n "${check_name:-}" ]; do
     [ -n "${check_name:-}" ] || continue
     check_lc="$(printf '%s' "${check_state:-}" | tr '[:upper:]' '[:lower:]')"
     case "$check_lc" in
@@ -232,13 +237,17 @@ codeql_alert_count() {
 # ---------------------------------------------------------------------------
 ruleset_rows() {
   local out rc
-  out="$(gh api "repos/$ORG/$repo/rulesets" 2>"$rdir/rulesets.err")" && rc=0 || rc=$?
+  out="$(gh api "repos/$ORG/$repo/rulesets?per_page=100" --paginate 2>"$rdir/rulesets.err")" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
     log "rulesets API call failed rc=$rc: $(err_text "$rdir/rulesets.err")"
     return 1
   fi
-  printf '%s' "$out" | jq '
-    map({
+  # --paginate emits one JSON document per page; flatten the stream first so
+  # a branch ruleset sitting past the first page is never lost. (Same shape
+  # as the CodeQL alert flatten above.)
+  printf '%s' "$out" | jq -s '
+    [.[].[]?]
+    | map({
       id: .id,
       name: .name,
       target: (.target // "branch"),
@@ -266,6 +275,11 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
   prs_skipped=0
   pr_checks_truncated=0
   pr_list_truncated=0
+  # Reset EVERY iteration: with only a success-branch assignment, a later
+  # repo's pr-list failure would leave this variable naming the previous
+  # repo's rows file and misattribute its PR rows into this repo's record
+  # (breaking the dependabot-row self-check as a whole-sweep failure).
+  dependabot_rows_file="$rdir/dependabot.ndjson"
 
   gh pr list -R "$ORG/$repo" --state open --limit 200 \
     --json number,title,author,headRefName,baseRefName,url,updatedAt \
@@ -287,7 +301,6 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
       log "repo $repo: open PR count >= limit 200; pr list truncated"
     fi
 
-    dependabot_rows_file="$rdir/dependabot.ndjson"
     : >"$dependabot_rows_file"
 
     # Dependabot PR roster, \u0001-joined for safe shell re-reading.
@@ -333,10 +346,16 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
 
       if [ "$checks_rc" -eq 0 ] || [ "$checks_rc" -eq 1 ] || [ "$checks_rc" -eq 8 ]; then
         normalize_checks_tsv <"$rdir/checks.$pr_number.tsv" >"$rdir/checks.$pr_number.rows"
-        # Verdict from rows (worst-of) with the gh rc as override: rc 1 is
-        # authoritatively "any check failed"; rc 8 with zero parsed rows is
-        # gh's "no checks" shape -> none; pending/unknown check states are
-        # never confirmably green.
+        # Verdict from rows (worst-of) with the gh rc as override:
+        #   rc 0 + rows            -> green/pending/red per rows
+        #   rc 0 + zero rows       -> none (no checks on the head branch)
+        #   rc 1 + rows            -> red (authoritatively "any check failed")
+        #   rc 1 + zero rows + the "no checks reported on the" stderr shape
+        #                          -> none (gh 2.47.x rc 1s the no-checks case)
+        #   rc 1 + zero rows, neither shape -> tool/API failure -> error lane
+        #   rc 8                   -> pending; with zero rows the row-count
+        #                             fallback keeps the result none
+        # pending/unknown check states are never confirmably green.
         any_fail="$(jq -s '[.[] | select(.state == "fail")] | length' "$rdir/checks.$pr_number.rows")"
         any_pending="$(jq -s '[.[] | select(.state == "pending" or .state == "other")] | length' "$rdir/checks.$pr_number.rows")"
         row_count="$(jq -s 'length' "$rdir/checks.$pr_number.rows")"
@@ -353,8 +372,17 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
         if [ "$row_count" -eq 0 ]; then
           verdict="none"
         fi
+        pr_ci_err=""
         if [ "$checks_rc" -eq 1 ]; then
-          verdict="red"
+          if [ "$row_count" -gt 0 ]; then
+            verdict="red"
+          elif grep -q "no checks reported on the" "$rdir/checks.$pr_number.err" 2>/dev/null; then
+            verdict="none"
+          else
+            pr_ci_err="$(err_text "$rdir/checks.$pr_number.err")"
+            verdict="error"
+            append_repo_error "ci_verdicts" "gh pr checks for #$pr_number rc=$checks_rc: $pr_ci_err"
+          fi
         fi
         jq -cn \
           --argjson number "$pr_number" \
@@ -365,6 +393,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           --arg url "$pr_url" \
           --arg updated "$pr_updat" \
           --arg verdict "$verdict" \
+          --arg cierr "$pr_ci_err" \
           --argjson rows "$(jq -s '.' "$rdir/checks.$pr_number.rows")" \
           '
           ($rows | if . == "" then [] else . end) as $rows
@@ -381,7 +410,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
                 verdict: $verdict,
                 check_count: $nr,
                 checks: $rows,
-                error: null
+                error: (if $cierr == "" then null else $cierr end)
               }
             }
           ' >>"$dependabot_rows_file"

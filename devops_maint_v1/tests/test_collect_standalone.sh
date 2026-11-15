@@ -213,7 +213,9 @@ case "$mode" in
         _repo_part="${_tmp#*/}"
         api_repo="${_repo_part%%/*}"
         case "$url" in
-            *rulesets)
+            # Suffix-tolerant: the sweep appends ?per_page=100 (& --paginate)
+            # to the rulesets surface, so the match is not end-anchored.
+            *rulesets*)
                 erc="${fx}/${api_repo}/rulesets.rc"
                 if [ -f "${erc}" ]; then rc="$(cat "${erc}")"; else rc=0; fi
                 if [ "$rc" -ne 0 ]; then
