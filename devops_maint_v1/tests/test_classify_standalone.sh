@@ -8,6 +8,9 @@
 #     (BEHIND/DIRTY on confirmably green-or-none CI), red CI, pending/error
 #     CI — and the clean base_ref/merge_state/CI fall-through that ends in
 #     mechanical_bump
+#   - title grammar (KB-413): conventional dependabot commit prefixes
+#     (build/chore/fix(deps[-dev]):) stripped before capturing, "bump"
+#     matched either case, grouped titles parked under the prefix too
 #   - vuln_clear: advisory findings in the SAME repo path-matching the module
 #     (exact or "/"-suffix), any version, on a version-only same-major bump
 #   - report_hold: rows from a partially-collected repo (collected=false)
@@ -225,6 +228,37 @@ check "S1 carriers are 21, 22, 23 and 32" jq -e '[.rows[] | select(.is_carrier) 
 # Report-only lane: the partial repo's row parks before any grouping.
 check "S1 partial-repo row parks with the typed repo reason" jq -e '.rows[] | select(.number == 41) | .class == "report_hold" and .report_only and .module == null and .from_version == null and .to_version == null and .advisory_ids == [] and (.report_reason | test("repo inventory partially collected"))' "${CLS1}" >/dev/null
 check "S1 report lane mirrors parked rows exactly" jq -e '.report == [{repo: "delta", number: 41, title: "Bump actions/cache from 4 to 4.2", class: "report_hold", reason: "repo inventory partially collected: partial (see errors)"}]' "${CLS1}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 2p. Title grammar (KB-413): conventional dependabot prefixes + bump case
+# ═════════════════════════════════════════════════════════════════════════════
+# Real dependabot titles carry a conventional-commit prefix ("build(deps):",
+# "chore(deps):", "fix(deps):", optionally "-dev") and often a lowercase
+# "bump". Those are THE mechanical bumps: the parse strips the prefix before
+# capturing and matches either case, while grouped titles stay unparseable
+# under the prefix too.
+FXP="${WORK_ROOT}/fxp"
+RUNP="${FXP}"
+mkdir -p "${RUNP}"
+make_inventory testorg "[$(repo_rec prefixed true "" '[]' '[]' "$(dep_rows \
+    61 "build(deps): Bump github.com/brokenbots/criteria-go-adapter-sdk from 0.5.2 to 0.5.3" "2026-11-14T09:00:00Z" "CLEAN" "green" "main" \
+    62 "chore(deps): bump npm/case-var from 1.2.0 to 1.2.1" "2026-11-14T09:10:00Z" "CLEAN" "green" "main" \
+    63 "fix(deps): Bump registry.example/pkg from 0.9.0 to 0.9.1" "2026-11-14T09:20:00Z" "CLEAN" "green" "main" \
+    64 "build(deps-dev): Bump registry.example/dev from 2.0.0 to 2.0.1" "2026-11-14T09:30:00Z" "CLEAN" "green" "main" \
+    65 "build(deps): Bump the go_modules group across 3 directories with 3 updates" "2026-11-14T09:40:00Z" "CLEAN" "green" "main")")]" "${FXP}/inventory.json"
+
+render_classify "${FXP}/inventory.json" "${WORK_ROOT}/classify_prefixed.sh"
+CLS_RCP=0
+run_classify "${WORK_ROOT}/classify_prefixed.sh" "${WORK_ROOT}/s1p.out" "${WORK_ROOT}/s1p.err" || CLS_RCP=$?
+expect_count "S1p classify exits 0 on prefixed/case titles" 0 "${CLS_RCP}"
+CLS_P="$(cat "${WORK_ROOT}/s1p.out")"
+check "S1p prefixed/case titles land in the mechanical buckets" jq -e '.summary == {rows_total: 5, mechanical_bump: 4, vuln_clear: 0, needs_rebase: 0, needs_judgment: 1, report_hold: 0, report_only: 0, parked_groups: 0, groups_total: 4, carriers_total: 4, closes_total: 0, rebases_total: 0}' "${CLS_P}" >/dev/null
+check "S1p canonical build(deps) title parses and acts mechanically" jq -e '.rows[] | select(.number == 61) | .class == "mechanical_bump" and .module == "github.com/brokenbots/criteria-go-adapter-sdk" and .from_version == "0.5.2" and .to_version == "0.5.3" and (.reasons | length == 0) and .is_carrier' "${CLS_P}" >/dev/null
+check "S1p chore(deps) + lowercase bump parses and acts mechanically" jq -e '.rows[] | select(.number == 62) | .class == "mechanical_bump" and .module == "npm/case-var" and .from_version == "1.2.0" and .to_version == "1.2.1"' "${CLS_P}" >/dev/null
+check "S1p fix(deps) prefix parses and acts mechanically" jq -e '.rows[] | select(.number == 63) | .class == "mechanical_bump" and .module == "registry.example/pkg"' "${CLS_P}" >/dev/null
+check "S1p build(deps-dev) prefix parses and acts mechanically" jq -e '.rows[] | select(.number == 64) | .class == "mechanical_bump" and .module == "registry.example/dev"' "${CLS_P}" >/dev/null
+check "S1p grouped title stays needs_judgment under the prefix" jq -e '.rows[] | select(.number == 65) | .class == "needs_judgment" and (.reasons[0] | test("does not parse")) and .module == null' "${CLS_P}" >/dev/null
+check "S1p prefixed rows group and carry like bare bumps" jq -e '[.groups[].module] | sort == (["github.com/brokenbots/criteria-go-adapter-sdk", "npm/case-var", "registry.example/dev", "registry.example/pkg"] | sort)' "${CLS_P}" >/dev/null
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. Consolidation parked: mixed base_refs stay report-only
