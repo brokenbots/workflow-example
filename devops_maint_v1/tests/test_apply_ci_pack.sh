@@ -299,20 +299,20 @@ body_matches_template() { # body_matches_template <lastbody.json> <template-file
 # that agrees with the composer still shows here).
 row_stats() { # row_stats <artifact> -> newline-joined k=v facts on fd 1
     jq -r '
+      def unchanged:
+        [.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
+        | [.[] | select(.action == "none" and .readback_verified == true)] | length;
       def filecount(action):
         [.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
         | [.[] | select(.action == action)] | length;
-      def rbfalse:
-        [.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
-        | [.[] | select(.readback_verified == false and .action != null)] | length;
       "rows=\(.repos | length)",
       "verified=\([.repos[] | select(.status == "verified")] | length)",
       "error=\([.repos[] | select(.status == "error")] | length)",
       "unplanned=\([.repos[] | select(.status == "unplanned")] | length)",
       "created=\(filecount("created"))",
       "updated=\(filecount("updated"))",
-      "none=\(filecount("none"))",
-      "rbfalse=\(rbfalse)"
+      "none=\(unchanged)",
+      "rbfalse=\([.repos[] | .errors[]? | select(.surface | test("_readback$"))] | length)"
     ' "$1"
 }
 
@@ -409,7 +409,7 @@ check "S3 PUT bodies target the default branch" test "$(jq -r '.branch' "${FX1}/
 check "S3 create bodies carry no sha key" test "$(jq 'has("sha")' "${FX1}/go1/lastbody.ci.json")" = "false" && test "$(jq 'has("sha")' "${FX1}/go1/lastbody.db.json")" = "false"
 check "S3 PUT ci content decodes byte-identically to the real go template" test "$(body_matches_template "${FX1}/go1/lastbody.ci.json" "${CI_TPL_DIR}/github-ci-go.yml")" = "ok"
 check "S3 PUT dependabot content decodes byte-identically to the real go dependabot template" test "$(body_matches_template "${FX1}/go1/lastbody.db.json" "${CI_TPL_DIR}/dependabot-go.yml")" = "ok"
-check "S3 PUT ci content is single-line base64" test "$(jq -j '.content' "${FX1}/go1/lastbody.ci.json" | wc -l)" = "1"
+check "S3 PUT ci content is single-line base64" test "$(jq -r '.content' "${FX1}/go1/lastbody.ci.json" | wc -l)" = "1"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 4. Idempotency: repo already carries the exact templates -> no write
@@ -474,7 +474,7 @@ P4_RC=0
 run_apply "${P4}" "${FX4}" "${WORK_ROOT}/a4.out" "${WORK_ROOT}/a4.err" || P4_RC=$?
 expect_count "S6 multi-pack run exits 0" 0 "${P4_RC}"
 ART4="$(tr -d '[:space:]' <"${WORK_ROOT}/a4.out")"
-check "S6 all three repos verified" jq -e '[.repos[] | select(.status == "verified")] | length == 3 and .summary.files_created_total == 6' "${ART4}" >/dev/null
+check "S6 all three repos verified" jq -e '([.repos[] | select(.status == "verified")] | length == 3) and .summary.files_created_total == 6' "${ART4}" >/dev/null
 check "S6 starter row carries its declared language" jq -e '.repos[] | select(.repo == "s6") | .pack == "starter" and .starter_language == "py"' "${ART4}" >/dev/null
 check "S6 g6 got the go ci template bytes" test "$(body_matches_template "${FX4}/g6/lastbody.ci.json" "${CI_TPL_DIR}/github-ci-go.yml")" = "ok"
 check "S6 g6 got the go dependabot template bytes" test "$(body_matches_template "${FX4}/g6/lastbody.db.json" "${CI_TPL_DIR}/dependabot-go.yml")" = "ok"
@@ -528,7 +528,8 @@ ART6="$(tr -d '[:space:]' <"${WORK_ROOT}/a6.out")"
 check "S8 row is error with the apply error" jq -e '.repos[0].status == "error" and .repos[0].errors[0].surface == "ci_apply" and (.repos[0].errors[0].detail | test("contents API put failed|500"))' "${ART6}" >/dev/null
 check "S8 failed file zeroed; the second file stays honest" jq -e '.repos[0].files.ci == null and .repos[0].files.dependabot.action == "none"' "${ART6}" >/dev/null
 check "S8 summary: zero verified, one errored, zero mismatch" jq -e '.summary.repos_verified_total == 0 and .summary.repos_error_total == 1 and .summary.verify_mismatch_total == 0' "${ART6}" >/dev/null
-check_not "S8 no read-back after a failed PUT" grep -q "^GET repos/testorg/go6/contents/" "${FX6}/call.log"
+expect_count "S8 exactly one probe GET (no read-back after a failed PUT)" 1 "$(grep -c "^GET repos/testorg/go6/contents/" "${FX6}/call.log")"
+expect_count "S8 exactly one failed PUT (no retry churn)" 1 "$(grep -c "^PUT repos/testorg/go6/contents/" "${FX6}/call.log")"
 check_not "S8 rc-0 run still emits NO typed failure" grep -q '^apply_ci_pack_failed:' "${WORK_ROOT}/a6.err"
 
 # ═════════════════════════════════════════════════════════════════════════════

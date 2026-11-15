@@ -506,12 +506,15 @@ jq -e --argjson plan "$PLAN_JSON" '
   (.summary.files_updated_total ==
      ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
        | [.[] | select(.action == "updated")] | length)) and
+  # File rows of files that were never attempted (after an earlier failure)
+  # keep their initial none/false placeholder: they are NOT idempotent-unchanged
+  # entries, and read-back mismatches are evidenced by their *_readback error
+  # rows rather than by placeholders.
   (.summary.files_unchanged_total ==
      ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
-       | [.[] | select(.action == "none")] | length)) and
+       | [.[] | select(.action == "none" and .readback_verified == true)] | length)) and
   (.summary.verify_mismatch_total ==
-     ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
-       | [.[] | select(.readback_verified == false and .action != null)] | length)) and
+     ([.repos[] | .errors[]? | select(.surface | test("_readback$"))] | length)) and
   ([.repos[] |
       (.status | IN("verified", "error", "unplanned")) and
       ((.errors | type) == "array")] | all) and
