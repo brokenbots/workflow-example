@@ -165,7 +165,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: pytest bootstrap (pinned runner; setup-python ships a bare interpreter)
         run: python -m pip install pytest==9.2.0
-      - name: editable install (guarded: repo must declare packaging metadata)
+      - name: "editable install (guarded: repo must declare packaging metadata)"
         if: ${{ hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != '' }}
         run: python -m pip install -e .
       - name: pytest (only when the tree carries tests)

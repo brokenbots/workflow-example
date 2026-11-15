@@ -171,19 +171,19 @@ jobs:
             echo "starter contract violated: tree must declare exactly one language (found ${langs})" >&2
             exit 1
           fi
-      - name: parity: language toolchain (go)
+      - name: "parity: language toolchain (go)"
         if: ${{ hashFiles('go.mod') != '' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: parity: language toolchain (ts)
+      - name: "parity: language toolchain (ts)"
         if: ${{ hashFiles('package.json') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - name: parity: language toolchain (py)
+      - name: "parity: language toolchain (py)"
         if: ${{ hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != '' }}
         uses: actions/setup-python@v5
         with:
@@ -192,13 +192,13 @@ jobs:
       # under the pinned toolchain — parity is exact.
       - name: make build path
         run: make build
-      - name: parity: language build path (go)
+      - name: "parity: language build path (go)"
         if: ${{ hashFiles('go.mod') != '' }}
         run: go build ./...
-      - name: parity: language build path (ts)
+      - name: "parity: language build path (ts)"
         if: ${{ hashFiles('package.json') != '' }}
         run: npm ci && npm run build
-      - name: parity: language build path (py)
+      - name: "parity: language build path (py)"
         if: ${{ hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != '' }}
         run: python -m pip install -e .
 
