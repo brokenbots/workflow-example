@@ -86,7 +86,7 @@ jq -e -n --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v |
 
 RUN_DIR="$(dirname "$CLASSIFICATION_PATH")"
 MERGED_PATH="$RUN_DIR/merged.json"
-RAW_DIR="$RUN_DIR/raw"
+RAW_DIR="$RUN_DIR/.merge.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
 [ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
 trap cleanup EXIT
 

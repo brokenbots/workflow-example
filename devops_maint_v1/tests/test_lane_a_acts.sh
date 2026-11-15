@@ -371,6 +371,10 @@ check "merge template records the merged schema" grep -q 'devops_maint_v1.merged
 FXA="${WORK_ROOT}/act1"
 FIXA="${WORK_ROOT}/fix-act1"
 mkdir -p "${FXA}" "${FIXA}"
+# Sentinel: the shared raw evidence lane that collect owns (A1 regression guard —
+# the lane step's scratch dir is step-scoped and must never touch this lane).
+mkdir -p "${FXA}/raw"
+printf 'collect-evidence-sentinel\n' >"${FXA}/raw/errors.log"
 classification_v1 "${FXA}/classification.json" testorg sw-act \
     "$(groups_json "$(grp g001 alpha golang.org/x/net 0.21.0 needs_rebase '' 23 main)" "$(grp g002 alpha github.com/stuck/mod 1.5.0 needs_rebase '' 44 release-1)")"
 printf '%s' '{"reviewDecision": "APPROVED", "mergeable": "MERGEABLE", "mergeStateStatus": "BEHIND", "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}]}' >"${FIXA}/view.23.json"
@@ -399,7 +403,9 @@ check_not "A1 the act lane never merges" grep -q 'pr merge' "${FIXA}/call.log"
 check "A2 stderr logs the plan line" grep -q 'act: rebase plan: 2 carrier(s)' "${ERRA}"
 check "A2 stderr logs per-carrier evidence" grep -q 'act: rebase #44 in testorg/alpha (group g002, merge_state=BEHIND)' "${ERRA}"
 check_not "A2 stderr on success never prints the typed failure prefix" grep -q 'act_failed' "${ERRA}"
-check "A2 no temp residue next to the classification (A1)" test "$(ls -A "${FXA}" | sort | tr '\n' ' ')" = "acts.json classification.json "
+check "A2 no temp residue next to the classification (A1)" test "$(ls -A "${FXA}" | sort | tr '\n' ' ')" = "acts.json classification.json raw "
+check "A2 the shared raw evidence lane survives the act step" test -d "${FXA}/raw" && test "$(cat "${FXA}/raw/errors.log")" = "collect-evidence-sentinel"
+check_not "A2 no step-scoped act scratch dir is left behind" ls "${FXA}"/.act.raw.* >/dev/null 2>&1
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. Act step: pre-network config gates + empty plan
@@ -470,6 +476,9 @@ check "A5 the degraded traffic is exactly view, update, post-view" test "$(grep 
 FXM="${WORK_ROOT}/merge1"
 FIXM="${WORK_ROOT}/fix-merge1"
 mkdir -p "${FXM}" "${FIXM}"
+# The same A1 regression guard on the merge lane: raw/ is collect's evidence lane.
+mkdir -p "${FXM}/raw"
+printf 'collect-evidence-sentinel\n' >"${FXM}/raw/errors.log"
 classification_v1 "${FXM}/classification.json" testorg sw-lane \
     "$(groups_json "$(grp g002 alpha github.com/consul/mod 1.2.5 mechanical_bump 31 32 main)")"
 printf '%s' "$(gate_json APPROVED MERGEABLE CLEAN '[{"status": "COMPLETED", "conclusion": "SUCCESS"}]')" >"${FIXM}/view.32.json"
@@ -493,7 +502,9 @@ check "M1 gh traffic was exactly view, merge, close, comment" test "$(grep -c . 
 check "M2 stderr logs the plan line" grep -q 'merge: merge plan: 1 carrier(s)' "${ERRM}"
 check "M2 stderr logs the close-out evidence" grep -q 'merge: group g002 in testorg/alpha: gate carrier #32' "${ERRM}"
 check_not "M2 success run never prints the typed failure prefix" grep -q 'merge_failed' "${ERRM}"
-check "M2 no temp residue next to the classification (M1)" test "$(ls -A "${FXM}" | sort | tr '\n' ' ')" = "classification.json merged.json "
+check "M2 no temp residue next to the classification (M1)" test "$(ls -A "${FXM}" | sort | tr '\n' ' ')" = "classification.json merged.json raw "
+check "M2 the shared raw evidence lane survives the merge step" test -d "${FXM}/raw" && test "$(cat "${FXM}/raw/errors.log")" = "collect-evidence-sentinel"
+check_not "M2 no step-scoped merge scratch dir is left behind" ls "${FXM}"/.merge.raw.* >/dev/null 2>&1
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 6. Merge step: the four typed gate deferrals, never a merge call

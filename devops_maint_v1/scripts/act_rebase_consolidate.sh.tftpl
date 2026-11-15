@@ -60,7 +60,7 @@ jq -e -n --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v |
 
 RUN_DIR="$(dirname "$CLASSIFICATION_PATH")"
 ACTS_PATH="$RUN_DIR/acts.json"
-RAW_DIR="$RUN_DIR/raw"
+RAW_DIR="$RUN_DIR/.act.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
 [ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
 trap cleanup EXIT
 
@@ -74,10 +74,9 @@ err_text() {
 
 # ---------------------------------------------------------------------------
 # Rebase carrier PRs: update-branch (merge base into the PR branch) + read-back.
-# All per-carrier state lives under a per-sweep raw dir to keep gh's chatter
-# out of the run dir.
+# All per-carrier state lives under the step-scoped RAW_DIR (set above) to keep
+# gh's chatter out of the run dir and off the shared raw evidence lane.
 # ---------------------------------------------------------------------------
-RAW_DIR="$RUN_DIR/raw"
 mkdir -p "$RAW_DIR"
 
 REBASE_COUNT="$(jq -r '.summary.rebases_total' "$CLASSIFICATION_PATH")"
