@@ -84,9 +84,10 @@ diverge between languages.
   `vuln-scan` target pin — the template suite cross-checks the literals and
   reds on drift.
 - `ghcr.io/google/osv-scanner:v1.8.5` is the CI scanner pin. The templates
-  pass args straight through the image's own `ENTRYPOINT ["/root/osv-scanner"]`
-  (verified against the v1.8.5 Dockerfile): no `--entrypoint` override, because
-  the binary lives at `/root/osv-scanner`, off the container PATH, so a
+  pass args straight through the image's own `ENTRYPOINT ["/osv-scanner"]`
+  (verified against the published v1.8.5 image config for linux/amd64 and
+  linux/arm64): no `--entrypoint` override, because the binary lives at
+  `/osv-scanner`, off the container PATH, so a
   bare-name override would red every osv leg instantly. The tag is a mutable
   org-managed pin, not a digest; digest pinning is deliberately out of scope
   for these plain `.yml` templates. The collect sweep (KB-406) runs the
@@ -98,9 +99,17 @@ diverge between languages.
   explicitly (latest stable at pin time, 2026-11-15; Python 3.14 explicitly
   supported per its PyPI classifiers). The pytest step keeps its test-file
   presence guard, so test-less repos degrade instead of red.
+- `ruff==0.17.5` in `github-ci-py.yml` pins the lint leg: latest stable
+  release, verified against the PyPI JSON API on 2026-11-15 (no `ruff` 1.x
+  has ever been published). Every published artifact is a
+  Python-version-agnostic `py3-none` wheel with explicit Python 3.14
+  support, so `python -m ruff` runs on the template's pinned interpreter.
+  The suite extracts the pin from the template itself and probes PyPI for
+  that exact release (loud-skip on transport trouble), so a non-resolvable
+  pin cannot be locked in again.
 - Interpreter/container/tool pins (`go-version-file: go.mod` for Go; Node 24
   as setup-node `"24"` + `node:24-bookworm`, lockstep-asserted; Python
-  `"3.14"` via the workflow-level `PYTHON_VERSION` env; `ruff==1.0.0`) are
+  `"3.14"` via the workflow-level `PYTHON_VERSION` env; `ruff==0.17.5`) are
   org-managed literals; the suite asserts every pin is present in its
   expected form.
 - Actions are allowlisted to the org set; the suite reds on any `uses:` not

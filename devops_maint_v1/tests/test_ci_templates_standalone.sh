@@ -327,13 +327,40 @@ else
 fi
 
 # Python: ruff pin + interpreter single-sourced via env + guarded legs.
-for step in 'ruff==1.0.0' 'PYTHON_VERSION: "3.14"' "python-version: \${{ env.PYTHON_VERSION }}" 'python -m pytest -q' 'python -m pip install -e .'; do
+for step in 'ruff==0.17.5' 'PYTHON_VERSION: "3.14"' "python-version: \${{ env.PYTHON_VERSION }}" 'python -m pytest -q' 'python -m pip install -e .'; do
     if grep -Fq "${step}" "${CI_PY}"; then
         ok "py template carries: ${step}"
     else
         fail "py template missing: ${step}"
     fi
 done
+
+# PyPI probe: the pinned ruff release must actually resolve. The version is
+# extracted from the template (not a second hand-written constant) so the
+# probe tests the pin CI installs; transport trouble never reds the suite.
+probe_pypi_version() { # <version> -> echoes HTTP status, or empty on transport failure
+    local ver="$1" code
+    command -v curl >/dev/null 2>&1 || { printf ''; return 0; }
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -L --connect-timeout 5 --max-time 15 \
+        "https://pypi.org/pypi/ruff/${ver}/json" 2>/dev/null)" || code=""
+    printf '%s' "${code}"
+}
+RUFF_PIN_LINE="$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' "${CI_PY}" | head -1)"
+if [ "${RUFF_PIN_LINE}" = "ruff==0.17.5" ]; then
+    ok "py ruff pin extracted from the template is the reviewed ruff==0.17.5"
+else
+    fail "py ruff pin extracted from the template is not ruff==0.17.5 (got: ${RUFF_PIN_LINE:-unset})"
+fi
+PROBE_CODE="$(probe_pypi_version "${RUFF_PIN_LINE#ruff==}")"
+if [ -z "${PROBE_CODE}" ]; then
+    skip_loud "PyPI ruff pin probe (curl absent or transport failure; not a red)"
+elif [ "${PROBE_CODE}" = "200" ]; then
+    ok "PyPI serves the pinned ruff release ${RUFF_PIN_LINE#ruff==} (probe HTTP 200)"
+elif [ "${PROBE_CODE}" = "404" ]; then
+    fail "pinned ruff release does not resolve on PyPI: ${RUFF_PIN_LINE} (https://pypi.org/pypi/ruff/${RUFF_PIN_LINE#ruff==}/json -> HTTP 404)"
+else
+    skip_loud "PyPI ruff pin probe inconclusive (HTTP ${PROBE_CODE}: rate-limit/5xx/other non-200/404; not a red)"
+fi
 JOB_PY_TEST="$(job_block "${CI_PY}" "test")"
 if printf '%s\n' "${JOB_PY_TEST}" | grep -Fq "hashFiles('**/test_*.py') != '' || hashFiles('**/tests/**/*.py') != ''"; then
     ok "py pytest leg guarded on test-file presence"
@@ -357,8 +384,9 @@ done
 
 # osv scanner invocation contract, shared by the three language templates:
 # pinned image, repo read-only, args pass through the image ENTRYPOINT —
-# v1.8.5 sets ENTRYPOINT ["/root/osv-scanner"] and the binary is off PATH,
-# so a --entrypoint bare-name override reds every osv leg instantly.
+# the published v1.8.5 image sets ENTRYPOINT ["/osv-scanner"] (image config,
+# linux/amd64 + arm64) and the binary is off PATH, so a --entrypoint
+# bare-name override reds every osv leg instantly.
 OSV_RUN='docker run --rm -v "$PWD:/repo:ro" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo'
 for f in "${CI_GO}" "${CI_TS}" "${CI_PY}"; do
     if grep -Fq "${OSV_RUN}" "${f}"; then
@@ -508,6 +536,20 @@ branch_commit() { # <repo> <branch> <path> <content> -> head sha
     git -C "$1" rev-parse HEAD
 }
 
+branch_commits() { # <repo> <branch> [<path> <content>]... -> head sha
+    local repo="$1" branch="$2"
+    shift 2
+    git -C "$repo" checkout -q -b "$branch" main
+    while [ "$#" -gt 0 ]; do
+        mkdir -p "$(dirname "$repo/$1")"
+        printf '%s\n' "$2" >"$repo/$1"
+        shift 2
+    done
+    git -C "$repo" add -A
+    git -C "$repo" commit -qm "scenario: multi-file"
+    git -C "$repo" rev-parse HEAD
+}
+
 base_sha() {
     git -C "$1" rev-parse main
 }
@@ -526,9 +568,8 @@ run_gate() { # <repo> <event> <head_sha> <outdir> -> echoes docs_only value
 FX="${WORK_ROOT}/fx-docs"
 mkdir -p "${FX}"
 fixture_repo "${FX}"
-sha="$(branch_commit "${FX}/repo" pr "docs/guide.md" "# guide")"
-sha="$(branch_commit "${FX}/repo" pr2 "notes.md" "# notes")"
-require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out1")" "true" "docs-only PR (two .md files) -> heavy jobs SKIP"
+sha="$(branch_commits "${FX}/repo" pr "docs/guide.md" "# guide" "notes.md" "# notes")"
+require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out1")" "true" "docs-only PR (two .md files on one branch) -> heavy jobs SKIP"
 require_equal "$(sed -n 's/^reason=//p' "${WORK_ROOT}/out1/out" | tail -1)" \
     "every changed file is a fail-safe docs path: skipping heavy jobs" \
     "docs-only reason is typed"
@@ -537,14 +578,15 @@ require_equal "$(sed -n 's/^reason=//p' "${WORK_ROOT}/out1/out" | tail -1)" \
 FX="${WORK_ROOT}/fx-mixed"
 mkdir -p "${FX}"
 fixture_repo "${FX}"
-sha="$(branch_commit "${FX}/repo" pr "notes.md" "# notes")"
-sha="$(branch_commit "${FX}/repo" pr2 "helper.go" "package main")"
-require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out2")" "false" "mixed diff (md + go) -> full run"
+sha="$(branch_commits "${FX}/repo" pr "notes.md" "# notes" "helper.go" "package main")"
+require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out2")" "false" "mixed diff (md + go on one branch) -> full run"
 if grep -qF "full run: helper.go is not a docs path" "${WORK_ROOT}/out2/out"; then
     ok "mixed-diff reason names the first non-docs path"
 else
     fail "mixed-diff reason does not name the code path"
 fi
+sha="$(branch_commits "${FX}/repo" pr2 "a-note.md" "# note" "helper.go" "package main")"
+require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out2b")" "false" "docs path sorts before code path -> still full run"
 
 # push event: ALWAYS full, even for an all-docs change.
 FX="${WORK_ROOT}/fx-push"

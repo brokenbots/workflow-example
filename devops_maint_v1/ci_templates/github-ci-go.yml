@@ -190,6 +190,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: osv-scanner (pinned image; findings exit 1 = red job)
-        # v1.8.5 image ENTRYPOINT is ["/root/osv-scanner"] — args pass through
-        # it; a --entrypoint override reds instantly (binary is off PATH).
+        # v1.8.5 image ENTRYPOINT is ["/osv-scanner"] — args pass through it;
+        # a --entrypoint override reds instantly (binary is off PATH).
         run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo

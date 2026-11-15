@@ -151,7 +151,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: ruff (pinned; any finding reds the job)
-        run: python -m pip install ruff==1.0.0 && python -m ruff check .
+        run: python -m pip install ruff==0.17.5 && python -m ruff check .
 
   test:
     name: test
@@ -180,6 +180,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: osv-scanner (pinned image; findings exit 1 = red job)
-        # v1.8.5 image ENTRYPOINT is ["/root/osv-scanner"] — args pass through
-        # it; a --entrypoint override reds instantly (binary is off PATH).
+        # v1.8.5 image ENTRYPOINT is ["/osv-scanner"] — args pass through it;
+        # a --entrypoint override reds instantly (binary is off PATH).
         run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo
