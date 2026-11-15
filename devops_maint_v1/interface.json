@@ -1,0 +1,11 @@
+{
+  "apiVersion": "criteria.brokenbots.dev/v1",
+  "kind": "WorkflowInterface",
+  "workflow": "devops_maint_v1",
+  "description": "Per-repo inventory sweep (KB-406, ADR-0015 wave 1): one deterministic collect step enumerates open dependabot PRs + per-PR CI verdicts, govulncheck/osv advisory state, CodeQL open-alert counts and protection ruleset state for a bound org/repo set, and emits one normalized inventory.json artifact under the sweep root. All traffic authenticates with the workflow GitHub identity; sweep artifacts live on the data lane.",
+  "adapters": ["shell"],
+  "mounts": [{"name": "data", "mountPath": "/data", "kind": "pvc"}],
+  "secretEnv": ["WORKFLOW_GITHUB_TOKEN"],
+  "env": [],
+  "configSlots": []
+}

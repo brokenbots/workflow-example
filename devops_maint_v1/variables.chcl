@@ -1,0 +1,59 @@
+// devops_maint_v1 variables (KB-406, ADR-0015 wave 1: per-repo inventory collect).
+//
+// The sweep runs unattended as deterministic shell (no copilot adapters, no
+// model turns), so its scope is fail-loud: org must be bound (no default) and
+// repos ships EMPTY by design so an unconfigured sweep can never silently
+// collect unconfigured repositories. The guided sweep binding (KB-410) makes
+// both explicit per run.
+variable "org" {
+    description = "GitHub org whose repos the sweep enumerates; org/repo pairs feed every gh call (PRs, checks, advisories, code-scanning, rulesets)."
+    type        = string
+}
+
+// Repo scope of the sweep, in declared sweep order. Empty by design: collect
+// refuses to emit a zero-repo artifact (fail loud) instead of widening scope.
+variable "repos" {
+    description = "Repo names under org this sweep collects. Must be bound to a non-empty list; empty by design so a sweep can never silently widen scope."
+    type        = list(string)
+    default     = []
+}
+
+// The PVC data lane the sweep executes from (interface.json mounts it at
+// /data). The shell adapter's working directory must exist BEFORE the step
+// execs, so it points at the mounted lane while the sweep script itself
+// creates the deeper sweep_root/<sweep_id>/ workspace.
+variable "data_root" {
+    description = "Durable data lane the sweep executes from (mounted at the interface's data mount path). Sweep artifacts nest under sweep_root inside it."
+    type        = string
+    default     = "/data"
+}
+
+// Durable root for sweep workspaces + inventory artifacts. Kept across runs
+// so KB-407's delta-driven cadence can read prior inventories back.
+variable "sweep_root" {
+    description = "Durable root for sweep workspaces + inventory.json artifacts (prior sweeps stay readable for the delta-driven cadence)."
+    type        = string
+    default     = "/data/devops-maint"
+}
+
+// Advisory surfaces are on by default (the card's full column set); a caller
+// may disable one to trade wall clock for a faster partial sweep — the
+// artifact records the skipped surface honestly rather than reporting it
+// clean, so KB-407 can never classify UNKNOWN as "no advisories".
+variable "scan_govulncheck" {
+    description = "Run govulncheck per cloned repo when the tool is present (status lanes: ok | not_applicable | unavailable | error; a disabled surface records not_applicable, never a clean bill)."
+    type        = bool
+    default     = true
+}
+
+variable "scan_osv" {
+    description = "Run osv-scanner per cloned repo when the tool is present (status lanes: ok | not_applicable | unavailable | error; a disabled surface records not_applicable, never a clean bill)."
+    type        = bool
+    default     = true
+}
+
+variable "workflow_github_token" {
+    description = "Workflow GitHub identity the shell adapter injects as GH_TOKEN via the engine's secret providers (ADR-0015 D4)."
+    type        = string
+    secret      = true
+}

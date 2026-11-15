@@ -1,0 +1,128 @@
+// devops_maint_v1 — per-repo inventory adapter step (KB-406, ADR-0015 wave 1).
+//
+// Wave 1 of the devops_maint_v1 series (anchor KB-405): the collect step is a
+// DETERMINISTIC SHELL step (no copilot adapters, no model turns) that sweeps a
+// bound org/repo set and emits ONE normalized JSON inventory artifact:
+//
+//   - open dependabot PRs per repo (enumerated from gh pr list) with the
+//     non-dependabot open PRs kept as a counted lane (the card's column set),
+//   - per-PR CI verdicts (gh pr checks text mode: red = any failing check,
+//     pending = any pending/unknown check, green = all passing, none = no
+//     checks on the head branch),
+//   - repo advisory state (govulncheck + osv-scanner on a depth-1 clone;
+//     honest status lanes so an unscanned surface never reads as clean),
+//   - CodeQL open-alert counts (code-scanning alerts API; disabled lane when
+//     code scanning is not enabled on the repo),
+//   - protection ruleset state (rulesets API; applied = an active branch
+//     ruleset exists).
+//
+// KB-407's classify/route graph consumes the artifact path, so the step's
+// stdout carries ONLY the artifact path; evidence and diagnostics go to
+// stderr like every other deterministic surface in this repo.
+//
+// Endings:
+//   collected       — the sweep wrote a structurally valid artifact and at
+//                     least one repo collected; per-repo partial failures
+//                     stay recorded inside the artifact (KB-407 sees them).
+//   collect_failed  — honest failure: bad sweep config (empty org/repos, a
+//                     repo name outside the safe-name shape), every repo
+//                     collected failed, or the artifact failed its structural
+//                     self-check. The partial artifact still exists in that
+//                     case and its path is reported in the error line.
+
+workflow {
+    name             = "devops_maint_v1"
+    version          = "1"
+    criteria_version = ">=0.5.9, >=0.5.52-rc1, <0.6.0"
+    initial_state    = "collect"
+    target_state     = "collected"
+
+    policy {
+        max_total_steps = 4
+    }
+}
+
+// ── Run state ────────────────────────────────────────────────────────────────
+
+// Absolute path of the normalized inventory artifact (one sweep). Set by the
+// collect step's success arm — the handle the classify/route graph (KB-407)
+// and the guided sweep (KB-410) read back.
+data "internal" "inventory_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the collect step fails (config errors, an
+// all-repos-failed sweep, or an artifact that failed its structural
+// self-check). Embedded with the artifact path when one exists, so a failed
+// sweep still tells a human where the partial evidence lives.
+data "internal" "collect_error" {
+    type  = string
+    value = ""
+}
+
+// ── The single collect step ──────────────────────────────────────────────────
+
+step "collect" {
+    target  = adapter.shell.collect
+    // Step timeouts must be compile-time-known literals in the step grammar
+    // (no var interpolation), so the collect wall-clock budget is pinned at
+    // 3600s: a 16-repo sweep's enumeration + per-PR checks + one depth-1
+    // clone per repo + the advisory scans fit comfortably.
+    timeout = "3600s"
+    input {
+        command = templatefile("./scripts/collect_inventory.sh.tftpl", {
+            gh_retry         = file("./scripts/gh_retry.sh.tftpl")
+            org              = var.org
+            repos_json       = jsonencode(var.repos)
+            sweep_root       = var.sweep_root
+            // shellquote takes strings only: bools flatten to "true"/"false"
+            // at the template boundary; the sweep script re-verifies the shape.
+            scan_govulncheck = var.scan_govulncheck ? "true" : "false"
+            scan_osv         = var.scan_osv ? "true" : "false"
+        })
+    }
+    outcome "success" {
+        next = state.collected
+        write {
+            target = data.internal.inventory_file.value
+            // stdout carries ONLY the machine artifact path (exact trimmatch).
+            value = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.collect_failed
+        write {
+            target = data.internal.collect_error.value
+            // The final stderr line is the typed failure reason; earlier
+            // stderr already carries the gh retry attempt evidence.
+            value = trimspace(output.stderr)
+        }
+    }
+}
+
+// ── Endings ──────────────────────────────────────────────────────────────────
+
+state "collected" {
+    terminal = true
+    success  = true
+}
+
+state "collect_failed" {
+    terminal = true
+    success  = false
+}
+
+// ── Outputs ──────────────────────────────────────────────────────────────────
+
+output "inventory_file" {
+    description = "Path of the normalized inventory artifact for this sweep; empty when the collect step failed."
+    type        = string
+    value       = data.internal.inventory_file.value
+}
+
+output "collect_error" {
+    description = "Typed failure line of the collect step (with the partial-artifact path when one exists); empty on success."
+    type        = string
+    value       = data.internal.collect_error.value
+}

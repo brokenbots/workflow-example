@@ -1,0 +1,22 @@
+// devops_maint_v1 (KB-406): one deterministic collect step — no copilot
+// adapters, no model turns. The sweep shell writes every artifact under the
+// sweep root inside the data lane the interface declares.
+
+// Exec lane: the mounted data path always exists (PVC mount), so the adapter
+// cwd is anchorable there while the sweep script itself mkdir -ps the deeper
+// sweep_root/<sweep_id>/ workspace.
+environment "shell" "collect" {
+    working_directory = var.data_root
+}
+
+adapter "shell" "collect" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.collect
+    secrets {
+        // GH_TOKEN (not the bare GITHUB-token lane): an operator-exported bare
+        // GITHUB_TOKEN would silently override the per-adapter secret. Same
+        // discipline as qa_triage_v1, review_triage_v1 and workstream_handler_v1.
+        GH_TOKEN = var.workflow_github_token
+    }
+}
