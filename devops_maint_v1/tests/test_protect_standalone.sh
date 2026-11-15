@@ -11,10 +11,17 @@
 #   - idempotent re-run: contract-matching ruleset -> NO write, verified
 #   - NEVER protection-without-signal: red/missing contexts + no canonical
 #     ruleset -> deferred row AND zero ruleset-mutating calls
-#   - maintain-on-red: existing canonical ruleset verified under a red
-#     signal with no write (maintenance is allowed, creation is not)
+#   - maintain-on-red: existing canonical ruleset is re-verified READ-ONLY
+#     under a red signal (no write; drift is reported, never healed)
 #   - drift heal on green -> PUT (not POST) with the canonical contract
-#   - drift heal on red -> PUT + honest heal-on-red note
+#   - drift on a red signal -> typed failure, NO POST and NO PUT in the log
+#   - skipped/skip/skipping/neutral check conclusions count as green
+#     signal (KB-408 docs-only heavy jobs; the Checks API's real skip
+#     conclusion is "skipped")
+#   - read-back with a non-empty conditions.ref_name.exclude -> healed on
+#     green (PUT), typed mismatch elsewhere
+#   - read-back with strict_required_status_checks_policy true -> typed
+#     mismatch, repo not verified
 #   - apply failure -> per-repo error row, sweep-style bookkeeping, rc 0
 #   - read-back mismatch -> typed step failure AFTER artifact preservation
 #   - admin bypass on read-back (bypass_actors) -> typed step failure: the
@@ -233,9 +240,10 @@ esac
 EOF
 chmod +x "${BIN_STUB_GH}/gh"
 
-canon_ruleset() { # canon_ruleset <contexts-csv> [id] -> canonical read-back shape
-    local ctx="$1" rid="${2:-901}"
-    printf '{"id": %s, "name": "devops-maintenance-protection", "target": "branch", "enforcement": "active",
+canon_ruleset() { # canon_ruleset <contexts-csv> [id] [exclude-csv] [strict] -> canonical read-back shape
+    local ctx="$1" rid="${2:-901}" excl="${3:-}" strict="${4:-false}"
+    local base
+    base="$(printf '{"id": %s, "name": "devops-maintenance-protection", "target": "branch", "enforcement": "active",
   "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "bypass_actors": [],
   "rules": [
     {"type": "pull_request", "parameters": {
@@ -245,7 +253,14 @@ canon_ruleset() { # canon_ruleset <contexts-csv> [id] -> canonical read-back sha
        "dismissal_restrictions": {"users": [], "teams": []}}},
     {"type": "required_status_checks", "parameters": {
        "strict_required_status_checks_policy": false,
-       "required_status_checks": [%s]}}]}' "${rid}" "${ctx}"
+       "required_status_checks": [%s]}}]}' "${rid}" "${ctx}")"
+    if [ -n "$excl" ]; then
+        base="$(printf '%s' "$base" | jq -c --arg e "$excl" '.conditions.ref_name.exclude = ($e | split(","))')"
+    fi
+    if [ "$strict" != "false" ]; then
+        base="$(printf '%s' "$base" | jq -c '.rules |= map(if .type == "required_status_checks" then .parameters.strict_required_status_checks_policy = true else . end)')"
+    fi
+    printf '%s' "$base" | jq -c .
 }
 
 make_fixtures() { # make_fixtures <dir>
@@ -260,6 +275,33 @@ green_checks() { # green_checks <dir> <contexts-csv> -> all-success check-runs f
     local c
     for c in $(printf '%s' "${ctx}" | tr ',' ' '); do
         rows="${rows}{\"name\": \"${c}\", \"conclusion\": \"success\"},"
+    done
+    printf '{"total_count": %s, "check_runs": [%s]}' \
+        "$(printf '%s' "$ctx" | tr ',' '\n' | wc -l | tr -d ' ')" "${rows%,}" >"${fx}/checks.json"
+}
+
+skipped_checks() { # skipped_checks <dir> <contexts-csv> -> all-skipped check-runs (KB-408 docs-only heavy jobs)
+    local fx="$1" ctx="$2"
+    local rows=""
+    local c
+    for c in $(printf '%s' "${ctx}" | tr ',' ' '); do
+        rows="${rows}{\"name\": \"${c}\", \"conclusion\": \"skipped\"},"
+    done
+    printf '{"total_count": %s, "check_runs": [%s]}' \
+        "$(printf '%s' "$ctx" | tr ',' '\n' | wc -l | tr -d ' ')" "${rows%,}" >"${fx}/checks.json"
+}
+
+mixed_checks() { # mixed_checks <dir> <contexts-csv> -> alternating success/skipped conclusions
+    local fx="$1" ctx="$2"
+    local rows=""
+    local c i=0
+    for c in $(printf '%s' "${ctx}" | tr ',' ' '); do
+        i=$((i + 1))
+        if [ $((i % 2)) -eq 1 ]; then
+            rows="${rows}{\"name\": \"${c}\", \"conclusion\": \"success\"},"
+        else
+            rows="${rows}{\"name\": \"${c}\", \"conclusion\": \"skipped\"},"
+        fi
     done
     printf '{"total_count": %s, "check_runs": [%s]}' \
         "$(printf '%s' "$ctx" | tr ',' '\n' | wc -l | tr -d ' ')" "${rows%,}" >"${fx}/checks.json"
@@ -501,7 +543,8 @@ check_not "S7 heal used PUT, never POST" grep -q "^POST " "${FX5}/call.log"
 check "S7 healed body carries the full contract" test "$(jq -r '.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' "${FX5}/go5/lastbody.json" | sort | tr '\n' ',' | sed 's/,$//')" = "changes,govulncheck,lint,osv,test"
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 8. Drift heal on red: mutation happens, with the honest heal-on-red note
+# 8. Drift on red is REPORTED, never healed: read-back verification only —
+#    no POST, no PUT, typed step failure, artifact preserved
 # ═════════════════════════════════════════════════════════════════════════════
 FX6="${WORK_ROOT}/fx6"
 make_fixtures "${FX6}"
@@ -511,18 +554,21 @@ printf '{"sha": "abc123"}' >"${FX6}/go6/head.json"
 red_checks "${FX6}/go6" "${GO_CTX}" "lint"
 printf '[{"id": 880, "name": "devops-maintenance-protection", "target": "branch", "enforcement": "active"}]' >"${FX6}/go6/rulesets.json"
 canon_ruleset '{"context": "changes", "integration_id": null}, {"context": "lint", "integration_id": null}' 880 >"${FX6}/go6/readback.json"
-canon_ruleset "${CTX_CONTRACT}" 880 >"${FX6}/go6/readback.after.json"
-canon_ruleset "${CTX_CONTRACT}" 880 >"${FX6}/go6/put.json"
 
 P6="${WORK_ROOT}/protect6.sh"
-render_protect testorg '["go6"]' '[{"repo":"go6","pack":"go"}]' "$(mk_anchor "p6.json")" "${P6}"
+mkdir -p "${WORK_ROOT}/runs6"
+printf '{}' >"${WORK_ROOT}/runs6/p6.json"
+render_protect testorg '["go6"]' '[{"repo":"go6","pack":"go"}]' "${WORK_ROOT}/runs6/p6.json" "${P6}"
 P6_RC=0
 run_protect "${P6}" "${FX6}" "${WORK_ROOT}/p6.out" "${WORK_ROOT}/p6.err" || P6_RC=$?
-expect_count "S8 heal-on-red exits 0" 0 "${P6_RC}"
-ART6="$(tr -d '[:space:]' <"${WORK_ROOT}/p6.out")"
-check "S8 heal-on-red verified with updated action" jq -e '.repos[0].status == "verified" and .repos[0].protection.action == "updated"' "${ART6}" >/dev/null
-check "S8 honest heal-on-red note is recorded" jq -r '.repos[0].note' "${ART6}" | grep -q "drift healed on an existing ruleset while signal red"
-check_not "S8 heal-on-red never CREATES protection" grep -q "^POST " "${FX6}/call.log"
+expect_count "S8 drift-on-red exits NON-ZERO (typed)" 1 "${P6_RC}"
+check "S8 typed failure names the gate" grep -qi 'protect_failed' "${WORK_ROOT}/p6.err"
+check "S8 typed failure names the artifact path" grep -qF "${WORK_ROOT}/runs6/protection.json" "${WORK_ROOT}/p6.err"
+check "S8 artifact was still written and preserved" test -f "${WORK_ROOT}/runs6/protection.json"
+check "S8 artifact records the verify mismatch" jq -e '.summary.verify_mismatch_total == 1 and .repos[0].status == "error"' "${WORK_ROOT}/runs6/protection.json" >/dev/null
+check "S8 mismatch is typed and names the drift" jq -e '.repos[0].errors[0].surface == "ruleset_readback_verify" and (.repos[0].errors[0].detail | test("lint"))' "${WORK_ROOT}/runs6/protection.json" >/dev/null
+check "S8 repo row is NOT verified" jq -e '.repos[0].protection == null' "${WORK_ROOT}/runs6/protection.json" >/dev/null
+check_not "S8 drift-on-red: no POST and no PUT in the call log" grep -q "^POST \|^PUT " "${FX6}/call.log"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 9. Apply failure: per-repo error row, bookkeeping, run still succeeds
@@ -731,6 +777,107 @@ check "S17 artifact was still written and preserved" test -f "${WORK_ROOT}/runs1
 check "S17 artifact records the verify mismatch" jq -e '.summary.verify_mismatch_total == 1 and .repos[0].status != "verified"' "${WORK_ROOT}/runs13/protection.json" >/dev/null
 check "S17 row is error with no protection object" jq -e '.repos[0].status == "error" and .repos[0].protection == null' "${WORK_ROOT}/runs13/protection.json" >/dev/null
 check "S17 mismatch is typed and names the actor" jq -e '.repos[0].errors[0].surface == "ruleset_readback_verify" and (.repos[0].errors[0].detail | test("OrganizationAdmin"))' "${WORK_ROOT}/runs13/protection.json" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 18. Skipped-only HEAD run: the Checks API's real skip conclusion counts as
+#     green (KB-408 docs-only heavy jobs) -> signal green -> ruleset created
+# ═════════════════════════════════════════════════════════════════════════════
+FX15="${WORK_ROOT}/fx15"
+make_fixtures "${FX15}"
+mkdir -p "${FX15}/go15"
+printf '{"default_branch": "main"}' >"${FX15}/go15/repo.json"
+printf '{"sha": "abc123"}' >"${FX15}/go15/head.json"
+skipped_checks "${FX15}/go15" "${GO_CTX}"
+printf '[]' >"${FX15}/go15/rulesets.json"
+canon_ruleset "${CTX_CONTRACT}" >"${FX15}/go15/post.json"
+canon_ruleset "${CTX_CONTRACT}" >"${FX15}/go15/readback.json"
+
+P15="${WORK_ROOT}/protect15.sh"
+render_protect testorg '["go15"]' '[{"repo":"go15","pack":"go"}]' "$(mk_anchor "p15.json")" "${P15}"
+P15_RC=0
+run_protect "${P15}" "${FX15}" "${WORK_ROOT}/p15.out" "${WORK_ROOT}/p15.err" || P15_RC=$?
+expect_count "S18 skipped-only signal run exits 0" 0 "${P15_RC}"
+ART15="$(tr -d '[:space:]' <"${WORK_ROOT}/p15.out")"
+check "S18 skipped-only HEAD run is signal-green" jq -e '.repos[0].signal.green == true and ([.repos[0].signal.contexts[].state] | all(. == "skipped"))' "${ART15}" >/dev/null
+check "S18 skipped-only run created the ruleset" jq -e '.repos[0].status == "verified" and .repos[0].protection.action == "created"' "${ART15}" >/dev/null
+check "S18 created body carries every pack context" test "$(jq -r '.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' "${FX15}/go15/lastbody.json" | sort | tr '\n' ',' | sed 's/,$//')" = "changes,govulncheck,lint,osv,test"
+check "S18 skipped-only run POSTs exactly once" test "$(grep -c "^POST repos/testorg/go15/rulesets$" "${FX15}/call.log")" -eq 1
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 19. Mixed success+skipped HEAD run: also signal-green, ruleset created
+# ═════════════════════════════════════════════════════════════════════════════
+FX16="${WORK_ROOT}/fx16"
+make_fixtures "${FX16}"
+mkdir -p "${FX16}/go16"
+printf '{"default_branch": "main"}' >"${FX16}/go16/repo.json"
+printf '{"sha": "abc123"}' >"${FX16}/go16/head.json"
+mixed_checks "${FX16}/go16" "${GO_CTX}"
+printf '[]' >"${FX16}/go16/rulesets.json"
+canon_ruleset "${CTX_CONTRACT}" >"${FX16}/go16/post.json"
+canon_ruleset "${CTX_CONTRACT}" >"${FX16}/go16/readback.json"
+
+P16="${WORK_ROOT}/protect16.sh"
+render_protect testorg '["go16"]' '[{"repo":"go16","pack":"go"}]' "$(mk_anchor "p16.json")" "${P16}"
+P16_RC=0
+run_protect "${P16}" "${FX16}" "${WORK_ROOT}/p16.out" "${WORK_ROOT}/p16.err" || P16_RC=$?
+expect_count "S19 mixed success+skipped run exits 0" 0 "${P16_RC}"
+ART16="$(tr -d '[:space:]' <"${WORK_ROOT}/p16.out")"
+check "S19 mixed conclusions are signal-green" jq -e '.repos[0].signal.green == true and ([.repos[0].signal.contexts[].state] | all(IN("success", "skipped")))' "${ART16}" >/dev/null
+check "S19 mixed run created and verified the ruleset" jq -e '.repos[0].status == "verified" and .repos[0].protection.action == "created"' "${ART16}" >/dev/null
+check "S19 mixed run POSTs exactly once" test "$(grep -c "^POST repos/testorg/go16/rulesets$" "${FX16}/call.log")" -eq 1
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 20. Ref-exclude drift on GREEN: read-back with a non-empty exclude list ->
+#     healed by PUT (exclude gone), post-PUT read-back verifies
+# ═════════════════════════════════════════════════════════════════════════════
+FX17="${WORK_ROOT}/fx17"
+make_fixtures "${FX17}"
+mkdir -p "${FX17}/go17"
+printf '{"default_branch": "main"}' >"${FX17}/go17/repo.json"
+printf '{"sha": "abc123"}' >"${FX17}/go17/head.json"
+green_checks "${FX17}/go17" "${GO_CTX}"
+printf '[{"id": 880, "name": "devops-maintenance-protection", "target": "branch", "enforcement": "active"}]' >"${FX17}/go17/rulesets.json"
+canon_ruleset "${CTX_CONTRACT}" 880 "refs/heads/main" >"${FX17}/go17/readback.json"
+canon_ruleset "${CTX_CONTRACT}" 880 >"${FX17}/go17/readback.after.json"
+canon_ruleset "${CTX_CONTRACT}" 880 >"${FX17}/go17/put.json"
+
+P17="${WORK_ROOT}/protect17.sh"
+render_protect testorg '["go17"]' '[{"repo":"go17","pack":"go"}]' "$(mk_anchor "p17.json")" "${P17}"
+P17_RC=0
+run_protect "${P17}" "${FX17}" "${WORK_ROOT}/p17.out" "${WORK_ROOT}/p17.err" || P17_RC=$?
+expect_count "S20 ref-exclude heal on green exits 0" 0 "${P17_RC}"
+ART17="$(tr -d '[:space:]' <"${WORK_ROOT}/p17.out")"
+check "S20 exclude drift healed and verified" jq -e '.repos[0].status == "verified" and .repos[0].protection.action == "updated" and .repos[0].protection.ruleset_id == 880' "${ART17}" >/dev/null
+check "S20 healed body protects the default branch (empty exclude)" jq -e '.conditions.ref_name.exclude | length == 0' "${FX17}/go17/lastbody.json" >/dev/null
+check "S20 exactly one PUT on the drifted ruleset" test "$(grep -c "^PUT repos/testorg/go17/rulesets/880$" "${FX17}/call.log")" -eq 1
+check_not "S20 heal never creates a new ruleset" grep -q "^POST " "${FX17}/call.log"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 21. strict_required_status_checks_policy true on read-back: typed mismatch,
+#     repo NOT verified (typed step failure, artifact preserved)
+# ═════════════════════════════════════════════════════════════════════════════
+FX18="${WORK_ROOT}/fx18"
+make_fixtures "${FX18}"
+mkdir -p "${FX18}/go18"
+printf '{"default_branch": "main"}' >"${FX18}/go18/repo.json"
+printf '{"sha": "abc123"}' >"${FX18}/go18/head.json"
+green_checks "${FX18}/go18" "${GO_CTX}"
+printf '[]' >"${FX18}/go18/rulesets.json"
+canon_ruleset "${CTX_CONTRACT}" 901 "" true >"${FX18}/go18/post.json"
+canon_ruleset "${CTX_CONTRACT}" 901 "" true >"${FX18}/go18/readback.json"
+
+mkdir -p "${WORK_ROOT}/runs18"
+printf '{}' >"${WORK_ROOT}/runs18/p18.json"
+P18="${WORK_ROOT}/protect18.sh"
+render_protect testorg '["go18"]' '[{"repo":"go18","pack":"go"}]' "${WORK_ROOT}/runs18/p18.json" "${P18}"
+P18_RC=0
+run_protect "${P18}" "${FX18}" "${WORK_ROOT}/p18.out" "${WORK_ROOT}/p18.err" || P18_RC=$?
+expect_count "S21 strict-policy drift exits NON-ZERO" 1 "${P18_RC}"
+check "S21 typed failure names the gate" grep -qi 'protect_failed' "${WORK_ROOT}/p18.err"
+check "S21 artifact was still written and preserved" test -f "${WORK_ROOT}/runs18/protection.json"
+check "S21 artifact records the strict-policy mismatch" jq -e '.summary.verify_mismatch_total == 1 and .repos[0].status == "error"' "${WORK_ROOT}/runs18/protection.json" >/dev/null
+check "S21 mismatch names the observed strict value" jq -e '.repos[0].errors[0].surface == "ruleset_readback_verify" and (.repos[0].errors[0].detail | test("strict_required_status_checks_policy: true"))' "${WORK_ROOT}/runs18/protection.json" >/dev/null
+check "S21 repo row is NOT verified" jq -e '.repos[0].protection == null' "${WORK_ROOT}/runs18/protection.json" >/dev/null
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2

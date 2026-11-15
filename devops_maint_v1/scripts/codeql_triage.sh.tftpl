@@ -66,7 +66,8 @@ cleanup() {
         "$RUN_DIR/.triage.selfcheck.$$.err" \
         "$RUN_DIR/.triage.selfcheck.$$.out" \
         "$RUN_DIR/.triage.compose.$$.err" \
-        "$RUN_DIR/.triage.compose.$$.tmp"
+        "$RUN_DIR/.triage.compose.$$.tmp" \
+        "$RUN_DIR/.triage.body.$$.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -320,13 +321,39 @@ for repo in $SOURCES_REPO; do
       continue
     fi
 
-    sup_comment="devops_maint_v1 codeql-triage: typed suppression - rule: $prow_rule; alert: #$prow_num; dismissed_reason: $prow_reason; rationale: $prow_rationale"
+    # GitHub caps code-scanning dismissed_comment at 280 characters. The typed
+    # prefix length varies with rule id / alert number / dismissed_reason, so
+    # the rationale room is computed from the COMPOSED prefix; only the
+    # rationale may be shortened, and the truncation is visible end-marked.
+    sup_comment_max=280
+    sup_trunc='...[truncated]'
+    sup_prefix="devops_maint_v1 codeql-triage: typed suppression - rule: $prow_rule; alert: #$prow_num; dismissed_reason: $prow_reason; rationale: "
+    sup_room=$((sup_comment_max - ${#sup_prefix}))
+    if [ "$sup_room" -lt "${#sup_trunc}" ]; then
+      # The typed prefix alone cannot fit the API cap: config-level failure,
+      # loud, before any mutation (the full rationale would never converge
+      # through a permanently-422ing dismissal).
+      fail "dismissed_comment typed prefix is ${#sup_prefix} characters (API cap $sup_comment_max); record the suppression with a shorter rule_id"
+    fi
+    if [ ${#prow_rationale} -le "$sup_room" ]; then
+      sup_rationale="$prow_rationale"
+    else
+      sup_rationale="${prow_rationale:0:$((sup_room - ${#sup_trunc}))}${sup_trunc}"
+    fi
+    sup_comment="${sup_prefix}${sup_rationale}"
+    [ ${#sup_comment} -le "$sup_comment_max" ] || fail "composed dismissed_comment exceeds $sup_comment_max characters (structural)"
+
     DISMISS_BODY="$(jq -cn --arg reason "$prow_reason" --arg comment "$sup_comment" \
       '{state: "dismissed", dismissed_reason: $reason, dismissed_comment: $comment}')"
+    # The PATCH body must live in a REAL file: gh_retry re-executes the same
+    # argv on a transient retry, and a process-substitution fd is already
+    # consumed by attempt 1 (a retried dismissal would send an empty body).
+    triage_body_file="$RUN_DIR/.triage.body.$$.json"
+    printf '%s' "$DISMISS_BODY" >"$triage_body_file"
     if gh api --method PATCH "repos/$ORG/$repo/code-scanning/alerts/$prow_num" \
         -H "Accept: application/vnd.github+json" \
-        --input <(printf '%s' "$DISMISS_BODY") >/dev/null 2>"$RAW_DIR/dismiss.$repo.$prow_num.tmp"; then
-      rm -f "$RAW_DIR/dismiss.$repo.$prow_num.tmp"
+        --input "$triage_body_file" >/dev/null 2>"$RAW_DIR/dismiss.$repo.$prow_num.tmp"; then
+      rm -f "$triage_body_file" "$RAW_DIR/dismiss.$repo.$prow_num.tmp"
       if alert_readback "$repo" "$prow_num"; then
         if [ "$ALERT_STATE" = "dismissed" ]; then
           budget_used=$((budget_used + 1))
@@ -344,6 +371,7 @@ for repo in $SOURCES_REPO; do
         row_out "readback_failed" "" "alert read-back failed: $rb_note" "" >>"$RUN_DIR/.triage.rows.ndjson"
       fi
     else
+      rm -f "$triage_body_file"
       summary_failed=$((summary_failed + 1))
       dm_note="$(err_text "$RAW_DIR/dismiss.$repo.$prow_num.tmp" 2>/dev/null || printf '<no stderr>')"
       row_out "dismiss_failed" "open" "dismissal PATCH failed: $dm_note" "" >>"$RUN_DIR/.triage.rows.ndjson"

@@ -649,15 +649,60 @@ check_not "S17 no PATCH ever landed on repo B" grep -q '^PATCH repos/testorg/goB
 check "S17 held_at_zero stays false with goB still open" jq -e '.summary.held_at_zero == false and .repos[1].alerts_after == 1' "${TRIAGE14}" >/dev/null
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 18. Protocol + hygiene: stdout path only, stderr diagnostics, token canary
+# 18. Bounded dismissed_comment: a plan rationale at the 2000-char shape-gate
+#     cap must NOT blow GitHub's 280-char dismissed_comment cap -> the PATCH
+#     comment is composed <= 280 with the typed prefix intact and an explicit
+#     truncation marker, while the artifact row still records the FULL rationale
 # ═════════════════════════════════════════════════════════════════════════════
-check "S18 triage diagnostics go to stderr as triage: lines" grep -q '^triage: triage plan: ' "${WORK_ROOT}/t3.err"
-check_not "S18 stderr carries no artifact JSON" grep -q '"dispositions"' "${WORK_ROOT}/t3.err"
-check_not "S18 token canary absent from the S3 artifact" grep -q "supersecret-token-canary" "${TRIAGE1}"
-check_not "S18 token canary absent from S3 stderr" grep -q "supersecret-token-canary" "${WORK_ROOT}/t3.err"
-check_not "S18 token canary absent from the S5 artifact" grep -q "supersecret-token-canary" "${TRIAGE2}"
+FX15="${WORK_ROOT}/fx15"
+mkdir -p "${FX15}/goL"
+: >"${FX15}/call.log"
+alert 1 go/unsafe-quoting critical >"${FX15}/goL/alerts.json"
+printf '{"state": "open"}' >"${FX15}/goL/rb.json"
+printf '{"state": "dismissed"}' >"${FX15}/goL/rb.after.json"
+LONG_RAT="head-marker$(printf 'x%.0s' $(seq 1 1974))tail-marker-END"
+expect_equal "S18 plan rationale is exactly at the 2000-char cap" 2000 "${#LONG_RAT}"
+PLAN_LONG='[{"repo":"goL","alert_number":1,"rule_id":"go/unsafe-quoting","disposition":"suppress","rationale":"LONG_RAT_PLACEHOLDER","dismissed_reason":"false_positive"}]'
+PLAN_LONG="${PLAN_LONG/LONG_RAT_PLACEHOLDER/${LONG_RAT}}"
+A15="$(mk_anchor "t18")"
+render_triage testorg '["goL"]' "${PLAN_LONG}" 1 "${A15}" "${WORK_ROOT}/triage15.sh"
+T18_RC=0
+run_sub "${WORK_ROOT}/triage15.sh" "${FX15}" "${WORK_ROOT}/t18.out" "${WORK_ROOT}/t18.err" || T18_RC=$?
+expect_equal "S18 capped-rationale run exits 0" 0 "${T18_RC}"
+TRIAGE15="$(tr -d '[:space:]' <"${WORK_ROOT}/t18.out")"
+check "S18 row converges as dismissed (never dismiss_failed)" jq -e '.repos[0].dispositions[0].result == "dismissed" and .summary.suppressions_failed == 0' "${TRIAGE15}" >/dev/null
+check "S18 PATCH comment respects the 280-char API cap" jq -e '(.dismissed_comment | length) <= 280' "${FX15}/goL/lastbody.json" >/dev/null
+check "S18 typed prefix survives the bound" jq -e '(.dismissed_comment | test("devops_maint_v1 codeql-triage: typed suppression - rule: go/unsafe-quoting; alert: #1; dismissed_reason: false_positive; rationale: "))' "${FX15}/goL/lastbody.json" >/dev/null
+check "S18 truncation is explicit, not silent" jq -e '(.dismissed_comment | endswith("...[truncated]"))' "${FX15}/goL/lastbody.json" >/dev/null
+check "S18 rationale head made it into the comment" jq -e '(.dismissed_comment | test("head-marker"))' "${FX15}/goL/lastbody.json" >/dev/null
+check "S18 artifact row still carries the FULL 2000-char rationale" jq -e '.repos[0].dispositions[0].rationale == $r and ($r | length) == 2000' --arg r "${LONG_RAT}" "${TRIAGE15}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 19. The dismissal body is delivered from a REAL file: a retried PATCH whose
+#     stdin fd was already consumed by attempt 1 (process substitution) would
+#     send an EMPTY body — the rendered script must never do that
+# ═════════════════════════════════════════════════════════════════════════════
+FX16="${WORK_ROOT}/fx16"
+mkdir -p "${FX16}/goN"
+: >"${FX16}/call.log"
+alert 1 go/unsafe-quoting critical >"${FX16}/goN/alerts.json"
+printf '{"state": "open"}' >"${FX16}/goN/rb.json"
+printf '{"state": "dismissed"}' >"${FX16}/goN/rb.after.json"
+A16="$(mk_anchor "t19")"
+render_triage testorg '["goN"]' '[{"repo":"goN","alert_number":1,"rule_id":"go/unsafe-quoting","disposition":"suppress","rationale":"real-file body","dismissed_reason":"false_positive"}]' 1 "${A16}" "${WORK_ROOT}/triage16.sh"
+check_not "S19 rendered script sends the PATCH body via process substitution" grep -qF -e '--input <(' "${WORK_ROOT}/triage16.sh"
+check "S19 rendered script feeds --input a real file path" grep -qF -e '--input "$triage_body_file"' "${WORK_ROOT}/triage16.sh"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 20. Protocol + hygiene: stdout path only, stderr diagnostics, token canary
+# ═════════════════════════════════════════════════════════════════════════════
+check "S20 triage diagnostics go to stderr as triage: lines" grep -q '^triage: triage plan: ' "${WORK_ROOT}/t3.err"
+check_not "S20 stderr carries no artifact JSON" grep -q '"dispositions"' "${WORK_ROOT}/t3.err"
+check_not "S20 token canary absent from the S3 artifact" grep -q "supersecret-token-canary" "${TRIAGE1}"
+check_not "S20 token canary absent from S3 stderr" grep -q "supersecret-token-canary" "${WORK_ROOT}/t3.err"
+check_not "S20 token canary absent from the S5 artifact" grep -q "supersecret-token-canary" "${TRIAGE2}"
 TR3DIR="$(dirname "$(printf '%s\n' "${TRIAGE1}")")"
-check "S18 no .triage scratch files left in the run dir" test "$(ls -A "${TR3DIR}" 2>/dev/null | grep -c '^\.triage')" = "0"
+check "S20 no .triage scratch files left in the run dir" test "$(ls -A "${TR3DIR}" 2>/dev/null | grep -c '^\.triage')" = "0"
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2

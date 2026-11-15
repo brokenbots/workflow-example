@@ -4,8 +4,11 @@
 # Applies branch-protection rulesets AFTER per-repo CI is green — NEVER
 # protection-without-signal. The canonical ruleset (name
 # "devops-maintenance-protection") is created on a repo ONLY when the pack's
-# required status-check contexts are observed green (success, or skipping per
-# the KB-408 docs-only semantics) on the default-branch HEAD:
+# required status-check contexts are observed green on the default-branch
+# HEAD. Green means every required context carries a check run whose
+# conclusion is accepted signals: success, skipped (the Checks API's real
+# skip conclusion for the KB-408 docs-only heavy jobs), skipping, skip, or
+# neutral — the same family collect_inventory normalizes.
 #
 #   signal enumeration (default branch -> HEAD sha -> check runs) FAILED
 #     -> error row, NO ruleset call (an evidence gap never protects)
@@ -14,20 +17,24 @@
 #   signal green
 #     -> upsert (create or heal an existing drifted ruleset to the contract)
 #        + API read-back verification -> verified row
-#   signal red + canonical ruleset ALREADY present
-#     -> no NEW protection is applied; the existing ruleset is re-verified
-#        against the contract by read-back (maintained, not created; a drift
-#        is healed with an upsert). Verified rows record the signal truth.
+#   signal red/missing + canonical ruleset ALREADY present
+#     -> READ-BACK VERIFICATION ONLY: the existing ruleset is re-read and
+#        verified against the contract; NO POST and NO PUT ever run here
+#        (drift on a red signal is REPORTED as a typed failure, not healed).
+#        A contract-matching read-back records the repo verified with
+#        action "none" and a read-only re-verification note.
 #
-# READ-BACK IS THE COMPLIANCE GATE (ADR-0015 D4): every application is
-# verified by a GET rulesets/{id} read-back asserting the exact contract —
+# READ-BACK IS THE COMPLIANCE GATE (ADR-0015 D4): every stored ruleset state
+# is verified by a GET rulesets/{id} read-back asserting the exact contract —
 # enforcement "active", branch target, EMPTY bypass_actors (enforced to
-# admins; GET rulesets/{id} reports bypassers as bypass_actors),
-# default-branch ref condition, the pull_request rule, and the EXACT
-# required status-check context set for the pack. A read-back that
-# does not match the contract is a typed step FAILURE (protect_failed) with
-# the evidence artifact preserved and its path named in the failure line —
-# a run must never mark a repo compliant on unverifiable state.
+# admins; GET rulesets/{id} reports bypassers as bypass_actors), ref
+# condition include ["~DEFAULT_BRANCH"] with an EMPTY exclude list, the
+# pull_request rule (required_approving_review_count == 1), and the
+# required_status_checks rule exactly once with the EXACT context set for
+# the pack and strict_required_status_checks_policy == false. A read-back
+# that does not match the contract is a typed step FAILURE (protect_failed)
+# with the evidence artifact preserved and its path named in the failure
+# line — a run must never mark a repo compliant on unverifiable state.
 #
 # The ruleset lives in this workflow's own namespace: matching by exact name
 # means pre-existing rulesets owned by others are read, never modified. The
@@ -200,17 +207,23 @@ signal_enumerate() {
 
 # Evaluate the pack's required contexts against SIGNAL_ROWS
 # -> CONTEXT_STATES_JSON: [{context, satisfied, state}]
+# Accepted check-run conclusions (one set for BOTH the satisfied predicate and
+# the state classification): success, and the docs-only/neutral family the
+# KB-408 templates actually record — skipped (the Checks API's real skip
+# conclusion), skipping, skip, and neutral, aligned with collect_inventory's
+# normalization. `skipping` alone was never a Checks API conclusion.
 evaluate_contexts() {
   local pack="$1"
   printf '%s' "$SIGNAL_ROWS" | jq -c --argjson req "$(pack_contexts_json "$pack")" '
     . as $rows
     | [$req[] | . as $ctx |
         ([$rows[] | select(.name == $ctx) | .conclusion]) as $cons
+        | (["success", "skipped", "skipping", "skip", "neutral"]) as $ok
         | {context: $ctx,
            satisfied: (($cons | length) > 0 and
-                       all($cons[]; . == "success" or . == "skipping")),
+                       all($cons[]; IN($ok[]))),
            state: (if ($cons | length) == 0 then "absent"
-                   elif any($cons[]; . != "success" and . != "skipping") then "failed_or_pending"
+                   elif any($cons[]; (IN($ok[]) | not)) then "failed_or_pending"
                    else ($cons | unique | join(",")) end)}]
   '
 }
@@ -297,6 +310,10 @@ verify_mismatches() {
          else empty end),
       (if (((.conditions.ref_name.include // []) | index("~DEFAULT_BRANCH")) == null)
          then "ref condition missing ~DEFAULT_BRANCH" else empty end),
+      (if ((.conditions.ref_name.exclude // []) | length) != 0
+         then "ref condition excludes " +
+              ([.conditions.ref_name.exclude[] | tostring] | join(",")) +
+              " (would not protect the default branch)" else empty end),
       (if ([.rules[] | select(.type == "pull_request")] | length) != 1
          then "pull_request rule not exactly once" else empty end),
       ([.rules[] | select(.type == "pull_request")]
@@ -308,6 +325,11 @@ verify_mismatches() {
            elif ([.[0].parameters.required_status_checks[]?.context] | sort) != ($req | sort)
              then "required status-check contexts mismatch: " +
                   ([.[0].parameters.required_status_checks[]?.context] | sort | join(","))
+           elif (.[0].parameters.strict_required_status_checks_policy != false)
+             then "strict_required_status_checks_policy: " +
+                  (.[0].parameters.strict_required_status_checks_policy
+                   | if . == null then "missing" else tostring end) +
+                  " (must be false)"
            else empty end)
     ]
   '
@@ -389,9 +411,12 @@ for repo in $SOURCES_REPO; do
       }
 
       apply_ok=1
-      if [ "$signal_green" = "true" ] || [ "$rid" != "" ]; then
-        # green -> apply; existing ruleset (even on red signal) -> maintain.
-        # Choose the mutation by comparing the current state to the contract.
+      action="none"
+      if [ "$signal_green" = "true" ]; then
+        # GREEN signal -> apply: create, or heal an existing drifted ruleset
+        # with a full-replace PUT. On green, evaluate_contexts has observed
+        # every pack context satisfied, so the written context set is
+        # signal-backed — this is the ONLY path that mutates rulesets.
         if [ "$rid" != "" ]; then
           if ruleset_readback "$repo" "$rid"; then
             decide_action
@@ -433,11 +458,22 @@ for repo in $SOURCES_REPO; do
           fi
         fi
       else
-        # RED signal + NO canonical ruleset: NEVER protection-without-signal.
-        repos_deferred_total=$((repos_deferred_total + 1))
-        repos_status="deferred"
-        note='"signal red/missing contexts and no existing canonical ruleset; application deferred until CI is green"'
-        prot_json="null"
+        # NEVER protection-without-signal. On a non-green signal the ONLY
+        # permitted interaction is read-back verification of an EXISTING
+        # canonical ruleset (read-only); drift is REPORTED, never healed:
+        # no POST and no PUT here, ever. With no ruleset present the repo
+        # is deferred: no ruleset API call at all.
+        if [ "$rid" != "" ]; then
+          # Existing ruleset on red/missing signal: apply_ok stays 1 and
+          # action stays "none" so the read-back verification block below
+          # re-reads and verifies it. Any mismatch is a typed step failure.
+          note='"existing ruleset re-verified read-only (signal not green); no protection applied or modified"'
+        else
+          repos_deferred_total=$((repos_deferred_total + 1))
+          repos_status="deferred"
+          note='"signal red/missing contexts and no existing canonical ruleset; application deferred until CI is green"'
+          prot_json="null"
+        fi
       fi
 
       # Read-back verification (the compliance gate; bounded retries against
@@ -473,11 +509,8 @@ for repo in $SOURCES_REPO; do
           esac
           repos_verified_total=$((repos_verified_total + 1))
           repos_status="verified"
-          if [ "$action" != "none" ] && [ "$signal_green" != "true" ]; then
-            # Maintaining an existing ruleset is allowed on a red signal;
-            # creating is NOT — record an honest note when healing on red.
-            note='"drift healed on an existing ruleset while signal red; no NEW protection applied"'
-          fi
+          # On a non-green signal action is always "none" (read-only
+          # re-verification); the honest read-only note was set in that arm.
           prot_json="$(jq -cn \
             --arg action "$action" \
             --arg rid "$rid" \
