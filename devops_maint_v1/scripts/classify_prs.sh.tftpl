@@ -12,9 +12,12 @@
 # Priority order of the gate ladder (single if/elif chain, first match wins;
 # a fired gate records at most one reason in the row's reasons — empty
 # reasons array = no gate fired):
-#   1. Title does not parse as "Bump <module> [ in <path>] from <from> to
-#      <to>[ in <path>]" — covers grouped titles ("Bump the go_modules
-#      group across ..."), release waves, manual retitles   -> needs_judgment
+#   1. Title (after stripping the conventional dependabot commit prefix
+#      "build/chore/fix(deps[-dev]):" and matching "Bump"/"bump"
+#      case-insensitively, KB-413) does not parse as "<module> [ in <path>]
+#      from <from> to <to>[ in <path>]" — covers grouped titles ("Bump the
+#      go_modules group across ..."), release waves, retitles
+#                                                        -> needs_judgment
 #   2. Version tokens uncomparable OR of mixed kinds (an integer-action
 #      token vs a dotted token): digests, dates, "from 4 to 4.1.0" -> judgment
 #   3. Major gate: to-major greater than from-major (actions-style integer
@@ -103,10 +106,14 @@ jq '
       elif (($c | split(".")[0]) | isint_s) then {kind: "dotted", major: ($c | split(".")[0] | tonumber)}
       else {kind: "opaque"} end;
   # Title grammar of a bump PR: <module> optionally qualified with " in <path>"
-  # before or after the from/to pair. Unparseable titles (grouped bumps,
+  # before or after the from/to pair. The conventional dependabot commit
+  # prefix ("build(deps):", "chore(deps):", "fix(deps):", also "-dev" scoped)
+  # is stripped first and "bump" matches either case, so real-world bump
+  # titles classify mechanically (KB-413). Unparseable titles (grouped bumps,
   # release waves, retitles) yield null; \\S+ keeps from/to free of spaces.
   def parse_title:
-    capture("^Bump (?<module>.+?)(?: in .+?)? from (?<from>\\S+) to (?<to>\\S+)(?: in .+?)?$") // null;
+    sub("^(?:[Bb]uild|[Cc]hore|[Ff]ix)\\(deps(?:-dev)?\\):\\s*"; "")
+    | capture("^(?:[Bb]ump) (?<module>.+?)(?: in .+?)? from (?<from>\\S+) to (?<to>\\S+)(?: in .+?)?$") // null;
   # Advisory path-match: the finding targets the same package path, any
   # version. Exact module equality, or the module as a "/" path-suffix of
   # the package field ("npm/left-pad" matches module "left-pad").
