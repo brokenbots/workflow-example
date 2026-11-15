@@ -462,7 +462,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
             # missing/null/empty osv id; those rows would trip the artifact
             # structural self-check and hard-fail the whole sweep. Degrade
             # just this repo to the error lane instead.
-            gov_malformed="$(printf '%s' "$gov_body" | jq '[.[] | select((.id | type) != "string" or (.id | length) == 0)] | length' 2>/dev/null)"
+            gov_malformed="$(printf '%s' "$gov_body" | jq '[.[] | select((.id | type) != "string" or (.id | length) == 0)] | length' 2>/dev/null || true)"
             case "$gov_malformed" in ''|*[!0-9]*) gov_malformed=0 ;; esac
             if [ "$gov_malformed" -gt 0 ]; then
               gov_status="error"

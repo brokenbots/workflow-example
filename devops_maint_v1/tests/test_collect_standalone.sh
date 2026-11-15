@@ -89,10 +89,7 @@ assert_no_single_quote() {
     case "${value}" in *"'"*) echo "BUG: test value contains a single quote: ${value}" >&2; exit 99 ;; esac
 }
 
-RETRY_KNOBS=()   # set per-scenario when a fixture injects transient failures
-
-render_sweep() {
-    local org="$1" repos_json="$2" sweep_root="$3" scan_gov="$4" scan_osv="$5" out="$6"
+render_sweep() {    local org="$1" repos_json="$2" sweep_root="$3" scan_gov="$4" scan_osv="$5" out="$6"
     assert_no_single_quote "${org}"
     assert_no_single_quote "${repos_json}"
     assert_no_single_quote "${sweep_root}"
