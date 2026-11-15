@@ -107,7 +107,8 @@ printf '%s' "$PLAN_JSON" | jq -e '
       (.disposition | IN("fix", "suppress")) and
       ((.rationale? | type) == "string") and (.rationale | length > 0) and (.rationale | length <= 2000) and
       ((.dismissed_reason? // "") | IN("", "false_positive", "wont_fix", "used_in_tests", "used_in_docs")) and
-      ((.disposition == "suppress") or ((.dismissed_reason? // "") == ""))))
+      ((.disposition == "suppress") or ((.dismissed_reason? // "") == "")) and
+      ((.disposition == "fix") or ((.dismissed_reason? // "") != ""))))
 ' >/dev/null 2>&1 || fail "codeql triage plan failed its shape check (see variables.chcl schema)"
 
 # Duplicate (repo, alert_number) rows would make the recorded decision
@@ -119,6 +120,7 @@ printf '%s' "$PLAN_JSON" | jq -e '
 
 # The plan may never widen the sweep scope.
 while IFS= read -r pr; do
+  [ -n "$pr" ] || continue  # empty plan renders as a single blank heredoc line
   printf '%s' "$REPOS_JSON" | jq -e --arg pr "$pr" '[.[]] | index($pr) != null' >/dev/null 2>&1 ||
     fail "plan row targets repo outside the sweep scope: $pr"
 done <<EOF2
@@ -183,29 +185,6 @@ alert_readback() {
   [ -n "$ALERT_STATE" ] || return 1
   return 0
 }
-
-# ---------------------------------------------------------------------------
-# Triage execution
-# ---------------------------------------------------------------------------
-started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-
-PLAN_COUNT="$(printf '%s' "$PLAN_JSON" | jq 'length')"
-log "triage plan: $PLAN_COUNT row(s), budget $BUDGET suppression(s) per run"
-
-summary_executed=0
-summary_failed=0
-summary_fix_pending=0
-summary_already_resolved=0
-summary_out_of_budget=0
-summary_rule_mismatch=0
-summary_unplanned=0
-summary_repo_disabled_rows=0
-summary_repo_error_rows=0
-
-repos_failed_total=0
-open_after_total=0
-open_before_total=0
-
 
 # ---------------------------------------------------------------------------
 # Triage execution
@@ -520,7 +499,7 @@ jq -e --argjson budget "$BUDGET" --argjson plan "$PLAN_JSON" '
           ((.repo | type) == "string") and
           (.result | IN("dismissed", "readback_mismatch", "readback_failed", "dismiss_failed",
                         "fix_pending", "already_resolved", "out_of_budget", "rule_mismatch",
-                        "unplanned", "repo_codeql_disabled", "repo_enumeration_failed"))))] | all)
+                        "unplanned", "repo_codeql_disabled", "repo_enumeration_failed")))] | all)
 ' "$TRIAGE_PATH" >"$RUN_DIR/.triage.selfcheck.$$.out" 2>"$RUN_DIR/.triage.selfcheck.$$.err" ||
   fail "artifact failed its structural self-check: $(err_text "$RUN_DIR/.triage.selfcheck.$$.err")"
 rm -f "$RUN_DIR/.triage.selfcheck.$$.out"
