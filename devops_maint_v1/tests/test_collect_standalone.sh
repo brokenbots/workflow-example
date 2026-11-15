@@ -77,13 +77,19 @@ expect_count() {
 }
 
 # ── Renderer ─────────────────────────────────────────────────────────────────
-# Replays the templatefile splice: {{ .key | shellquote }} renders as a
-# single-quoted literal. Test values must not contain single quotes (asserted
-# below), and every marker must be consumed (no leftover {{ in the render).
+# Replays the templatefile splice faithfully: file() returns the file's
+# CONTENT, so the {{ .gh_retry }} marker is replaced with the wrapper's
+# full body (raw, unquoted), exactly like the template engine does for
+# devops_triage_v1's open_pr step. The {{ .key | shellquote }} markers
+# render as a single-quoted literal. Test values must not contain single
+# quotes (asserted below), and every marker must be consumed (no leftover
+# {{ in the render).
 assert_no_single_quote() {
     local value="$1"
     case "${value}" in *"'"*) echo "BUG: test value contains a single quote: ${value}" >&2; exit 99 ;; esac
 }
+
+RETRY_KNOBS=()   # set per-scenario when a fixture injects transient failures
 
 render_sweep() {
     local org="$1" repos_json="$2" sweep_root="$3" scan_gov="$4" scan_osv="$5" out="$6"
@@ -92,13 +98,21 @@ render_sweep() {
     assert_no_single_quote "${sweep_root}"
     assert_no_single_quote "${scan_gov}"
     assert_no_single_quote "${scan_osv}"
-    sed -e "s@{{ *\.gh_retry | shellquote }}@'${WRAPPER}'@g" \
-        -e "s@{{ *\.org | shellquote }}@'${org}'@g" \
-        -e "s@{{ *\.repos_json | shellquote }}@'${repos_json}'@g" \
-        -e "s@{{ *\.sweep_root | shellquote }}@'${sweep_root}'@g" \
-        -e "s@{{ *\.scan_govulncheck | shellquote }}@'${scan_gov}'@g" \
-        -e "s@{{ *\.scan_osv | shellquote }}@'${scan_osv}'@g" \
-        "${TEMPLATE}" >"${out}"
+    local wrap
+    wrap="$(cat "${WRAPPER}")"
+    local o_rep="'${org}'" r_rep="'${repos_json}'" s_rep="'${sweep_root}'" \
+        g_rep="'${scan_gov}'" os_rep="'${scan_osv}'"
+    local rendered
+    rendered="$(cat "${TEMPLATE}")"
+    # Engine-faithful: the gh_retry splice is CONTENT substitution (file()
+    # yields the file's body, not a path), exactly like templatefile.
+    rendered="${rendered//'{{ .gh_retry }}'/"${wrap}"}"
+    rendered="${rendered//'{{ .org | shellquote }}'/"${o_rep}"}"
+    rendered="${rendered//'{{ .repos_json | shellquote }}'/"${r_rep}"}"
+    rendered="${rendered//'{{ .sweep_root | shellquote }}'/"${s_rep}"}"
+    rendered="${rendered//'{{ .scan_govulncheck | shellquote }}'/"${g_rep}"}"
+    rendered="${rendered//'{{ .scan_osv | shellquote }}'/"${os_rep}"}"
+    printf '%s' "${rendered}" >"${out}"
     if grep -q '{{' "${out}"; then
         echo "BUG: rendered sweep still contains template markers" >&2
         exit 99
@@ -144,6 +158,18 @@ case "$mode" in
         sub="${args[0]:-}"
         case "$sub" in
             list)
+                if [ -f "${fx}/${repo}/prlist.tr" ]; then
+                    # Transient-transport injection: fail the first N attempts
+                    # with a retry-class stderr, then serve the real list.
+                    cntf="${fx}/${repo}/prlist.tr.count"
+                    tr_n="$(cat "${fx}/${repo}/prlist.tr")"
+                    tr_done="$(cat "${cntf}" 2>/dev/null || echo 0)"
+                    if [ "${tr_done:-0}" -lt "${tr_n}" ]; then
+                        echo "$((tr_done + 1))" >"${cntf}"
+                        echo 'gh: connection reset by peer' >&2
+                        exit 1
+                    fi
+                fi
                 if [ -f "${fx}/${repo}/prlist.fail" ]; then
                     rc="$(cat "${fx}/${repo}/prlist.fail")"
                     cat "${fx}/${repo}/prlist.failmsg" 2>/dev/null || echo "gh: fixture failure" >&2
@@ -266,6 +292,11 @@ if [ -n "$fx" ] && [ -d "$fx" ]; then
         echo "this output is not json at all"
         exit 0
     fi
+    if [ -f "$fx/$scan_repo.malformed" ]; then
+        # Parseable NDJSON whose finding rows lack the osv id.
+        cat "$fx/$scan_repo.malformed"
+        exit 0
+    fi
     if [ -f "$fx/$scan_repo.json" ]; then
         cat "$fx/$scan_repo.json"
         exit 0
@@ -343,6 +374,10 @@ run_sweep() {
         export COLLECT_GH_FIXTURES="${fixtures}"
         export COLLECT_GH_LOG="${fixtures}/call.log"
         export GH_RETRY_MAX_ATTEMPTS=1
+        # Zero-delay backoff: with retries disabled above this is inert, but
+        # scenarios that override GH_RETRY_MAX_ATTEMPTS (retry-wiring tests)
+        # must never actually sleep.
+        export GH_RETRY_BACKOFF_SECONDS="0 0 0"
         export GH_RETRY_SCRIPT_SLEEP_BUDGET=0
         export GH_TOKEN="supersecret-token-canary"
         export TEST_ROOT="${WORK_ROOT}"
@@ -375,7 +410,8 @@ pr() { # pr <number> <author-login>
 check "gh_retry vendored byte-identical to workstream_handler_v1" cmp -s "${WRAPPER}" "${CANONICAL_WRAPPER}"
 check "main.chcl renders the sweep through templatefile" grep -q 'templatefile("./scripts/collect_inventory.sh.tftpl"' "${ROOT_DIR}/main.chcl"
 check "main.chcl passes the gh_retry shim file" grep -q 'gh_retry         = file("./scripts/gh_retry.sh.tftpl")' "${ROOT_DIR}/main.chcl"
-check "sweep template splices every named arg" test "$(grep -o '{{ *\.gh_retry | shellquote }}' "${TEMPLATE}" | wc -l)" = "1"
+check "sweep template splices the wrapper as raw content" test "$(grep -o '{{ *\.gh_retry }}' "${TEMPLATE}" | wc -l)" = "1"
+check "sweep template does not treat the wrapper as a path" test "$(grep -c '$_TPL_DIR' "${TEMPLATE}")" = "0"
 check "sweep template consumes scan flags" grep -q 'scan_govulncheck={{ .scan_govulncheck | shellquote }}' "${TEMPLATE}"
 
 NODE_OK=1
@@ -407,8 +443,8 @@ echo "1" >"${FX1}/alpha/checks.13.rc"
 printf 'module example.com/alpha\ngo 1.22\n' >"${FX1}/alpha/gomod"
 cat >"${FX1}/alpha/codeql.json" <<'EOF'
 [
-  {"rule": {"security_severity": "9.2", "id": "sql-injection"}},
-  {"rule": {"security_severity": "5.1", "id": "ssrf"}}
+  {"rule": {"security_severity_level": "critical", "id": "sql-injection"}},
+  {"rule": {"security_severity_level": "medium", "id": "ssrf"}}
 ]
 EOF
 cat >"${FX1}/alpha/rulesets.json" <<'EOF'
@@ -493,6 +529,12 @@ check "S1 beta rulesets none -> not applied" jq -e '.repos[1].rulesets.status ==
 check "S1 raw pr list kept for evidence" test -f "${FX1}/../sw1" -o -f "$(dirname "${ART1}")/raw/0000.alpha/pr_list.json"
 check "S1 gh called once per repo" test "$(grep -c '^pr list' "${FX1}/call.log")" = "2"
 check "S1 gh clone skipped when no advisory repo has go.mod on alpha only" test "$(grep -c '^repo clone' "${FX1}/call.log")" = "2"
+check "S1 pr checks calls not retried (no transient fixture text)" test "$(grep -c '^pr checks' "${FX1}/call.log")" = "3"
+
+# rendered-script shape: the wrapper is spliced as content and installs the shadow
+check "S1 rendered sweep defines the wrapper classifier" grep -q '^gh_retry_is_transient() {' "${WORK_ROOT}/sweep1.sh"
+check "S1 rendered sweep installs the gh drop-in shadow" grep -qF 'gh() { gh_retry_run stream' "${WORK_ROOT}/sweep1.sh"
+check_not "S1 rendered sweep has no dangling path-source of the wrapper" grep -q 'd "$_TPL_DIR"' "${WORK_ROOT}/sweep1.sh"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 3. Honest error lanes: per-repo partial failure recorded, sweep continues
@@ -733,12 +775,49 @@ check "S8 deterministic modulo sweep id/timestamps" cmp -s "${WORK_ROOT}/art1.no
 # ═════════════════════════════════════════════════════════════════════════════
 # 9. Multi-page CodeQL alert flatten (two concatenated docs -> per-alert math)
 # ═════════════════════════════════════════════════════════════════════════════
-printf '[{"rule": {"security_severity": "4.2"}}, {"rule": {"security_severity": "3.0"}}]' >"${FX5}/iota/codeql.json"
-FLAT=$(printf '[{"rule": {"security_severity": "4.2"}}, {"rule": {"security_severity": "3.0"}}]\n[{"rule": {"security_severity": "9.9"}}]' | jq -s '[.[].[]?] | length')
+FLAT=$(printf '[{"rule": {"security_severity_level": "medium"}}, {"rule": {"security_severity_level": "low"}}]\n[{"rule": {"security_severity_level": "critical"}}]' | jq -s '[.[].[]?] | length')
 expect_count "S9 flatten counts alerts across pages" 3 "${FLAT}"
+# Bucketing math mirroring the sweep template on the flattened pages.
+S9BUCKETS=$(printf '[{"rule": {"security_severity_level": "medium"}}, {"rule": {"security_severity_level": "low"}}]\n[{"rule": {"security_severity_level": "critical"}}]\n[{"rule": {}}]' | jq -s --argjson total 4 '
+    [.[].[]?] as $alerts
+    | [$alerts[] | select((.rule.security_severity_level? // null) != null)] as $rows
+    | {
+        critical: ([$rows[] | select(.rule.security_severity_level == "critical")] | length),
+        high:     ([$rows[] | select(.rule.security_severity_level == "high")] | length),
+        medium:   ([$rows[] | select(.rule.security_severity_level == "medium")] | length),
+        low:      ([$rows[] | select(.rule.security_severity_level == "low")] | length),
+        other:    ($total - ($rows | length))
+      }')
+check "S9 severity buckets follow the documented security_severity_level enum" jq -e '.critical == 1 and .high == 0 and .medium == 1 and .low == 1 and .other == 1' <<<"${S9BUCKETS}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 10. Retry wiring: transient pr-list failure is retried through the spliced
+# KB-219 wrapper; verdict-shaped failures stay single-attempt (S1 above).
+# ═════════════════════════════════════════════════════════════════════════════
+FX10="${WORK_ROOT}/fx10"
+make_fixtures "${FX10}"
+mkdir -p "${FX10}/rho"
+printf '[%s]' "$(pr 32 'dependabot[bot]')" >"${FX10}/rho/prlist.json"
+echo "1" >"${FX10}/rho/prlist.tr"
+printf 'build\tsuccess\t' >"${FX10}/rho/checks.32.tsv"
+printf '[]' >"${FX10}/rho/codeql.json"
+printf '[]' >"${FX10}/rho/rulesets.json"
+
+render_sweep testorg '["rho"]' "${WORK_ROOT}/sw10" true true "${WORK_ROOT}/sweep10.sh"
+SWEEP_RC10=0
+run_sweep "${WORK_ROOT}/sweep10.sh" "${FX10}" "${WORK_ROOT}/s10.out" "${WORK_ROOT}/s10.err" \
+    "GH_RETRY_MAX_ATTEMPTS=2" || SWEEP_RC10=$?
+expect_count "S10 sweep exits zero after the transport retry" 0 "${SWEEP_RC10}"
+ART10="$(tr -d '[:space:]' <"${WORK_ROOT}/s10.out")"
+check "S10 rho collected after retry" jq -e '.repos[0].repo == "rho" and .repos[0].collected == true and .repos[0].prs.dependabot_total == 1' "${ART10}" >/dev/null
+expect_count "S10 pr list attempted twice for one repo" "2" "$(grep -c '^pr list' "${FX10}/call.log")"
+check "S10 retry evidence recorded on stderr capture" test "$(find "${WORK_ROOT}/sw10" -name pr_list.err | head -1 | xargs grep -c 'result=retry class=connection_reset')" = "1"
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2
     exit 1
 fi
+# Every fixture dir is explicit (WORK_ROOT-anchored); assert the suite never
+# leaks scratch into its own directory or the repo tree.
+check "suite leaves no scratch leak beside its fixtures" test ! -e "${SCRIPT_DIR}/testorg"
 echo "PASS: devops_maint_v1 collect-step regression suite verified"
