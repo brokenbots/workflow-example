@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — route_brief step (KB-407, ADR-0015 wave 2 / Lane A).
+#
+# Builds the COMPACT decision-model brief for the route step, entirely from
+# the classification artifact (pure jq — no network, no gh, no model calls).
+# stdout carries ONLY the brief (single-line compact JSON); it flows into the
+# decision step's state through the data lane:
+#
+#   collect → classify → route_prepare(this) → route(decision) → act → merge
+#
+# The brief states the sweep context, the deterministic bucket counts, the
+# consolidated plan (carrier PRs and their superseded members) and the rebase
+# plan. Judgment rows and report-only rows are deliberately excluded from the
+# plan section — they are human-review/report lanes and can never be
+# auto-acted on; the note field says so explicitly so the model's hold
+# choice has a deterministic fallback for anything ambiguous.
+set -euo pipefail
+
+CLASSIFICATION_PATH={{ .classification_file | shellquote }}
+
+log() { printf 'route_prepare: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'route_prepare_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
+[ -n "$CLASSIFICATION_PATH" ] || fail "classification_file is empty (classify step bug or misbinding)"
+[ -f "$CLASSIFICATION_PATH" ] || fail "classification artifact not found: $CLASSIFICATION_PATH"
+case "$CLASSIFICATION_PATH" in
+  *..*) fail "classification path must not contain '..' components: $CLASSIFICATION_PATH" ;;
+esac
+
+RUN_DIR="$(dirname "$CLASSIFICATION_PATH")"
+TMP_ERR="$RUN_DIR/.route_brief.$$.err"
+trap 'rm -f "$TMP_ERR"' EXIT
+
+jq -e '.schema == "devops_maint_v1.classification.v1"' "$CLASSIFICATION_PATH" >/dev/null 2>&1 ||
+  fail "input is not a devops_maint_v1.classification.v1 artifact: $CLASSIFICATION_PATH"
+
+log "brief source $CLASSIFICATION_PATH"
+
+# ---------------------------------------------------------------------------
+# Compact brief — one line of JSON on stdout, nothing else
+# ---------------------------------------------------------------------------
+jq -c '
+  def num_field($f): ((.[$f] // 0) | type == "number");
+  . as $c
+  | {
+      sweep: {
+        sweep_id: $c.run.sweep_id,
+        org: $c.run.org,
+        repos: $c.run.repos
+      },
+      buckets: {
+        mechanical_bump: $c.summary.mechanical_bump,
+        vuln_clear: $c.summary.vuln_clear,
+        needs_rebase: $c.summary.needs_rebase,
+        needs_judgment: $c.summary.needs_judgment,
+        report_only: $c.summary.report_only,
+        parked_groups: $c.summary.parked_groups
+      },
+      plan: {
+        groups: [$c.groups[]
+                 | {group_id, repo, module, to_version, action_class,
+                    carrier: .carrier.number, closes: .closes}],
+        rebases: [$c.rebases[] | {repo, number, group_id, merge_state}]
+      },
+      note: "needs-judgment rows are human-review only and are excluded from automated action; report-only rows carry no package detail; every group merges through exactly one carrier PR and superseded members close only after the carrier merges."
+    }
+    | if (all(.buckets | to_entries[]; .value | type == "number")) then . else error("brief bucket counts not numeric") end
+    | if (.plan.groups | length) == $c.summary.groups_total then . else error("brief groups count mismatch") end
+    | if (.plan.rebases | length) == $c.summary.rebases_total then . else error("brief rebases count mismatch") end
+' "$CLASSIFICATION_PATH" 2>"$TMP_ERR" ||
+  fail "brief compose failed: $(head -c 200 "$TMP_ERR" 2>/dev/null)"

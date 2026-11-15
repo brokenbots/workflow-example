@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — act step (KB-407, ADR-0015 wave 2 / Lane A).
+#
+# The rebase lane of the classify/route/act graph. Reads the classification
+# artifact and executes the needs_rebase plan: `gh pr update-branch` on every
+# rebase carrier — the plan's own member PR, rebased onto its base ref, never
+# a new branch or new PR — then reads the merge-state back so the record is
+# verified, not assumed. Emits ONE acts.json artifact next to the
+# classification (its run directory):
+#
+#   <classification dir>/acts.json
+#
+# Per-carrier rebase failures (conflicts, a rejected update, a gh transport
+# failure after retries) are bookkeeping, not step failures: the row records
+# the typed result and the step succeeds, so a sweep's evidence is honest
+# without wedging the whole lane on one stuck PR. The step fails only on
+# config/structural problems (bad paths, wrong schema, unwritable run dir).
+# An empty rebase plan trivially succeeds.
+#
+# stdout carries ONLY the acts.json path; diagnostics go to stderr. All gh
+# traffic runs under the spliced gh_retry wrapper with the adapter-injected
+# GH_TOKEN (the workflow identity — the brokenbot lane merges, this step
+# never does).
+set -euo pipefail
+
+# KB-219: the shared retry wrapper is spliced as raw content (file() returns
+# the file's content, not a path) and installs the gh drop-in shadow, so
+# every gh call below is transport-wrapped exactly like the collect sweep.
+{{ .gh_retry }}
+
+ORG={{ .org | shellquote }}
+CLASSIFICATION_PATH={{ .classification_file | shellquote }}
+
+log() { printf 'act: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'act_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  rm -f "$RUN_DIR/.act.rows.ndjson" "$RUN_DIR/.act.compose.$$.err" "$RUN_DIR/.act.selfcheck.$$.err"
+  rm -rf "$RAW_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Config validation (fail loud, before any network call)
+# ---------------------------------------------------------------------------
+[ -n "$CLASSIFICATION_PATH" ] || fail "classification_file is empty (classify step bug or misbinding)"
+[ -f "$CLASSIFICATION_PATH" ] || fail "classification artifact not found: $CLASSIFICATION_PATH"
+case "$CLASSIFICATION_PATH" in
+  *..*) fail "classification path must not contain '..' components: $CLASSIFICATION_PATH" ;;
+esac
+
+jq -e '.schema == "devops_maint_v1.classification.v1"' "$CLASSIFICATION_PATH" >/dev/null 2>&1 ||
+  fail "input is not a devops_maint_v1.classification.v1 artifact: $CLASSIFICATION_PATH"
+
+jq -e -n --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+  fail "org must match ^[A-Za-z0-9][A-Za-z0-9-]{0,99}\$ (got: $(printf '%s' "$ORG" | head -c 40))"
+
+RUN_DIR="$(dirname "$CLASSIFICATION_PATH")"
+ACTS_PATH="$RUN_DIR/acts.json"
+RAW_DIR="$RUN_DIR/raw"
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+trap cleanup EXIT
+
+err_text() {
+  if [ ! -s "$1" ]; then
+    printf '<no stderr>'
+  else
+    grep -v '^gh_retry: ' "$1" | head -c 200 || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Rebase carrier PRs: update-branch (merge base into the PR branch) + read-back.
+# All per-carrier state lives under a per-sweep raw dir to keep gh's chatter
+# out of the run dir.
+# ---------------------------------------------------------------------------
+RAW_DIR="$RUN_DIR/raw"
+mkdir -p "$RAW_DIR"
+
+REBASE_COUNT="$(jq -r '.summary.rebases_total' "$CLASSIFICATION_PATH")"
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+log "rebase plan: $REBASE_COUNT carrier(s) from $CLASSIFICATION_PATH"
+
+rebased=0
+failed=0
+
+: >"$RUN_DIR/.act.rows.ndjson"
+i=0
+while [ "$i" -lt "$REBASE_COUNT" ]; do
+  row="$(jq -c '.rebases['"$i"']' "$CLASSIFICATION_PATH")"
+  i=$((i + 1))
+  repo="$(printf '%s' "$row" | jq -r '.repo')"
+  number="$(printf '%s' "$row" | jq -r '.number')"
+  group_id="$(printf '%s' "$row" | jq -r '.group_id')"
+  merge_state="$(printf '%s' "$row" | jq -r '.merge_state')"
+  REPO_FULL="$ORG/$repo"
+
+  log "rebase #$number in $REPO_FULL (group $group_id, merge_state=$merge_state)"
+
+  before_state="$(gh pr view "$number" -R "$REPO_FULL" --json mergeStateStatus 2>"$RAW_DIR/view.$i.err" |
+    jq -r '.mergeStateStatus // "UNKNOWN"' 2>/dev/null || true)"
+  [ -n "$before_state" ] || before_state="UNKNOWN"
+
+  if gh pr update-branch "$number" -R "$REPO_FULL" >/dev/null 2>"$RAW_DIR/update.$i.err"; then
+    after_state="$(gh pr view "$number" -R "$REPO_FULL" --json mergeStateStatus 2>"$RAW_DIR/postview.$i.err" |
+      jq -r '.mergeStateStatus // "UNKNOWN"' 2>/dev/null || true)"
+    [ -n "$after_state" ] || after_state="UNKNOWN"
+    rebased=$((rebased + 1))
+    printf '%s\n' "$(jq -cn --arg repo "$repo" --argjson number "$number" --arg gid "$group_id" \
+      --arg before "$before_state" --arg after "$after_state" \
+      '{repo: $repo, number: $number, group_id: $gid, action: "rebase", result: "rebased",
+        before_state: $before, after_state: $after, note: null}')" >>"$RUN_DIR/.act.rows.ndjson"
+  else
+    failed=$((failed + 1))
+    printf '%s\n' "$(jq -cn --arg repo "$repo" --argjson number "$number" --arg gid "$group_id" \
+      --arg before "$before_state" --arg note "$(err_text "$RAW_DIR/update.$i.err")" \
+      '{repo: $repo, number: $number, group_id: $gid, action: "rebase", result: "failed",
+        before_state: $before, after_state: null, note: $note}')" >>"$RUN_DIR/.act.rows.ndjson"
+    log "rebase #$number in $REPO_FULL FAILED: $(err_text "$RAW_DIR/update.$i.err")"
+  fi
+done
+
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+# ---------------------------------------------------------------------------
+# acts.json + structural self-check
+# ---------------------------------------------------------------------------
+if ! jq -cn \
+  --arg inv "$CLASSIFICATION_PATH" \
+  --arg sid "$(jq -r '.run.sweep_id' "$CLASSIFICATION_PATH")" \
+  --arg org "$ORG" \
+  --arg started "$started_at" \
+  --arg finished "$finished_at" \
+  --argjson rows "$(cat "$RUN_DIR/.act.rows.ndjson" | jq -s '.')" \
+  '
+  {
+    schema: "devops_maint_v1.acts.v1",
+    run: {
+      sweep_id: $sid,
+      org: $org,
+      classification_path: $inv,
+      started_at: $started,
+      finished_at: $finished
+    },
+    summary: {
+      planned: ($rows | length),
+      rebased: ([$rows[] | select(.result == "rebased")] | length),
+      failed: ([$rows[] | select(.result == "failed")] | length)
+    },
+    rebases: $rows
+  }' >"$ACTS_PATH" 2>"$RUN_DIR/.act.compose.$$.err"; then
+  fail "acts artifact compose failed: $(head -c 200 "$RUN_DIR/.act.compose.$$.err" 2>/dev/null)"
+fi
+
+jq -e '
+  . as $root
+  | ($root.schema == "devops_maint_v1.acts.v1") and
+  ($root.run.org | type == "string" and length > 0) and
+  ($root.run.classification_path | type == "string" and length > 0) and
+  ($root.summary.rebased <= $root.summary.planned and $root.summary.failed <= $root.summary.planned) and
+  ($root.summary.planned == ($root.rebases | length)) and
+  ($root.summary.rebased + $root.summary.failed == $root.summary.planned) and
+  (all($root.rebases[];
+      . as $r
+      | ($r.repo | type == "string" and length > 0) and
+        ($r.number | type == "number") and
+        ($r.group_id | type == "string" and length > 3) and
+        ($r.action == "rebase") and
+        ($r.result | IN("rebased", "failed")) and
+        ($r.before_state | type == "string" and length > 0) and
+        (if $r.result == "failed" then ($r.note | type == "string" and length > 0) and ($r.after_state == null)
+         else (($r.after_state | type == "string" and length > 0) and $r.note == null)
+         end)))
+' "$ACTS_PATH" >/dev/null 2>"$RUN_DIR/.act.selfcheck.$$.err" ||
+  fail "acts artifact failed its structural self-check: $(head -c 200 "$RUN_DIR/.act.selfcheck.$$.err" 2>/dev/null)"
+
+rm -f "$RUN_DIR/.act.rows.ndjson" "$RUN_DIR/.act.compose.$$.err" "$RUN_DIR/.act.selfcheck.$$.err"
+rm -rf "$RAW_DIR"
+
+log "rebase plan done: planned=$REBASE_COUNT rebased=$rebased failed=$failed"
+
+printf '%s\n' "$ACTS_PATH"
