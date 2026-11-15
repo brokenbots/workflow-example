@@ -326,7 +326,7 @@ jq -e '
   ($root.summary.needs_rebase == ([$root.rows[] | select(.class == "needs_rebase")] | length)) and
   ($root.summary.needs_judgment == ([$root.rows[] | select(.class == "needs_judgment")] | length)) and
   ($root.summary.report_hold == ([$root.rows[] | select(.class == "report_hold")] | length)) and
-  ($root.rows | length == ([$root.rows[].number] | unique | length)) and
+  (([$root.rows[] | [.repo, .number]] | unique | length) == ($root.rows | length)) and
   (all($root.rows[];
       . as $row
       | ($row.repo | type == "string" and length > 0) and

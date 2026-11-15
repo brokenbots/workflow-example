@@ -340,7 +340,40 @@ check "S7 no temp residue next to the parked inventory (S2)" test "$(ls -A "${RU
 check "S7 no temp residue for the empty-inventory run (S3)" test "$(ls -A "${RUN3}" | sort | tr '\n' ' ')" = "classification.json inventory.json "
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 8. The tree still validates (grammar + interface contract)
+# 8. Regression: duplicate PR numbers across repos must not trip the self-check
+# ═════════════════════════════════════════════════════════════════════════════
+# PR numbers are per-repo; two repos can both carry a PR #5. The artifact
+# self-check must key uniqueness on (repo, number), not on number alone.
+FXDUP="${WORK_ROOT}/dupnum"
+RUNdup="${FXDUP}"
+mkdir -p "${RUNdup}"
+RECS_DUP_ALPHA="$(repo_rec alpha true "" '[]' '[]' "$(dep_rows \
+    5 "Bump github.com/one/mod from 1.0.0 to 1.0.1" "2026-11-14T09:00:00Z" "CLEAN" "green" "main")")"
+RECS_DUP_BETA="$(repo_rec beta true "" '[]' '[]' "$(dep_rows \
+    5 "Bump github.com/two/mod from 1.0.0 to 1.0.1" "2026-11-14T09:05:00Z" "CLEAN" "green" "main")")"
+make_inventory testorg "[${RECS_DUP_ALPHA},
+${RECS_DUP_BETA}]" "${FXDUP}/inventory.json"
+render_classify "${FXDUP}/inventory.json" "${WORK_ROOT}/classify_dup.sh"
+OUTdup="${WORK_ROOT}/dup.out"
+ERRdup="${WORK_ROOT}/dup.err"
+CLS_DUP_RC=0
+run_classify "${WORK_ROOT}/classify_dup.sh" "${OUTdup}" "${ERRdup}" || CLS_DUP_RC=$?
+expect_count "S8 duplicate number across repos classifies fine" 0 "${CLS_DUP_RC}"
+CLSDUP="$(cat "${OUTdup}")"
+check "S8 both duplicate-number rows are classified and carried" jq -e '[.rows[] | select(.number == 5)] | length == 2' "${CLSDUP}" >/dev/null
+check "S8 alpha #5 keeps its own repo-scoped group and carrier flag" jq -e '[.rows[] | select(.repo == "alpha" and .number == 5)][0] as $r | $r.is_carrier and ($r.group_id | type == "string" and length > 0) and $r.class == "mechanical_bump"' "${CLSDUP}" >/dev/null
+check "S8 beta #5 keeps its own repo-scoped group and carrier flag" jq -e '[.rows[] | select(.repo == "beta" and .number == 5)][0] as $r | $r.is_carrier and ($r.group_id | type == "string" and length > 0) and $r.class == "mechanical_bump"' "${CLSDUP}" >/dev/null
+check "S8 the two rows land in distinct per-repo groups" jq -e '[.groups[]] | length == 2 and ([.[].carrier.repo] | sort == ["alpha", "beta"]) and (.[0].group_id != .[1].group_id)' "${CLSDUP}" >/dev/null
+check "S8 each group carriers its own repo's PR number" jq -e '[.groups[] | select(.carrier.repo == "beta")][0].carrier.number == 5' "${CLSDUP}" >/dev/null
+check "S8 per-(repo, number) uniqueness holds" jq -e '([.rows[] | [.repo, .number]] | unique | length) == (.rows | length)' "${CLSDUP}" >/dev/null
+if grep -q 'classification artifact failed its structural self-check' "${ERRdup}"; then
+    check "S8 self-check accepts per-repo duplicate numbers" false
+else
+    check "S8 self-check accepts per-repo duplicate numbers" true
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 9. The tree still validates (grammar + interface contract)
 # ═════════════════════════════════════════════════════════════════════════════
 NODE_OK=1
 set +e
