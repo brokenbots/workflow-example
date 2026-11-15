@@ -3,8 +3,9 @@
 #
 # Per-repo enumeration of open dependabot PRs, per-PR CI verdicts, advisory
 # state (govulncheck/osv-scanner), CodeQL open-alert count, and protection
-# ruleset state. Emits ONE normalized JSON artifact per sweep under
-# {{ .sweep_root }}. The artifact feeds KB-407's classify/route step.
+# ruleset state. Emits ONE normalized JSON artifact per sweep under the sweep
+# root inside the data lane. ADR-0015 D1: the artifact feeds KB-407's
+# classify/route step.
 set -euo pipefail
 
 _TPL_DIR={{ .gh_retry | shellquote }}
@@ -18,11 +19,6 @@ SWEEP_ROOT={{ .sweep_root | shellquote }}
 
 scan_govulncheck={{ .scan_govulncheck | shellquote }}
 scan_osv={{ .scan_osv | shellquote }}
-
-COLLECT_MAX_PR_CHECKS=${COLLECT_MAX_PR_CHECKS:-50}
-case "$COLLECT_MAX_PR_CHECKS" in
-  '' | *[!0-9]*) fail_config "COLLECT_MAX_PR_CHECKS must be a non-negative integer (got: $COLLECT_MAX_PR_CHECKS)" ;;
-esac
 
 log() { printf 'collect: %s\n' "$*" >&2; }
 
@@ -40,10 +36,16 @@ fail_collect() {
   exit 1
 }
 
+COLLECT_MAX_PR_CHECKS=${COLLECT_MAX_PR_CHECKS:-50}
+case "$COLLECT_MAX_PR_CHECKS" in
+  '' | *[!0-9]*) fail_config "COLLECT_MAX_PR_CHECKS must be a non-negative integer (got: $COLLECT_MAX_PR_CHECKS)" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Config validation (fail-loud, before any network call)
 # ---------------------------------------------------------------------------
-printf '%s' "$ORG" | jq -e 'type == "string" and length > 0 and length <= 100 and test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$")' >/dev/null 2>&1 ||
+# jq parses stdin as JSON, so validate the raw org string via --arg.
+jq -n --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
   fail_config "org must match ^[A-Za-z0-9][A-Za-z0-9-]{0,99}\$ (got: $(printf '%s' "$ORG" | head -c 40))"
 
 printf '%s' "$REPOS_JSON" | jq -e '
@@ -183,10 +185,13 @@ codeql_alert_count() {
     log "CodeQL alerts API call failed rc=$rc: $(head -c 200 "$rdir/codeql.err" 2>/dev/null || echo '<no stderr>')"
     return 2
   fi
-  CODEQL_OPEN_ALERTS="$(printf '%s' "$out" | jq -s 'length')"
+  # --paginate may emit multiple concatenated JSON docs (one per page);
+  # flatten the outer -s stream of docs first so the count is per-alert.
+  CODEQL_OPEN_ALERTS="$(printf '%s' "$out" | jq -s '[.[].[]?] | length' 2>/dev/null)"
   if [ -z "$CODEQL_OPEN_ALERTS" ]; then CODEQL_OPEN_ALERTS=0; fi
   CODEQL_BY_SEVERITY="$(printf '%s' "$out" | jq -s --argjson total "$CODEQL_OPEN_ALERTS" '
-    [.[] | select((.rule.security_severity? // "") != "")] as $rows
+    [.[].[]?] as $alerts
+    | [$alerts[] | select((.rule.security_severity? // "") != "")] as $rows
     | {
         critical: ([$rows[] | select((.rule.security_severity | tonumber) >= 9.0)] | length),
         high:     ([$rows[] | select((.rule.security_severity | tonumber) >= 7.0 and (.rule.security_severity | tonumber) < 9.0)] | length),
@@ -304,12 +309,30 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
         && checks_rc=0 || checks_rc=$?
 
       if [ "$checks_rc" -eq 0 ] || [ "$checks_rc" -eq 1 ] || [ "$checks_rc" -eq 8 ]; then
-        case "$checks_rc" in
-          1) verdict="red" ;;
-          8) verdict="pending" ;;
-          *) verdict="green" ;;
-        esac
         normalize_checks_tsv <"$rdir/checks.$pr_number.tsv" >"$rdir/checks.$pr_number.rows"
+        # Verdict from rows (worst-of) with the gh rc as override: rc 1 is
+        # authoritatively "any check failed"; rc 8 with zero parsed rows is
+        # gh's "no checks" shape -> none; pending/unknown check states are
+        # never confirmably green.
+        any_fail="$(jq -s '[.[] | select(.state == "fail")] | length' "$rdir/checks.$pr_number.rows")"
+        any_pending="$(jq -s '[.[] | select(.state == "pending" or .state == "other")] | length' "$rdir/checks.$pr_number.rows")"
+        row_count="$(jq -s 'length' "$rdir/checks.$pr_number.rows")"
+        verdict="green"
+        if [ "$any_pending" -gt 0 ]; then
+          verdict="pending"
+        fi
+        if [ "$any_fail" -gt 0 ]; then
+          verdict="red"
+        fi
+        if [ "$checks_rc" -eq 8 ]; then
+          verdict="pending"
+        fi
+        if [ "$row_count" -eq 0 ]; then
+          verdict="none"
+        fi
+        if [ "$checks_rc" -eq 1 ]; then
+          verdict="red"
+        fi
         jq -cn \
           --argjson number "$pr_number" \
           --arg title "$pr_title" \
@@ -319,9 +342,9 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           --arg url "$pr_url" \
           --arg updated "$pr_updat" \
           --arg verdict "$verdict" \
-          --rawfile rows "$rdir/checks.$pr_number.rows" \
+          --argjson rows "$(jq -s '.' "$rdir/checks.$pr_number.rows")" \
           '
-          ($rows | if . == "" then [] else (fromjson? // []) end) as $rows
+          ($rows | if . == "" then [] else . end) as $rows
           | ($rows | length) as $nr
           | {
               number: $number,
@@ -332,7 +355,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
               url: (if $url == "" then null else $url end),
               updated_at: (if $updated == "" then null else $updated end),
               ci: {
-                verdict: (if $verdict == "green" and $nr == 0 then "none" else $verdict end),
+                verdict: $verdict,
                 check_count: $nr,
                 checks: $rows,
                 error: null
@@ -404,7 +427,8 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           gov_status="unavailable"
           gov_reason="govulncheck binary not found on PATH"
           gov_findings="[]"
-          append_repo_error "govulncheck" "govulncheck binary not found on PATH"
+          # Unavailable is a recorded detection gap, not a collection failure:
+          # status/reason carry it; no errors[] row, repo stays collectable.
         else
           gov_body="$(govulncheck_findings "$clone_dir")" && gov_rc=0 || gov_rc=$?
           if [ "$gov_rc" -eq 0 ]; then
@@ -424,7 +448,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           osv_status="unavailable"
           osv_reason="osv-scanner binary not found on PATH"
           osv_findings="[]"
-          append_repo_error "osv" "osv-scanner binary not found on PATH"
+          # Unavailable is a recorded detection gap, not a collection failure.
         else
           osv_body="$(osv_findings "$clone_dir")" && osv_rc=0 || osv_rc=$?
           if [ "$osv_rc" -eq 0 ]; then
@@ -519,17 +543,17 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
     --argjson pr_list_truncated "$pr_list_truncated" \
     --argjson prs "$prs_arg" \
     --argjson errors "$err_json" \
-    --argjson gov_status "$gov_status" \
+    --arg gov_status "$gov_status" \
     --arg gov_reason "$gov_reason" \
     --argjson gov_findings "$gov_findings" \
-    --argjson osv_status "$osv_status" \
+    --arg osv_status "$osv_status" \
     --arg osv_reason "$osv_reason" \
     --argjson osv_findings "$osv_findings" \
-    --argjson cq_status "$cq_status" \
+    --arg cq_status "$cq_status" \
     --arg cq_reason "$cq_reason" \
     --argjson cq_open_alerts "$cq_open_alerts" \
     --argjson cq_by_severity "$cq_by_severity" \
-    --argjson rs_status "$rs_status" \
+    --arg rs_status "$rs_status" \
     --arg rs_reason "$rs_reason" \
     --argjson rs_applied "$rs_applied" \
     --argjson rs_rules "$rs_rules" \
@@ -648,7 +672,7 @@ jq -e '
       (.prs.prs_skipped | type == "boolean") and
       (.prs.open_total | type == "number") and
       (.prs.dependabot_total | type == "number") and
-      (.prs.other_open_total | type == "number" and .prs.other_open_total >= 0) and
+      (.prs.other_open_total | (type == "number") and (. >= 0)) and
       (.prs.pr_checks_truncated | type == "boolean") and
       (.prs.pr_list_truncated | type == "boolean") and
       ((.prs.pr_list_truncated == false) or (.prs.open_total >= 200)) and
@@ -697,10 +721,6 @@ fi
 
 if [ "$artifact_failed" -eq "$idx" ]; then
   fail_collect "every repo in scope failed to collect (repos=$(printf '%s' "$REPOS_JSON" | jq -c '. // []'))"
-fi
-
-if [ "$artifact_failed" -eq "$idx" ]; then
-  fail_collect "every repo in scope failed to collect (repos=$REPOS_JSON)"
 fi
 
 log "sweep $sweep_id done: $collected_repos complete, $failed_repos partial, artifact=$ARTIFACT_PATH"
