@@ -209,6 +209,10 @@ repos_failed_total=0
 open_after_total=0
 open_before_total=0
 
+# The budget is enforced PER RUN across the whole sweep: one counter, initialised
+# once here. summary.budget_used is read from the executed-count at the end.
+budget_used=0
+
 for repo in $SOURCES_REPO; do
   log "repo $repo: enumerating open CodeQL alerts"
 
@@ -238,9 +242,9 @@ for repo in $SOURCES_REPO; do
     open_alerts_json="$CQ_OPEN"
   fi
 
-  # Plan rows for THIS repo execute in declaration order; the budget caps
-  # suppression executions only (fix rows never consume budget).
-  budget_used=0
+  # Plan rows for THIS repo execute in declaration order; the budget is ONE
+  # per-run counter (caps suppression executions across the whole sweep, not
+  # per repo — see the contract in the header and variables.chcl).
   plan_repo_rows="$(printf '%s' "$PLAN_JSON" | jq -c --arg repo "$repo" '[.[] | select(.repo == $repo)]')"
   open_numbers_json="$(printf '%s' "$open_alerts_json" | jq -c '[.[] | .number]')"
 

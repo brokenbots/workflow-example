@@ -620,15 +620,44 @@ check "S16 empty plan + no alerts = held_at_zero" jq -e '.summary.held_at_zero =
 check "S16 no dispositions at all" jq -e '.repos[0].dispositions == []' "${TRIAGE13}" >/dev/null
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 17. Protocol + hygiene: stdout path only, stderr diagnostics, token canary
+# 17. Per-run budget across repos: two repos x one suppress row, budget=1 —
+#     exactly ONE dismissal lands, the second repo's row is out_of_budget,
+#     rc 0, and the structural self-check stays consistent (the budget is
+#     one counter for the WHOLE sweep, never per repo)
 # ═════════════════════════════════════════════════════════════════════════════
-check "S17 triage diagnostics go to stderr as triage: lines" grep -q '^triage: triage plan: ' "${WORK_ROOT}/t3.err"
-check_not "S17 stderr carries no artifact JSON" grep -q '"dispositions"' "${WORK_ROOT}/t3.err"
-check_not "S17 token canary absent from the S3 artifact" grep -q "supersecret-token-canary" "${TRIAGE1}"
-check_not "S17 token canary absent from S3 stderr" grep -q "supersecret-token-canary" "${WORK_ROOT}/t3.err"
-check_not "S17 token canary absent from the S5 artifact" grep -q "supersecret-token-canary" "${TRIAGE2}"
+FX14="${WORK_ROOT}/fx14"
+mkdir -p "${FX14}/goA" "${FX14}/goB"
+: >"${FX14}/call.log"
+alert 1 go/unsafe-quoting critical >"${FX14}/goA/alerts.json"
+printf '{"state": "open"}' >"${FX14}/goA/rb.json"
+printf '{"state": "dismissed"}' >"${FX14}/goA/rb.after.json"
+alert 1 go/unsafe-quoting critical >"${FX14}/goB/alerts.json"
+printf '{"state": "open"}' >"${FX14}/goB/rb.json"
+
+A14="$(mk_anchor "t17")"
+render_triage testorg '["goA","goB"]' '[{"repo":"goA","alert_number":1,"rule_id":"go/unsafe-quoting","disposition":"suppress","rationale":"first repo row","dismissed_reason":"false_positive"},{"repo":"goB","alert_number":1,"rule_id":"go/unsafe-quoting","disposition":"suppress","rationale":"second repo row","dismissed_reason":"wont_fix"}]' 1 "${A14}" "${WORK_ROOT}/triage14.sh"
+T17_RC=0
+run_sub "${WORK_ROOT}/triage14.sh" "${FX14}" "${WORK_ROOT}/t17.out" "${WORK_ROOT}/t17.err" || T17_RC=$?
+expect_equal "S17 cross-repo budgeted run exits 0" 0 "${T17_RC}"
+TRIAGE14="$(tr -d '[:space:]' <"${WORK_ROOT}/t17.out")"
+check "S17 budget_used hits the cap exactly once" jq -e '.summary.budget_used == 1 and .summary.budget == 1 and .summary.suppressions_executed == 1' "${TRIAGE14}" >/dev/null
+check "S17 the second repo's row is typed out_of_budget" jq -e '.summary.out_of_budget_total == 1 and .repos[1].dispositions[0].result == "out_of_budget"' "${TRIAGE14}" >/dev/null
+check "S17 first repo's row dismissed with read-back" jq -e '.repos[0].repo == "goA" and .repos[0].dispositions[0].result == "dismissed"' "${TRIAGE14}" >/dev/null
+check "S17 out-of-budget row leaves the evidence open" jq -e '.repos[1].repo == "goB" and .repos[1].dispositions[0].readback_state == "open"' "${TRIAGE14}" >/dev/null
+check "S17 exactly ONE PATCH across the whole sweep" test "$(grep -c '^PATCH ' "${FX14}/call.log")" -eq 1
+check_not "S17 no PATCH ever landed on repo B" grep -q '^PATCH repos/testorg/goB/' "${FX14}/call.log"
+check "S17 held_at_zero stays false with goB still open" jq -e '.summary.held_at_zero == false and .repos[1].alerts_after == 1' "${TRIAGE14}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 18. Protocol + hygiene: stdout path only, stderr diagnostics, token canary
+# ═════════════════════════════════════════════════════════════════════════════
+check "S18 triage diagnostics go to stderr as triage: lines" grep -q '^triage: triage plan: ' "${WORK_ROOT}/t3.err"
+check_not "S18 stderr carries no artifact JSON" grep -q '"dispositions"' "${WORK_ROOT}/t3.err"
+check_not "S18 token canary absent from the S3 artifact" grep -q "supersecret-token-canary" "${TRIAGE1}"
+check_not "S18 token canary absent from S3 stderr" grep -q "supersecret-token-canary" "${WORK_ROOT}/t3.err"
+check_not "S18 token canary absent from the S5 artifact" grep -q "supersecret-token-canary" "${TRIAGE2}"
 TR3DIR="$(dirname "$(printf '%s\n' "${TRIAGE1}")")"
-check "S17 no .triage scratch files left in the run dir" test "$(ls -A "${TR3DIR}" 2>/dev/null | grep -c '^\.triage')" = "0"
+check "S18 no .triage scratch files left in the run dir" test "$(ls -A "${TR3DIR}" 2>/dev/null | grep -c '^\.triage')" = "0"
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2

@@ -21,9 +21,10 @@
 #
 # READ-BACK IS THE COMPLIANCE GATE (ADR-0015 D4): every application is
 # verified by a GET rulesets/{id} read-back asserting the exact contract —
-# enforcement "active", branch target, EMPTY bypass list (enforced to
-# admins), default-branch ref condition, the pull_request rule, and the
-# EXACT required status-check context set for the pack. A read-back that
+# enforcement "active", branch target, EMPTY bypass_actors (enforced to
+# admins; GET rulesets/{id} reports bypassers as bypass_actors),
+# default-branch ref condition, the pull_request rule, and the EXACT
+# required status-check context set for the pack. A read-back that
 # does not match the contract is a typed step FAILURE (protect_failed) with
 # the evidence artifact preserved and its path named in the failure line —
 # a run must never mark a repo compliant on unverifiable state.
@@ -199,8 +200,6 @@ signal_enumerate() {
 
 # Evaluate the pack's required contexts against SIGNAL_ROWS
 # -> CONTEXT_STATES_JSON: [{context, satisfied, state}]
-# Evaluate the pack's required contexts against SIGNAL_ROWS
-# -> CONTEXT_STATES_JSON: [{context, satisfied, state}]
 evaluate_contexts() {
   local pack="$1"
   printf '%s' "$SIGNAL_ROWS" | jq -c --argjson req "$(pack_contexts_json "$pack")" '
@@ -233,7 +232,9 @@ contract_body() {
       target: "branch",
       enforcement: "active",
       conditions: {ref_name: {include: ["~DEFAULT_BRANCH"], exclude: []}},
-      bypass: [],
+      # The rulesets API contract: bypass_actors names who may bypass; an
+      # empty list means nobody (enforced to admins) may bypass this ruleset.
+      bypass_actors: [],
       rules: [
         {type: "pull_request",
          parameters: {required_approving_review_count: $approvals,
@@ -288,7 +289,12 @@ verify_mismatches() {
     [
       (if .enforcement != "active" then "enforcement: " + (.enforcement // "null") else empty end),
       (if .target != "branch" then "target: " + (.target // "null") else empty end),
-      (if ((.bypass // []) | length) != 0 then "bypass not empty (admins must not bypass)" else empty end),
+      # GET .../rulesets/{id} reports the bypassers as `bypass_actors`
+      # (a list of {actor_type, ...}); `bypass` is never in the response.
+      (if ((.bypass_actors // []) | length) != 0
+         then "bypass_actors not empty (admins must not bypass): " +
+              ([.bypass_actors[] | (.actor_type // "?")] | join(","))
+         else empty end),
       (if (((.conditions.ref_name.include // []) | index("~DEFAULT_BRANCH")) == null)
          then "ref condition missing ~DEFAULT_BRANCH" else empty end),
       (if ([.rules[] | select(.type == "pull_request")] | length) != 1
@@ -413,6 +419,12 @@ for repo in $SOURCES_REPO; do
               --input "$RUN_DIR/.protect.body.$$.json" 2>"$RAW_DIR/apply.$repo.err")"; then
             rid="$(printf '%s' "$out" | jq -r '.id // ""')"
             rm -f "$RUN_DIR/.protect.body.$$.json"
+            if [ -z "$rid" ]; then
+              # A write that returns no id cannot be read back: typed, not silent.
+              repos_error_total=$((repos_error_total + 1))
+              add_error ruleset_apply "apply succeeded but the response carried no ruleset id; read-back not possible"
+              apply_ok=0
+            fi
           else
             rm -f "$RUN_DIR/.protect.body.$$.json"
             repos_error_total=$((repos_error_total + 1))
@@ -470,9 +482,10 @@ for repo in $SOURCES_REPO; do
             --arg action "$action" \
             --arg rid "$rid" \
             --argjson contexts "$(pack_contexts_json "$prow_pack")" \
+            --argjson bypass_count "$(printf '%s' "$RB_JSON" | jq '(.bypass_actors // []) | length')" \
             '{action: $action, ruleset_id: (if $rid == "" then null else ($rid | tonumber) end),
               readback_verified: true,
-              enforcement: "active", bypass_actors: 0,
+              enforcement: "active", bypass_actors: ($bypass_count | tonumber),
               required_contexts: $contexts}')"
         fi
       fi

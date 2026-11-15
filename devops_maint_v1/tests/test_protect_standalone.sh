@@ -17,6 +17,9 @@
 #   - drift heal on red -> PUT + honest heal-on-red note
 #   - apply failure -> per-repo error row, sweep-style bookkeeping, rc 0
 #   - read-back mismatch -> typed step failure AFTER artifact preservation
+#   - admin bypass on read-back (bypass_actors) -> typed step failure: the
+#     read-back is the compliance gate, verified against the field GitHub
+#     actually returns
 #   - signal enumeration failure -> error row, no ruleset calls
 #   - unplanned repos are report-only rows
 #   - pagination flatten (rulesets past the first page are still honored)
@@ -233,7 +236,7 @@ chmod +x "${BIN_STUB_GH}/gh"
 canon_ruleset() { # canon_ruleset <contexts-csv> [id] -> canonical read-back shape
     local ctx="$1" rid="${2:-901}"
     printf '{"id": %s, "name": "devops-maintenance-protection", "target": "branch", "enforcement": "active",
-  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "bypass": [],
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}, "bypass_actors": [],
   "rules": [
     {"type": "pull_request", "parameters": {
        "required_approving_review_count": 1, "dismiss_stale_reviews_on_push": false,
@@ -396,7 +399,8 @@ check "S3 log: check-runs enumerated" grep -q "GET repos/testorg/go1/commits/abc
 check "S3 log: ruleset created with POST exactly once" test "$(grep -c "^POST repos/testorg/go1/rulesets$" "${FX1}/call.log")" -eq 1
 check "S3 log: no PUT call (nothing to update)" test "$(grep -c "^PUT " "${FX1}/call.log")" -eq 0
 check "S3 create body carries the exact context contract" test "$(jq -r '.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' "${FX1}/go1/lastbody.json" | sort | tr '\n' ',' | sed 's/,$//')" = "changes,govulncheck,lint,osv,test"
-check "S3 create body enforces to admins (no bypass)" test "$(jq -r '.bypass | length' "${FX1}/go1/lastbody.json")" -eq "0"
+check "S3 create body enforces to admins (no bypass actors)" test "$(jq -r 'if .bypass_actors == null then "MISSING" else (.bypass_actors | length) end' "${FX1}/go1/lastbody.json")" = "0"
+check "S3 create body carries no legacy bypass field" test "$(jq 'has("bypass")' "${FX1}/go1/lastbody.json")" = "false"
 check "S3 create body requires PR approval" test "$(jq -r '.rules[] | select(.type == "pull_request") | .parameters.required_approving_review_count' "${FX1}/go1/lastbody.json")" -eq "1"
 check "S3 log: read-back GET on the created ruleset" grep -q "GET repos/testorg/go1/rulesets/901$" "${FX1}/call.log"
 
@@ -698,6 +702,35 @@ for pack in go ts py starter; do
 done
 check "S16 all four pack templates exist" test -f "${ROOT_DIR}/ci_templates/github-ci-go.yml" -a -f "${ROOT_DIR}/ci_templates/github-ci-ts.yml" -a -f "${ROOT_DIR}/ci_templates/github-ci-py.yml" -a -f "${ROOT_DIR}/ci_templates/github-ci-starter.yml"
 check "S16 README records KB-409 as the required-check authority" grep -q "KB-409" "${ROOT_DIR}/ci_templates/README.md"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 17. Admin bypass on read-back: GET .../rulesets/{id} reports bypassers as
+#     bypass_actors; a ruleset coming back with bypass_actors set is NOT
+#     verified (typed step failure, artifact preserved)
+# ═════════════════════════════════════════════════════════════════════════════
+FX13="${WORK_ROOT}/fx13"
+make_fixtures "${FX13}"
+mkdir -p "${FX13}/go13"
+printf '{"default_branch": "main"}' >"${FX13}/go13/repo.json"
+printf '{"sha": "abc123"}' >"${FX13}/go13/head.json"
+green_checks "${FX13}/go13" "${GO_CTX}"
+printf '[]' >"${FX13}/go13/rulesets.json"
+canon_ruleset "${CTX_CONTRACT}" >"${FX13}/go13/post.json"
+canon_ruleset "${CTX_CONTRACT}" | jq '.bypass_actors = [{"actor_type": "OrganizationAdmin", "bypass_mode": "always"}]' >"${FX13}/go13/readback.json"
+
+mkdir -p "${WORK_ROOT}/runs13"
+printf '{}' >"${WORK_ROOT}/runs13/p13.json"
+P13="${WORK_ROOT}/protect13.sh"
+render_protect testorg '["go13"]' '[{"repo":"go13","pack":"go"}]' "${WORK_ROOT}/runs13/p13.json" "${P13}"
+P13_RC=0
+run_protect "${P13}" "${FX13}" "${WORK_ROOT}/p13.out" "${WORK_ROOT}/p13.err" || P13_RC=$?
+expect_count "S17 admin-bypass read-back exits NON-ZERO" 1 "${P13_RC}"
+check "S17 typed failure names the gate" grep -qi 'protect_failed' "${WORK_ROOT}/p13.err"
+check "S17 typed failure names the artifact path" grep -qF "${WORK_ROOT}/runs13/protection.json" "${WORK_ROOT}/p13.err"
+check "S17 artifact was still written and preserved" test -f "${WORK_ROOT}/runs13/protection.json"
+check "S17 artifact records the verify mismatch" jq -e '.summary.verify_mismatch_total == 1 and .repos[0].status != "verified"' "${WORK_ROOT}/runs13/protection.json" >/dev/null
+check "S17 row is error with no protection object" jq -e '.repos[0].status == "error" and .repos[0].protection == null' "${WORK_ROOT}/runs13/protection.json" >/dev/null
+check "S17 mismatch is typed and names the actor" jq -e '.repos[0].errors[0].surface == "ruleset_readback_verify" and (.repos[0].errors[0].detail | test("OrganizationAdmin"))' "${WORK_ROOT}/runs13/protection.json" >/dev/null
 
 if [ "${FAILURES}" -gt 0 ]; then
     echo "FAILED: ${FAILURES} assertion(s)" >&2
