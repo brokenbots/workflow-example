@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — codeql_triage step (KB-409, ADR-0015 Lane B, waves 5+6).
+#
+# The budgeted CodeQL backlog triage loop. The workflow OWNS the CodeQL
+# backlog: every run enumerates the open code-scanning alerts across the
+# sweep scope and executes the TYPED triage plan against it — dispositions
+# are pre-decided in the plan binding (fix | suppress), never re-derived at
+# run time:
+#
+#   suppress — typed dismissal: the alert is closed via the code-scanning
+#              alerts API with a typed dismissed_reason (false_positive |
+#              wont_fix | used_in_tests | used_in_docs) and a dismissed
+#              comment carrying the typed suppression + rationale, then READ
+#              BACK to verify the alert is actually dismissed. Budgeted: at
+#              most CODEQL_TRIAGE_BUDGET dismissal executions per run, in
+#              plan declaration order.
+#   fix      — the alert closes when its code fix lands through the standard
+#              pipeline (the fix is not authored here); the loop records the
+#              row as fix_pending, never acts, and burns no budget. When the
+#              fix has landed the alert is simply no longer open in the fresh
+#              enumeration and the row resolves as already_resolved.
+#
+# Open alerts WITHOUT a plan row are report-only (unplanned rows): nothing is
+# widened, nothing is re-triaged at run time, the backlog report stays the
+# honest deliverable. A plan row may never target a repo outside the sweep
+# scope (config failure, fails loud before any network call).
+#
+# Per-disposition failures (a rejected PATCH, a read-back that still shows
+# the alert open) are bookkeeping rows, not step failures — the next run's
+# budget retries them. Plan rows naming a rule the live alert no longer
+# carries are skipped as rule_mismatch (stale evidence is never dismissed).
+# The step FAILS only on config/structural problems: bad plan shape, plan
+# rows outside the sweep scope, duplicate (repo, alert_number) rows, bad
+# budget, missing run anchor, or a failed structural self-check.
+#
+# The artifact lands beside the run's classification evidence (the sweep-run
+# dir the classify/act/merge steps already use): <run dir>/codeql_triage.json
+#
+# stdout carries ONLY the artifact path; diagnostics go to stderr. All gh
+# traffic runs under the spliced gh_retry wrapper with the adapter-injected
+# GH_TOKEN (the workflow identity — brokenbot merges, this step never does).
+set -euo pipefail
+
+# KB-219: the shared retry wrapper is spliced as raw content (file() returns
+# the file's content, not a path) and installs the gh drop-in shadow, so
+# every gh call below is transport-wrapped exactly like the collect sweep.
+{{ .gh_retry }}
+
+ORG={{ .org | shellquote }}
+REPOS_JSON={{ .repos_json | shellquote }}
+PLAN_JSON={{ .plan_json | shellquote }}
+BUDGET={{ .budget | shellquote }}
+ANCHOR_PATH={{ .classification_file | shellquote }}
+
+log() { printf 'triage: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'codeql_triage_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  rm -rf "$RAW_DIR"
+  rm -f "$RUN_DIR/.triage.rows.ndjson" \
+        "$RUN_DIR/.triage.records.ndjson" \
+        "$RUN_DIR/.triage.selfcheck.$$.err" \
+        "$RUN_DIR/.triage.selfcheck.$$.out" \
+        "$RUN_DIR/.triage.compose.$$.err" \
+        "$RUN_DIR/.triage.compose.$$.tmp" \
+        "$RUN_DIR/.triage.body.$$.json"
+}
+
+# ---------------------------------------------------------------------------
+# Config validation (fail loud, before any network call)
+# ---------------------------------------------------------------------------
+[ -n "$ANCHOR_PATH" ] || fail "classification_file anchor is empty (graph misbinding)"
+[ -f "$ANCHOR_PATH" ] || fail "run anchor not found: $ANCHOR_PATH"
+case "$ANCHOR_PATH" in
+  *..*) fail "run anchor path must not contain '..' components: $ANCHOR_PATH" ;;
+esac
+
+jq -e -n --arg v "$ORG" '($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+  fail "org must match ^[A-Za-z0-9][A-Za-z0-9-]{0,99}\$ (got: $(printf '%s' "$ORG" | head -c 40))"
+
+case "$BUDGET" in
+  ''|*[!0-9]*) fail "codeql_triage budget must be a positive integer (got: $(printf '%s' "$BUDGET" | head -c 20))" ;;
+esac
+[ "$BUDGET" -ge 1 ] || fail "codeql_triage budget must be >= 1 (got: $BUDGET)"
+[ "$BUDGET" -le 1000 ] || fail "codeql_triage budget must be <= 1000 (got: $BUDGET)"
+
+printf '%s' "$REPOS_JSON" | jq -e 'type == "array" and (length >= 1)' >/dev/null 2>&1 ||
+  fail "repos_json must be a non-empty array (a sweep can never silently widen scope)"
+while IFS= read -r r; do
+  [ -n "$r" ] || fail "repos_json contains an empty repo name"
+  jq -e -n --arg v "$r" '($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"))' >/dev/null 2>&1 ||
+    fail "repo name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\$ (got: $(printf '%s' "$r" | head -c 40))"
+done <<EOF2
+$(printf '%s' "$REPOS_JSON" | jq -r '.[]')
+EOF2
+
+# Typed triage plan (KB-409): pre-decided dispositions executed verbatim.
+printf '%s' "$PLAN_JSON" | jq -e '
+  (type == "array") and
+  (all(.[];
+      ((.repo? | type) == "string") and (.repo | length > 0) and
+      ((.alert_number? | type) == "number") and (.alert_number >= 1) and (.alert_number <= 999999) and
+      ((.rule_id? | type) == "string") and (.rule_id | length > 0) and (.rule_id | length <= 200) and
+      (.disposition | IN("fix", "suppress")) and
+      ((.rationale? | type) == "string") and (.rationale | length > 0) and (.rationale | length <= 2000) and
+      ((.dismissed_reason? // "") | IN("", "false_positive", "wont_fix", "used_in_tests", "used_in_docs")) and
+      ((.disposition == "suppress") or ((.dismissed_reason? // "") == "")) and
+      ((.disposition == "fix") or ((.dismissed_reason? // "") != ""))))
+' >/dev/null 2>&1 || fail "codeql triage plan failed its shape check (see variables.chcl schema)"
+
+# Duplicate (repo, alert_number) rows would make the recorded decision
+# ambiguous — the plan is the decision set, so ambiguity is a config failure.
+printf '%s' "$PLAN_JSON" | jq -e '
+  ([.[] | "\(.repo)/\(.alert_number)"] | length) ==
+  ([.[] | "\(.repo)/\(.alert_number)"] | unique | length)
+' >/dev/null 2>&1 || fail "triage plan carries duplicate (repo, alert_number) rows"
+
+# The plan may never widen the sweep scope.
+while IFS= read -r pr; do
+  [ -n "$pr" ] || continue  # empty plan renders as a single blank heredoc line
+  printf '%s' "$REPOS_JSON" | jq -e --arg pr "$pr" '[.[]] | index($pr) != null' >/dev/null 2>&1 ||
+    fail "plan row targets repo outside the sweep scope: $pr"
+done <<EOF2
+$(printf '%s' "$PLAN_JSON" | jq -r '[.[].repo] | unique | .[]')
+EOF2
+
+RUN_DIR="$(dirname "$ANCHOR_PATH")"
+TRIAGE_PATH="$RUN_DIR/codeql_triage.json"
+RAW_DIR="$RUN_DIR/.triage.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+trap cleanup EXIT
+
+err_text() {
+  if [ ! -s "$1" ]; then
+    printf '<no stderr>'
+  else
+    grep -v '^gh_retry: ' "$1" | head -c 200 || true
+  fi
+}
+
+mkdir -p "$RAW_DIR"
+: >"$RUN_DIR/.triage.rows.ndjson"
+: >"$RUN_DIR/.triage.records.ndjson"
+
+# ---------------------------------------------------------------------------
+# CodeQL open-alert enumeration per repo (0 ok / 1 disabled / 2 error)
+# Sets CQ_OPEN: flattened rows {number, rule_id, severity}.
+# ---------------------------------------------------------------------------
+codeql_enumerate() {
+  local repo="$1" out rc
+  out="$(gh api "repos/$ORG/$repo/code-scanning/alerts?state=open&per_page=100&tool_name=CodeQL" --paginate 2>"$RAW_DIR/enum.$repo.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/enum.$repo.tmp" "$RAW_DIR/enum.$repo.err" 2>/dev/null || true
+    if grep -qiE '404|not enabled|not found' "$RAW_DIR/enum.$repo.err" 2>/dev/null; then
+      # 404 lane: CodeQL not enabled for this repo — nothing to triage here,
+      # recorded as disabled (never surfaced as a workflow error).
+      return 1
+    fi
+    log "code-scanning alerts API failed rc=$rc: $(err_text "$RAW_DIR/enum.$repo.err")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/enum.$repo.tmp"
+  # --paginate may emit multiple concatenated JSON docs (one per page);
+  # flatten the outer -s stream of docs first so rows are per-alert.
+  CQ_OPEN="$(printf '%s' "$out" | jq -s -c '[.[].[]? | {number: .number, rule_id: (.rule.id // ""), severity: (.rule.security_severity_level // null)}]' 2>/dev/null)"
+  [ -n "$CQ_OPEN" ] || CQ_OPEN='[]'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Read back ONE alert (0 ok with ALERT_STATE set / 1 failure)
+# ---------------------------------------------------------------------------
+alert_readback() {
+  local repo="$1" num="$2" out rc
+  out="$(gh api "repos/$ORG/$repo/code-scanning/alerts/$num" 2>"$RAW_DIR/rb.$repo.$num.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/rb.$repo.$num.tmp" "$RAW_DIR/rb.$repo.$num.err" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$RAW_DIR/rb.$repo.$num.tmp"
+  ALERT_STATE="$(printf '%s' "$out" | jq -r '.state // ""' 2>/dev/null)"
+  [ -n "$ALERT_STATE" ] || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Triage execution
+# ---------------------------------------------------------------------------
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+SOURCES_REPO="$(printf '%s' "$REPOS_JSON" | jq -r '.[]')"
+
+PLAN_COUNT="$(printf '%s' "$PLAN_JSON" | jq 'length')"
+log "triage plan: $PLAN_COUNT row(s), budget $BUDGET suppression(s) per run"
+
+summary_executed=0
+summary_failed=0
+summary_fix_pending=0
+summary_already_resolved=0
+summary_out_of_budget=0
+summary_rule_mismatch=0
+summary_unplanned=0
+summary_repo_disabled_rows=0
+summary_repo_error_rows=0
+
+repos_failed_total=0
+open_after_total=0
+open_before_total=0
+
+# The budget is enforced PER RUN across the whole sweep: one counter, initialised
+# once here. summary.budget_used is read from the executed-count at the end.
+budget_used=0
+
+for repo in $SOURCES_REPO; do
+  log "repo $repo: enumerating open CodeQL alerts"
+
+  open_alerts_json='[]'
+  alerts_before=0
+  alerts_after=0
+  repo_cq_status="ok"
+  : >"$RAW_DIR/err.$repo.rows"
+
+  if codeql_enumerate "$repo"; then
+    repo_cq_status="ok"
+  else
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      repo_cq_status="disabled"
+      log "repo $repo: CodeQL not enabled (404); nothing triaged here"
+    else
+      repo_cq_status="error"
+      repos_failed_total=$((repos_failed_total + 1))
+      printf '%s\n' "$(jq -cn --arg s "codeql" --arg d "code-scanning alerts API failed: $(err_text "$RAW_DIR/enum.$repo.err")" '{surface: $s, detail: $d}')" >>"$RAW_DIR/err.$repo.rows"
+    fi
+  fi
+
+  if [ "$repo_cq_status" = "ok" ]; then
+    alerts_before="$(printf '%s' "$CQ_OPEN" | jq '[.[] | .number] | unique | length')"
+    open_before_total=$((open_before_total + alerts_before))
+    open_alerts_json="$CQ_OPEN"
+  fi
+
+  # Plan rows for THIS repo execute in declaration order; the budget is ONE
+  # per-run counter (caps suppression executions across the whole sweep, not
+  # per repo — see the contract in the header and variables.chcl).
+  plan_repo_rows="$(printf '%s' "$PLAN_JSON" | jq -c --arg repo "$repo" '[.[] | select(.repo == $repo)]')"
+  open_numbers_json="$(printf '%s' "$open_alerts_json" | jq -c '[.[] | .number]')"
+
+  while IFS= read -r prow; do
+    [ -n "$prow" ] || continue
+    prow_repo="$(printf '%s' "$prow" | jq -r '.repo')"
+    prow_num="$(printf '%s' "$prow" | jq -r '.alert_number')"
+    prow_rule="$(printf '%s' "$prow" | jq -r '.rule_id')"
+    prow_disp="$(printf '%s' "$prow" | jq -r '.disposition')"
+    prow_reason="$(printf '%s' "$prow" | jq -r '.dismissed_reason // ""')"
+    prow_rationale="$(printf '%s' "$prow" | jq -r '.rationale')"
+
+    row_out() {
+      jq -cn \
+        --arg repo "$prow_repo" \
+        --argjson number "$prow_num" \
+        --arg rule "$prow_rule" \
+        --arg disp "$prow_disp" \
+        --arg result "$1" \
+        --arg readback "$2" \
+        --arg note "$3" \
+        --arg rationale "$prow_rationale" \
+        --arg reason "$4" \
+        '{repo: $repo, alert_number: $number, rule_id: $rule, disposition: $disp,
+          result: $result, readback_state: (if $readback == "" then null else $readback end),
+          rationale: $rationale, note: $note,
+          dismissed_reason: (if $reason == "" then null else $reason end)}'
+    }
+
+    case "$repo_cq_status" in
+      disabled)
+        # CodeQL disabled: no CodeQL alert can exist here. The row keeps its
+        # recorded disposition but cannot be observed — never acted on.
+        summary_repo_disabled_rows=$((summary_repo_disabled_rows + 1))
+        row_out "repo_codeql_disabled" "" "CodeQL is not enabled for this repo; no alert can be open here" "" >>"$RUN_DIR/.triage.rows.ndjson"
+        continue ;;
+      error)
+        summary_repo_error_rows=$((summary_repo_error_rows + 1))
+        row_out "repo_enumeration_failed" "" "open-alert enumeration failed; recorded disposition not executed" "" >>"$RUN_DIR/.triage.rows.ndjson"
+        continue ;;
+    esac
+
+    # Is the planned alert still open in the fresh enumeration?
+    open_here="$(printf '%s' "$open_numbers_json" | jq --argjson n "$prow_num" '[.[] | select(. == $n)] | length')"
+    if [ "$open_here" -eq 0 ]; then
+      summary_already_resolved=$((summary_already_resolved + 1))
+      row_out "already_resolved" "" "alert is no longer open in the fresh enumeration" "" >>"$RUN_DIR/.triage.rows.ndjson"
+      continue
+    fi
+
+    if [ "$prow_disp" = "fix" ]; then
+      # The fix rides the standard pipeline; the loop records the pending row
+      # and never acts (a code fix closes the alert by re-scan when it lands).
+      summary_fix_pending=$((summary_fix_pending + 1))
+      row_out "fix_pending" "open" "fix rides the standard pipeline; the alert closes by re-scan when it lands" "" >>"$RUN_DIR/.triage.rows.ndjson"
+      continue
+    fi
+
+    # --- suppress arm -------------------------------------------------------
+    # Typed suppression-with-rationale. The plan row must still name the SAME
+    # rule the live alert carries — a stale plan never dismisses evidence it
+    # was not written against.
+    live_rule="$(printf '%s' "$open_alerts_json" | jq -r --argjson n "$prow_num" '.[] | select(.number == $n) | .rule_id')"
+    if [ "$live_rule" != "$prow_rule" ]; then
+      summary_rule_mismatch=$((summary_rule_mismatch + 1))
+      row_out "rule_mismatch" "open" "plan names rule $prow_rule; live alert carries rule $live_rule; not dismissed on stale evidence" "" >>"$RUN_DIR/.triage.rows.ndjson"
+      continue
+    fi
+
+    if [ "$budget_used" -ge "$BUDGET" ]; then
+      summary_out_of_budget=$((summary_out_of_budget + 1))
+      row_out "out_of_budget" "open" "suppression budget exhausted for this run; retried next run in plan order" "" >>"$RUN_DIR/.triage.rows.ndjson"
+      continue
+    fi
+
+    # GitHub caps code-scanning dismissed_comment at 280 characters. The typed
+    # prefix length varies with rule id / alert number / dismissed_reason, so
+    # the rationale room is computed from the COMPOSED prefix; only the
+    # rationale may be shortened, and the truncation is visible end-marked.
+    sup_comment_max=280
+    sup_trunc='...[truncated]'
+    sup_prefix="devops_maint_v1 codeql-triage: typed suppression - rule: $prow_rule; alert: #$prow_num; dismissed_reason: $prow_reason; rationale: "
+    sup_room=$((sup_comment_max - ${#sup_prefix}))
+    if [ "$sup_room" -lt "${#sup_trunc}" ]; then
+      # The typed prefix alone cannot fit the API cap: config-level failure,
+      # loud, before any mutation (the full rationale would never converge
+      # through a permanently-422ing dismissal).
+      fail "dismissed_comment typed prefix is ${#sup_prefix} characters (API cap $sup_comment_max); record the suppression with a shorter rule_id"
+    fi
+    if [ ${#prow_rationale} -le "$sup_room" ]; then
+      sup_rationale="$prow_rationale"
+    else
+      sup_rationale="${prow_rationale:0:$((sup_room - ${#sup_trunc}))}${sup_trunc}"
+    fi
+    sup_comment="${sup_prefix}${sup_rationale}"
+    [ ${#sup_comment} -le "$sup_comment_max" ] || fail "composed dismissed_comment exceeds $sup_comment_max characters (structural)"
+
+    DISMISS_BODY="$(jq -cn --arg reason "$prow_reason" --arg comment "$sup_comment" \
+      '{state: "dismissed", dismissed_reason: $reason, dismissed_comment: $comment}')"
+    # The PATCH body must live in a REAL file: gh_retry re-executes the same
+    # argv on a transient retry, and a process-substitution fd is already
+    # consumed by attempt 1 (a retried dismissal would send an empty body).
+    triage_body_file="$RUN_DIR/.triage.body.$$.json"
+    printf '%s' "$DISMISS_BODY" >"$triage_body_file"
+    if gh api --method PATCH "repos/$ORG/$repo/code-scanning/alerts/$prow_num" \
+        -H "Accept: application/vnd.github+json" \
+        --input "$triage_body_file" >/dev/null 2>"$RAW_DIR/dismiss.$repo.$prow_num.tmp"; then
+      rm -f "$triage_body_file" "$RAW_DIR/dismiss.$repo.$prow_num.tmp"
+      if alert_readback "$repo" "$prow_num"; then
+        if [ "$ALERT_STATE" = "dismissed" ]; then
+          budget_used=$((budget_used + 1))
+          summary_executed=$((summary_executed + 1))
+          row_out "dismissed" "$ALERT_STATE" "" "$prow_reason" >>"$RUN_DIR/.triage.rows.ndjson"
+        else
+          # Read-back must show the dismissal; if it does not, the dismissal
+          # did not take effect and the budget row is NOT consumed.
+          summary_failed=$((summary_failed + 1))
+          row_out "readback_mismatch" "$ALERT_STATE" "read-back after dismissal did not show dismissed; not counted against budget" "" >>"$RUN_DIR/.triage.rows.ndjson"
+        fi
+      else
+        summary_failed=$((summary_failed + 1))
+        rb_note="$(err_text "$RAW_DIR/rb.$repo.$prow_num.err" 2>/dev/null || printf '<no stderr>')"
+        row_out "readback_failed" "" "alert read-back failed: $rb_note" "" >>"$RUN_DIR/.triage.rows.ndjson"
+      fi
+    else
+      rm -f "$triage_body_file"
+      summary_failed=$((summary_failed + 1))
+      dm_note="$(err_text "$RAW_DIR/dismiss.$repo.$prow_num.tmp" 2>/dev/null || printf '<no stderr>')"
+      row_out "dismiss_failed" "open" "dismissal PATCH failed: $dm_note" "" >>"$RUN_DIR/.triage.rows.ndjson"
+    fi
+  done <<EOF2
+$(printf '%s' "$plan_repo_rows" | jq -c '.[]')
+EOF2
+
+  # Unplanned open alerts: report-only rows (the loop never widens scope).
+  while IFS= read -r arow; do
+    [ -n "$arow" ] || continue
+    arow_num="$(printf '%s' "$arow" | jq -r '.number')"
+    planned="$(printf '%s' "$PLAN_JSON" | jq --arg repo "$repo" --argjson n "$arow_num" '[.[] | select(.repo == $repo and .alert_number == $n)] | length')"
+    [ "$planned" -gt 0 ] && continue
+    arow_rule="$(printf '%s' "$arow" | jq -r '.rule_id')"
+    arow_sev="$(printf '%s' "$arow" | jq -r '.severity // "other"')"
+    summary_unplanned=$((summary_unplanned + 1))
+    jq -cn --arg repo "$repo" --argjson number "$arow_num" --arg rule "$arow_rule" --arg sev "$arow_sev" \
+      '{repo: $repo, alert_number: $number, rule_id: $rule, disposition: null,
+        result: "unplanned", readback_state: "open", severity: $sev,
+        rationale: null, note: "open alert with no triage plan row; report-only"}' >>"$RUN_DIR/.triage.rows.ndjson"
+  done <<EOF2
+$(printf '%s' "$open_alerts_json" | jq -c '.[]')
+EOF2
+
+  # Fresh open count after this run's actions (the hold-at-zero signal). A
+  # re-enumeration failure here leaves alerts_after at 0 but flips the repo
+  # to the error lane so the summary cannot overclaim held-at-zero.
+  if [ "$repo_cq_status" = "ok" ]; then
+    if codeql_enumerate "$repo"; then
+      alerts_after="$(printf '%s' "$CQ_OPEN" | jq '[.[] | .number] | unique | length')"
+    else
+      repo_cq_status="error"
+      repos_failed_total=$((repos_failed_total + 1))
+      printf '%s\n' "$(jq -cn --arg s "codeql" --arg d "post-run re-enumeration failed: held_at_zero cannot be claimed" '{surface: $s, detail: $d}')" >>"$RAW_DIR/err.$repo.rows"
+    fi
+    open_after_total=$((open_after_total + alerts_after))
+  fi
+  log "repo $repo: open before=$alerts_before after=$alerts_after"
+
+  if [ -s "$RAW_DIR/err.$repo.rows" ]; then
+    err_json="$(jq -s -c '.' "$RAW_DIR/err.$repo.rows")"
+  else
+    err_json='[]'
+  fi
+
+  jq -cn \
+    --arg repo "$repo" \
+    --arg status "$repo_cq_status" \
+    --argjson alerts_before "$alerts_before" \
+    --argjson alerts_after "$alerts_after" \
+    --argjson open_before_rows "$(if [ "$repo_cq_status" = "ok" ]; then printf '%s' "$open_alerts_json"; else printf '[]'; fi)" \
+    --argjson dispositions "$(jq -s -c --arg repo "$repo" '[.[] | select(.repo == $repo)]' "$RUN_DIR/.triage.rows.ndjson")" \
+    --argjson errors "$err_json" \
+    '{
+      repo: $repo,
+      codeql_status: $status,
+      alerts_before: $alerts_before,
+      alerts_after: $alerts_after,
+      open_alerts: $open_before_rows,
+      dispositions: $dispositions,
+      errors: $errors
+    }' >>"$RUN_DIR/.triage.records.ndjson" ||
+    fail "failed to compose repo record for $repo"
+done
+
+# ---------------------------------------------------------------------------
+# Final artifact
+# ---------------------------------------------------------------------------
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+jq -s \
+  --arg s_start "$started_at" \
+  --arg s_finish "$finished_at" \
+  --arg s_org "$ORG" \
+  --argjson s_repos "$REPOS_JSON" \
+  --argjson s_budget "$BUDGET" \
+  --argjson s_plan "$PLAN_JSON" \
+  --arg s_executed "$summary_executed" \
+  --arg s_failed "$summary_failed" \
+  --arg s_fix_pending "$summary_fix_pending" \
+  --arg s_already_resolved "$summary_already_resolved" \
+  --arg s_out_of_budget "$summary_out_of_budget" \
+  --arg s_rule_mismatch "$summary_rule_mismatch" \
+  --arg s_unplanned "$summary_unplanned" \
+  --arg s_repo_disabled_rows "$summary_repo_disabled_rows" \
+  --arg s_repo_error_rows "$summary_repo_error_rows" \
+  '
+  . as $repos
+  | {
+      schema: "devops_maint_v1.codeql_triage.v1",
+      run: {
+        started_at: $s_start,
+        finished_at: $s_finish,
+        org: $s_org,
+        repos: $s_repos,
+        triage_plan: $s_plan,
+        budget: $s_budget
+      },
+      summary: {
+        repos_total: ($s_repos | length),
+        repos_ok: ([$repos[] | select(.codeql_status == "ok")] | length),
+        repos_disabled: ([$repos[] | select(.codeql_status == "disabled")] | length),
+        repos_error: ([$repos[] | select(.codeql_status == "error")] | length),
+        alerts_open_total_before: ([$repos[] | .alerts_before] | add // 0),
+        alerts_open_total_after: ([$repos[] | .alerts_after] | add // 0),
+        suppressions_executed: ($s_executed | tonumber),
+        suppressions_failed: ($s_failed | tonumber),
+        fix_pending_total: ($s_fix_pending | tonumber),
+        already_resolved_total: ($s_already_resolved | tonumber),
+        out_of_budget_total: ($s_out_of_budget | tonumber),
+        rule_mismatch_total: ($s_rule_mismatch | tonumber),
+        unplanned_total: ($s_unplanned | tonumber),
+        repo_disabled_rows_total: ($s_repo_disabled_rows | tonumber),
+        repo_error_rows_total: ($s_repo_error_rows | tonumber),
+        budget: $s_budget,
+        budget_used: ($s_executed | tonumber),
+        held_at_zero: (([$repos[] | select(.codeql_status == "error")] | length) == 0 and
+                       ([$repos[] | .alerts_after] | add // 0) == 0)
+      },
+      repos: $repos
+    }
+  ' "$RUN_DIR/.triage.records.ndjson" >"$RUN_DIR/.triage.compose.$$.tmp" 2>"$RUN_DIR/.triage.compose.$$.err" ||
+    fail "failed to compose final artifact: $(err_text "$RUN_DIR/.triage.compose.$$.err")"
+mv "$RUN_DIR/.triage.compose.$$.tmp" "$TRIAGE_PATH"
+
+# ---------------------------------------------------------------------------
+# Structural self-check (fail loud — a malformed artifact is a broken loop)
+# ---------------------------------------------------------------------------
+jq -e --argjson budget "$BUDGET" --argjson plan "$PLAN_JSON" '
+  (.schema == "devops_maint_v1.codeql_triage.v1") and
+  (.run.budget == $budget) and (.run.triage_plan == $plan) and
+  (.run.org | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$")) and
+  (.run.started_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+  (.run.finished_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+  (.summary.budget_used <= .summary.budget) and
+  (.summary.budget_used == .summary.suppressions_executed) and
+  (.summary.repos_total == (.repos | length)) and
+  (.summary.repos_ok == ([.repos[] | select(.codeql_status == "ok")] | length)) and
+  (.summary.repos_disabled == ([.repos[] | select(.codeql_status == "disabled")] | length)) and
+  (.summary.repos_error == ([.repos[] | select(.codeql_status == "error")] | length)) and
+  (.summary.alerts_open_total_after == ([.repos[] | .alerts_after] | add // 0)) and
+  (.summary.alerts_open_total_before == ([.repos[] | .alerts_before] | add // 0)) and
+  (.summary.suppressions_executed == ([.repos[].dispositions[]? | select(.result == "dismissed")] | length)) and
+  (.summary.fix_pending_total == ([.repos[].dispositions[]? | select(.result == "fix_pending")] | length)) and
+  (.summary.unplanned_total == ([.repos[].dispositions[]? | select(.result == "unplanned")] | length)) and
+  (.summary.out_of_budget_total == ([.repos[].dispositions[]? | select(.result == "out_of_budget")] | length)) and
+  (.summary.rule_mismatch_total == ([.repos[].dispositions[]? | select(.result == "rule_mismatch")] | length)) and
+  (.summary.held_at_zero == (([.repos[] | select(.codeql_status == "error")] | length) == 0 and
+                              ([.repos[] | .alerts_after] | add // 0) == 0)) and
+  ([.repos[] |
+      ((.codeql_status | IN("ok", "disabled", "error"))) and
+      ((.alerts_before | type) == "number") and (.alerts_before >= 0) and
+      ((.alerts_after | type) == "number") and (.alerts_after >= 0) and
+      ((.dispositions | type) == "array") and
+      all(.dispositions[];
+          ((.repo | type) == "string") and
+          (.result | IN("dismissed", "readback_mismatch", "readback_failed", "dismiss_failed",
+                        "fix_pending", "already_resolved", "out_of_budget", "rule_mismatch",
+                        "unplanned", "repo_codeql_disabled", "repo_enumeration_failed")))] | all)
+' "$TRIAGE_PATH" >"$RUN_DIR/.triage.selfcheck.$$.out" 2>"$RUN_DIR/.triage.selfcheck.$$.err" ||
+  fail "artifact failed its structural self-check: $(err_text "$RUN_DIR/.triage.selfcheck.$$.err")"
+rm -f "$RUN_DIR/.triage.selfcheck.$$.out"
+
+held="false"
+if [ "$repos_failed_total" -eq 0 ] && [ "$open_after_total" -eq 0 ]; then held="true"; fi
+log "codeql triage complete: executed=$summary_executed failed=$summary_failed fix_pending=$summary_fix_pending unplanned=$summary_unplanned open_after=$open_after_total held_at_zero=$held"
+printf '%s\n' "$TRIAGE_PATH"
