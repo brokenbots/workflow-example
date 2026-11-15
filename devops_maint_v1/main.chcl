@@ -1,14 +1,15 @@
-// devops_maint_v1 — Lane A: classify/route/act graph (KB-407, ADR-0015 wave 2).
+// devops_maint_v1 — Lane A classify/route/act + Lane B protect/triage graph
+// (KB-407 + KB-409, ADR-0015 waves 2–6).
 //
 // ADR-0015 deviates here by design: D1 interposes a separate "review" node
 // between act and merge; this graph realizes it as the pre-existing GitHub
 // reviewDecision == APPROVED gate inside the merge lane (KB-407, coordinator
 // note 2026-11-15).
 //
-// Wave 2 of the devops_maint_v1 series (anchor KB-405, predecessor KB-406):
-// the wave-1 collect step stays byte-compatible and is extended into a
-// 6-step graph — every step deterministic shell except the one decision-
-// adapter gate that rules on the automatable plan:
+// Wave 4 of the devops_maint_v1 series (anchor KB-405, predecessors
+// KB-406/407/408): the wave-1 collect step stays byte-compatible and is
+// extended into an 8-step graph — every step deterministic shell except the
+// one decision-adapter gate that rules on the automatable plan:
 //
 //   collect       (shell)    normalized inventory sweep               [KB-406]
 //   classify      (shell)    deterministic buckets + consolidation:
@@ -29,6 +30,18 @@
 //                            merge. The workflow identity (collect/act) and
 //                            the brokenbot identity (merge) are different
 //                            tokens by design (ADR-0015: separate lanes).
+//   protect       (shell)    Lane B (KB-409): branch-protection application
+//                            AFTER per-repo CI green — NEVER protection-
+//                            without-signal. Applied rulesets are verified
+//                            by API read-back (enforcement, bypass empty,
+//                            exact required contexts); a read-back that
+//                            does not match the contract is a typed failure.
+//   codeql_triage (shell)    Lane B (KB-409): the budgeted CodeQL backlog
+//                            triage loop — typed dispositions (fix |
+//                            suppress-with-rationale) executed verbatim,
+//                            fix rows riding the standard pipeline, and the
+//                            post-run open-alert count as the hold-at-zero
+//                            signal.
 //
 // Determinism contract (ADR-0015 D1/D2): buckets and the consolidated plan
 // come from pure jq in classify — identical inventories classify identically.
@@ -143,6 +156,39 @@ data "internal" "merge_file" {
 // Typed failure line when the merge step fails (with the evidence-artifact
 // path when a gated merge failed).
 data "internal" "merge_error" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the protection artifact (per-repo signal + ruleset rows
+// with read-back verification); the Lane B protect step's deliverable.
+data "internal" "protection_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the protect step fails. Per-repo signal
+// enumeration/apply failures are bookkeeping rows inside the protection
+// artifact; the step itself fails on config problems or a read-back that
+// does not match the contract (the artifact is preserved and named in the
+// line).
+data "internal" "protection_error" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the CodeQL triage artifact (per-repo open-alert snapshots,
+// disposition rows, and the post-run open count — the hold-at-zero signal).
+data "internal" "codeql_triage_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the codeql_triage step fails. Per-disposition
+// failures are bookkeeping rows inside the triage artifact; the step itself
+// fails on config problems (bad plan, out-of-scope rows, duplicate rows) or
+// a failed structural self-check.
+data "internal" "codeql_triage_error" {
     type  = string
     value = ""
 }
@@ -342,7 +388,7 @@ step "merge" {
         })
     }
     outcome "success" {
-        next = state.completed
+        next = step.protect
         write {
             target = data.internal.merge_file.value
             value  = trimspace(output.stdout)
@@ -352,6 +398,73 @@ step "merge" {
         next = state.merge_failed
         write {
             target = data.internal.merge_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// Lane B protection application: branch-protection rulesets applied AFTER the
+// per-repo CI signal is green (NEVER protection-without-signal), each
+// application verified by API read-back against the exact contract.
+step "protect" {
+    target  = adapter.shell.protect
+    timeout = "1800s"
+    input {
+        command = templatefile("./scripts/protect_rulesets.sh.tftpl", {
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
+            org                 = var.org
+            repos_json          = jsonencode(var.repos)
+            plan_json           = jsonencode(var.protection_plan)
+            classification_file = data.internal.classification_file.value
+        })
+    }
+    outcome "success" {
+        next = step.codeql_triage
+        write {
+            target = data.internal.protection_file.value
+            // stdout carries ONLY the machine artifact path (exact trimmatch).
+            value = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.protect_failed
+        write {
+            target = data.internal.protection_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// Lane B budgeted CodeQL triage loop: typed plan dispositions executed
+// verbatim (fix rows ride the standard pipeline and burn no budget; suppress
+// rows are capped per run and read back), driving open alerts to zero and
+// holding there.
+step "codeql_triage" {
+    target  = adapter.shell.codeql_triage
+    timeout = "1800s"
+    input {
+        command = templatefile("./scripts/codeql_triage.sh.tftpl", {
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
+            org                 = var.org
+            repos_json          = jsonencode(var.repos)
+            plan_json           = jsonencode(var.codeql_triage_plan)
+            // shellquote takes strings only; format("%d", ...) is the
+            // number-to-string bridge the workstream_handler_v1 graph uses.
+            budget              = format("%d", var.codeql_triage_budget)
+            classification_file = data.internal.classification_file.value
+        })
+    }
+    outcome "success" {
+        next = state.completed
+        write {
+            target = data.internal.codeql_triage_file.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.codeql_triage_failed
+        write {
+            target = data.internal.codeql_triage_error.value
             value  = trimspace(output.stderr)
         }
     }
@@ -398,6 +511,16 @@ state "act_failed" {
 }
 
 state "merge_failed" {
+    terminal = true
+    success  = false
+}
+
+state "protect_failed" {
+    terminal = true
+    success  = false
+}
+
+state "codeql_triage_failed" {
     terminal = true
     success  = false
 }
@@ -477,4 +600,28 @@ output "merge_error" {
     description = "Typed failure line of the merge step (with the evidence-artifact path on a gated merge failure); empty on success."
     type        = string
     value       = data.internal.merge_error.value
+}
+
+output "protection_file" {
+    description = "Path of the protection artifact (per-repo signal + ruleset rows with read-back verification); empty when the protect step failed."
+    type        = string
+    value       = data.internal.protection_file.value
+}
+
+output "protection_error" {
+    description = "Typed failure line of the protect step; empty on success. Per-repo signal/apply failures live in the protection artifact; a read-back that did not match the contract fails the step with the preserved artifact path named here."
+    type        = string
+    value       = data.internal.protection_error.value
+}
+
+output "codeql_triage_file" {
+    description = "Path of the CodeQL triage artifact (per-repo open-alert snapshots, disposition rows, post-run open count); empty when the codeql_triage step failed."
+    type        = string
+    value       = data.internal.codeql_triage_file.value
+}
+
+output "codeql_triage_error" {
+    description = "Typed failure line of the codeql_triage step; empty on success. Per-disposition failures live in the triage artifact."
+    type        = string
+    value       = data.internal.codeql_triage_error.value
 }

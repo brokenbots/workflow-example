@@ -103,3 +103,41 @@ variable "brokenbot_github_token" {
     type        = string
     secret      = true
 }
+
+// ── Lane B (KB-409): protection + CodeQL triage ─────────────────────────────
+
+// Branch-protection application (AFTER per-repo CI green; NEVER
+// protection-without-signal). One row per repo to protect; the pack selects
+// the required status-check contexts from the KB-408 application contract.
+variable "protection_plan" {
+    description = "Repos to carry branch protection via the canonical devops-maintenance-protection ruleset. The pack (go|ts|py|starter) fixes the required status-check contexts. Applied only when the pack's required checks are green on the default-branch HEAD; a repo without a plan row is reported but never protected."
+    type        = list(object({
+        repo = string
+        pack = string
+    }))
+    default     = []
+}
+
+// Pre-decided CodeQL dispositions the triage loop executes verbatim (never
+// re-derived at run time). fix rows ride the standard pipeline (no budget);
+// suppress rows are typed dismissals capped by the per-run budget.
+variable "codeql_triage_plan" {
+    description = "Typed triage decisions for open CodeQL alerts: repo + alert_number + rule_id + disposition (fix | suppress) + rationale. A suppress row must carry dismissed_reason (false_positive | wont_fix | used_in_tests | used_in_docs). Rows outside the repos scope or duplicating (repo, alert_number) fail loud before any network call; open alerts without a row stay unplanned (report-only)."
+    type        = list(object({
+        repo             = string
+        alert_number     = number
+        rule_id          = string
+        disposition      = string
+        dismissed_reason = optional(string, "")
+        rationale        = string
+    }))
+    default     = []
+}
+
+// The backlog is driven to zero and HELD, not driven recklessly: at most this
+// many dismissal executions happen per run, in plan declaration order.
+variable "codeql_triage_budget" {
+    description = "Maximum CodeQL dismissal executions per run (suppression rows only; fix rows never consume budget). Keeps the triage loop budgeted."
+    type        = number
+    default     = 5
+}

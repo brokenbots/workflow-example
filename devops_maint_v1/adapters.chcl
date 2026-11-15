@@ -27,6 +27,14 @@ environment "shell" "merge" {
     working_directory = var.data_root
 }
 
+environment "shell" "protect" {
+    working_directory = var.data_root
+}
+
+environment "shell" "codeql_triage" {
+    working_directory = var.data_root
+}
+
 adapter "shell" "collect" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
@@ -72,6 +80,28 @@ adapter "shell" "merge" {
     environment = shell.merge
     secrets {
         GH_TOKEN = var.brokenbot_github_token
+    }
+}
+
+// Lane B protection application: workflow GitHub identity (ruleset writes +
+// read-back verification under the same secret channel as collect/act).
+adapter "shell" "protect" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.protect
+    secrets {
+        GH_TOKEN = var.workflow_github_token
+    }
+}
+
+// Lane B CodeQL triage loop: workflow GitHub identity (code-scanning alert
+// dismissal + read-back under the same secret channel as collect/act).
+adapter "shell" "codeql_triage" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.codeql_triage
+    secrets {
+        GH_TOKEN = var.workflow_github_token
     }
 }
 

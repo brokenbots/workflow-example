@@ -1,0 +1,589 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — protect step (KB-409, ADR-0015 Lane B, wave 3).
+#
+# Applies branch-protection rulesets AFTER per-repo CI is green — NEVER
+# protection-without-signal. The canonical ruleset (name
+# "devops-maintenance-protection") is created on a repo ONLY when the pack's
+# required status-check contexts are observed green (success, or skipping per
+# the KB-408 docs-only semantics) on the default-branch HEAD:
+#
+#   signal enumeration (default branch -> HEAD sha -> check runs) FAILED
+#     -> error row, NO ruleset call (an evidence gap never protects)
+#   signal red / contexts missing  + no canonical ruleset
+#     -> deferred row, NO ruleset call (protection-without-signal is barred)
+#   signal green
+#     -> upsert (create or heal an existing drifted ruleset to the contract)
+#        + API read-back verification -> verified row
+#   signal red + canonical ruleset ALREADY present
+#     -> no NEW protection is applied; the existing ruleset is re-verified
+#        against the contract by read-back (maintained, not created; a drift
+#        is healed with an upsert). Verified rows record the signal truth.
+#
+# READ-BACK IS THE COMPLIANCE GATE (ADR-0015 D4): every application is
+# verified by a GET rulesets/{id} read-back asserting the exact contract —
+# enforcement "active", branch target, EMPTY bypass list (enforced to
+# admins), default-branch ref condition, the pull_request rule, and the
+# EXACT required status-check context set for the pack. A read-back that
+# does not match the contract is a typed step FAILURE (protect_failed) with
+# the evidence artifact preserved and its path named in the failure line —
+# a run must never mark a repo compliant on unverifiable state.
+#
+# The ruleset lives in this workflow's own namespace: matching by exact name
+# means pre-existing rulesets owned by others are read, never modified. The
+# pack context table lives here and must match ci_templates (the suite
+# cross-checks it against ci_templates/README.md and the job names).
+#
+# Plan validation (fail loud, before any network call): non-empty plan, pack
+# in {go, ts, py, starter}, repo names well-formed, plan repos within the
+# sweep scope, no duplicate repos. Repos of the sweep WITHOUT a plan row are
+# reported (unplanned rows) — staged rollout is allowed and honest.
+#
+# The artifact lands beside the run's classification evidence:
+# <run dir>/protection.json
+#
+# stdout carries ONLY the artifact path; diagnostics go to stderr.
+set -euo pipefail
+
+# KB-219: the shared retry wrapper is spliced as raw content (file() returns
+# the file's content, not a path) and installs the gh drop-in shadow, so
+# every gh call below is transport-wrapped exactly like the collect sweep.
+{{ .gh_retry }}
+
+ORG={{ .org | shellquote }}
+REPOS_JSON={{ .repos_json | shellquote }}
+PLAN_JSON={{ .plan_json | shellquote }}
+ANCHOR_PATH={{ .classification_file | shellquote }}
+
+RULESET_NAME="devops-maintenance-protection"
+PR_RULE_REQUIRED_APPROVALS=1   # ADR-0015 D3: at least one approving review
+MERGE_METHODS='["merge","squash","rebase"]'   # default GH methods kept as-is
+STRICT_STATUS_POLICY=false     # branches need not be strictly up to date
+
+# Pack -> REQUIRED status-check contexts (KB-408 application contract).
+# Kept in EXACT pack order; the suite cross-checks the table against
+# ci_templates/README.md and the template job names.
+PACK_CONTEXTS='{go:["changes","lint","test","govulncheck","osv"],ts:["changes","typecheck","test","osv"],py:["changes","lint","test","osv"],starter:["changes","build-parity","smoke"]}'
+
+log() { printf 'protect: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'protect_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  rm -rf "$RAW_DIR"
+  rm -f "$RUN_DIR/.protect.rows.ndjson" \
+        "$RUN_DIR/.protect.records.ndjson" \
+        "$RUN_DIR/.protect.selfcheck.$$.err" \
+        "$RUN_DIR/.protect.selfcheck.$$.out" \
+        "$RUN_DIR/.protect.compose.$$.err" \
+        "$RUN_DIR/.protect.compose.$$.tmp" \
+        "$RUN_DIR/.protect.body.$$.json"
+}
+
+# ---------------------------------------------------------------------------
+# Config validation (fail loud, before any network call)
+# ---------------------------------------------------------------------------
+[ -n "$ANCHOR_PATH" ] || fail "classification_file anchor is empty (graph misbinding)"
+[ -f "$ANCHOR_PATH" ] || fail "run anchor not found: $ANCHOR_PATH"
+case "$ANCHOR_PATH" in
+  *..*) fail "run anchor path must not contain '..' components: $ANCHOR_PATH" ;;
+esac
+
+jq -e -n --arg v "$ORG" '($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+  fail "org must match ^[A-Za-z0-9][A-Za-z0-9-]{0,99}\$ (got: $(printf '%s' "$ORG" | head -c 40))"
+
+printf '%s' "$REPOS_JSON" | jq -e 'type == "array" and (length >= 1)' >/dev/null 2>&1 ||
+  fail "repos_json must be a non-empty array (a sweep can never silently widen scope)"
+while IFS= read -r r; do
+  [ -n "$r" ] || fail "repos_json contains an empty repo name"
+  jq -e -n --arg v "$r" '($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"))' >/dev/null 2>&1 ||
+    fail "repo name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\$ (got: $(printf '%s' "$r" | head -c 40))"
+done <<EOF2
+$(printf '%s' "$REPOS_JSON" | jq -r '.[]')
+EOF2
+
+# Typed protection plan (KB-409): the pack decides the required contexts.
+printf '%s' "$PLAN_JSON" | jq -e '
+  (type == "array") and (length >= 1) and
+  (all(.[];
+      ((.repo? | type) == "string") and (.repo | length > 0) and
+      ((.pack? | type) == "string") and (.pack | IN("go", "ts", "py", "starter")))) and
+  (([.[] | .repo] | length) == ([.[] | .repo] | unique | length))
+' >/dev/null 2>&1 ||
+  fail "protection plan failed its shape check (non-empty list of {repo, pack} rows with unique repos, pack in go|ts|py|starter; see variables.chcl schema)"
+
+# The plan may never widen the sweep scope.
+while IFS= read -r pr; do
+  printf '%s' "$REPOS_JSON" | jq -e --arg pr "$pr" '[.[]] | index($pr) != null' >/dev/null 2>&1 ||
+    fail "plan row targets repo outside the sweep scope: $pr"
+done <<EOF2
+$(printf '%s' "$PLAN_JSON" | jq -r '[.[].repo] | unique | .[]')
+EOF2
+
+RUN_DIR="$(dirname "$ANCHOR_PATH")"
+PROTECTION_PATH="$RUN_DIR/protection.json"
+RAW_DIR="$RUN_DIR/.protect.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+trap cleanup EXIT
+
+err_text() {
+  if [ ! -s "$1" ]; then
+    printf '<no stderr>'
+  else
+    grep -v '^gh_retry: ' "$1" | head -c 200 || true
+  fi
+}
+
+mkdir -p "$RAW_DIR"
+: >"$RUN_DIR/.protect.rows.ndjson"
+: >"$RUN_DIR/.protect.records.ndjson"
+
+# ---------------------------------------------------------------------------
+# Required contexts for a pack (context list + JSON array form)
+# ---------------------------------------------------------------------------
+pack_contexts() {
+  local pack="$1"
+  printf '%s' "$PACK_CONTEXTS" | jq -r --arg p "$pack" '.[$p] | .[]'
+}
+
+pack_contexts_json() {
+  local pack="$1"
+  printf '%s' "$PACK_CONTEXTS" | jq -c --arg p "$pack" '.[$p]'
+}
+
+# ---------------------------------------------------------------------------
+# Signal enumeration per repo.
+#   0 ok   -> SIGNAL_JSON=[[{context,satisfied,state}...]], SIGNAL_SHA, SIGNAL_BRANCH
+#   2 error (no signal call is safe after this — caller must NOT protect)
+# ---------------------------------------------------------------------------
+signal_enumerate() {
+  local repo="$1" out rc sha branch
+  out="$(gh api "repos/$ORG/$repo" 2>"$RAW_DIR/sigmeta.$repo.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/sigmeta.$repo.tmp" "$RAW_DIR/sigmeta.$repo.err" 2>/dev/null || true
+    log "repo metadata call failed rc=$rc: $(err_text "$RAW_DIR/sigmeta.$repo.err")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/sigmeta.$repo.tmp"
+  branch="$(printf '%s' "$out" | jq -r '.default_branch // ""')"
+  [ -n "$branch" ] || return 2
+
+  out="$(gh api "repos/$ORG/$repo/commits/$branch" 2>"$RAW_DIR/sigh.$repo.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/sigh.$repo.tmp" "$RAW_DIR/sigh.$repo.err" 2>/dev/null || true
+    log "head commit call failed rc=$rc: $(err_text "$RAW_DIR/sigh.$repo.err")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/sigh.$repo.tmp"
+  sha="$(printf '%s' "$out" | jq -r '.sha // ""')"
+  [ -n "$sha" ] || return 2
+
+  out="$(gh api "repos/$ORG/$repo/commits/$sha/check-runs?per_page=100" --paginate 2>"$RAW_DIR/sig.$repo.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/sig.$repo.tmp" "$RAW_DIR/sig.$repo.err" 2>/dev/null || true
+    log "check-runs call failed rc=$rc: $(err_text "$RAW_DIR/sig.$repo.err")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/sig.$repo.tmp"
+
+  SIGNAL_SHA="$sha"
+  SIGNAL_BRANCH="$branch"
+  # Flat [{name, conclusion}] rows; a context may appear multiple times
+  # (re-runs) — ALL observed conclusions of a context must satisfy it.
+  SIGNAL_ROWS="$(printf '%s' "$out" | jq -s -c '[.[].check_runs[]? | {name: .name, conclusion: .conclusion}]' 2>/dev/null)"
+  [ -n "$SIGNAL_ROWS" ] || SIGNAL_ROWS='[]'
+  return 0
+}
+
+# Evaluate the pack's required contexts against SIGNAL_ROWS
+# -> CONTEXT_STATES_JSON: [{context, satisfied, state}]
+# Evaluate the pack's required contexts against SIGNAL_ROWS
+# -> CONTEXT_STATES_JSON: [{context, satisfied, state}]
+evaluate_contexts() {
+  local pack="$1"
+  printf '%s' "$SIGNAL_ROWS" | jq -c --argjson req "$(pack_contexts_json "$pack")" '
+    . as $rows
+    | [$req[] | . as $ctx |
+        ([$rows[] | select(.name == $ctx) | .conclusion]) as $cons
+        | {context: $ctx,
+           satisfied: (($cons | length) > 0 and
+                       all($cons[]; . == "success" or . == "skipping")),
+           state: (if ($cons | length) == 0 then "absent"
+                   elif any($cons[]; . != "success" and . != "skipping") then "failed_or_pending"
+                   else ($cons | unique | join(",")) end)}]
+  '
+}
+
+# ---------------------------------------------------------------------------
+# Ruleset contract body for a pack (POST/PUT payload)
+# ---------------------------------------------------------------------------
+contract_body() {
+  local pack="$1"
+  local body_file="$2"
+  jq -n \
+    --arg name "$RULESET_NAME" \
+    --argjson approvals "$PR_RULE_REQUIRED_APPROVALS" \
+    --argjson methods "$MERGE_METHODS" \
+    --argjson strict "$STRICT_STATUS_POLICY" \
+    --argjson contexts "$(pack_contexts_json "$pack")" \
+    '{
+      name: $name,
+      target: "branch",
+      enforcement: "active",
+      conditions: {ref_name: {include: ["~DEFAULT_BRANCH"], exclude: []}},
+      bypass: [],
+      rules: [
+        {type: "pull_request",
+         parameters: {required_approving_review_count: $approvals,
+                      dismissal_restrictions: {users: [], teams: []},
+                      require_code_owner_review: false,
+                      require_last_push_approval: false,
+                      required_review_thread_resolution: false,
+                      allowed_merge_methods: $methods}},
+        {type: "required_status_checks",
+         parameters: {strict_required_status_checks_policy: $strict,
+                      required_status_checks: [$contexts[] | {context: ., integration_id: null}]}}
+      ]
+    }' >"$body_file"
+}
+
+# ---------------------------------------------------------------------------
+# Ruleset discovery + read-back verification
+# ---------------------------------------------------------------------------
+rulesets_list() {
+  local repo="$1" out rc
+  out="$(gh api "repos/$ORG/$repo/rulesets?per_page=100" --paginate 2>"$RAW_DIR/rs.$repo.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/rs.$repo.tmp" "$RAW_DIR/rs.$repo.err" 2>/dev/null || true
+    log "rulesets list call failed rc=$rc: $(err_text "$RAW_DIR/rs.$repo.err")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/rs.$repo.tmp"
+  # --paginate emits concatenated docs; rows are the ids and names of every
+  # ruleset (including others' pre-existing rulesets — read, never touched).
+  RS_ROWS="$(printf '%s' "$out" | jq -s -c '[.[].[]? | {id: .id, name: .name, target: .target, enforcement: .enforcement}]' 2>/dev/null)"
+  [ -n "$RS_ROWS" ] || RS_ROWS='[]'
+  return 0
+}
+
+ruleset_readback() {
+  local repo="$1" rid="$2" out rc
+  out="$(gh api "repos/$ORG/$repo/rulesets/$rid" 2>"$RAW_DIR/rb.$repo.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    mv "$RAW_DIR/rb.$repo.tmp" "$RAW_DIR/rb.$repo.err" 2>/dev/null || true
+    log "ruleset read-back call failed rc=$rc: $(err_text "$RAW_DIR/rb.$repo.err")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/rb.$repo.tmp"
+  RB_JSON="$(printf '%s' "$out")"
+  return 0
+}
+
+# Read-back contract match: jq emits the mismatch list; empty = verified.
+verify_mismatches() {
+  local pack="$1"
+  printf '%s' "$RB_JSON" | jq -r --argjson req "$(pack_contexts_json "$pack")" '
+    [
+      (if .enforcement != "active" then "enforcement: " + (.enforcement // "null") else empty end),
+      (if .target != "branch" then "target: " + (.target // "null") else empty end),
+      (if ((.bypass // []) | length) != 0 then "bypass not empty (admins must not bypass)" else empty end),
+      (if (((.conditions.ref_name.include // []) | index("~DEFAULT_BRANCH")) == null)
+         then "ref condition missing ~DEFAULT_BRANCH" else empty end),
+      (if ([.rules[] | select(.type == "pull_request")] | length) != 1
+         then "pull_request rule not exactly once" else empty end),
+      ([.rules[] | select(.type == "pull_request")]
+         | (if ((.[0].parameters.required_approving_review_count // 0) != 1)
+              then "required_approving_review_count: " + ((.[0].parameters.required_approving_review_count // 0) | tostring)
+              else empty end)),
+      ([.rules[] | select(.type == "required_status_checks")]
+         | if length != 1 then "required_status_checks rule not exactly once"
+           elif ([.[0].parameters.required_status_checks[]?.context] | sort) != ($req | sort)
+             then "required status-check contexts mismatch: " +
+                  ([.[0].parameters.required_status_checks[]?.context] | sort | join(","))
+           else empty end)
+    ]
+  '
+}
+
+# Bounded read-back retry: a GET immediately after a write can race the API
+# index; up to READBACK_ATTEMPTS attempts READBACK_SLEEP seconds apart.
+READBACK_ATTEMPTS=3
+READBACK_SLEEP=2
+
+# ---------------------------------------------------------------------------
+# Protection application
+# ---------------------------------------------------------------------------
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+SOURCES_REPO="$(printf '%s' "$REPOS_JSON" | jq -r '.[]')"
+
+PLAN_COUNT="$(printf '%s' "$PLAN_JSON" | jq 'length')"
+log "protection plan: $PLAN_COUNT repo(s), ruleset '$RULESET_NAME', approvals=$PR_RULE_REQUIRED_APPROVALS"
+
+repos_verified_total=0
+repos_deferred_total=0
+repos_error_total=0
+repos_unplanned_total=0
+rulesets_created_total=0
+rulesets_updated_total=0
+rulesets_unchanged_total=0
+verify_mismatch_total=0
+
+for repo in $SOURCES_REPO; do
+  log "repo $repo: evaluating protection"
+
+  prow_pack="$(printf '%s' "$PLAN_JSON" | jq -r --arg repo "$repo" '[.[] | select(.repo == $repo)][0].pack // ""')"
+  missing_contexts='[]'
+  errors_json='[]'
+  note="null"
+  sig_json="null"
+  prot_json="null"
+  repos_status="error"
+
+  add_error() {
+    errors_json="$(printf '%s' "$errors_json" | jq -c --arg s "$1" --arg d "$2" '. + [{surface: $s, detail: $d}]')"
+  }
+
+  if [ -z "$prow_pack" ]; then
+    # Sweep repo without a plan row: honest report-only (staged rollout).
+    repos_unplanned_total=$((repos_unplanned_total + 1))
+    repos_status="unplanned"
+    note='"no protection plan row; reported only"'
+  elif ! signal_enumerate "$repo"; then
+    # Signal enumeration FAILED: an evidence gap never protects.
+    repos_error_total=$((repos_error_total + 1))
+    add_error signal "signal enumeration failed (repo metadata / head commit / check-runs); see step stderr"
+    prot_json="null"
+  else
+    context_states_json="$(evaluate_contexts "$prow_pack")"
+    signal_green="$(printf '%s' "$context_states_json" | jq 'all(.[]; .satisfied)')"
+    missing_contexts="$(printf '%s' "$context_states_json" | jq -c '[.[] | select(.satisfied | not) | .context]')"
+    sig_json="$(jq -cn \
+      --arg branch "$SIGNAL_BRANCH" \
+      --arg sha "$SIGNAL_SHA" \
+      --argjson green "$signal_green" \
+      --argjson states "$context_states_json" \
+      '{checked: true, green: $green, default_branch: $branch, head_sha: $sha, contexts: $states}')"
+
+    if ! rulesets_list "$repo"; then
+      repos_error_total=$((repos_error_total + 1))
+      add_error rulesets_list "$(err_text "$RAW_DIR/rs.$repo.err")"
+      prot_json="null"
+    else
+      rid="$(printf '%s' "$RS_ROWS" | jq -r --arg n "$RULESET_NAME" '[.[] | select(.name == $n) | .id][0] // ""')"
+
+      decide_action() {
+        action="none"
+        if [ "$rid" = "" ]; then
+          action="created"
+        elif [ "$(verify_mismatches "$prow_pack" | jq 'length')" != "0" ]; then
+          action="updated"
+        fi
+      }
+
+      apply_ok=1
+      if [ "$signal_green" = "true" ] || [ "$rid" != "" ]; then
+        # green -> apply; existing ruleset (even on red signal) -> maintain.
+        # Choose the mutation by comparing the current state to the contract.
+        if [ "$rid" != "" ]; then
+          if ruleset_readback "$repo" "$rid"; then
+            decide_action
+          else
+            repos_error_total=$((repos_error_total + 1))
+            add_error ruleset_readback "$(err_text "$RAW_DIR/rb.$repo.err")"
+            apply_ok=0
+          fi
+        else
+          action="created"
+        fi
+
+        if [ "$apply_ok" -eq 1 ] && [ "$action" != "none" ]; then
+          contract_body "$prow_pack" "$RUN_DIR/.protect.body.$$.json"
+          # GitHub's rulesets API: create = POST .../rulesets, mutate an
+          # existing ruleset = PUT .../rulesets/{id} (full replaces).
+          if [ "$action" = "created" ]; then
+            apply_path="repos/$ORG/$repo/rulesets"
+            apply_method="POST"
+          else
+            apply_path="repos/$ORG/$repo/rulesets/$rid"
+            apply_method="PUT"
+          fi
+          if out="$(gh api --method "$apply_method" "$apply_path" -H "Accept: application/vnd.github+json" \
+              --input "$RUN_DIR/.protect.body.$$.json" 2>"$RAW_DIR/apply.$repo.err")"; then
+            rid="$(printf '%s' "$out" | jq -r '.id // ""')"
+            rm -f "$RUN_DIR/.protect.body.$$.json"
+          else
+            rm -f "$RUN_DIR/.protect.body.$$.json"
+            repos_error_total=$((repos_error_total + 1))
+            add_error ruleset_apply "$(err_text "$RAW_DIR/apply.$repo.err")"
+            apply_ok=0
+          fi
+        fi
+      else
+        # RED signal + NO canonical ruleset: NEVER protection-without-signal.
+        repos_deferred_total=$((repos_deferred_total + 1))
+        repos_status="deferred"
+        note='"signal red/missing contexts and no existing canonical ruleset; application deferred until CI is green"'
+        prot_json="null"
+      fi
+
+      # Read-back verification (the compliance gate; bounded retries against
+      # write/read race on the API index).
+      if [ "$apply_ok" -eq 1 ] && [ "$repos_status" != "deferred" ] && [ -n "$rid" ]; then
+        rb_verified=0
+        rb_mismatches='[]'
+        rb_attempt=1
+        while [ "$rb_attempt" -le "$READBACK_ATTEMPTS" ]; do
+          if ruleset_readback "$repo" "$rid"; then
+            rb_mismatches="$(verify_mismatches "$prow_pack")"
+            if [ "$(printf '%s' "$rb_mismatches" | jq 'length')" = "0" ]; then
+              rb_verified=1
+              break
+            fi
+            break   # contract mismatch is not transport-race; no point retrying
+          fi
+          rb_attempt=$((rb_attempt + 1))
+          [ "$rb_attempt" -le "$READBACK_ATTEMPTS" ] && sleep "$READBACK_SLEEP"
+        done
+
+        if [ "$rb_verified" -ne 1 ]; then
+          verify_mismatch_total=$((verify_mismatch_total + 1))
+          repos_error_total=$((repos_error_total + 1))
+          repos_status="error"
+          add_error ruleset_readback_verify "$(if [ "$(printf '%s' "$rb_mismatches" | jq 'length')" != "0" ] ; then printf '%s' "$rb_mismatches" | jq -r 'join("; ")'; else printf 'read-back unavailable after %s attempt(s)' "$READBACK_ATTEMPTS"; fi)"
+          prot_json="null"
+        else
+          case "$action" in
+            created)  rulesets_created_total=$((rulesets_created_total + 1)) ;;
+            updated)  rulesets_updated_total=$((rulesets_updated_total + 1)) ;;
+            none)     rulesets_unchanged_total=$((rulesets_unchanged_total + 1)) ;;
+          esac
+          repos_verified_total=$((repos_verified_total + 1))
+          repos_status="verified"
+          if [ "$action" != "none" ] && [ "$signal_green" != "true" ]; then
+            # Maintaining an existing ruleset is allowed on a red signal;
+            # creating is NOT — record an honest note when healing on red.
+            note='"drift healed on an existing ruleset while signal red; no NEW protection applied"'
+          fi
+          prot_json="$(jq -cn \
+            --arg action "$action" \
+            --arg rid "$rid" \
+            --argjson contexts "$(pack_contexts_json "$prow_pack")" \
+            '{action: $action, ruleset_id: (if $rid == "" then null else ($rid | tonumber) end),
+              readback_verified: true,
+              enforcement: "active", bypass_actors: 0,
+              required_contexts: $contexts}')"
+        fi
+      fi
+    fi
+  fi
+
+  jq -cn \
+    --arg repo "$repo" \
+    --arg pack "$prow_pack" \
+    --arg status "$repos_status" \
+    --argjson signal "$sig_json" \
+    --argjson protection "$prot_json" \
+    --argjson missing "$missing_contexts" \
+    --argjson errors "$errors_json" \
+    --argjson note "$note" \
+    '{repo: $repo, pack: (if $pack == "" then null else $pack end), status: $status,
+      signal: $signal, protection: $protection,
+      missing_contexts: $missing, errors: $errors, note: $note}' \
+    >>"$RUN_DIR/.protect.records.ndjson" ||
+    fail "failed to compose repo record for $repo"
+done
+
+# ---------------------------------------------------------------------------
+# Final artifact
+# ---------------------------------------------------------------------------
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+jq -s \
+  --arg s_start "$started_at" \
+  --arg s_finish "$finished_at" \
+  --arg s_org "$ORG" \
+  --argjson s_repos "$REPOS_JSON" \
+  --argjson s_plan "$PLAN_JSON" \
+  --arg s_rule "$RULESET_NAME" \
+  --arg s_verified "$repos_verified_total" \
+  --arg s_deferred "$repos_deferred_total" \
+  --arg s_error "$repos_error_total" \
+  --arg s_unplanned "$repos_unplanned_total" \
+  --arg s_created "$rulesets_created_total" \
+  --arg s_updated "$rulesets_updated_total" \
+  --arg s_unchanged "$rulesets_unchanged_total" \
+  --arg s_mismatch "$verify_mismatch_total" \
+  '
+  . as $repos
+  | {
+      schema: "devops_maint_v1.protection.v1",
+      run: {
+        started_at: $s_start,
+        finished_at: $s_finish,
+        org: $s_org,
+        repos: $s_repos,
+        protection_plan: $s_plan,
+        ruleset_name: $s_rule
+      },
+      summary: {
+        repos_total: ($s_repos | length),
+        repos_verified_total: ($s_verified | tonumber),
+        repos_deferred_total: ($s_deferred | tonumber),
+        repos_error_total: ($s_error | tonumber),
+        repos_unplanned_total: ($s_unplanned | tonumber),
+        rulesets_created_total: ($s_created | tonumber),
+        rulesets_updated_total: ($s_updated | tonumber),
+        rulesets_unchanged_total: ($s_unchanged | tonumber),
+        verify_mismatch_total: ($s_mismatch | tonumber)
+      },
+      repos: $repos
+    }
+  ' "$RUN_DIR/.protect.records.ndjson" >"$RUN_DIR/.protect.compose.$$.tmp" 2>"$RUN_DIR/.protect.compose.$$.err" ||
+    fail "failed to compose final artifact: $(err_text "$RUN_DIR/.protect.compose.$$.err")"
+mv "$RUN_DIR/.protect.compose.$$.tmp" "$PROTECTION_PATH"
+
+# ---------------------------------------------------------------------------
+# Structural self-check (fail loud — a malformed artifact is a broken gate)
+# ---------------------------------------------------------------------------
+jq -e --arg rule "$RULESET_NAME" --argjson plan "$PLAN_JSON" '
+  (.schema == "devops_maint_v1.protection.v1") and
+  (.run.ruleset_name == $rule) and (.run.protection_plan == $plan) and
+  (.run.org | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$")) and
+  (.run.started_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+  (.run.finished_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+  (.summary.repos_total == (.repos | length)) and
+  (.summary.repos_verified_total == ([.repos[] | select(.status == "verified")] | length)) and
+  (.summary.repos_deferred_total == ([.repos[] | select(.status == "deferred")] | length)) and
+  (.summary.repos_error_total == ([.repos[] | select(.status == "error")] | length)) and
+  (.summary.repos_unplanned_total == ([.repos[] | select(.status == "unplanned")] | length)) and
+  (.summary.rulesets_created_total == ([.repos[] | select(.protection.action == "created")] | length)) and
+  (.summary.rulesets_updated_total == ([.repos[] | select(.protection.action == "updated")] | length)) and
+  (.summary.rulesets_unchanged_total == ([.repos[] | select(.protection.action == "none")] | length)) and
+  ([.repos[] |
+      (.status | IN("verified", "deferred", "error", "unplanned")) and
+      ((.errors | type) == "array") and
+      ((.missing_contexts | type) == "array")] | all) and
+  # Read-back IS the compliance gate: a verified row without a verified
+  # read-back can never exist.
+  ([.repos[] | select(.status == "verified") | .protection.readback_verified] | all) and
+  # NEVER protection-without-signal: a ruleset may be CREATED only on an
+  # observed green signal for that repo.
+  ([.repos[] | select(.protection.action == "created") | (.signal.green == true and .signal.checked == true)] | all) and
+  ([.repos[] | select(.status == "deferred") | ((.protection == null) and ((.missing_contexts | length) > 0))] | all) and
+  ([.repos[] | select(.status == "error") | ((.errors | length) > 0)] | all) and
+  ([.repos[] | select(.status == "unplanned") | (.protection == null and .signal == null)] | all)
+' "$PROTECTION_PATH" >"$RUN_DIR/.protect.selfcheck.$$.out" 2>"$RUN_DIR/.protect.selfcheck.$$.err" ||
+  fail "artifact failed its structural self-check: $(err_text "$RUN_DIR/.protect.selfcheck.$$.err")"
+rm -f "$RUN_DIR/.protect.selfcheck.$$.out"
+
+# Read-back mismatches are typed STEP failures (the run must never end green
+# with an unverifiable protection claim); the evidence artifact is preserved
+# and its path named in the failure line.
+if [ "$verify_mismatch_total" -gt 0 ]; then
+  fail "$verify_mismatch_total repo(s) failed ruleset read-back verification; evidence at $PROTECTION_PATH"
+fi
+
+log "protection complete: verified=$repos_verified_total deferred=$repos_deferred_total error=$repos_error_total unplanned=$repos_unplanned_total created=$rulesets_created_total updated=$rulesets_updated_total unchanged=$rulesets_unchanged_total"
+printf '%s\n' "$PROTECTION_PATH"
