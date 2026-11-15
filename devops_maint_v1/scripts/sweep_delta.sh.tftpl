@@ -32,13 +32,21 @@
 #                          collect; re-scanning would double the sweep cost)
 #
 # Per-repo row: {repo, pack, starter_language, before, after, deltas,
-# delta_class, advisories, inventory_collected_before, errors}. delta_class
-# precedence:
+# delta_class, advisories, inventory_collected_before, errors}. Two explicit
+# polarities: deltas.rulesets_applied stays the RAW signed protection
+# transition (+1 gained / -1 lost; summary.rulesets_applied_net is the net
+# change in repos with applied rulesets), while the CLASSIFICATION inverts
+# that surface — protection GAINED is an improvement and protection LOST is a
+# regression. delta_class precedence:
 #   partial_error (enumeration errors; the surfaces that failed stay honest)
-#   > regressed   (any surface strictly higher than before — new PRs/alerts)
-#   > improved    (any surface strictly lower — the sweep consumed backlog)
+#   > regressed   (a backlog surface strictly higher than before — new
+#                  PRs/alerts — OR protection lost: applied ruleset 1 -> 0)
+#   > improved    (a backlog surface strictly lower than before — the sweep
+#                  consumed backlog — OR protection gained: applied 0 -> 1)
 #   > clean       (all before- and after-surface counts are zero)
 #   > unchanged   (equal, but non-zero — backlog still pending)
+# A regression on one surface outranks an improvement on another (regressed
+# is evaluated before improved), and partial_error outranks both.
 #
 # Deliverable: dirname(inventory)/delta.json, schema devops_maint_v1.delta.v1,
 # self-checking its own structure (per-repo delta arithmetic AND an
@@ -95,6 +103,12 @@ printf '%s' "$REPOS_JSON" | jq -e '
   ((length) == (unique | length))
 ' >/dev/null 2>&1 ||
     fail "repos failed their shape check (non-empty unique array of non-empty strings)"
+
+if ! printf '%s' "$REPOS_JSON" | jq -e 'all(.[]; test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"))' >/dev/null 2>&1; then
+    bad="$(printf '%s' "$REPOS_JSON" | jq -r '[.[] | select(test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$") | not)][0] // "?"')"
+    [ -n "$bad" ] || bad="?"
+    fail "repo name failed its shape check (^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\$; got: ${bad:0:40})"
+fi
 
 printf '%s' "$PLAN_JSON" | jq -e '
   (type == "array") and (length > 0) and
@@ -248,7 +262,13 @@ collect_for_delta() { # collect_for_delta <repo> <row-index> <pack> <starter_lan
     before_json="$(before_row "$repo")"
     if [ "$before_json" = "null" ] || [ -z "$before_json" ]; then
         repo_error "before_inventory" "repo is not present in the before inventory; delta computed against zeroed surfaces"
-        before_json="{\"repo\": \"$repo\", \"before\": {\"prs_total\": 0, \"prs_dependabot\": 0, \"prs_other\": 0, \"codeql_alerts\": 0, \"codeql_status\": \"unknown\", \"rulesets_applied\": false}, \"collected\": false, \"advisories\": null}"
+        before_json="$(jq -cn --arg repo "$repo" '{
+            repo: $repo,
+            before: {prs_total: 0, prs_dependabot: 0, prs_other: 0,
+                     codeql_alerts: 0, codeql_status: "unknown", rulesets_applied: false},
+            collected: false,
+            advisories: null
+        }')"
     fi
 
     A_OPEN=0; A_DEP=0; A_OTHER=0
@@ -323,12 +343,20 @@ collect_for_delta() { # collect_for_delta <repo> <row-index> <pack> <starter_lan
           rulesets_applied: (if .after.rulesets_applied == .before.rulesets_applied then 0
                              elif .after.rulesets_applied then 1 else -1 end)
         }
+        # Classification polarity: the RAW signed rulesets transition stays in
+        # .deltas (and summary.rulesets_applied_net), but protection GAINED is
+        # classified improved and protection LOST regressed — the protection
+        # surface is classified from its before/after shape, not from the raw
+        # signed value, while backlog surfaces keep strict signed compares.
+        # A regression on one surface outranks an improvement on another.
         | .delta_class = (
           if (.errors | length) > 0 then "partial_error"
-          elif ([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
-                 .deltas.codeql_alerts, .deltas.rulesets_applied] | any(. > 0)) then "regressed"
-          elif ([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
-                 .deltas.codeql_alerts, .deltas.rulesets_applied] | any(. < 0)) then "improved"
+          elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+                  .deltas.codeql_alerts] | any(. > 0)) or
+                (.after.rulesets_applied == false and .before.rulesets_applied == true)) then "regressed"
+          elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+                  .deltas.codeql_alerts] | any(. < 0)) or
+                (.after.rulesets_applied == true and .before.rulesets_applied == false)) then "improved"
           elif ([.before.prs_total, .before.prs_dependabot, .before.prs_other,
                  .before.codeql_alerts] == [0, 0, 0, 0] and .before.rulesets_applied == false) then "clean"
           else "unchanged"
@@ -340,7 +368,9 @@ collect_for_delta() { # collect_for_delta <repo> <row-index> <pack> <starter_lan
 }
 
 idx=0
-for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
+# Quoted, non-word-splitting iteration; process substitution keeps the loop
+# in THIS shell so idx advances and each record keeps its own file.
+while IFS= read -r repo; do
     row="$(plan_for "$repo")"
     if [ "$row" != "null" ] && [ -n "$row" ]; then
         dpack="$(printf '%s' "$row" | jq -r '.pack')"
@@ -351,7 +381,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
         collect_for_delta "$repo" "$idx" "" ""
     fi
     idx=$((idx + 1))
-done
+done < <(printf '%s' "$REPOS_JSON" | jq -r '.[]')
 
 # ---------------------------------------------------------------------------
 # Final artifact: schema + per-repo rows + summary, self-checking structure
@@ -367,6 +397,7 @@ jq -s \
       schema: "devops_maint_v1.delta.v1",
       sweep: {
         org: $s_org,
+        sweep_id: $s_id,
         repos: $s_repos,
         repos_total: ($repos | length),
         before_inventory: $s_before
@@ -415,10 +446,12 @@ jq -e '
   (all(.repos[];
       .delta_class ==
       (if (.errors | length) > 0 then "partial_error"
-       elif ([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
-              .deltas.codeql_alerts, .deltas.rulesets_applied] | any(. > 0)) then "regressed"
-       elif ([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
-              .deltas.codeql_alerts, .deltas.rulesets_applied] | any(. < 0)) then "improved"
+       elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+               .deltas.codeql_alerts] | any(. > 0)) or
+             (.after.rulesets_applied == false and .before.rulesets_applied == true)) then "regressed"
+       elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+               .deltas.codeql_alerts] | any(. < 0)) or
+             (.after.rulesets_applied == true and .before.rulesets_applied == false)) then "improved"
        elif ([.before.prs_total, .before.prs_dependabot, .before.prs_other,
               .before.codeql_alerts] == [0, 0, 0, 0] and .before.rulesets_applied == false) then "clean"
        else "unchanged"

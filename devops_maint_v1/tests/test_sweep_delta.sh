@@ -12,7 +12,7 @@
 #     multi-paginate code-scanning flatten (same shape as collect)
 #   - delta_class precedence: partial_error > regressed > improved > clean >
 #     unchanged, recomputed independently by the artifact self-check
-#   - rulesets transitions: applied 0 -> 1 is regressed, 1 -> 0 is improved
+#   - rulesets transitions: applied 0 -> 1 is improved, 1 -> 0 is regressed
 #   - CodeQL disabled (HTTP 404 on the alerts API) is a zero-alert state, not
 #     an error; a transport failure is an honest partial_error row
 #   - all-repos-failed re-enumeration -> typed failure with the artifact kept
@@ -278,6 +278,11 @@ check "S2g empty plan fails typed" grep -qF 'delta_failed: delta plan failed its
 gated_run h testorg '["a1"]' '[{"repo":"a1","pack":"starter"}]'
 check "S2h starter row without starter_language fails typed" grep -qF 'delta_failed: delta plan failed its shape check' "${WORK_ROOT}/sweep2h.err"
 
+gated_run i testorg '["bad name"]' '[{"repo":"bad name","pack":"go"}]'
+check "S2i repo name with whitespace fails typed" grep -qF 'delta_failed: repo name failed its shape check' "${WORK_ROOT}/sweep2i.err"
+check "S2i gate names the offending value" grep -qF 'got: bad name)' "${WORK_ROOT}/sweep2i.err"
+expect_count "S2i no network before the repo-name gate" 0 "$(wc -l <"${FX2}/call.log")"
+
 expect_count "S2 no sweep run reached the network" 0 "$(wc -l <"${FX2}/call.log")"
 check_not "S2 no artifact beside the gate-failed inventory" test -e "${FX2}/delta.json"
 
@@ -366,6 +371,7 @@ expect_count "S4 stdout carries exactly one line" 1 "$(wc -l <"${OUT4}")"
 expect_count "S4 stdout is the artifact path alone" 1 "$(grep -cF "${ART4}" "${OUT4}")"
 check "S4 artifact schema is delta v1" jq -e '(.schema == "devops_maint_v1.delta.v1") and (.sweep.org == "testorg") and (.sweep.repos_total == 3)' "${ART4}" >/dev/null
 check "S4 artifact anchors the before inventory" jq -e --arg p "${FX4}/inv.json" '.sweep.before_inventory == $p' "${ART4}" >/dev/null
+check "S4 artifact is keyed to its sweep id" jq -e --arg sid "$(basename "$(dirname "${FX4}/inv.json")")" '.sweep.sweep_id == $sid' "${ART4}" >/dev/null
 check "S4 g1 regressed with honest PR arithmetic" jq -e '[.repos[] | select(.repo == "g1")] | (.[0].delta_class == "regressed") and (.[0].deltas.prs_total == 1) and (.[0].deltas.prs_dependabot == 1) and (.[0].deltas.prs_other == 0) and (.[0].deltas.codeql_alerts == 0) and (.[0].deltas.rulesets_applied == 0)' "${ART4}" >/dev/null
 check "S4 g1 before counts copied from the inventory" jq -e '[.repos[] | select(.repo == "g1")] | (.[0].before.prs_total == 2) and (.[0].before.prs_dependabot == 1) and (.[0].before.codeql_alerts == 23) and (.[0].before.rulesets_applied == false)' "${ART4}" >/dev/null
 check "S4 g2 improved across PR and CodeQL surfaces" jq -e '[.repos[] | select(.repo == "g2")] | (.[0].delta_class == "improved") and (.[0].deltas.prs_total == -6) and (.[0].deltas.prs_dependabot == -4) and (.[0].deltas.prs_other == -2) and (.[0].deltas.codeql_alerts == -18)' "${ART4}" >/dev/null
@@ -397,7 +403,8 @@ check "S5 equal non-zero backlog classifies unchanged" jq -e '[.repos[] | select
 check "S5 applied rulesets stay applied after the delta" jq -e '[.repos[] | select(.repo == "u1")] | (.[0].after.rulesets_applied == true) and (.[0].before.rulesets_applied == true)' "${FX5}/delta.json" >/dev/null
 
 # ═══════════════════════════════════════════════════════════════════════════
-# S6 — rulesets transitions: 0 -> 1 regressed, 1 -> 0 improved
+# S6 — protection-surface classification: applied 0 -> 1 is improved,
+# 1 -> 0 is regressed (the raw signed deltas still keep their polarity)
 # ═══════════════════════════════════════════════════════════════════════════
 FX6="${WORK_ROOT}/fx6"
 mk_fixtures "${FX6}"
@@ -408,9 +415,10 @@ mk_inventory "${FX6}/inv.json" testorg '"p1","p2"' '
 printf '[{"id":1,"enforcement":"active"}]\n' >"${FX6}/p1/rs.json"          # 0 -> 1
 printf '[{"id":1,"enforcement":"evaluate"}]\n' >"${FX6}/p2/rs.json"        # 1 -> 0
 run_sweep 6 testorg '["p1","p2"]' '[{"repo":"p1","pack":"go"}]' "${FX6}/inv.json" || { echo "BUG: S6 sweep failed" >&2; exit 99; }
-check "S6 protection newly applied is regressed" jq -e '[.repos[] | select(.repo == "p1")] | (.[0].delta_class == "regressed") and (.[0].deltas.rulesets_applied == 1) and (.[0].after.rulesets_applied == true)' "${FX6}/delta.json" >/dev/null
-check "S6 protection dropped is improved" jq -e '[.repos[] | select(.repo == "p2")] | (.[0].delta_class == "improved") and (.[0].deltas.rulesets_applied == -1) and (.[0].after.rulesets_applied == false)' "${FX6}/delta.json" >/dev/null
-check "S6 summary nets the ruleset transitions" jq -e '.summary.rulesets_applied_net == 0' "${FX6}/delta.json" >/dev/null
+check "S6 protection newly applied is improved" jq -e '[.repos[] | select(.repo == "p1")] | first | (.delta_class == "improved") and (.deltas.rulesets_applied == 1) and (.after.rulesets_applied == true)' "${FX6}/delta.json" >/dev/null
+check "S6 protection dropped is regressed" jq -e '[.repos[] | select(.repo == "p2")] | first | (.delta_class == "regressed") and (.deltas.rulesets_applied == -1) and (.after.rulesets_applied == false)' "${FX6}/delta.json" >/dev/null
+check "S6 protection gained with every other surface flat is improved end-to-end" jq -e '[.repos[] | select(.repo == "p1")] | first | (.before.rulesets_applied == false) and (.after.rulesets_applied == true) and (.before.prs_total == 0) and (.after.prs_total == 0) and (.before.prs_dependabot == 0) and (.after.prs_dependabot == 0) and (.before.prs_other == 0) and (.after.prs_other == 0) and (.before.codeql_alerts == 0) and (.after.codeql_alerts == 0) and (.delta_class == "improved")' "${FX6}/delta.json" >/dev/null
+check "S6 summary classifies both transitions and nets them" jq -e '(.summary.rulesets_applied_net == 0) and (.summary.repos_improved == 1) and (.summary.repos_regressed == 1) and (.summary.repos_clean == 0) and (.summary.repos_unchanged == 0) and (.summary.repos_partial_error == 0)' "${FX6}/delta.json" >/dev/null
 check "S6 unplanned row stays report-only (pack null)" jq -e '[.repos[] | select(.repo == "p2")] | (.[0].pack == null) and (.[0].starter_language == null)' "${FX6}/delta.json" >/dev/null
 check "S6 summary counts the planned rows only" jq -e '(.summary.repos_planned == 1) and (.sweep.repos_total == 2)' "${FX6}/delta.json" >/dev/null
 
@@ -523,14 +531,16 @@ check_not "S12 delta failures are prefixed delta_failed, stdout stays clean" gre
 
 # ═══════════════════════════════════════════════════════════════════════════
 # S13 — determinism (ADR-0015 D2): an identical sweep over the identical
-# before inventory produces a byte-identical delta artifact (modulo the
-# inventory path)
+# before inventory, re-run in the same run directory, produces a byte-identical
+# delta artifact (no fields stripped: the artifact is keyed to its sweep —
+# .sweep.before_inventory and .sweep.sweep_id are stable here by construction)
 # ═══════════════════════════════════════════════════════════════════════════
 FX13="${WORK_ROOT}/fx13"
 cp -R "${FX4}" "${FX13}"
 run_sweep 13 testorg '["g1","g2","g3"]' '[{"repo":"g1","pack":"go"},{"repo":"g2","pack":"ts"},{"repo":"g3","pack":"py"}]' "${FX13}/inv.json" || { echo "BUG: S13 sweep failed" >&2; exit 99; }
-jq -S 'del(.sweep.before_inventory)' "${FX4}/delta.json" >"${WORK_ROOT}/a.json"
-jq -S 'del(.sweep.before_inventory)' "${FX13}/delta.json" >"${WORK_ROOT}/b.json"
+cp "${FX13}/delta.json" "${WORK_ROOT}/a.json"
+run_sweep 13 testorg '["g1","g2","g3"]' '[{"repo":"g1","pack":"go"},{"repo":"g2","pack":"ts"},{"repo":"g3","pack":"py"}]' "${FX13}/inv.json" || { echo "BUG: S13 re-run failed" >&2; exit 99; }
+cp "${FX13}/delta.json" "${WORK_ROOT}/b.json"
 check "S13 identical sweeps produce byte-identical artifacts" cmp -s "${WORK_ROOT}/a.json" "${WORK_ROOT}/b.json"
 
 # ═══════════════════════════════════════════════════════════════════════════

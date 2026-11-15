@@ -76,8 +76,7 @@ fail() {
 
 cleanup() {
   rm -rf "$RAW_DIR"
-  rm -f "$RUN_DIR/.compliance.rows.ndjson" \
-        "$RUN_DIR/.compliance.records.ndjson" \
+  rm -f "$RUN_DIR/.compliance.records.ndjson" \
         "$RUN_DIR/.compliance.selfcheck.$$.err" \
         "$RUN_DIR/.compliance.selfcheck.$$.out" \
         "$RUN_DIR/.compliance.compose.$$.err" \
@@ -150,7 +149,6 @@ err_text() {
 }
 
 mkdir -p "$RAW_DIR"
-: >"$RUN_DIR/.compliance.rows.ndjson"
 : >"$RUN_DIR/.compliance.records.ndjson"
 
 # ---------------------------------------------------------------------------
