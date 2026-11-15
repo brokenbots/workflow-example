@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — compliance application step (KB-410, ADR-0015 Lane B, wave 5).
+#
+# Implements the KB-408 application contract: writes the canonical Lane B
+# compliance pack — .github/workflows/ci.yml and .github/dependabot.yml taken
+# from ci_templates — into every planned repo, byte-exact, via the GitHub
+# Contents API on the repo's default branch.
+#
+# Write/read order per repo file (guarding the protection signal flow: the CI
+# pack must exist for the KB-409 protect step to ever observe a green
+# signal):
+#   GET current file bytes
+#     -> equal to the template       -> action none (idempotent; no PUT)
+#     -> file absent (404)           -> action created (PUT without sha)
+#     -> bytes differ                -> action updated (PUT with sha)
+#   -> PUT (Contents API, jq-composed body)
+#   -> bounded read-back: GET again, byte-compare against the template
+#
+# READ-BACK IS THE COMPLIANCE GATE (ADR-0015 D4, matching KB-409's ruleset
+# gate): a file is only "verified" when the stored bytes re-read from the
+# repo compare EXACTLY to the template. Any read-back mismatch is a typed
+# step FAILURE (apply_ci_pack_failed) with the evidence artifact preserved
+# and its path named in the failure line — a run must never mark a repo
+# compliant on unverifiable bytes.
+#
+# Templates are spliced in as base64 (the engine's base64encode(file(...));
+# the base64 alphabet carries no single quotes, so the splice stays
+# shellquote-safe) and decoded with the base64 CLI — byte-exact through the
+# shell layer, never re-typed.
+#
+# Plan validation (fail loud, before any network call): non-empty plan, pack
+# in {go, ts, py, starter}, repo names well-formed, plan repos within the
+# sweep scope, no duplicate repos; starter rows require a starter_language in
+# {go, ts, py} and non-starter rows must leave starter_language empty. Repos
+# of the sweep WITHOUT a plan row are reported (unplanned rows) — staged
+# rollout is allowed and honest.
+#
+# The artifact lands beside the run's classification evidence:
+# <run dir>/compliance.json
+#
+# stdout carries ONLY the artifact path; diagnostics go to stderr.
+set -euo pipefail
+
+# KB-219: the shared retry wrapper is spliced as raw content (file() returns
+# the file's content, not a path) and installs the gh drop-in shadow, so
+# every gh call below is transport-wrapped exactly like the collect sweep.
+{{ .gh_retry }}
+
+ORG={{ .org | shellquote }}
+REPOS_JSON={{ .repos_json | shellquote }}
+PLAN_JSON={{ .plan_json | shellquote }}
+ANCHOR_PATH={{ .classification_file | shellquote }}
+
+# KB-408 template payloads as base64, spliced by the graph (shellquote-safe);
+# the runtime decodes them with the base64 CLI, byte-exact, before any
+# network call and fails loud if a payload is missing or undecodable.
+GO_CI_B64={{ .go_ci_b64 | shellquote }}
+TS_CI_B64={{ .ts_ci_b64 | shellquote }}
+PY_CI_B64={{ .py_ci_b64 | shellquote }}
+STARTER_CI_B64={{ .starter_ci_b64 | shellquote }}
+GO_DB_B64={{ .go_db_b64 | shellquote }}
+TS_DB_B64={{ .ts_db_b64 | shellquote }}
+PY_DB_B64={{ .py_db_b64 | shellquote }}
+
+COMMIT_MSG_CI="devops_maint_v1: apply Lane B compliance pack (KB-408 templates)"
+COMMIT_MSG_DB="devops_maint_v1: apply Lane B dependabot config (KB-408 template)"
+CI_REL=".github/workflows/ci.yml"
+DB_REL=".github/dependabot.yml"
+
+log() { printf 'compliance: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'apply_ci_pack_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  rm -rf "$RAW_DIR"
+  rm -f "$RUN_DIR/.compliance.rows.ndjson" \
+        "$RUN_DIR/.compliance.records.ndjson" \
+        "$RUN_DIR/.compliance.selfcheck.$$.err" \
+        "$RUN_DIR/.compliance.selfcheck.$$.out" \
+        "$RUN_DIR/.compliance.compose.$$.err" \
+        "$RUN_DIR/.compliance.compose.$$.tmp" \
+        "$RUN_DIR/.compliance.body.$$.json"
+}
+
+# ---------------------------------------------------------------------------
+# Config validation (fail loud, before any network call)
+# ---------------------------------------------------------------------------
+[ -n "$ANCHOR_PATH" ] || fail "classification_file anchor is empty (graph misbinding)"
+[ -f "$ANCHOR_PATH" ] || fail "run anchor not found: $ANCHOR_PATH"
+case "$ANCHOR_PATH" in
+  *..*) fail "run anchor path must not contain '..' components: $ANCHOR_PATH" ;;
+esac
+
+jq -e -n --arg v "$ORG" '($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+  fail "org must match ^[A-Za-z0-9][A-Za-z0-9-]{0,99}\$ (got: $(printf '%s' "$ORG" | head -c 40))"
+
+printf '%s' "$REPOS_JSON" | jq -e 'type == "array" and (length >= 1)' >/dev/null 2>&1 ||
+  fail "repos_json must be a non-empty array (a sweep can never silently widen scope)"
+while IFS= read -r r; do
+  [ -n "$r" ] || fail "repos_json contains an empty repo name"
+  jq -e -n --arg v "$r" '($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"))' >/dev/null 2>&1 ||
+    fail "repo name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\$ (got: $(printf '%s' "$r" | head -c 40))"
+done <<EOF2
+$(printf '%s' "$REPOS_JSON" | jq -r '.[]')
+EOF2
+
+# Typed compliance plan: the pack decides which templates land where.
+printf '%s' "$PLAN_JSON" | jq -e '
+  (type == "array") and (length >= 1) and
+  (all(.[];
+      ((.repo? | type) == "string") and (.repo | length > 0) and
+      ((.pack? | type) == "string") and (.pack | IN("go", "ts", "py", "starter")))) and
+  (([.[] | .repo] | length) == ([.[] | .repo] | unique | length)) and
+  (all(.[];
+      if .pack == "starter" then
+        ((.starter_language? // "" | type) == "string") and
+        (.starter_language? // "" | length > 0) and
+        (.starter_language? // "" | IN("go", "ts", "py"))
+      else
+        ((.starter_language? // "") == "")
+      end)) and
+  (all([.[].repo][];
+      test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")))
+' >/dev/null 2>&1 ||
+  fail "compliance plan failed its shape check (non-empty list of {repo, pack} rows with unique well-formed repos, pack in go|ts|py|starter; starter rows require starter_language in go|ts|py and non-starter rows must leave it empty; see variables.chcl schema)"
+
+# The plan may never widen the sweep scope.
+while IFS= read -r pr; do
+  printf '%s' "$REPOS_JSON" | jq -e --arg pr "$pr" '[.[]] | index($pr) != null' >/dev/null 2>&1 ||
+    fail "plan row targets repo outside the sweep scope: $pr"
+done <<EOF2
+$(printf '%s' "$PLAN_JSON" | jq -r '[.[].repo] | unique | .[]')
+EOF2
+
+RUN_DIR="$(dirname "$ANCHOR_PATH")"
+COMPLIANCE_PATH="$RUN_DIR/compliance.json"
+RAW_DIR="$RUN_DIR/.compliance.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+trap cleanup EXIT
+
+err_text() {
+  if [ ! -s "$1" ]; then
+    printf '<no stderr>'
+  else
+    grep -v '^gh_retry: ' "$1" | head -c 200 || true
+  fi
+}
+
+mkdir -p "$RAW_DIR"
+: >"$RUN_DIR/.compliance.rows.ndjson"
+: >"$RUN_DIR/.compliance.records.ndjson"
+
+# ---------------------------------------------------------------------------
+# Template materialization: decode every splice once, byte-exact, and fail
+# loud BEFORE any network call if a payload is missing or undecodable.
+# ---------------------------------------------------------------------------
+declare_file() { # b64_value target_file label
+  printf '%s' "$1" | base64 -d >"$2" 2>/dev/null || fail "$3 payload is not valid base64"
+  [ -s "$2" ] || fail "$3 payload decoded empty"
+}
+
+declare_file "$GO_CI_B64"      "$RAW_DIR/tpl.ci.go"      "go ci.yml"
+declare_file "$TS_CI_B64"      "$RAW_DIR/tpl.ci.ts"      "ts ci.yml"
+declare_file "$PY_CI_B64"      "$RAW_DIR/tpl.ci.py"      "py ci.yml"
+declare_file "$STARTER_CI_B64" "$RAW_DIR/tpl.ci.starter" "starter ci.yml"
+declare_file "$GO_DB_B64"      "$RAW_DIR/tpl.db.go"      "go dependabot.yml"
+declare_file "$TS_DB_B64"      "$RAW_DIR/tpl.db.ts"      "ts dependabot.yml"
+declare_file "$PY_DB_B64"      "$RAW_DIR/tpl.db.py"      "py dependabot.yml"
+
+tpl_ci_for() {
+  case "$1" in
+    go)      printf '%s' "$RAW_DIR/tpl.ci.go" ;;
+    ts)      printf '%s' "$RAW_DIR/tpl.ci.ts" ;;
+    py)      printf '%s' "$RAW_DIR/tpl.ci.py" ;;
+    starter) printf '%s' "$RAW_DIR/tpl.ci.starter" ;;
+    *)       printf '' ;;
+  esac
+}
+
+tpl_db_for() { # pack starter_language
+  if [ "$1" = "starter" ]; then
+    case "$2" in
+      go) printf '%s' "$RAW_DIR/tpl.db.go" ;;
+      ts) printf '%s' "$RAW_DIR/tpl.db.ts" ;;
+      py) printf '%s' "$RAW_DIR/tpl.db.py" ;;
+      *)  printf '' ;;
+    esac
+  else
+    case "$1" in
+      go) printf '%s' "$RAW_DIR/tpl.db.go" ;;
+      ts) printf '%s' "$RAW_DIR/tpl.db.ts" ;;
+      py) printf '%s' "$RAW_DIR/tpl.db.py" ;;
+      *)  printf '' ;;
+    esac
+  fi
+}
+
+# Single-line base64 encoder for PUT payloads (GNU and BusyBox compatible).
+encode_file() {
+  base64 "$1" | tr -d '\n'
+}
+
+# ---------------------------------------------------------------------------
+# Contents API helpers.
+#   contents_get -> 0 ok (CUR_JSON holds the GET response)
+#                   1 file absent (404; create lane)
+#                   2 transport/API error (never a write signal)
+# ---------------------------------------------------------------------------
+contents_get() {
+  local repo="$1" path="$2" branch="$3" stem out rc
+  stem="$(printf '%s' "$path" | tr '/' '_')"
+  out="$(gh api "repos/$ORG/$repo/contents/$path?ref=$branch" 2>"$RAW_DIR/get.$repo.$stem.tmp")" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if grep -qiE '404|not enabled|not found' "$RAW_DIR/get.$repo.$stem.tmp" 2>/dev/null; then
+      rm -f "$RAW_DIR/get.$repo.$stem.tmp"
+      return 1
+    fi
+    log "contents get failed rc=$rc: $(err_text "$RAW_DIR/get.$repo.$stem.tmp")"
+    return 2
+  fi
+  rm -f "$RAW_DIR/get.$repo.$stem.tmp"
+  CUR_JSON="$(printf '%s' "$out")"
+  return 0
+}
+
+# Store the current bytes from the last CUR_JSON fetch.
+cur_bytes_to() { # target_file
+  printf '%s' "$CUR_JSON" | jq -j '.content // empty' | tr -d '\n' | base64 -d >"$1" 2>/dev/null
+}
+
+# Write (create or update) one file and verify by byte-exact read-back.
+# Globals out: FACTION (none|created|updated), FREADBACK (true|false),
+# FA_ERR (failure detail for the row's error). Returns:
+#   0 -> write verified or (idempotent) none needed; caller records it
+#   1 -> write landed but read-back mismatched (typed failure upstream)
+#   2 -> API/transport failure
+file_apply() { # repo rel_path branch tpl_file commit_msg
+  local repo="$1" path="$2" branch="$3" tpl_file="$4" commit_msg="$5"
+  local stem cur_file readback_file body_file sha new_sha content_b64 attempt
+  FACTION="none"
+  FREADBACK=false
+  FA_ERR=""
+  stem="$(printf '%s' "$path" | tr '/' '_')"
+  cur_file="$RAW_DIR/cur.$repo.$stem"
+  readback_file="$RAW_DIR/rb.$repo.$stem"
+  body_file="$RUN_DIR/.compliance.body.$$.json"
+
+  if ! contents_get "$repo" "$path" "$branch"; then
+    local grc=$?
+    if [ "$grc" -eq 1 ]; then
+      FACTION="created"
+      sha=""
+    else
+      FA_ERR="contents API get failed on the existing-file probe; see step stderr"
+      return 2
+    fi
+  else
+    cur_bytes_to "$cur_file" || { FA_ERR="failed to decode the existing file's bytes"; return 2; }
+    sha="$(printf '%s' "$CUR_JSON" | jq -r '.sha // ""')"
+    if [ -z "$sha" ]; then
+      # A GET that returns no sha cannot drive a safe update: typed, not silent.
+      FA_ERR="existing file has no sha; safe update not possible"
+      return 2
+    fi
+    if cmp -s "$cur_file" "$tpl_file"; then
+      return 0   # idempotent: bytes already exact, no write, no churn
+    fi
+    FACTION="updated"
+  fi
+
+  content_b64="$(encode_file "$tpl_file")" || return 2
+  jq -cn \
+    --arg msg "$commit_msg" \
+    --arg c "$content_b64" \
+    --arg branch "$branch" \
+    --arg sha "$sha" \
+    '{message: $msg, content: $c, branch: $branch} + (if $sha == "" then {} else {sha: $sha} end)' \
+    >"$body_file" ||
+    { FA_ERR="failed to compose the Contents API body"; return 2; }
+
+  if ! out="$(gh api --method PUT "repos/$ORG/$repo/contents/$path" -H "Accept: application/vnd.github+json" \
+      --input "$body_file" 2>"$RAW_DIR/put.$repo.$stem.err")"; then
+    rm -f "$body_file"
+    FA_ERR="contents API put failed: $(err_text "$RAW_DIR/put.$repo.$stem.err")"
+    log "$FA_ERR"
+    return 2
+  fi
+  rm -f "$body_file"
+  new_sha="$(printf '%s' "$out" | jq -r '.content.sha // .sha // ""' 2>/dev/null)"
+  if [ -z "$new_sha" ]; then
+    # A write that returns no sha cannot be read back: typed, not silent.
+    FA_ERR="contents API put succeeded but the response carried no file sha; read-back not possible"
+    log "$FA_ERR"
+    return 2
+  fi
+
+  # Bounded read-back verification (the compliance gate): bytes must match
+  # the template EXACTLY or the row is a typed failure (never silent).
+  attempt=1
+  while [ "$attempt" -le "${READBACK_ATTEMPTS:-3}" ]; do
+    if contents_get "$repo" "$path" "$branch"; then
+      cur_bytes_to "$readback_file" || break
+      if cmp -s "$readback_file" "$tpl_file"; then
+        FREADBACK=true
+      fi
+      return 0   # a byte mismatch is not a transport race; report it at once
+    fi
+    attempt=$((attempt + 1))
+    sleep "${READBACK_SLEEP:-2}"
+  done
+  FA_ERR="read-back unavailable after ${READBACK_ATTEMPTS:-3} attempt(s); see step stderr"
+  return 2
+}
+
+# ---------------------------------------------------------------------------
+# Compliance application
+# ---------------------------------------------------------------------------
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+REPOS_LIST="$(printf '%s' "$REPOS_JSON" | jq -r '.[]')"
+
+PLAN_COUNT="$(printf '%s' "$PLAN_JSON" | jq 'length')"
+log "compliance plan: $PLAN_COUNT repo(s), templates from ci_templates (KB-408)"
+
+repos_verified_total=0
+repos_error_total=0
+repos_unplanned_total=0
+files_created_total=0
+files_updated_total=0
+files_unchanged_total=0
+verify_mismatch_total=0
+
+for repo in $REPOS_LIST; do
+  log "repo $repo: applying compliance pack"
+
+  prow_pack="$(printf '%s' "$PLAN_JSON" | jq -r --arg repo "$repo" '[.[] | select(.repo == $repo)][0].pack // ""')"
+  starter_language="$(printf '%s' "$PLAN_JSON" | jq -r --arg repo "$repo" '[.[] | select(.repo == $repo)][0].starter_language // ""')"
+  errors_json='[]'
+  note="null"
+  repos_status="error"
+  files_json="null"
+
+  add_error() {
+    errors_json="$(printf '%s' "$errors_json" | jq -c --arg s "$1" --arg d "$2" '. + [{surface: $s, detail: $d}]')"
+  }
+
+  if [ -z "$prow_pack" ]; then
+    # Sweep repo without a plan row: honest report-only (staged rollout).
+    repos_unplanned_total=$((repos_unplanned_total + 1))
+    repos_status="unplanned"
+    note='"no compliance plan row; reported only"'
+  else
+    # The pack lands on the default branch only.
+    default_branch=""
+    branch_out="$(gh api "repos/$ORG/$repo" 2>"$RAW_DIR/repo.$repo.tmp")" && branch_rc=0 || branch_rc=$?
+    if [ "$branch_rc" -ne 0 ]; then
+      add_error repo_metadata "$(err_text "$RAW_DIR/repo.$repo.tmp")"
+    else
+      default_branch="$(printf '%s' "$branch_out" | jq -r '.default_branch // ""')"
+      [ -n "$default_branch" ] || add_error repo_metadata "default branch missing from repo metadata"
+    fi
+    rm -f "$RAW_DIR/repo.$repo.tmp"
+
+    if [ -n "$default_branch" ]; then
+      files_json="$(jq -cn --arg ci_rel "$CI_REL" --arg db_rel "$DB_REL" \
+        '{ci: {target_path: $ci_rel, action: "none", readback_verified: false},
+          dependabot: {target_path: $db_rel, action: "none", readback_verified: false}}')"
+      apply_ok=1
+      tpl_ci="$(tpl_ci_for "$prow_pack")"
+      tpl_db="$(tpl_db_for "$prow_pack" "$starter_language")"
+      [ -f "$tpl_ci" ] || { add_error ci "resolved template file missing for pack $prow_pack"; apply_ok=0; }
+      [ -f "$tpl_db" ] || { add_error dependabot "resolved template file missing for pack $prow_pack"; apply_ok=0; }
+      for spec in "ci:$CI_REL:$tpl_ci:$COMMIT_MSG_CI" "dependabot:$DB_REL:$tpl_db:$COMMIT_MSG_DB"; do
+        [ "$apply_ok" -eq 1 ] || break
+        IFS=':' read -r file_name rel_path tpl_file commit_msg <<EOFS
+$spec
+EOFS
+        if file_apply "$repo" "$rel_path" "$default_branch" "$tpl_file" "$commit_msg"; then
+          if [ "$FACTION" != "none" ]; then
+            files_json="$(printf '%s' "$files_json" | jq -c \
+              --arg f "$file_name" --arg action "$FACTION" --argjson rb "$FREADBACK" \
+              '.[$f].action = $action | .[$f].readback_verified = $rb')"
+            case "$FACTION" in
+              created) files_created_total=$((files_created_total + 1)) ;;
+              updated) files_updated_total=$((files_updated_total + 1)) ;;
+            esac
+          else
+            files_json="$(printf '%s' "$files_json" | jq -c \
+              --arg f "$file_name" \
+              '.[$f].readback_verified = true')"
+            files_unchanged_total=$((files_unchanged_total + 1))
+          fi
+        else
+          apply_rc=$?
+          files_json="$(printf '%s' "$files_json" | jq -c --arg f "$file_name" '.[$f] = null')"
+          case "$apply_rc" in
+            1)
+              apply_ok=0
+              verify_mismatch_total=$((verify_mismatch_total + 1))
+              add_error "${file_name}_readback" "read-back bytes differ from the KB-408 template; application cannot be marked compliant"
+              ;;
+            *)
+              apply_ok=0
+              add_error "${file_name}_apply" "${FA_ERR:-contents API write/read failed; see step stderr}"
+              ;;
+          esac
+        fi
+      done
+
+      if [ "$apply_ok" -eq 1 ]; then
+        repos_verified_total=$((repos_verified_total + 1))
+        repos_status="verified"
+      else
+        repos_error_total=$((repos_error_total + 1))
+        repos_status="error"
+      fi
+    else
+      repos_error_total=$((repos_error_total + 1))
+      repos_status="error"
+    fi
+  fi
+
+  jq -cn \
+    --arg repo "$repo" \
+    --arg pack "$prow_pack" \
+    --arg starter_language "$starter_language" \
+    --arg status "$repos_status" \
+    --argjson files "$files_json" \
+    --argjson errors "$errors_json" \
+    --argjson note "$note" \
+    '{repo: $repo, pack: (if $pack == "" then null else $pack end),
+      starter_language: (if $starter_language == "" then null else $starter_language end),
+      status: $status, files: $files, errors: $errors, note: $note}' \
+    >>"$RUN_DIR/.compliance.records.ndjson" ||
+    fail "failed to compose repo record for $repo"
+done
+
+# ---------------------------------------------------------------------------
+# Final artifact
+# ---------------------------------------------------------------------------
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+jq -s \
+  --arg s_start "$started_at" \
+  --arg s_finish "$finished_at" \
+  --arg s_org "$ORG" \
+  --argjson s_repos "$REPOS_JSON" \
+  --argjson s_plan "$PLAN_JSON" \
+  --arg s_verified "$repos_verified_total" \
+  --arg s_error "$repos_error_total" \
+  --arg s_unplanned "$repos_unplanned_total" \
+  --arg s_created "$files_created_total" \
+  --arg s_updated "$files_updated_total" \
+  --arg s_unchanged "$files_unchanged_total" \
+  --arg s_mismatch "$verify_mismatch_total" \
+  '
+  . as $repos
+  | {
+      schema: "devops_maint_v1.compliance.v1",
+      run: {
+        started_at: $s_start,
+        finished_at: $s_finish,
+        org: $s_org,
+        repos: $s_repos,
+        compliance_plan: $s_plan,
+        template_pack: "ci_templates (KB-408)"
+      },
+      summary: {
+        repos_total: ($s_repos | length),
+        repos_verified_total: ($s_verified | tonumber),
+        repos_error_total: ($s_error | tonumber),
+        repos_unplanned_total: ($s_unplanned | tonumber),
+        files_created_total: ($s_created | tonumber),
+        files_updated_total: ($s_updated | tonumber),
+        files_unchanged_total: ($s_unchanged | tonumber),
+        verify_mismatch_total: ($s_mismatch | tonumber)
+      },
+      repos: $repos
+    }
+  ' "$RUN_DIR/.compliance.records.ndjson" >"$RUN_DIR/.compliance.compose.$$.tmp" 2>"$RUN_DIR/.compliance.compose.$$.err" ||
+    fail "failed to compose final artifact: $(err_text "$RUN_DIR/.compliance.compose.$$.err")"
+mv "$RUN_DIR/.compliance.compose.$$.tmp" "$COMPLIANCE_PATH"
+
+# ---------------------------------------------------------------------------
+# Structural self-check (fail loud — a malformed artifact is a broken gate)
+# ---------------------------------------------------------------------------
+jq -e --argjson plan "$PLAN_JSON" '
+  (.schema == "devops_maint_v1.compliance.v1") and
+  (.run.compliance_plan == $plan) and
+  (.run.org | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$")) and
+  (.run.started_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+  (.run.finished_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+  (.summary.repos_total == (.repos | length)) and
+  (.summary.repos_verified_total == ([.repos[] | select(.status == "verified")] | length)) and
+  (.summary.repos_error_total == ([.repos[] | select(.status == "error")] | length)) and
+  (.summary.repos_unplanned_total == ([.repos[] | select(.status == "unplanned")] | length)) and
+  (.summary.files_created_total ==
+     ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
+       | [.[] | select(.action == "created")] | length)) and
+  (.summary.files_updated_total ==
+     ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
+       | [.[] | select(.action == "updated")] | length)) and
+  (.summary.files_unchanged_total ==
+     ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
+       | [.[] | select(.action == "none")] | length)) and
+  (.summary.verify_mismatch_total ==
+     ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
+       | [.[] | select(.readback_verified == false and .action != null)] | length)) and
+  ([.repos[] |
+      (.status | IN("verified", "error", "unplanned")) and
+      ((.errors | type) == "array")] | all) and
+  # Read-back IS the compliance gate: a verified row without byte-verified
+  # files can never exist.
+  ([.repos[] | select(.status == "verified") |
+      (.files.ci.readback_verified == true and .files.dependabot.readback_verified == true)] | all) and
+  ([.repos[] | select(.status == "error") | ((.errors | length) > 0)] | all) and
+  ([.repos[] | select(.status == "unplanned") | (.files == null)] | all)
+' "$COMPLIANCE_PATH" >"$RUN_DIR/.compliance.selfcheck.$$.out" 2>"$RUN_DIR/.compliance.selfcheck.$$.err" ||
+  fail "artifact failed its structural self-check: $(err_text "$RUN_DIR/.compliance.selfcheck.$$.err")"
+rm -f "$RUN_DIR/.compliance.selfcheck.$$.out"
+
+# Read-back mismatches are typed STEP failures (the run must never end green
+# with an unverifiable compliance claim); the evidence artifact is preserved
+# and its path named in the failure line.
+if [ "$verify_mismatch_total" -gt 0 ]; then
+  fail "$verify_mismatch_total file(s) failed byte read-back verification; evidence at $COMPLIANCE_PATH"
+fi
+
+log "compliance complete: verified=$repos_verified_total error=$repos_error_total unplanned=$repos_unplanned_total created=$files_created_total updated=$files_updated_total unchanged=$files_unchanged_total"
+printf '%s\n' "$COMPLIANCE_PATH"

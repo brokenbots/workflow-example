@@ -104,16 +104,18 @@ variable "brokenbot_github_token" {
     secret      = true
 }
 
-// ── Lane B (KB-409): protection + CodeQL triage ─────────────────────────────
+// ── Lane B (KB-409): compliance + protection + CodeQL triage ─────────────────
 
-// Branch-protection application (AFTER per-repo CI green; NEVER
-// protection-without-signal). One row per repo to protect; the pack selects
-// the required status-check contexts from the KB-408 application contract.
+// Lane B application plan (ADR-0015 D6 compliance-then-protection order):
+// one row per repo selects the KB-408 pack whose CI template + dependabot.yml
+// the compliance_apply step writes, and whose required status-check contexts
+// the protect step then enforces ONLY after that repo's CI is green.
 variable "protection_plan" {
-    description = "Repos to carry branch protection via the canonical devops-maintenance-protection ruleset. The pack (go|ts|py|starter) fixes the required status-check contexts. Applied only when the pack's required checks are green on the default-branch HEAD; a repo without a plan row is reported but never protected."
+    description = "Repos to carry the Lane B application: compliance_apply writes the pack's CI template + dependabot.yml (byte-verified by read-back), then protect applies the canonical devops-maintenance-protection ruleset only when the pack's required checks are green on the default-branch HEAD. The pack (go|ts|py|starter) fixes the templates and the required status-check contexts; for the starter pack, starter_language (go|ts|py) selects the language dependabot template. A repo without a plan row is reported but never touched."
     type        = list(object({
-        repo = string
-        pack = string
+        repo             = string
+        pack             = string
+        starter_language = optional(string, "")
     }))
     default     = []
 }

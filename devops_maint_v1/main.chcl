@@ -42,6 +42,19 @@
 //                            fix rows riding the standard pipeline, and the
 //                            post-run open-alert count as the hold-at-zero
 //                            signal.
+//   compliance_apply (shell) Lane B (KB-410): the KB-408 compliance pack
+//                            (CI template + dependabot.yml) written per plan
+//                            repo via the Contents API, every write verified
+//                            by bounded byte read-back; a read-back that
+//                            does not byte-match is a typed failure. Applied
+//                            BEFORE the protect step so its CI signal is the
+//                            one protection gates on.
+//   delta_report   (shell)   Lane B (KB-410): per-repo before/after deltas —
+//                            the collect inventory is the before, a light
+//                            re-enumeration (open PRs by author, open CodeQL
+//                            alerts, applied rulesets) is the after; the
+//                            artifact carries delta_class per repo for the
+//                            delta-driven weekly cadence.
 //
 // Determinism contract (ADR-0015 D1/D2): buckets and the consolidated plan
 // come from pure jq in classify — identical inventories classify identically.
@@ -189,6 +202,38 @@ data "internal" "codeql_triage_file" {
 // fails on config problems (bad plan, out-of-scope rows, duplicate rows) or
 // a failed structural self-check.
 data "internal" "codeql_triage_error" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the compliance artifact (per-repo pack rows with per-file
+// read-back verification); the Lane B compliance_apply step's deliverable.
+data "internal" "compliance_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the compliance_apply step fails. Per-repo/per-file
+// apply failures are bookkeeping rows inside the compliance artifact; the
+// step itself fails on config problems or a read-back that does not
+// byte-match the KB-408 template (the artifact is preserved and named in
+// the line).
+data "internal" "compliance_error" {
+    type  = string
+    value = ""
+}
+
+// Absolute path of the delta artifact (per-repo before/after deltas over the
+// sweep surfaces); the delta_report step's deliverable for the cadence.
+data "internal" "delta_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the delta_report step fails. Per-repo enumeration
+// errors are bookkeeping rows inside the delta artifact; the step itself
+// fails on config problems or an all-repos-failed re-enumeration.
+data "internal" "delta_error" {
     type  = string
     value = ""
 }
@@ -388,7 +433,7 @@ step "merge" {
         })
     }
     outcome "success" {
-        next = step.protect
+        next = step.compliance_apply
         write {
             target = data.internal.merge_file.value
             value  = trimspace(output.stdout)
@@ -398,6 +443,48 @@ step "merge" {
         next = state.merge_failed
         write {
             target = data.internal.merge_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// Lane B compliance application (KB-410 guided sweep, D6): the KB-408 pack's
+// CI template + dependabot.yml written per plan repo through the Contents
+// API, each write verified by bounded byte read-back, applied BEFORE the
+// protect step so protection always gates on the pack's own CI signal.
+step "compliance_apply" {
+    target  = adapter.shell.compliance_apply
+    timeout = "1800s"
+    input {
+        command = templatefile("./scripts/apply_ci_pack.sh.tftpl", {
+            gh_retry            = file("./scripts/gh_retry.sh.tftpl")
+            org                 = var.org
+            repos_json          = jsonencode(var.repos)
+            plan_json           = jsonencode(var.protection_plan)
+            classification_file = data.internal.classification_file.value
+            // Base64 alphabet is shellquote-safe (A-Za-z0-9+/=), so the
+            // shellquoted payload stays exactly its bytes end-to-end.
+            go_ci_b64      = base64encode(file("./ci_templates/github-ci-go.yml"))
+            ts_ci_b64      = base64encode(file("./ci_templates/github-ci-ts.yml"))
+            py_ci_b64      = base64encode(file("./ci_templates/github-ci-py.yml"))
+            starter_ci_b64 = base64encode(file("./ci_templates/github-ci-starter.yml"))
+            go_db_b64      = base64encode(file("./ci_templates/dependabot-go.yml"))
+            ts_db_b64      = base64encode(file("./ci_templates/dependabot-ts.yml"))
+            py_db_b64      = base64encode(file("./ci_templates/dependabot-py.yml"))
+        })
+    }
+    outcome "success" {
+        next = step.protect
+        write {
+            target = data.internal.compliance_file.value
+            // stdout carries ONLY the machine artifact path (exact trimmatch).
+            value = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.compliance_apply_failed
+        write {
+            target = data.internal.compliance_error.value
             value  = trimspace(output.stderr)
         }
     }
@@ -455,7 +542,7 @@ step "codeql_triage" {
         })
     }
     outcome "success" {
-        next = state.completed
+        next = step.delta_report
         write {
             target = data.internal.codeql_triage_file.value
             value  = trimspace(output.stdout)
@@ -465,6 +552,39 @@ step "codeql_triage" {
         next = state.codeql_triage_failed
         write {
             target = data.internal.codeql_triage_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// Lane B delta report (KB-410 guided sweep, D6): the sweep's collect
+// inventory is the before snapshot; a light re-enumeration (no clones, no
+// per-PR checks, no advisory re-scan) is the after. Per-repo deltas drive
+// the follow-on weekly cadence.
+step "delta_report" {
+    target  = adapter.shell.delta_report
+    timeout = "1800s"
+    input {
+        command = templatefile("./scripts/sweep_delta.sh.tftpl", {
+            gh_retry        = file("./scripts/gh_retry.sh.tftpl")
+            org             = var.org
+            repos_json      = jsonencode(var.repos)
+            plan_json       = jsonencode(var.protection_plan)
+            inventory_file  = data.internal.inventory_file.value
+        })
+    }
+    outcome "success" {
+        next = state.completed
+        write {
+            target = data.internal.delta_file.value
+            // stdout carries ONLY the machine artifact path (exact trimmatch).
+            value = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.delta_report_failed
+        write {
+            target = data.internal.delta_error.value
             value  = trimspace(output.stderr)
         }
     }
@@ -521,6 +641,16 @@ state "protect_failed" {
 }
 
 state "codeql_triage_failed" {
+    terminal = true
+    success  = false
+}
+
+state "compliance_apply_failed" {
+    terminal = true
+    success  = false
+}
+
+state "delta_report_failed" {
     terminal = true
     success  = false
 }
@@ -624,4 +754,28 @@ output "codeql_triage_error" {
     description = "Typed failure line of the codeql_triage step; empty on success. Per-disposition failures live in the triage artifact."
     type        = string
     value       = data.internal.codeql_triage_error.value
+}
+
+output "compliance_file" {
+    description = "Path of the compliance artifact (per-repo pack rows with per-file read-back verification); empty when the compliance_apply step failed."
+    type        = string
+    value       = data.internal.compliance_file.value
+}
+
+output "compliance_error" {
+    description = "Typed failure line of the compliance_apply step; empty on success. Per-file apply failures live in the compliance artifact; a read-back that did not byte-match fails the step with the preserved artifact path named here."
+    type        = string
+    value       = data.internal.compliance_error.value
+}
+
+output "delta_file" {
+    description = "Path of the delta artifact (per-repo before/after deltas); empty when the delta_report step failed."
+    type        = string
+    value       = data.internal.delta_file.value
+}
+
+output "delta_error" {
+    description = "Typed failure line of the delta_report step; empty on success. Per-repo enumeration failures live in the delta artifact."
+    type        = string
+    value       = data.internal.delta_error.value
 }
