@@ -77,18 +77,43 @@ run_brief() { # <rendered.sh> <out> <err>
 # classification_v1 <out> <jq-patch>
 # An honest, self-consistent reduce of a real classify artifact: one
 # mechanical group (+ its superseded closes), one rebase plan row, and the
-# bucket counts that reconcile with them.
+# bucket counts that reconcile with them — plus per-row entries so the
+# judgment/report-only exclusion in the brief is testable (a row-shaped
+# leak carries `.class`, never `.action_class`).
 classification_v1() {
     local out="$1" patch="$2"
     jq -n '
       {
         schema: "devops_maint_v1.classification.v1",
         run: {sweep_id: "sw-route", org: "testorg",
-              repos: ["alpha", "beta"], started_at: "2026-11-15T05:00:00Z",
-              finished_at: "2026-11-15T05:05:00Z"},
-        summary: {rows_total: 3, groups_total: 1, rebases_total: 1,
+              repos: ["alpha", "beta", "gamma", "delta"],
+              started_at: "2026-11-15T05:00:00Z", finished_at: "2026-11-15T05:05:00Z"},
+        summary: {rows_total: 5, groups_total: 1, rebases_total: 1,
                   mechanical_bump: 2, vuln_clear: 0, needs_rebase: 1,
-                  needs_judgment: 0, report_only: 0, parked_groups: 0},
+                  needs_judgment: 1, report_hold: 1, report_only: 1,
+                  parked_groups: 0},
+        rows: [
+          {repo: "alpha", number: 32, module: "github.com/consul/mod",
+           from_version: "1.2.0", to_version: "1.2.5",
+           class: "mechanical_bump", report_only: false,
+           group_id: "g-test-0001", is_carrier: true},
+          {repo: "alpha", number: 31, module: "github.com/consul/mod",
+           from_version: "1.2.0", to_version: "1.2.5",
+           class: "mechanical_bump", report_only: false,
+           group_id: "g-test-0001", is_carrier: false},
+          {repo: "beta", number: 7, module: "github.com/acme/rebase-drift",
+           from_version: "1.5.0", to_version: "1.6.0",
+           class: "needs_rebase", report_only: false,
+           group_id: "g-test-0002", is_carrier: false},
+          {repo: "gamma", number: 99, module: "github.com/acme/judgment-only",
+           from_version: "8.8.8", to_version: "9.9.9",
+           class: "needs_judgment", report_only: false,
+           group_id: null, is_carrier: false},
+          {repo: "delta", number: 100, module: "github.com/acme/report-only",
+           from_version: "0.0.0", to_version: "0.0.1",
+           class: "report_hold", report_only: true,
+           group_id: null, is_carrier: false}
+        ],
         groups: [{group_id: "g-test-0001", repo: "alpha", module: "github.com/consul/mod",
                   to_version: "1.2.5", action_class: "mechanical_bump",
                   carrier: {number: 32, repo: "alpha", title: "Bump github.com/consul/mod from 1.2.0 to 1.2.5",
@@ -152,9 +177,9 @@ BRIEF1="$(cat "${WORK_ROOT}/b1.out")"
 
 require_equal "$(wc -l <"${WORK_ROOT}/b1.out" | tr -d ' ')" "1" "B1 stdout is exactly one line"
 require_equal "$(printf '%s' "${BRIEF1}" | jq -r '.sweep.sweep_id + "/" + .sweep.org + "?" + (.sweep.repos|sort|join(","))')" \
-    "sw-route/testorg?alpha,beta" "B1 sweep context carried"
+    "sw-route/testorg?alpha,beta,delta,gamma" "B1 sweep context carried"
 require_equal "$(printf '%s' "${BRIEF1}" | jq -c '.buckets')" \
-    '{"mechanical_bump":2,"vuln_clear":0,"needs_rebase":1,"needs_judgment":0,"report_only":0,"parked_groups":0}' \
+    '{"mechanical_bump":2,"vuln_clear":0,"needs_rebase":1,"needs_judgment":1,"report_only":1,"parked_groups":0}' \
     "B1 bucket counts carried verbatim"
 require_equal "$(printf '%s' "${BRIEF1}" | jq -rc '.plan.groups')" \
     '[{"group_id":"g-test-0001","repo":"alpha","module":"github.com/consul/mod","to_version":"1.2.5","action_class":"mechanical_bump","carrier":32,"closes":[31]}]' \
@@ -170,7 +195,20 @@ check_protocols() {
         fail "B1 success-run stderr protocol broken"
     fi
 }
-ok "B1 judgment/report-only rows are excluded from plan.groups (fixture has neither class among groups)"
+require_equal "$(printf '%s' "${BRIEF1}" | jq -rc '[.plan.groups[] | select(.action_class == null or .action_class == "needs_judgment" or .action_class == "report_hold")] | length')" \
+    "0" "B1 no judgment/report-only class reaches plan.groups"
+require_equal "$(printf '%s' "${BRIEF1}" | jq -rc '.plan.groups | length')" \
+    "1" "B1 plan holds only the actionable group"
+if grep -qE 'github\.com/acme/(judgment-only|report-only)' <<<"${BRIEF1}"; then
+    fail "B1 judgment/report-only row detail leaked into the brief"
+else
+    ok "B1 judgment/report-only row detail absent from the brief"
+fi
+if grep -q 'github\.com/consul/mod' <<<"${BRIEF1}"; then
+    ok "B1 positive control: actionable module detail present in the brief"
+else
+    fail "B1 positive control missing — actionable module detail absent from the brief"
+fi
 ok "B1 stdout carries only the compact brief line"
 check_protocols
 
@@ -190,6 +228,11 @@ run_expect_fail() { # <label> <fixture_file> <stderr-substring>
         ok "${label}: stderr carries '${substring}'"
     else
         fail "${label}: stderr missing '${substring}' — got: $(head -c 200 "${err}")"
+    fi
+    if grep -q '^route_prepare_failed:' "${err}"; then
+        ok "${label}: stderr is prefixed route_prepare_failed:"
+    else
+        fail "${label}: stderr missing 'route_prepare_failed:' prefix — got: $(head -c 200 "${err}")"
     fi
 }
 
@@ -217,9 +260,9 @@ mkdir -p "${WORK_ROOT}/trav/x"
 classification_v1 "${WORK_ROOT}/trav/cl.json" ""
 run_expect_fail "B7 '..' traversal rejected" "${WORK_ROOT}/trav/x/../cl.json" "classification path must not contain '..' components"
 
-# stdout protocol: diagnostics are stderr-only, prefixed, on a passing run too
-# (log lines route_prepare-prefixed, failures route_prepare_failed-prefixed —
-# asserted above via check_protocols and run_expect_fail's empty-stdout reads)
+# stdout protocol: diagnostics are stderr-only, prefixed, on every run —
+# success logs are route_prepare-prefixed (check_protocols above) and every
+# failure scenario asserts the route_prepare_failed: prefix (run_expect_fail)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # The tree still validates (grammar + interface contract)
