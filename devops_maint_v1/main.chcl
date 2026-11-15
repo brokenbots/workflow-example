@@ -245,6 +245,8 @@ data "internal" "delta_error" {
 // carries the plan and the explicit note that judgment/report rows are never
 // auto-acted, so a hold choice is the model's whole veto surface — it can
 // narrow nothing, widen nothing, and invent no actions.
+// The adapter's strict input contract enforces questions-as-array
+// (jsonencode([…])); a map-shaped questions value is rejected by the adapter.
 local "route_questions" {
     value = jsonencode([
         {
@@ -368,7 +370,12 @@ step "route" {
         next = state.route_failed
         write {
             target = data.internal.route_error.value
-            value  = trimspace(output.stderr)
+            // The decision adapter declares a typed failure payload
+            // {error: {kind,status,message,retryable}} (ADR-0013) — there is
+            // no shell stderr channel on this adapter, and the engine
+            // validates write reads against the adapter's declared output
+            // projection.
+            value  = trimspace(output.error.message)
         }
     }
 }
