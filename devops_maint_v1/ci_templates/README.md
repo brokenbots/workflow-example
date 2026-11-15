@@ -51,8 +51,13 @@ Gate semantics (fail-safe direction: the skip requires positive evidence):
 - docs-only PR (every changed file matches the fail-safe docs set:
   `*.md`, `*.markdown`, `*.mdx`, `*.rst`, `docs/` image assets, `LICENSE`,
   `LICENSE.*`, `CODEOWNERS`) → heavy jobs skip;
-- anything `.github/` (workflows, dependabot policy) and any code file under
-  any directory → full run;
+- any non-documentation state file under `.github/` (workflows, dependabot
+  policy) and any code file under any directory → full run — the docs-set
+  patterns, not the directory, decide, so a stray `.md` under `.github/`
+  (PR/issue templates) correctly matches the docs set and skips;
+- `docs/` image assets match top-level `docs/*.ext` only; a nested asset
+  (e.g. `docs/assets/x.png`) deliberately keeps the full run (conservative,
+  fail-safe direction);
 - detection tool failure or empty diff → full run, gate exits 0 (infra
   failures never red-block a PR from the gate job and never skip without
   evidence).
@@ -78,10 +83,25 @@ diverge between languages.
 - `govulncheck@v1.9.0` in `github-ci-go.yml` must match the root Makefile
   `vuln-scan` target pin — the template suite cross-checks the literals and
   reds on drift.
-- `ghcr.io/google/osv-scanner:v1.8.5` is the CI scanner pin; the collect
-  sweep (KB-406) runs the operator-provided `osv-scanner` from PATH with the
-  same v1 CLI shape (`--recursive`). Image pin and interpreter/container pins
-  are org-managed literals; the suite asserts every pin is present in its
+- `ghcr.io/google/osv-scanner:v1.8.5` is the CI scanner pin. The templates
+  pass args straight through the image's own `ENTRYPOINT ["/root/osv-scanner"]`
+  (verified against the v1.8.5 Dockerfile): no `--entrypoint` override, because
+  the binary lives at `/root/osv-scanner`, off the container PATH, so a
+  bare-name override would red every osv leg instantly. The tag is a mutable
+  org-managed pin, not a digest; digest pinning is deliberately out of scope
+  for these plain `.yml` templates. The collect sweep (KB-406) runs the
+  operator-provided `osv-scanner` from PATH with the same v1 CLI shape
+  (`--recursive`). The suite asserts the exact docker-run invocation so any
+  drift back toward a broken override reds.
+- `pytest==9.2.0` in `github-ci-py.yml` bootstraps the test leg: setup-python
+  provisions a bare interpreter, so the pytest runner must be installed
+  explicitly (latest stable at pin time, 2026-11-15; Python 3.14 explicitly
+  supported per its PyPI classifiers). The pytest step keeps its test-file
+  presence guard, so test-less repos degrade instead of red.
+- Interpreter/container/tool pins (`go-version-file: go.mod` for Go; Node 24
+  as setup-node `"24"` + `node:24-bookworm`, lockstep-asserted; Python
+  `"3.14"` via the workflow-level `PYTHON_VERSION` env; `ruff==1.0.0`) are
+  org-managed literals; the suite asserts every pin is present in its
   expected form.
 - Actions are allowlisted to the org set; the suite reds on any `uses:` not
   in: `actions/checkout@v7`, `actions/setup-go@v7`, `actions/setup-node@v4`,

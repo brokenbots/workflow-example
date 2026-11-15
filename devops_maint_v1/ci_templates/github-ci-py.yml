@@ -8,9 +8,11 @@
 #
 # Job set (ADR-0015 Lane B language template, Python leg):
 #   lint  ruff check . (pinned tool, zero-arg-warnings policy)
-#   test  pytest only when tests exist (guarded on test-file presence;
-#         otherwise the leg degrades instead of red for no work), against an
-#         installable package (pyproject.toml or setup.py — guarded edit install)
+#   test  pinned pytest runner bootstrapped first (setup-python ships a bare
+#         interpreter), then pytest only when tests exist (guarded on
+#         test-file presence; otherwise the leg degrades instead of red for
+#         no work), against an installable package (pyproject.toml or
+#         setup.py — guarded edit install)
 #   osv   pinned osv-scanner image over the whole tree; scanner exit 1
 #         (findings) reds the job
 #
@@ -161,6 +163,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - name: pytest bootstrap (pinned runner; setup-python ships a bare interpreter)
+        run: python -m pip install pytest==9.2.0
       - name: editable install (guarded: repo must declare packaging metadata)
         if: ${{ hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != '' }}
         run: python -m pip install -e .
@@ -176,4 +180,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: osv-scanner (pinned image; findings exit 1 = red job)
-        run: docker run --rm --entrypoint osv-scanner -v "$PWD:/repo:ro" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo
+        # v1.8.5 image ENTRYPOINT is ["/root/osv-scanner"] — args pass through
+        # it; a --entrypoint override reds instantly (binary is off PATH).
+        run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo

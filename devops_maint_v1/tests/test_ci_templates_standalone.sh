@@ -14,8 +14,9 @@
 #      real fixture git repos — docs-only PRs skip, mixed/push/empty-diff/
 #      detection-failure stay full, `.github/` state files stay full;
 #   4. language legs carry their ADR job set (go: vet/gofmt/test/
-#      govulncheck/osv; ts: tsc + vitest container; py: ruff guarded pytest;
-#      starter: exactly-one-language parity + smoke), stable `name:` values
+#      govulncheck/osv; ts: tsc + vitest container; py: pinned pytest
+#      bootstrap + guarded pytest; starter: parity with the pinned toolchain
+#      hoisted above make build + smoke), stable `name:` values for the
 #      for the KB-409 required-check contract, org action allowlist, pins;
 #   5. dependabot policy shape incl. the negative: NO semver-major entry,
 #      ever — majors must surface as judgment-lane PRs (KB-407 gate #3);
@@ -127,6 +128,46 @@ PYEOF
 done
 else
     skip_loud "YAML parse leg (python3+pyyaml unavailable here; the CI image covers it)"
+fi
+
+# Structural shape beyond grep's reach (when PyYAML exists): trigger shape,
+# minimal permissions, needs/if edges, the stable job-name contract, and the
+# gate never self-gating.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+    python3 - "${CI_GO}" "${CI_TS}" "${CI_PY}" "${CI_STARTER}" <<'PYEOF' || fail "workflow structural validation failed"
+import sys, yaml
+
+SKIP_IF = "needs.changes.outputs.docs_only == 'false'"
+
+def needs_list(job):
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+for path in sys.argv[1:]:
+    doc = yaml.safe_load(open(path))
+    trig = doc.get(True, doc.get("on", {}))
+    assert isinstance(trig, dict), f"{path}: missing on: block"
+    push = trig.get("push", {})
+    assert list(push.get("branches", [])) == ["main"], f"{path}: push must target main only"
+    assert "pull_request" in trig, f"{path}: pull_request trigger missing"
+    assert doc.get("permissions") == {"contents": "read"}, f"{path}: permissions not minimal read-only"
+    jobs = doc.get("jobs", {})
+    assert list(jobs)[0] == "changes", f"{path}: changes gate must be the first job"
+    for name, job in jobs.items():
+        assert job.get("name") == name, f"{path}/{name}: stable-name contract broken"
+    for name, job in jobs.items():
+        if name == "changes":
+            assert job.get("if") is None, f"{path}/changes: gate must not self-gate"
+            continue
+        assert "changes" in needs_list(job), f"{path}/{name}: missing needs: changes"
+        assert job.get("if") == SKIP_IF, f"{path}/{name}: docs-only skip if drifted"
+    smoke = jobs.get("smoke")
+    if smoke is not None:
+        assert "build-parity" in needs_list(smoke), f"{path}/smoke: missing needs: build-parity"
+print("ok: workflow structural shape (triggers/permissions/needs/if/name contract)")
+PYEOF
+else
+    skip_loud "workflow structural leg (python3+pyyaml unavailable here; CI covers it)"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -299,6 +340,11 @@ if printf '%s\n' "${JOB_PY_TEST}" | grep -Fq "hashFiles('**/test_*.py') != '' ||
 else
     fail "py pytest leg not guarded on test-file presence"
 fi
+if printf '%s\n' "${JOB_PY_TEST}" | grep -Fq 'python -m pip install pytest==9.2.0'; then
+    ok "py test job bootstraps the pinned pytest runner (bare-interpreter fix)"
+else
+    fail "py test job missing the pinned pytest bootstrap (pytest import-fails on a bare interpreter)"
+fi
 
 # Starter: exactly-one-language guard + make build + guarded language builds + smoke.
 for step in 'exactly-one-language guard' 'make build' "hashFiles('go.mod') != ''" "hashFiles('package.json') != ''" "hashFiles('pyproject.toml') != ''" 'make -n smoke' 'make smoke' 'go build ./...' 'npm run build'; do
@@ -309,12 +355,21 @@ for step in 'exactly-one-language guard' 'make build' "hashFiles('go.mod') != ''
     fi
 done
 
-# osv scanner pin shared by the three language templates.
+# osv scanner invocation contract, shared by the three language templates:
+# pinned image, repo read-only, args pass through the image ENTRYPOINT —
+# v1.8.5 sets ENTRYPOINT ["/root/osv-scanner"] and the binary is off PATH,
+# so a --entrypoint bare-name override reds every osv leg instantly.
+OSV_RUN='docker run --rm -v "$PWD:/repo:ro" ghcr.io/google/osv-scanner:v1.8.5 --recursive /repo'
 for f in "${CI_GO}" "${CI_TS}" "${CI_PY}"; do
-    if grep -Fq 'ghcr.io/google/osv-scanner:v1.8.5' "${f}" && grep -Fq -- '--recursive /repo' "${f}"; then
-        ok "$(basename "${f}"): pinned osv-scanner image over the whole tree"
+    if grep -Fq "${OSV_RUN}" "${f}"; then
+        ok "$(basename "${f}"): exact osv-scanner invocation contract"
     else
-        fail "$(basename "${f}"): osv leg missing the pinned recursive scanner run"
+        fail "$(basename "${f}"): osv run drifted from the invocation contract (${OSV_RUN})"
+    fi
+    if grep -Eq 'run:.*--entrypoint' "${f}"; then
+        fail "$(basename "${f}"): --entrypoint override reintroduced (args must pass through the image entrypoint)"
+    else
+        ok "$(basename "${f}"): osv args pass through the image entrypoint (no override)"
     fi
 done
 
