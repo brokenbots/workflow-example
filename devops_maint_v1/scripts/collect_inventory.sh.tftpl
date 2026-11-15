@@ -555,7 +555,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
     --argjson cq_by_severity "$cq_by_severity" \
     --arg rs_status "$rs_status" \
     --arg rs_reason "$rs_reason" \
-    --argjson rs_applied "$rs_applied" \
+    --arg rs_applied "$rs_applied" \
     --argjson rs_rules "$rs_rules" \
     '
     {

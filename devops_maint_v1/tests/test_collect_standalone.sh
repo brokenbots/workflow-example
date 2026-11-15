@@ -37,13 +37,16 @@ BIN_STUB_TOOLS="${WORK_ROOT}/bin_tools"
 mkdir -p "${BIN_STUB_GH}" "${BIN_STUB_TOOLS}"
 
 FAILURES=0
+# All three helpers report on stderr so that assertion commands ending in
+# stdout redirections (`check "..." jq -e ... >/dev/null`) do not swallow
+# the PASS/FAIL report itself.
 check() {
     local label="$1"
     shift
     if "$@"; then
-        echo "PASS: ${label}"
+        echo "PASS: ${label}" >&2
     else
-        echo "FAIL: ${label}"
+        echo "FAIL: ${label}" >&2
         FAILURES=$((FAILURES + 1))
     fi
 }
@@ -55,10 +58,10 @@ check_not() {
     local label="$1"
     shift
     if "$@"; then
-        echo "FAIL: ${label}"
+        echo "FAIL: ${label}" >&2
         FAILURES=$((FAILURES + 1))
     else
-        echo "PASS: ${label}"
+        echo "PASS: ${label}" >&2
     fi
 }
 
@@ -66,9 +69,9 @@ expect_count() {
     # expect_count <label> <want> <got>
     local label="$1" want="$2" got="$3"
     if [ "${got}" = "${want}" ]; then
-        echo "PASS: ${label}"
+        echo "PASS: ${label}" >&2
     else
-        echo "FAIL: ${label} (want ${want}, got ${got})"
+        echo "FAIL: ${label} (want ${want}, got ${got})" >&2
         FAILURES=$((FAILURES + 1))
     fi
 }
@@ -236,6 +239,9 @@ chmod +x "${BIN_STUB_GH}/gh"
 # unavailable toolchain (command -v fails -> unavailable lane).
 cat >"${BIN_STUB_TOOLS}/govulncheck" <<'EOF'
 #!/usr/bin/env bash
+# Whole-sweep flags model single-repo or every-has-go.mod scenarios. Dir-mode
+# (TEST_GOV_FIXTURE=<dir>) injects per-repo lanes (<dir>/<repo>.{json,unpars,fail});
+# the repo is taken from the trailing clone-dir argument, mirroring osv-scanner.
 if [ "${TEST_GOV_FAIL:-0}" = "1" ]; then
     echo "govulncheck: fixture-injected failure" >&2
     exit 1
@@ -244,8 +250,30 @@ if [ -n "${TEST_GOV_UNPARSEABLE:-}" ]; then
     echo "this output is not json at all"
     exit 0
 fi
-if [ -n "${TEST_GOV_FIXTURE:-}" ]; then
-    cat "${TEST_GOV_FIXTURE}"
+# govulncheck is invoked with cwd=clone dir and `./...` (no dir argument),
+# so derive the scan repo from $PWD; osv-scanner takes the dir as argv.
+scan_repo="$(basename "$PWD")"
+stripped="$(printf '%s' "$scan_repo" | sed -n 's/^[0-9]*\.//p')"
+if [ -n "$stripped" ]; then scan_repo="$stripped"; fi
+fx="${TEST_GOV_FIXTURE:-}"
+if [ -n "$fx" ] && [ -d "$fx" ]; then
+    if [ -f "$fx/$scan_repo.fail" ]; then
+        echo "govulncheck: fixture-injected failure (per-repo)" >&2
+        exit 1
+    fi
+    if [ -f "$fx/$scan_repo.unpars" ]; then
+        echo "this output is not json at all"
+        exit 0
+    fi
+    if [ -f "$fx/$scan_repo.json" ]; then
+        cat "$fx/$scan_repo.json"
+        exit 0
+    fi
+    echo "[]"
+    exit 0
+fi
+if [ -n "$fx" ]; then
+    cat "$fx"
     exit 0
 fi
 echo "[]"
@@ -445,10 +473,10 @@ check "S1 alpha pr13 verdict red" test "$(jq -r '.repos[0].prs.dependabot[1].ci.
 check "S1 alpha pr13 failure state normalized" test "$(jq -r '.repos[0].prs.dependabot[1].ci.checks[0].state' "${A_ALPHA}")" = "fail"
 check "S1 alpha pr13 skipped state normalized" test "$(jq -r '.repos[0].prs.dependabot[1].ci.checks[1].state' "${A_ALPHA}")" = "skip"
 check "S1 alpha dependabot authors kept" test "$(jq -r '.repos[0].prs.dependabot[0].author' "${A_ALPHA}")" = "dependabot[bot]"
-check "S1 alpha gov ok with 2 findings" jq -e '.repos[0].advisories.govulncheck.status == "ok" and (.advisories.govulncheck.findings | length) == 2' "${A_ALPHA}" >/dev/null
+check "S1 alpha gov ok with 2 findings" jq -e '.repos[0].advisories.govulncheck.status == "ok" and (.repos[0].advisories.govulncheck.findings | length) == 2' "${A_ALPHA}" >/dev/null
 check "S1 alpha gov finding id/module/version" test "$(jq -r '.repos[0].advisories.govulncheck.findings[0].id' "${A_ALPHA}")/"$(jq -r '.repos[0].advisories.govulncheck.findings[0].package' "${A_ALPHA}")"" = "GO-2024-0001/golang.org/x/net"
 check "S1 alpha osv ok empty (clean tool run)" jq -e '.repos[0].advisories.osv.status == "ok" and (.advisories.osv.findings | length) == 0' "${A_ALPHA}" >/dev/null
-check "S1 alpha codeql ok critical=1 medium=1" jq -e '.repos[0].codeql.status == "ok" and .codeql.open_alerts == 2 and .codeql.by_severity.critical == 1 and .codeql.by_severity.medium == 1 and .codeql.by_severity.other == 0' "${A_ALPHA}" >/dev/null
+check "S1 alpha codeql ok critical=1 medium=1" jq -e '.repos[0].codeql.status == "ok" and .repos[0].codeql.open_alerts == 2 and .repos[0].codeql.by_severity.critical == 1 and .repos[0].codeql.by_severity.medium == 1 and .repos[0].codeql.by_severity.other == 0' "${A_ALPHA}" >/dev/null
 check "S1 alpha rulesets applied with 1 rule" jq -e '.repos[0].rulesets.applied == true and (.repos[0].rulesets.rules | length) == 1 and .repos[0].rulesets.rules[0].bypass_actors == 1' "${A_ALPHA}" >/dev/null
 
 # beta record
@@ -483,6 +511,9 @@ echo "1" >"${FX2}/gamma/rulesets.rc"       # rulesets rc 1 -> error + empty rule
 # per-repo osv error injection: gamma fails, delta scans clean (dir mode)
 mkdir -p "${FX2}/osv"
 echo "1" >"${FX2}/osv/gamma.fail"
+# per-repo govulncheck error injection (only gamma has go.mod anyway)
+mkdir -p "${FX2}/govd"
+echo "1" >"${FX2}/govd/gamma.fail"
 
 mkdir -p "${FX2}/delta"
 printf '[]' >"${FX2}/delta/prlist.json"    # zero PRs, zero checks needed
@@ -491,12 +522,12 @@ printf '[]' >"${FX2}/delta/rulesets.json"
 
 render_sweep testorg '["gamma","delta"]' "${WORK_ROOT}/sw2" true true "${WORK_ROOT}/sweep2.sh"
 SWEEP_RC2=0
-run_sweep "${WORK_ROOT}/sweep2.sh" "${FX2}" "${WORK_ROOT}/s2.out" "${WORK_ROOT}/s2.err" "TEST_GOV_FAIL=1" "TEST_OSV_FIXTURE=${FX2}/osv" || SWEEP_RC2=$?
+run_sweep "${WORK_ROOT}/sweep2.sh" "${FX2}" "${WORK_ROOT}/s2.out" "${WORK_ROOT}/s2.err" "TEST_GOV_FIXTURE=${FX2}/govd" "TEST_OSV_FIXTURE=${FX2}/osv" || SWEEP_RC2=$?
 
 expect_count "S2 sweep continues past a partial repo (one complete)" 0 "${SWEEP_RC2}"
 ART2="$(tr -d '[:space:]' <"${WORK_ROOT}/s2.out")"
 check "S2 artifact exists" test -f "${ART2}"
-check "S2 gamma collected=false (error lanes)" jq -e '.repos[0].repo == "gamma" and .repos[0].collected == false and .repos[0].collected_reason | tostring | contains("partial")' "${ART2}" >/dev/null
+check "S2 gamma collected=false (error lanes)" jq -e '.repos[0].repo == "gamma" and .repos[0].collected == false and (.repos[0].collected_reason | tostring | contains("partial"))' "${ART2}" >/dev/null
 check "S2 gamma pr30 none (rc 8 with no rows)" test "$(jq -r '.repos[0].prs.dependabot[0].ci.verdict' "${ART2}")" = "none"
 check "S2 gamma pr31 error verdict with message" jq -e '.repos[0].prs.dependabot[1].ci.verdict == "error" and (.repos[0].prs.dependabot[1].ci.error | contains("500"))' "${ART2}" >/dev/null
 check "S2 gamma ci verdicts error row" jq -e '[.repos[0].errors[].surface] | index("ci_verdicts") != null' "${ART2}" >/dev/null
@@ -531,7 +562,7 @@ printf '[]' >"${FX3}/eps/codeql.json"
 printf '[]' >"${FX3}/eps/rulesets.json"
 
 render_sweep testorg '["eps"]' "${WORK_ROOT}/sw3" true true "${WORK_ROOT}/sweep3.sh"
-# PATH without the tools dir: tools unavailable; osv stub fixture -> unparseable
+# PATH without the tools dir: both advisory tools unavailable for the repo
 SWEEP_RC3=0
 set +e
 (
@@ -540,8 +571,6 @@ set +e
     export COLLECT_GH_LOG="${FX3}/call.log"
     export GH_RETRY_MAX_ATTEMPTS=1
     export GH_TOKEN="supersecret-token-canary"
-    export TEST_GOV_UNPARSEABLE=1
-    export TEST_OSV_UNPARSEABLE=1
     "${WORK_ROOT}/sweep3.sh"
 ) >"${WORK_ROOT}/s3.out" 2>"${WORK_ROOT}/s3.err"
 SWEEP_RC3=$?
@@ -562,16 +591,29 @@ printf '[]' >"${FX3B}/eps/codeql.json"
 printf '[]' >"${FX3B}/eps/rulesets.json"
 mkdir -p "${FX3B}/osv"
 echo "1" >"${FX3B}/osv/eps.unpars"
-render_sweep testorg '["eps"]' "${WORK_ROOT}/sw3b" true true "${WORK_ROOT}/sweep3b.sh"
+mkdir -p "${FX3B}/govd"
+echo "1" >"${FX3B}/govd/eps.unpars"
+# eta: clean second repo so the sweep still emits a collected repo even
+# though eps' advisory lanes error on unparseable output.
+mkdir -p "${FX3B}/eta"
+printf '[%s]' "$(pr 41 'dependabot[bot]')" >"${FX3B}/eta/prlist.json"
+printf 'build\tsuccess\t' >"${FX3B}/eta/checks.41.tsv"
+printf 'module example.com/eta\ngo 1.23\n' >"${FX3B}/eta/gomod"
+printf '[]' >"${FX3B}/eta/codeql.json"
+printf '[]' >"${FX3B}/eta/rulesets.json"
+render_sweep testorg '["eps","eta"]' "${WORK_ROOT}/sw3b" true true "${WORK_ROOT}/sweep3b.sh"
 SWEEP_RC3B=0
-run_sweep "${WORK_ROOT}/sweep3b.sh" "${FX3B}" "${WORK_ROOT}/s3b.out" "${WORK_ROOT}/s3b.err" "TEST_GOV_UNPARSEABLE=1" "TEST_OSV_FIXTURE=${FX3B}/osv" || SWEEP_RC3B=$?
+run_sweep "${WORK_ROOT}/sweep3b.sh" "${FX3B}" "${WORK_ROOT}/s3b.out" "${WORK_ROOT}/s3b.err" "TEST_GOV_FIXTURE=${FX3B}/govd" "TEST_OSV_FIXTURE=${FX3B}/osv" || SWEEP_RC3B=$?
 expect_count "S3b unparseable output -> honest error, sweep continues" 0 "${SWEEP_RC3B}"
 ART3B="$(tr -d '[:space:]' <"${WORK_ROOT}/s3b.out")"
 check "S3b gov unparseable -> error" test "$(jq -r '.repos[0].advisories.govulncheck.status' "${ART3B}")" = "error"
 check "S3b osv unparseable -> error" test "$(jq -r '.repos[0].advisories.osv.status' "${ART3B}")" = "error"
+check "S3b eps rows error, eta collected clean" jq -e '.repos[0].collected == false and .repos[1].repo == "eta" and .repos[1].collected == true' "${ART3B}" >/dev/null
+expect_count "S3b summary collected=1 failed=1" "1" "$(jq -r '.summary.repos_failed' "${ART3B}")"
 
 # scan flags off -> both lanes not_applicable, no clone attempted
 render_sweep testorg '["eps"]' "${WORK_ROOT}/sw3c" false false "${WORK_ROOT}/sweep3c.sh"
+: >"${FX3B}/call.log"
 SWEEP_RC3C=0
 run_sweep "${WORK_ROOT}/sweep3c.sh" "${FX3B}" "${WORK_ROOT}/s3c.out" "${WORK_ROOT}/s3c.err" || SWEEP_RC3C=$?
 ART3C="$(tr -d '[:space:]' <"${WORK_ROOT}/s3c.out")"
