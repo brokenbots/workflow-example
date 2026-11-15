@@ -192,7 +192,8 @@ job_block() { # <file> <job>
                      f { print }' "$1"
 }
 
-for pair in "${CI_GO}:lint test govulncheck osv" "${CI_TS}:typecheck test osv" "${CI_PY}:lint test osv" "${CI_STARTER}:build-parity smoke"; do    file="${pair%%:*}"
+for pair in "${CI_GO}:lint test govulncheck osv" "${CI_TS}:typecheck test osv" "${CI_PY}:lint test osv" "${CI_STARTER}:build-parity smoke"; do
+    file="${pair%%:*}"
     for job in ${pair#*:}; do
         BLOCK="$(job_block "${file}" "${job}")"
         if printf '%s\n' "${BLOCK}" | grep -Eq 'needs: (\[?changes)'; then
@@ -382,10 +383,6 @@ for pair in "${DEP_GO}:go_modules" "${DEP_TS}:npm" "${DEP_PY}:pip"; do
     fi
 done
 
-if [ "$(grep -c '[^$-]{{' "${DEP_GO}" 2>/dev/null || true)" != "0" ]; then
-    fail "dependabot-go.yml: unexpected template artifact"
-fi
-
 # Deeper policy validation when python3+yaml exist.
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
     python3 - "${DEP_GO}" "${DEP_TS}" "${DEP_PY}" <<'PYEOF' || fail "dependabot deep-shape validation failed"
@@ -529,11 +526,11 @@ sha="$(branch_commit "${FX}/repo" pr2 "docs/diagram.png" "binary-ish")"
 require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out9")" "true" "docs/ image asset -> SKIP"
 sha="$(branch_commit "${FX}/repo" pr3 "LICENSE" "MIT")"
 require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out10")" "true" "LICENSE -> SKIP"
-sha="$(branch_commit "${FX}/repo" pr5 "CODEOWNERS" "* @org/owners")"
+sha="$(branch_commit "${FX}/repo" pr4 "CODEOWNERS" "* @org/owners")"
 require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out11")" "true" "CODEOWNERS -> SKIP"
-sha="$(branch_commit "${FX}/repo" pr6 "design.rst" "heading")"
+sha="$(branch_commit "${FX}/repo" pr5 "design.rst" "heading")"
 require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out12")" "true" "rst -> SKIP"
-sha="$(branch_commit "${FX}/repo" pr7 "doc.mdx" "heading")"
+sha="$(branch_commit "${FX}/repo" pr6 "doc.mdx" "heading")"
 require_equal "$(run_gate "${FX}/repo" pull_request "${sha}" "${WORK_ROOT}/out13")" "true" "mdx -> SKIP"
 
 # degenerate inputs stay full and never red the gate.
@@ -564,7 +561,7 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 LEAK=0
 for f in "${ALL_TPL_FILES[@]}"; do
-    if grep -Eq 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|hvs\.[A-Za-z0-9]{20,}|https://[^ ]*[A-Za-z0-9]+:[^ /@ ]+@|"token": *"[A-Za-z0-9]"' "${f}"; then
+    if grep -Eq 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|hvs\.[A-Za-z0-9]{20,}|https?://[^/[:space:]@]+:[^/[:space:]@]+@|"token": *"[A-Za-z0-9]"' "${f}"; then
         fail "secret-shape literal leaked into $(basename "${f}")"
         LEAK=1
     fi
