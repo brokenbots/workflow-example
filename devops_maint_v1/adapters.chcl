@@ -1,8 +1,9 @@
-// devops_maint_v1 (KB-406 + KB-407): five determinstic shell steps and the
-// one decision-adapter gate. The shell steps write every artifact under the
-// sweep root inside the data lane the interface declares; the merge step runs
-// on a DIFFERENT GitHub identity than the collect/act steps (ADR-0015: the
-// workflow lane enumerates and rebases, the brokenbot lane merges).
+// devops_maint_v1 (KB-406 + KB-407 + KB-409 + KB-410): deterministic shell
+// steps and the one decision-adapter gate. The shell steps write every
+// artifact under the sweep root inside the data lane the interface declares;
+// the merge step runs on a DIFFERENT GitHub identity than the collect/act
+// steps (ADR-0015: the workflow lane enumerates and rebases, the brokenbot
+// lane merges).
 
 // Exec lane: the mounted data path always exists (PVC mount), so the adapter
 // cwd is anchorable there while the scripts themselves mkdir -ps the deeper
@@ -32,6 +33,14 @@ environment "shell" "protect" {
 }
 
 environment "shell" "codeql_triage" {
+    working_directory = var.data_root
+}
+
+environment "shell" "compliance_apply" {
+    working_directory = var.data_root
+}
+
+environment "shell" "delta_report" {
     working_directory = var.data_root
 }
 
@@ -100,6 +109,28 @@ adapter "shell" "codeql_triage" {
     source      = "ghcr.io/brokenbots/criteria-adapter-shell"
     version     = "0.5.5"
     environment = shell.codeql_triage
+    secrets {
+        GH_TOKEN = var.workflow_github_token
+    }
+}
+
+// Lane B compliance application: workflow GitHub identity (Contents API
+// writes + byte read-back under the same secret channel as collect/act).
+adapter "shell" "compliance_apply" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.compliance_apply
+    secrets {
+        GH_TOKEN = var.workflow_github_token
+    }
+}
+
+// Lane B delta re-enumeration: workflow GitHub identity (read-only PR/alert/
+// ruleset enumeration under the workflow lane).
+adapter "shell" "delta_report" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.delta_report
     secrets {
         GH_TOKEN = var.workflow_github_token
     }

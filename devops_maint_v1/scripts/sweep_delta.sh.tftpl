@@ -1,0 +1,484 @@
+#!/usr/bin/env bash
+# sweep_delta.sh.tftpl — per-repo before/after delta report (KB-410, ADR-0015 D6).
+#
+# Renders from main.chcl with (all shellquote args arrive single-quoted):
+#   gh_retry         — the vendored bounded-backoff retry wrapper, spliced
+#                      ONCE as shell source (it defines a gh() function that
+#                      shadows the binary).
+#   org              — org (validated before any network call).
+#   repos_json       — sweep scope, JSON array of repo names.
+#   plan_json        — the Lane B application plan (protection_plan:
+#                      [{repo, pack, starter_language}]); repos not in the
+#                      plan are reported with pack null.
+#   inventory_file   — the BEFORE snapshot: the collect step's inventory
+#                      artifact (schema devops_maint_v1.inventory.v1), read
+#                      back for per-repo before counts.
+#
+# The delta report turns the guided sweep into the delta-driven weekly cadence:
+# the collect inventory captured at the start of the run is the before, and a
+# LIGHT re-enumeration (no clones, no per-PR checks, no advisory re-scan) is
+# the after:
+#   * open PRs:            gh pr list --state open --limit 200 --json number,author
+#                          (the dependabot share uses the exact collect
+#                          predicate: author.login test "dependabot", case-
+#                          insensitive substring — deviating would misclassify
+#                          the before/after pair)
+#   * CodeQL open alerts:  code-scanning alerts API with tool_name=CodeQL,
+#                          paginated; 404 means the repo has CodeQL disabled
+#                          (zero alerts, a state — not an error)
+#   * protection:          rulesets API; applied = any active branch ruleset
+#   * advisories:          NOT re-scanned — carried from the before inventory
+#                          and marked carried (the advisory scans ran inside
+#                          collect; re-scanning would double the sweep cost)
+#
+# Per-repo row: {repo, pack, starter_language, before, after, deltas,
+# delta_class, advisories, inventory_collected_before, errors}. Two explicit
+# polarities: deltas.rulesets_applied stays the RAW signed protection
+# transition (+1 gained / -1 lost; summary.rulesets_applied_net is the net
+# change in repos with applied rulesets), while the CLASSIFICATION inverts
+# that surface — protection GAINED is an improvement and protection LOST is a
+# regression. delta_class precedence:
+#   partial_error (enumeration errors; the surfaces that failed stay honest)
+#   > regressed   (a backlog surface strictly higher than before — new
+#                  PRs/alerts — OR protection lost: applied ruleset 1 -> 0)
+#   > improved    (a backlog surface strictly lower than before — the sweep
+#                  consumed backlog — OR protection gained: applied 0 -> 1)
+#   > clean       (all before- and after-surface counts are zero)
+#   > unchanged   (equal, but non-zero — backlog still pending)
+# A regression on one surface outranks an improvement on another (regressed
+# is evaluated before improved), and partial_error outranks both.
+#
+# Deliverable: dirname(inventory)/delta.json, schema devops_maint_v1.delta.v1,
+# self-checking its own structure (per-repo delta arithmetic AND an
+# independent re-derivation of every delta_class). stdout carries ONLY the
+# artifact path; typed failures prefix stderr lines with
+# delta_failed: and preserve the artifact when one exists.
+set -euo pipefail
+umask 077
+
+{{ .gh_retry }}
+
+ORG={{ .org | shellquote }}
+REPOS_JSON={{ .repos_json | shellquote }}
+PLAN_JSON={{ .plan_json | shellquote }}
+INVENTORY_PATH={{ .inventory_file | shellquote }}
+
+fail() {     # fail <message...> -> typed delta_failed: line, exit 1
+    printf 'delta_failed: %s\n' "$*" >&2
+    exit 1
+}
+
+fail_artifact() { # fail_artifact <message...> -> typed line + preserved artifact path
+    printf 'delta_failed: %s (delta artifact kept: %s)\n' "$*" "$DELTA_PATH" >&2
+    exit 1
+}
+
+log() {
+    printf 'delta: %s\n' "$*" >&2
+}
+
+cleanup() {
+    # The scratch lane (before table, per-repo records) is never evidence;
+    # the delta artifact beside the inventory is the deliverable.
+    rm -rf "$RAW_DIR"
+}
+
+err_text() {
+    if [ ! -s "$1" ]; then
+        printf '<no stderr>'
+    else
+        grep -v '^gh_retry: ' "$1" | head -c 200 || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Config gates — typed, fail-loud, BEFORE any network call
+# ---------------------------------------------------------------------------
+printf '%s' "$ORG" | jq -ne --arg v "$ORG" '($v | type == "string") and ($v | length > 0) and ($v | length <= 100) and ($v | test("^[A-Za-z0-9][A-Za-z0-9-]{0,99}$"))' >/dev/null 2>&1 ||
+    fail "org failed its shape check (RFC-1035 segment of at most 100 chars)"
+
+printf '%s' "$REPOS_JSON" | jq -e '
+  (type == "array") and (length > 0) and
+  (all(.[]; (type == "string"))) and (all(.[]; length > 0)) and
+  ((length) == (unique | length))
+' >/dev/null 2>&1 ||
+    fail "repos failed their shape check (non-empty unique array of non-empty strings)"
+
+if ! printf '%s' "$REPOS_JSON" | jq -e 'all(.[]; test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"))' >/dev/null 2>&1; then
+    bad="$(printf '%s' "$REPOS_JSON" | jq -r '[.[] | select(test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$") | not)][0] // "?"')"
+    [ -n "$bad" ] || bad="?"
+    fail "repo name failed its shape check (^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\$; got: ${bad:0:40})"
+fi
+
+printf '%s' "$PLAN_JSON" | jq -e '
+  (type == "array") and (length > 0) and
+  (all(.[]; ((type == "object") and
+    ((.repo? | type) == "string") and (.repo | length > 0) and
+    ((.pack? | type) == "string") and (.pack | IN("go", "ts", "py", "starter")) and
+    ((.starter_language? // "") | type == "string")))) and
+  (([.[].repo] | length) == ([.[].repo] | unique | length)) and
+  all(.[]; select(.pack == "starter") | (.starter_language // "") | IN("go", "ts", "py")) and
+  (all(.[]; select(.pack != "starter") | (.starter_language // "") == ""))
+' >/dev/null 2>&1 ||
+    fail "delta plan failed its shape check (non-empty list of {repo, pack, starter_language?} rows with unique repos; pack in go|ts|py|starter; a starter row must declare starter_language in go|ts|py and only a starter row may)"
+# The plan may never widen the sweep scope (same gate as protect/compliance).
+while IFS= read -r pr; do
+  printf '%s' "$REPOS_JSON" | jq -e --arg pr "$pr" '[.[]] | index($pr) != null' >/dev/null 2>&1 ||
+    fail "plan row targets repo outside the sweep scope: $pr"
+done <<EOF2
+$(printf '%s' "$PLAN_JSON" | jq -r '[.[].repo] | unique | .[]')
+EOF2
+
+# ---------------------------------------------------------------------------
+# BEFORE snapshot: the collect inventory artifact, read back and validated
+# ---------------------------------------------------------------------------
+DELTA_PATH="$(dirname "$INVENTORY_PATH")/delta.json"
+SWEEP_ID="$(basename "$(dirname "$INVENTORY_PATH")")"
+[ -n "$INVENTORY_PATH" ] || fail "inventory anchor path is empty"
+[ -r "$INVENTORY_PATH" ] || fail "before inventory not readable: $INVENTORY_PATH"
+INV_SCHEMA="$(jq -r '.schema // ""' "$INVENTORY_PATH" 2>/dev/null)" || INV_SCHEMA="unreadable"
+[ "$INV_SCHEMA" = "devops_maint_v1.inventory.v1" ] ||
+    fail "before inventory failed its schema check (expected devops_maint_v1.inventory.v1, got: $INV_SCHEMA)"
+
+RUN_DIR="$(dirname "$INVENTORY_PATH")"
+RAW_DIR="$RUN_DIR/.delta.raw.$$"   # step-scoped scratch; never the shared raw evidence lane
+[ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
+trap cleanup EXIT
+mkdir -p "$RAW_DIR"
+
+jq -e --arg org "$ORG" '.sweep.org == $org' "$INVENTORY_PATH" >/dev/null 2>&1 ||
+    fail "before inventory org does not match the sweep org"
+
+BEFORE_TABLE_FILE="$RAW_DIR/before-table.json"
+# Normalized before surfaces per repo (open PR totals, CodeQL open alerts,
+# applied protection, the advisories carried forward, and whether the before
+# row itself was collected completely — a partial before row would make any
+# delta dishonest, so the row is flagged and stays partial_error).
+jq -c '
+  [.repos[] | {
+    repo: .repo,
+    before: {
+      prs_total:        (.prs.open_total // 0),
+      prs_dependabot:   (.prs.dependabot_total // 0),
+      prs_other:        (.prs.other_open_total // 0),
+      codeql_alerts:    (.codeql.open_alerts // 0),
+      codeql_status:    (.codeql.status // "unknown"),
+      rulesets_applied: (.rulesets.applied // false)
+    },
+    collected: (.collected // false),
+    advisories: .advisories
+  }]
+' "$INVENTORY_PATH" >"$BEFORE_TABLE_FILE"
+
+before_row() { # before_row <repo> -> JSON row, or "null" when absent
+    jq -c --arg r "$1" 'map(select(.repo == $r)) | if length == 1 then .[0] else null end' "$BEFORE_TABLE_FILE"
+}
+
+plan_for() { # plan_for <repo> -> JSON {repo, pack, starter_language} or "null"
+    printf '%s' "$PLAN_JSON" | jq -c --arg r "$1" 'map(select(.repo == $r)) | if length == 1 then .[0] else null end'
+}
+
+# ---------------------------------------------------------------------------
+# Per-repo light re-enumeration (the AFTER snapshot)
+# ---------------------------------------------------------------------------
+repo_error() { # repo_error <surface> <detail>; appends one row to $ERR_FILE
+    jq -cn --arg s "$1" --arg d "$2" '{surface: $s, detail: $d}' >>"$ERR_FILE"
+}
+
+prs_after() { # prs_after <repo> -> sets A_OPEN/A_DEP/A_OTHER; rc 2 = transport error
+    local prs_file="$RAW_DIR/$1.prs.json"
+    if ! gh pr list -R "$ORG/$1" --state open --limit 200 \
+        --json number,author >"$prs_file" 2>"$prs_file.err"; then
+        log "repo $1: gh pr list failed: $(err_text "$prs_file.err")"
+        return 2
+    fi
+    # The dependabot share must use the EXACT collect predicate, otherwise a
+    # delta compares differently-classified totals.
+    A_OPEN="$(jq 'length' "$prs_file" 2>/dev/null)" && [ -n "$A_OPEN" ] || A_OPEN=0
+    A_DEP="$(jq '[.[] | select(((.author.login // "") | test("dependabot"; "i")))] | length' "$prs_file" 2>/dev/null)" &&
+        [ -n "$A_DEP" ] || A_DEP=0
+    A_OTHER=$((A_OPEN - A_DEP))
+    if [ "$A_OPEN" -ge 200 ]; then
+        log "repo $1: open PR count >= limit 200; pr list truncated"
+    fi
+    rm -f "$prs_file" "$prs_file.err"
+    return 0
+}
+
+codeql_after() { # codeql_after <repo> -> sets A_CODEQL/A_CODEQL_STATUS; rc 1 disabled / 2 transport
+    local cq_file="$RAW_DIR/$1.cq.json"
+    if ! gh api "repos/$ORG/$1/code-scanning/alerts?state=open&per_page=100&tool_name=CodeQL" --paginate >"$cq_file" 2>"$cq_file.err"; then
+        if grep -qiE '404|not enabled|not found' "$cq_file.err" 2>/dev/null; then
+            A_CODEQL=0
+            A_CODEQL_STATUS="disabled"
+            rm -f "$cq_file" "$cq_file.err"
+            return 1
+        fi
+        log "repo $1: CodeQL alerts API call failed: $(err_text "$cq_file.err")"
+        rm -f "$cq_file" "$cq_file.err"
+        return 2
+    fi
+    # --paginate emits one JSON document per page; flatten identically to collect.
+    A_CODEQL="$(jq -s '[.[].[]?] | length' "$cq_file" 2>/dev/null)" && [ -n "$A_CODEQL" ] || A_CODEQL=0
+    A_CODEQL_STATUS="ok"
+    rm -f "$cq_file" "$cq_file.err"
+    return 0
+}
+
+rulesets_after() { # rulesets_after <repo> -> sets A_RULESETS; rc 2 = transport error
+    local rs_file="$RAW_DIR/$1.rs.json"
+    if ! gh api "repos/$ORG/$1/rulesets?per_page=100" --paginate >"$rs_file" 2>"$rs_file.err"; then
+        log "repo $1: rulesets API call failed: $(err_text "$rs_file.err")"
+        rm -f "$rs_file" "$rs_file.err"
+        return 2
+    fi
+    # --paginate emits one JSON document per page; slurp the stream, then use
+    # the same applied predicate as collect: an active ruleset targeting
+    # branches counts as protection applied. An rc-0 empty body (rare,
+    # 204-shaped) is honest "not applied", never a crash.
+    A_RULESETS="$(jq -s '
+        [.[].[]?] as $rs
+        | if ($rs | length) == 0 then false
+          else any($rs[]; .enforcement == "active" and ((.target // "branch") == "branch"))
+        end
+    ' "$rs_file" 2>/dev/null)" && [ -n "$A_RULESETS" ] || A_RULESETS="false"
+    if [ "$A_RULESETS" != "true" ] && [ "$A_RULESETS" != "false" ]; then A_RULESETS="false"; fi
+    rm -f "$rs_file" "$rs_file.err"
+    return 0
+}
+
+RECORDS_DIR="$RAW_DIR/records"
+mkdir -p "$RECORDS_DIR"
+
+collect_for_delta() { # collect_for_delta <repo> <row-index> <pack> <starter_language>
+    local repo="$1"
+    local idx_tag="$(printf '%04d' "$2")"
+    local dpack="$3"
+    local dlang="${4:-}"
+    ERR_FILE="$RECORDS_DIR/$idx_tag.$repo.errors.ndjson"
+    : >"$ERR_FILE"
+
+    local before_json
+    before_json="$(before_row "$repo")"
+    if [ "$before_json" = "null" ] || [ -z "$before_json" ]; then
+        repo_error "before_inventory" "repo is not present in the before inventory; delta computed against zeroed surfaces"
+        before_json="$(jq -cn --arg repo "$repo" '{
+            repo: $repo,
+            before: {prs_total: 0, prs_dependabot: 0, prs_other: 0,
+                     codeql_alerts: 0, codeql_status: "unknown", rulesets_applied: false},
+            collected: false,
+            advisories: null
+        }')"
+    fi
+
+    A_OPEN=0; A_DEP=0; A_OTHER=0
+    A_CODEQL=0; A_CODEQL_STATUS="unknown"
+    A_RULESETS="false"
+
+    local prs_rc=0 codeql_rc=0 rs_rc=0
+    prs_after "$repo" || prs_rc=$?
+    codeql_after "$repo" || codeql_rc=$?
+    rulesets_after "$repo" || rs_rc=$?
+
+    if [ "$prs_rc" -eq 2 ]; then
+        repo_error "pull_requests" "open-PR enumeration failed for the after snapshot"
+    fi
+    if [ "$codeql_rc" -eq 2 ]; then
+        repo_error "codeql" "CodeQL alerts enumeration failed for the after snapshot"
+    fi
+    if [ "$rs_rc" -eq 2 ]; then
+        repo_error "rulesets" "rulesets enumeration failed for the after snapshot"
+    fi
+
+    local errs_json='[]'
+    if [ -s "$ERR_FILE" ]; then
+        errs_json="$(jq -s '.' "$ERR_FILE")"
+    fi
+
+    jq -cn \
+        --arg repo "$repo" \
+        --arg before_json "$before_json" \
+        --arg pack "$dpack" \
+        --arg starter_language "$dlang" \
+        --argjson a_open "$A_OPEN" \
+        --argjson a_dep "$A_DEP" \
+        --argjson a_other "$A_OTHER" \
+        --argjson a_codeql "$A_CODEQL" \
+        --arg a_codeql_status "$A_CODEQL_STATUS" \
+        --argjson a_rulesets "$A_RULESETS" \
+        --argjson errs "$errs_json" \
+        '
+        . as $row
+        | ($before_json | fromjson) as $b
+        | {
+          repo: $repo,
+          pack: (if $pack == "" then null else $pack end),
+          starter_language: (if $starter_language == "" then null else $starter_language end),
+          before: $b.before,
+          after: {
+            prs_total: $a_open,
+            prs_dependabot: $a_dep,
+            prs_other: $a_other,
+            codeql_alerts: $a_codeql,
+            codeql_status: $a_codeql_status,
+            rulesets_applied: $a_rulesets
+          },
+          advisories: {
+            carried: ($b.advisories != null),
+            carried_from: (if $b.advisories != null then $b.advisories else null end),
+            note: (if $b.advisories != null then
+                     "advisories are carried from the before inventory (not re-scanned by the delta pass)"
+                   else
+                     "no advisory data in the before inventory"
+                   end)
+          },
+          inventory_collected_before: $b.collected,
+          errors: $errs
+        }
+        | .deltas = {
+          prs_total:        (.after.prs_total - .before.prs_total),
+          prs_dependabot:   (.after.prs_dependabot - .before.prs_dependabot),
+          prs_other:        (.after.prs_other - .before.prs_other),
+          codeql_alerts:    (.after.codeql_alerts - .before.codeql_alerts),
+          rulesets_applied: (if .after.rulesets_applied == .before.rulesets_applied then 0
+                             elif .after.rulesets_applied then 1 else -1 end)
+        }
+        # Classification polarity: the RAW signed rulesets transition stays in
+        # .deltas (and summary.rulesets_applied_net), but protection GAINED is
+        # classified improved and protection LOST regressed — the protection
+        # surface is classified from its before/after shape, not from the raw
+        # signed value, while backlog surfaces keep strict signed compares.
+        # A regression on one surface outranks an improvement on another.
+        | .delta_class = (
+          if (.errors | length) > 0 then "partial_error"
+          elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+                  .deltas.codeql_alerts] | any(. > 0)) or
+                (.after.rulesets_applied == false and .before.rulesets_applied == true)) then "regressed"
+          elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+                  .deltas.codeql_alerts] | any(. < 0)) or
+                (.after.rulesets_applied == true and .before.rulesets_applied == false)) then "improved"
+          elif ([.before.prs_total, .before.prs_dependabot, .before.prs_other,
+                 .before.codeql_alerts] == [0, 0, 0, 0] and .before.rulesets_applied == false) then "clean"
+          else "unchanged"
+          end
+        )
+        ' >"$RECORDS_DIR/$idx_tag.$repo.json"
+    rm -f "$ERR_FILE"
+    log "repo $repo: delta recorded"
+}
+
+idx=0
+# Quoted, non-word-splitting iteration; process substitution keeps the loop
+# in THIS shell so idx advances and each record keeps its own file.
+while IFS= read -r repo; do
+    row="$(plan_for "$repo")"
+    if [ "$row" != "null" ] && [ -n "$row" ]; then
+        dpack="$(printf '%s' "$row" | jq -r '.pack')"
+        dlang="$(printf '%s' "$row" | jq -r '.starter_language // ""')"
+        collect_for_delta "$repo" "$idx" "$dpack" "$dlang"
+    else
+        # Unplanned repos stay report-only: pack null, same enumeration.
+        collect_for_delta "$repo" "$idx" "" ""
+    fi
+    idx=$((idx + 1))
+done < <(printf '%s' "$REPOS_JSON" | jq -r '.[]')
+
+# ---------------------------------------------------------------------------
+# Final artifact: schema + per-repo rows + summary, self-checking structure
+# ---------------------------------------------------------------------------
+jq -s \
+    --arg s_id "$SWEEP_ID" \
+    --arg s_org "$ORG" \
+    --argjson s_repos "$REPOS_JSON" \
+    --arg s_before "$INVENTORY_PATH" \
+    '
+    . as $repos
+    | {
+      schema: "devops_maint_v1.delta.v1",
+      sweep: {
+        org: $s_org,
+        sweep_id: $s_id,
+        repos: $s_repos,
+        repos_total: ($repos | length),
+        before_inventory: $s_before
+      },
+      repos: $repos,
+      summary: {
+        repos_planned:        ([$repos[] | select(.pack != null)] | length),
+        repos_clean:          ([$repos[] | select(.delta_class == "clean")] | length),
+        repos_improved:       ([$repos[] | select(.delta_class == "improved")] | length),
+        repos_regressed:      ([$repos[] | select(.delta_class == "regressed")] | length),
+        repos_unchanged:      ([$repos[] | select(.delta_class == "unchanged")] | length),
+        repos_partial_error:  ([$repos[] | select(.delta_class == "partial_error")] | length),
+        repos_failed_rows:    ([$repos[] | select((.errors | length) > 0)] | length),
+        prs_dependabot_delta_total: ([$repos[] | .deltas.prs_dependabot] | add // 0),
+        prs_other_delta_total:      ([$repos[] | .deltas.prs_other] | add // 0),
+        codeql_alerts_delta_total:  ([$repos[] | .deltas.codeql_alerts] | add // 0),
+        rulesets_applied_net:       ([$repos[] | .deltas.rulesets_applied] | add // 0)
+      }
+    }
+    ' "$RECORDS_DIR"/*.json >"$DELTA_PATH"
+
+# ---------------------------------------------------------------------------
+# Structural self-check: the artifact must verify its own arithmetic and the
+# delta_class derivation (recomputed independently from the recorded rows).
+# ---------------------------------------------------------------------------
+jq -e '
+  (.schema == "devops_maint_v1.delta.v1") and
+  (.repos | length) == (.sweep.repos | length) and
+  (all(.repos[]; (
+      (.repo | type == "string") and (.repo | length > 0) and
+      (.before | type == "object") and (.after | type == "object") and
+      (.deltas | type == "object") and (.delta_class | type == "string") and
+      (.delta_class | IN("clean", "improved", "regressed", "unchanged", "partial_error")) and
+      ((.pack == null) or ((.pack | type) == "string")) and
+      ((.starter_language == null) or ((.starter_language | type) == "string")) and
+      (.advisories | type == "object") and (.advisories.carried | type == "boolean") and
+      (.inventory_collected_before | type == "boolean") and
+      (.errors | type == "array")
+  ))) and
+  (all(.repos[];
+      (.deltas.prs_total       == (.after.prs_total       - .before.prs_total)) and
+      (.deltas.prs_dependabot  == (.after.prs_dependabot  - .before.prs_dependabot)) and
+      (.deltas.prs_other       == (.after.prs_other       - .before.prs_other)) and
+      (.deltas.codeql_alerts   == (.after.codeql_alerts   - .before.codeql_alerts))
+  )) and
+  (all(.repos[];
+      .delta_class ==
+      (if (.errors | length) > 0 then "partial_error"
+       elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+               .deltas.codeql_alerts] | any(. > 0)) or
+             (.after.rulesets_applied == false and .before.rulesets_applied == true)) then "regressed"
+       elif (([.deltas.prs_total, .deltas.prs_dependabot, .deltas.prs_other,
+               .deltas.codeql_alerts] | any(. < 0)) or
+             (.after.rulesets_applied == true and .before.rulesets_applied == false)) then "improved"
+       elif ([.before.prs_total, .before.prs_dependabot, .before.prs_other,
+              .before.codeql_alerts] == [0, 0, 0, 0] and .before.rulesets_applied == false) then "clean"
+       else "unchanged"
+       end)
+  )) and
+  (all(.repos[]; if .errors[0]? != null then (.errors[0].surface | type == "string") and (.errors[0].detail | type == "string") else true end)) and
+  (all(.repos[]; if .inventory_collected_before == false then (.errors | length) > 0 else true end)) and
+  (.summary.repos_planned       == ([.repos[] | select(.pack != null)] | length)) and
+  (.summary.repos_clean         == ([.repos[] | select(.delta_class == "clean")] | length)) and
+  (.summary.repos_improved      == ([.repos[] | select(.delta_class == "improved")] | length)) and
+  (.summary.repos_regressed     == ([.repos[] | select(.delta_class == "regressed")] | length)) and
+  (.summary.repos_unchanged     == ([.repos[] | select(.delta_class == "unchanged")] | length)) and
+  (.summary.repos_partial_error == ([.repos[] | select(.delta_class == "partial_error")] | length)) and
+  (.summary.repos_failed_rows   == ([.repos[] | select((.errors | length) > 0)] | length)) and
+  (.summary.prs_dependabot_delta_total == ([.repos[] | .deltas.prs_dependabot] | add // 0)) and
+  (.summary.prs_other_delta_total      == ([.repos[] | .deltas.prs_other] | add // 0)) and
+  (.summary.codeql_alerts_delta_total  == ([.repos[] | .deltas.codeql_alerts] | add // 0)) and
+  (.summary.rulesets_applied_net       == ([.repos[] | .deltas.rulesets_applied] | add // 0))
+' "$DELTA_PATH" >/dev/null 2>&1 ||
+    fail_artifact "delta artifact failed its structural self-check"
+
+# An honest sweep never hides a total re-enumeration failure: when every repo
+# failed its after snapshot, the run is a typed failure (the artifact is kept
+# so the partial evidence outlives it).
+if [ "$(jq '.summary.repos_failed_rows' "$DELTA_PATH")" -eq "$(jq '.sweep.repos_total' "$DELTA_PATH")" ] &&
+    [ "$(jq '.summary.repos_failed_rows' "$DELTA_PATH")" -gt 0 ]; then
+    fail_artifact "every repo failed its delta re-enumeration"
+fi
+
+printf '%s\n' "$DELTA_PATH"
