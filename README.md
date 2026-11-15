@@ -34,6 +34,14 @@ BrokenBots.
   (`stub_systemone.mjs`) where the unpublished decision adapter binary is
   available; `k8s/examples/routes-configmap.yaml` carries the
   `decision-demo-url` object prepared for the KB-207 routing run.
+- `devops_maint_v1` (KB-405, [ADR-0015](docs/devops-maint-adr.md)): the devops
+  maintenance ops workflow family — the series anchor owning two lanes over
+  every in-scope repo: dependency hygiene (deterministic collect → classify →
+  route → act → merge, one consolidated PR per module with close-out on the
+  closed dependabot PRs) and the compliance baseline (per-language CI
+  templates, dependabot config, branch protection applied only after that
+  repo's CI is green, CodeQL backlog triage with typed suppressions). The
+  graph waves land in the KB-406–KB-410 series.
 
 ## Kubernetes deployment
 
