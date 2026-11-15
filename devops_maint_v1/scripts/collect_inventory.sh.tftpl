@@ -8,10 +8,15 @@
 # classify/route step.
 set -euo pipefail
 
-_TPL_DIR={{ .gh_retry | shellquote }}
-# shellcheck source=gh_retry.sh
-# shellcheck disable=SC1091
-. "$_TPL_DIR"
+# KB-219: the shared retry wrapper is spliced as raw content — file() returns
+# the file's content, not a path (same splice shape as devops_triage_v1's
+# open_pr step) — and installs the gh drop-in shadow, so every gh call in this
+# sweep (pr list, pr checks, repo clone, api) is transport-wrapped: transient
+# TLS/reset/5xx/rate-limit failures retry on the bounded schedule while
+# verdict-shaped results (rc 0 bodies, 4xx, gh rc 8) pass through unchanged.
+# Attempt evidence goes to stderr (the call sites' own .err captures); the
+# per-site rc guards and stdout/stderr redirections below are unchanged.
+{{ .gh_retry }}
 
 ORG={{ .org | shellquote }}
 REPOS_JSON={{ .repos_json | shellquote }}
@@ -21,6 +26,19 @@ scan_govulncheck={{ .scan_govulncheck | shellquote }}
 scan_osv={{ .scan_osv | shellquote }}
 
 log() { printf 'collect: %s\n' "$*" >&2; }
+
+# The gh_retry shadow writes attempt-evidence lines into the per-site .err
+# captures ahead of the terminal tool output. When a .err file is turned into
+# an error message, strip that evidence so the tool text leads the way.
+err_text() {
+  # Missing or empty capture (or nothing left after stripping): honest
+  # placeholder, never a failure under set -e.
+  if [ ! -s "$1" ]; then
+    printf '<no stderr>'
+  else
+    grep -v '^gh_retry: ' "$1" | head -c 200 || true
+  fi
+}
 
 fail_config() {
   printf 'collect_failed: %s\n' "$*" >&2
@@ -144,7 +162,7 @@ govulncheck_findings() {
         version: (.finding.frames[0].version // null)
       }
     ]
-    | unique_by(.id + "\u0000" + (.package // "") + "\u0000" + (.version // ""))
+    | unique_by(((.id // "") + "\u0000" + (.package // "") + "\u0000" + (.version // "")))
   ' 2>/dev/null
 }
 
@@ -182,21 +200,26 @@ codeql_alert_count() {
     if grep -qiE '404|not enabled|not found' "$rdir/codeql.err" 2>/dev/null; then
       return 1
     fi
-    log "CodeQL alerts API call failed rc=$rc: $(head -c 200 "$rdir/codeql.err" 2>/dev/null || echo '<no stderr>')"
+    log "CodeQL alerts API call failed rc=$rc: $(err_text "$rdir/codeql.err")"
     return 2
   fi
   # --paginate may emit multiple concatenated JSON docs (one per page);
   # flatten the outer -s stream of docs first so the count is per-alert.
   CODEQL_OPEN_ALERTS="$(printf '%s' "$out" | jq -s '[.[].[]?] | length' 2>/dev/null)"
   if [ -z "$CODEQL_OPEN_ALERTS" ]; then CODEQL_OPEN_ALERTS=0; fi
+  # The code-scanning alerts API exposes the rule's severity rating as
+  # rule.security_severity_level: a string enum (critical|high|medium|low)
+  # or null — it is NOT the numeric security_severity field, which the
+  # alerts payload does not carry. Rows lacking the level land in "other"
+  # so the buckets still sum to the open-alert total.
   CODEQL_BY_SEVERITY="$(printf '%s' "$out" | jq -s --argjson total "$CODEQL_OPEN_ALERTS" '
     [.[].[]?] as $alerts
-    | [$alerts[] | select((.rule.security_severity? // "") != "")] as $rows
+    | [$alerts[] | select((.rule.security_severity_level? // null) != null)] as $rows
     | {
-        critical: ([$rows[] | select((.rule.security_severity | tonumber) >= 9.0)] | length),
-        high:     ([$rows[] | select((.rule.security_severity | tonumber) >= 7.0 and (.rule.security_severity | tonumber) < 9.0)] | length),
-        medium:   ([$rows[] | select((.rule.security_severity | tonumber) >= 4.0 and (.rule.security_severity | tonumber) < 7.0)] | length),
-        low:      ([$rows[] | select((.rule.security_severity | tonumber) < 4.0)] | length),
+        critical: ([$rows[] | select(.rule.security_severity_level == "critical")] | length),
+        high:     ([$rows[] | select(.rule.security_severity_level == "high")] | length),
+        medium:   ([$rows[] | select(.rule.security_severity_level == "medium")] | length),
+        low:      ([$rows[] | select(.rule.security_severity_level == "low")] | length),
         other:    ($total - ($rows | length))
       }
   ' 2>/dev/null)" || CODEQL_BY_SEVERITY='{}'
@@ -211,7 +234,7 @@ ruleset_rows() {
   local out rc
   out="$(gh api "repos/$ORG/$repo/rulesets" 2>"$rdir/rulesets.err")" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
-    log "rulesets API call failed rc=$rc: $(head -c 200 "$rdir/rulesets.err" 2>/dev/null || echo '<no stderr>')"
+    log "rulesets API call failed rc=$rc: $(err_text "$rdir/rulesets.err")"
     return 1
   fi
   printf '%s' "$out" | jq '
@@ -250,7 +273,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
     && prs_rc=0 || prs_rc=$?
 
   if [ "$prs_rc" -ne 0 ]; then
-    append_repo_error "pull_requests" "gh pr list rc=$prs_rc: $(head -c 200 "$rdir/pr_list.err" 2>/dev/null)"
+    append_repo_error "pull_requests" "gh pr list rc=$prs_rc: $(err_text "$rdir/pr_list.err")"
     open_total=0
     dependabot_total=0
     other_open_total=0
@@ -364,7 +387,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
           ' >>"$dependabot_rows_file"
         rm -f "$rdir/checks.$pr_number.rows"
       else
-        pr_err="$(head -c 200 "$rdir/checks.$pr_number.err" 2>/dev/null)"
+        pr_err="$(err_text "$rdir/checks.$pr_number.err")"
         append_repo_error "ci_verdicts" "gh pr checks for #$pr_number rc=$checks_rc: $pr_err"
         jq -cn \
           --argjson number "$pr_number" \
@@ -403,7 +426,7 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
     gh repo clone "$ORG/$repo" "$clone_dir" -- --depth 1 >"$rdir/clone.out" 2>"$rdir/clone.err" \
       && clone_ok=1 || clone_ok=0
     if [ "$clone_ok" -ne 1 ]; then
-      clone_err="$(head -c 120 "$rdir/clone.err" 2>/dev/null)"
+      clone_err="$(err_text "$rdir/clone.err")"
       log "repo $repo: clone failed rc=$clone_ok: $clone_err"
       if [ "$scan_govulncheck" = "true" ]; then
         gov_status="error"
@@ -432,9 +455,26 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
         else
           gov_body="$(govulncheck_findings "$clone_dir")" && gov_rc=0 || gov_rc=$?
           if [ "$gov_rc" -eq 0 ]; then
-            gov_status="ok"
-            gov_reason="govulncheck scan completed"
-            gov_findings="$gov_body"
+            # A clean zero-finding run can yield an empty parse; keep the
+            # artifact schema valid (compose uses --argjson).
+            if [ -z "$gov_body" ]; then gov_body='[]'; fi
+            # A scan that exits 0 can still yield finding rows with a
+            # missing/null/empty osv id; those rows would trip the artifact
+            # structural self-check and hard-fail the whole sweep. Degrade
+            # just this repo to the error lane instead.
+            gov_malformed="$(printf '%s' "$gov_body" | jq '[.[] | select((.id | type) != "string" or (.id | length) == 0)] | length' 2>/dev/null)"
+            case "$gov_malformed" in ''|*[!0-9]*) gov_malformed=0 ;; esac
+            if [ "$gov_malformed" -gt 0 ]; then
+              gov_status="error"
+              gov_reason="govulncheck produced finding rows without an osv id"
+              gov_findings="[]"
+              append_repo_error "govulncheck" "govulncheck produced $gov_malformed finding row(s) without an osv id"
+              log "govulncheck: ${gov_malformed} finding row(s) with missing osv id at $repo; degraded to error"
+            else
+              gov_status="ok"
+              gov_reason="govulncheck scan completed"
+              gov_findings="$gov_body"
+            fi
           else
             gov_status="error"
             gov_reason="govulncheck failed or produced unparseable output"
@@ -452,6 +492,9 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
         else
           osv_body="$(osv_findings "$clone_dir")" && osv_rc=0 || osv_rc=$?
           if [ "$osv_rc" -eq 0 ]; then
+            # A clean zero-vulnerability run can yield an empty parse; keep
+            # the artifact schema valid (compose uses --argjson).
+            if [ -z "$osv_body" ]; then osv_body='[]'; fi
             osv_status="ok"
             osv_reason="osv-scanner scan completed"
             osv_findings="$osv_body"
@@ -497,6 +540,9 @@ for repo in $(printf '%s' "$REPOS_JSON" | jq -r '.[]'); do
   rs_rules="[]"
   rs_body="$(ruleset_rows)" && rs_rc=0 || rs_rc=$?
   if [ "$rs_rc" -eq 0 ]; then
+    # An rc-0 empty API body (rare, 204-shaped) would make the jq guard and
+    # compose's --argjson both choke; normalize to a valid empty rows array.
+    if [ -z "$rs_body" ]; then rs_body='[]'; fi
     rs_rules="$rs_body"
     if [ "$(printf '%s' "$rs_rules" | jq '[.[] | select(.enforcement == "active" and .target == "branch")] | length')" -gt 0 ]; then
       rs_applied="true"
