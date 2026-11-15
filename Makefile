@@ -400,6 +400,8 @@ ci: validate
 	bash devops_maint_v1/tests/test_ci_templates_standalone.sh
 	bash devops_maint_v1/tests/test_protect_standalone.sh
 	bash devops_maint_v1/tests/test_codeql_triage_standalone.sh
+	bash devops_maint_v1/tests/test_apply_ci_pack.sh
+	bash devops_maint_v1/tests/test_sweep_delta.sh
 	@echo "== ci: secret-free shipped configs gate (CRI-250) =="
 	bash k8s/tests/test_secret_free_gate.sh
 	@echo "== ci: validate-manifests (structural YAML parse; CI also kubectl-dry-runs, non-gating) =="
