@@ -1,5 +1,10 @@
 // devops_maint_v1 — Lane A: classify/route/act graph (KB-407, ADR-0015 wave 2).
 //
+// ADR-0015 deviates here by design: D1 interposes a separate "review" node
+// between act and merge; this graph realizes it as the pre-existing GitHub
+// reviewDecision == APPROVED gate inside the merge lane (KB-407, coordinator
+// note 2026-11-15).
+//
 // Wave 2 of the devops_maint_v1 series (anchor KB-405, predecessor KB-406):
 // the wave-1 collect step stays byte-compatible and is extended into a
 // 6-step graph — every step deterministic shell except the one decision-

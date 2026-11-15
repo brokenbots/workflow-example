@@ -47,7 +47,6 @@ log "brief source $CLASSIFICATION_PATH"
 # Compact brief — one line of JSON on stdout, nothing else
 # ---------------------------------------------------------------------------
 jq -c '
-  def num_field($f): ((.[$f] // 0) | type == "number");
   . as $c
   | {
       sweep: {

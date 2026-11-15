@@ -9,8 +9,9 @@
 #
 #   <inventory dir>/classification.json
 #
-# Priority order of the gate ladder (first match wins; every triggered gate
-# is recorded in the row's reasons):
+# Priority order of the gate ladder (single if/elif chain, first match wins;
+# a fired gate records at most one reason in the row's reasons — empty
+# reasons array = no gate fired):
 #   1. Title does not parse as "Bump <module> [ in <path>] from <from> to
 #      <to>[ in <path>]" — covers grouped titles ("Bump the go_modules
 #      group across ..."), release waves, manual retitles   -> needs_judgment
