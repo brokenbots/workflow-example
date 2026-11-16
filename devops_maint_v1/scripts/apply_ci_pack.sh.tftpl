@@ -347,6 +347,16 @@ file_apply() { # repo rel_path branch tpl_file commit_msg
     if cmp -s "$cur_file" "$tpl_file"; then
       return 0   # idempotent: bytes already exact, no write, no churn
     fi
+    if [ "${NOCLOBBER:-0}" -eq 1 ]; then
+      # The repo already carries a differing (functional) file. Overwriting hand-rolled
+      # workflows silently destroyed live infra (seen: noop's WS-series CI with richer
+      # jobs than the pack). Typed skip: report it, let the ADR-grade merge strategy
+      # (pack-into-existing) land later. rc 4 = skipped_existing.
+      FA_ERR="existing $path differs from the KB-408 template; no-clobber policy skips overwrite (pack-into-existing merge is future design)"
+      log "$FA_ERR"
+      FACTION="skipped_existing"
+      return 4
+    fi
     FACTION="updated"
   fi
 
@@ -423,6 +433,7 @@ repos_unplanned_total=0
 files_created_total=0
 files_updated_total=0
 files_unchanged_total=0
+files_skipped_total=0
 verify_mismatch_total=0
 
 for repo in $REPOS_LIST; do
@@ -467,11 +478,13 @@ for repo in $REPOS_LIST; do
       [ -f "$tpl_db" ] || { add_error dependabot "resolved template file missing for pack $prow_pack"; apply_ok=0; }
       pending_specs=""
       pr_batch_done=0
-      for spec in "ci:$CI_REL:$tpl_ci:$COMMIT_MSG_CI" "dependabot:$DB_REL:$tpl_db:$COMMIT_MSG_DB"; do
+      CI_SKIPPED=0
+      for spec in "ci:$CI_REL:$tpl_ci:$COMMIT_MSG_CI:noclobber" "dependabot:$DB_REL:$tpl_db:$COMMIT_MSG_DB:clobber"; do
         [ "$apply_ok" -eq 1 ] || break
-        IFS=':' read -r file_name rel_path tpl_file commit_msg <<EOFS
+        IFS=':' read -r file_name rel_path tpl_file commit_msg clobber_mode <<EOFS
 $spec
 EOFS
+        NOCLOBBER=$([ "$clobber_mode" = "noclobber" ] && echo 1 || echo 0)
         if [ "$pr_batch_done" -eq 1 ]; then
           # the PR batch carried this file; mark it from PR_FILES
           case " $PR_FILES " in
@@ -509,36 +522,47 @@ EOFS
           fi
         else
           apply_rc=$?
-          if [ "$apply_rc" -eq 3 ]; then
-            # Protected main: batch THIS file + every remaining spec into ONE
-            # commit/branch/PR, verify each on the branch, then mark all.
-            batch_specs="$file_name:$rel_path:$tpl_file"
-            case "$spec" in
-              ci:*) batch_specs="$batch_specs,dependabot:$DB_REL:$tpl_db" ;;
-              dependabot:*) batch_specs="$batch_specs,ci:$CI_REL:$tpl_ci" ;;
-            esac
-            PR_FILES=""
-            if pr_apply_pack "$repo" "$batch_specs" "devops_maint_v1: apply Lane B compliance pack (sweep $(basename "$(dirname "$ANCHOR_PATH")"))"; then
-              pr_batch_done=1
-              PACK_PR_URL="$(printf '%s' "$PR_INFO" | cut -d' ' -f2)"
-              PACK_PR_BRANCH="$(printf '%s' "$PR_INFO" | cut -d' ' -f1)"
-              case " $PR_FILES " in
-                *" $file_name "*)
-                  files_json="$(printf '%s' "$files_json" | jq -c \
-                    --arg f "$file_name" --arg pr "$PACK_PR_URL" --arg br "$PACK_PR_BRANCH" \
-                    '.[$f].action = "pr_opened" | .[$f].readback_verified = true | .[$f].pr = $pr | .[$f].pr_branch = $br')"
-                  files_updated_total=$((files_updated_total + 1))
-                  ;;
-              esac
-            else
-              apply_ok=0
-              add_error "${file_name}_apply" "protected main (409) and PR-route fallback failed; see step stderr"
-              files_json="$(printf '%s' "$files_json" | jq -c --arg f "$file_name" '.[$f] = null')"
-            fi
-            continue
-          fi
           files_json="$(printf '%s' "$files_json" | jq -c --arg f "$file_name" '.[$f] = null')"
           case "$apply_rc" in
+            3)
+              # Protected main: batch THIS file + every remaining spec into ONE
+              # commit/branch/PR, verify each on the branch, then mark all.
+              batch_specs="$file_name:$rel_path:$tpl_file"
+              case "$spec" in
+                ci:*) batch_specs="$batch_specs,dependabot:$DB_REL:$tpl_db" ;;
+                dependabot:*)
+                  # ci is noclobber: do not re-add it to the PR batch when it was
+                  # skipped (rc 4). Only pair with ci when ci is clobber-mode.
+                  if [ "${CI_SKIPPED:-0}" -ne 1 ]; then
+                    batch_specs="$batch_specs,ci:$CI_REL:$tpl_ci"
+                  fi ;;
+              esac
+              PR_FILES=""
+              if pr_apply_pack "$repo" "$batch_specs" "devops_maint_v1: apply Lane B compliance pack (sweep $(basename "$(dirname "$ANCHOR_PATH")"))"; then
+                pr_batch_done=1
+                PACK_PR_URL="$(printf '%s' "$PR_INFO" | cut -d' ' -f2)"
+                PACK_PR_BRANCH="$(printf '%s' "$PR_INFO" | cut -d' ' -f1)"
+                case " $PR_FILES " in
+                  *" $file_name "*)
+                    files_json="$(printf '%s' "$files_json" | jq -c \
+                      --arg f "$file_name" --arg pr "$PACK_PR_URL" --arg br "$PACK_PR_BRANCH" \
+                      '.[$f].action = "pr_opened" | .[$f].readback_verified = true | .[$f].pr = $pr | .[$f].pr_branch = $br')"
+                    files_updated_total=$((files_updated_total + 1))
+                    ;;
+                esac
+              else
+                apply_ok=0
+                add_error "${file_name}_apply" "protected main (409) and PR-route fallback failed; see step stderr"
+              fi
+              ;;
+            4)
+              # skipped_existing: honest report row; the repo's own file governs.
+              [ "$file_name" = "ci" ] && CI_SKIPPED=1
+              files_json="$(printf '%s' "$files_json" | jq -c \
+                --arg f "$file_name" --arg d "${FA_ERR:-}" \
+                '.[$f].action = "skipped_existing" | .[$f].readback_verified = true | .[$f].detail = $d')"
+              files_skipped_total=$((files_skipped_total + 1))
+              ;;
             1)
               apply_ok=0
               verify_mismatch_total=$((verify_mismatch_total + 1))
@@ -597,6 +621,7 @@ jq -s \
   --arg s_created "$files_created_total" \
   --arg s_updated "$files_updated_total" \
   --arg s_unchanged "$files_unchanged_total" \
+  --argjson s_skipped "$files_skipped_total" \
   --arg s_mismatch "$verify_mismatch_total" \
   '
   . as $repos
@@ -618,6 +643,7 @@ jq -s \
         files_created_total: ($s_created | tonumber),
         files_updated_total: ($s_updated | tonumber),
         files_unchanged_total: ($s_unchanged | tonumber),
+        files_skipped_total: ($s_skipped | tonumber),
         verify_mismatch_total: ($s_mismatch | tonumber)
       },
       repos: $repos
@@ -652,6 +678,9 @@ jq -e --argjson plan "$PLAN_JSON" '
   (.summary.files_unchanged_total ==
      ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
        | [.[] | select(.action == "none" and .readback_verified == true)] | length)) and
+  (.summary.files_skipped_total ==
+     ([.repos[] | .files? // {} | (.ci // {}), (.dependabot // {})]
+       | [.[] | select(.action == "skipped_existing")] | length)) and
   (.summary.verify_mismatch_total ==
      ([.repos[] | .errors[]? | select(.surface | test("_readback$"))] | length)) and
   ([.repos[] |
@@ -674,5 +703,5 @@ if [ "$verify_mismatch_total" -gt 0 ]; then
   fail "$verify_mismatch_total file(s) failed byte read-back verification; evidence at $COMPLIANCE_PATH"
 fi
 
-log "compliance complete: verified=$repos_verified_total error=$repos_error_total unplanned=$repos_unplanned_total created=$files_created_total updated=$files_updated_total unchanged=$files_unchanged_total"
+log "compliance complete: verified=$repos_verified_total error=$repos_error_total unplanned=$repos_unplanned_total created=$files_created_total updated=$files_updated_total unchanged=$files_unchanged_total skipped=$files_skipped_total"
 printf '%s\n' "$COMPLIANCE_PATH"
