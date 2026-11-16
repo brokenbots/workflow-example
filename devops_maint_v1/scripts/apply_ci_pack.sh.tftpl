@@ -250,7 +250,8 @@ pr_apply_pack() { # repo specs_csv commit_title -> sets PR_INFO; PR_FILES
   work="$RAW_DIR/pr.$repo"
   rm -rf "$work"
 
-  if ! git clone --quiet --depth 1 "https://x-access-token:${GH_TOKEN:?}@github.com/$ORG/$repo.git" "$work" 2>"$RAW_DIR/prclone.$repo.err"; then
+  if ! git -c credential.helper='!f() { printf "username=x-access-token\n"; printf "password=%s\n" "$GH_TOKEN"; }; f' \
+      clone --quiet --depth 1 "https://github.com/$ORG/$repo.git" "$work" 2>"$RAW_DIR/prclone.$repo.err"; then
     log "pr route: clone failed for $repo: $(tail -1 "$RAW_DIR/prclone.$repo.err" 2>/dev/null || echo '?')"
     return 1
   fi
