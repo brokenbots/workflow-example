@@ -44,7 +44,7 @@ while IFS= read -r row; do
   snum="$(printf '%s' "$row" | jq -r '.number')"
   reason="$(jq -r --arg repo "$srepo" --argjson num "$snum" '
     ([.stale_closes[]? | select(.repo == $repo and .number == $num) | .reasons[0]][0] // "stale")'     "$CLASSIFICATION_PATH")"
-  if gh pr close "$snum" -R "{{ .org | shellquote }}/$srepo" --comment "$reason" >/dev/null 2>"$RAW_DIR/stale.$srepo.$snum.err"; then
+  if gh pr close "$snum" -R "{{ .org }}/$srepo" --comment "$reason" >/dev/null 2>"$RAW_DIR/stale.$srepo.$snum.err"; then
     jq -cn --arg repo "$srepo" --argjson num "$snum" '{repo: $repo, number: $num, status: "closed"}' >>"$ND"
     CLOSED=$((CLOSED + 1))
     log "#$snum ($srepo) closed (typed stale-superseded lane)"
@@ -59,12 +59,12 @@ jq -cn \
   --arg s "$started_at" --arg f "$finished_at" \
   --arg sid "$(jq -r '.run.sweep_id' "$CLASSIFICATION_PATH")" \
   --arg org "$(jq -r '.run.org' "$CLASSIFICATION_PATH")" \
-  --argjson cls "$CLASSIFICATION_PATH" \
-  --argjson rows "$(cat "$ND")" \
+  --arg cls "$CLASSIFICATION_PATH" \
+  --argjson rows "[$(cat "$ND")]" \
   --argjson closed "$CLOSED" --argjson failed "$FAILED" \
   '{schema: "devops_maint_v1.stale_close.v1",
     run: {sweep_id: $sid, org: $org, started_at: $s, finished_at: $f,
-          classification_path: $cls},
+          classification_path: ($cls | fromjson? // $cls)},
     summary: {candidates: (($rows | length) + $failed), closed: $closed, failed: $failed},
     rows: $rows}' >"$STALE_ARTIFACT"
 
