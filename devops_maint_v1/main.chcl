@@ -82,7 +82,7 @@ workflow {
     target_state     = "completed"
 
     policy {
-        max_total_steps = 10
+        max_total_steps = 11
     }
 }
 
@@ -114,6 +114,19 @@ data "internal" "classification_file" {
 // Typed failure line when the classify step fails (bad inventory artifact or
 // a structural self-check failure).
 data "internal" "classify_error" {
+    type  = string
+    value = ""
+}
+
+// Path of the stale_close artifact (rows closed by the stale-superseded lane
+// before the route gate); empty when the stale_close step failed.
+data "internal" "stale_file" {
+    type  = string
+    value = ""
+}
+
+// Typed failure line when the stale_close step fails.
+data "internal" "stale_error" {
     type  = string
     value = ""
 }
@@ -245,8 +258,6 @@ data "internal" "delta_error" {
 // carries the plan and the explicit note that judgment/report rows are never
 // auto-acted, so a hold choice is the model's whole veto surface — it can
 // narrow nothing, widen nothing, and invent no actions.
-// The adapter's strict input contract enforces questions-as-array
-// (jsonencode([…])); a map-shaped questions value is rejected by the adapter.
 local "route_questions" {
     value = jsonencode([
         {
@@ -310,10 +321,12 @@ step "classify" {
     input {
         command = templatefile("./scripts/classify_prs.sh.tftpl", {
             inventory_file = data.internal.inventory_file.value
+            stale_days     = var.stale_days
+            red_close_days = var.red_close_days
         })
     }
     outcome "success" {
-        next = step.route_prepare
+        next = step.stale_close
         write {
             target = data.internal.classification_file.value
             value  = trimspace(output.stdout)
@@ -323,6 +336,36 @@ step "classify" {
         next = state.classify_failed
         write {
             target = data.internal.classify_error.value
+            value  = trimspace(output.stderr)
+        }
+    }
+}
+
+// The stale-superseded close lane EXECUTES before the route gate (run 22
+// lesson): closures are reversible (dependabot regenerates), so they must not
+// be parked behind the confidence floor that gates act/merge/compliance. The
+// gate then reasons over a classification whose dead rows are already closed
+// and recorded.
+step "stale_close" {
+    target  = adapter.shell.stale_close
+    timeout = "600s"
+    input {
+        command = templatefile("./scripts/stale_close.sh.tftpl", {
+            classification_file = data.internal.classification_file.value
+            org                 = var.org
+        })
+    }
+    outcome "success" {
+        next = step.route_prepare
+        write {
+            target = data.internal.stale_file.value
+            value  = trimspace(output.stdout)
+        }
+    }
+    outcome "failure" {
+        next = state.stale_close_failed
+        write {
+            target = data.internal.stale_error.value
             value  = trimspace(output.stderr)
         }
     }
@@ -370,11 +413,6 @@ step "route" {
         next = state.route_failed
         write {
             target = data.internal.route_error.value
-            // The decision adapter declares a typed failure payload
-            // {error: {kind,status,message,retryable}} (ADR-0013) — there is
-            // no shell stderr channel on this adapter, and the engine
-            // validates write reads against the adapter's declared output
-            // projection.
             value  = trimspace(output.error.message)
         }
     }
@@ -622,6 +660,11 @@ state "classify_failed" {
     success  = false
 }
 
+state "stale_close_failed" {
+    terminal = true
+    success  = false
+}
+
 state "route_prepare_failed" {
     terminal = true
     success  = false
@@ -674,6 +717,18 @@ output "collect_error" {
     description = "Typed failure line of the collect step (with the partial-artifact path when one exists); empty on success."
     type        = string
     value       = data.internal.collect_error.value
+}
+
+output "stale_file" {
+    description = "Path of the stale_close artifact; empty when the stale_close step failed."
+    type        = string
+    value       = data.internal.stale_file.value
+}
+
+output "stale_error" {
+    description = "Typed failure line of the stale_close step; empty on success."
+    type        = string
+    value       = data.internal.stale_error.value
 }
 
 output "classification_file" {

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# devops_maint_v1 — stale_close step (dave ruling 2026-11-16 + fast-iteration run 22).
+#
+# The stale-superseded close lane EXECUTES here, BEFORE the route gate: judgment/
+# needs_rebase rows the classifier flagged stale (older than the threshold and
+# superseded by a fresher minor-and-patch branch of the same family) are closed with
+# a typed comment by the brokenbot identity. Closes are reversible by design —
+# dependabot regenerates updates on its own schedule. Closing must NOT be gated on
+# route confidence: a run that holds act/merge/compliance still closes dead PRs —
+# that was the run 22 lesson (gate 0.586 < floor parked the close plan forever).
+#
+# Per-row close failures are bookkeeping (recorded, not fatal). The step fails only
+# on config/structural problems. stdout carries ONLY the stale artifact path.
+#
+# <classification dir>/stale_close.json
+set -euo pipefail
+
+CLASSIFICATION_PATH={{ .classification_file | shellquote }}
+
+log() { printf 'stale_close: %s\n' "$*" >&2; }
+
+fail() {
+  printf 'stale_close_failed: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -n "$CLASSIFICATION_PATH" ]] || fail "classification_file is empty (classify step bug or misbinding)"
+[[ -f "$CLASSIFICATION_PATH" ]] || fail "classification artifact not found: $CLASSIFICATION_PATH"
+
+RUN_DIR="$(dirname "$CLASSIFICATION_PATH")"
+RAW_DIR="$RUN_DIR/.staleclose.raw"
+STALE_ARTIFACT="$RUN_DIR/stale_close.json"
+mkdir -p "$RAW_DIR" || fail "raw directory not creatable: $RAW_DIR"
+
+finished_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+ND="$RAW_DIR/stale.ndjson"
+: >"$ND"
+CLOSED=0
+FAILED=0
+while IFS= read -r row; do
+  srepo="$(printf '%s' "$row" | jq -r '.repo')"
+  snum="$(printf '%s' "$row" | jq -r '.number')"
+  reason="$(jq -r --arg repo "$srepo" --argjson num "$snum" '
+    ([.stale_closes[]? | select(.repo == $repo and .number == $num) | .reasons[0]][0] // "stale")'     "$CLASSIFICATION_PATH")"
+  if gh pr close "$snum" -R "{{ .org }}/$srepo" --comment "$reason" >/dev/null 2>"$RAW_DIR/stale.$srepo.$snum.err"; then
+    jq -cn --arg repo "$srepo" --argjson num "$snum" '{repo: $repo, number: $num, status: "closed"}' >>"$ND"
+    CLOSED=$((CLOSED + 1))
+    log "#$snum ($srepo) closed (typed stale-superseded lane)"
+  else
+    FAILED=$((FAILED + 1))
+    jq -cn --arg repo "$srepo" --argjson num "$snum" '{repo: $repo, number: $num, status: "failed"}' >>"$ND"
+    log "#$snum ($srepo) close failed: $(grep -v '^gh_retry: ' "$RAW_DIR/stale.$srepo.$snum.err" | head -c 200 || true)"
+  fi
+done < <(jq -r '[.stale_closes[]? | {repo, number} | tojson] | .[]' "$CLASSIFICATION_PATH")
+
+jq -cn \
+  --arg s "$started_at" --arg f "$finished_at" \
+  --arg sid "$(jq -r '.run.sweep_id' "$CLASSIFICATION_PATH")" \
+  --arg org "$(jq -r '.run.org' "$CLASSIFICATION_PATH")" \
+  --arg cls "$CLASSIFICATION_PATH" \
+  --argjson rows "$(jq -s . "$ND")" \
+  --argjson closed "$CLOSED" --argjson failed "$FAILED" \
+  '{schema: "devops_maint_v1.stale_close.v1",
+    run: {sweep_id: $sid, org: $org, started_at: $s, finished_at: $f,
+          classification_path: ($cls | fromjson? // $cls)},
+    summary: {candidates: (($rows | length) + $failed), closed: $closed, failed: $failed},
+    rows: $rows}' >"$STALE_ARTIFACT"
+
+jq -e '
+  (.schema == "devops_maint_v1.stale_close.v1") and
+  (.summary.closed == ([.rows[] | select(.status == "closed")] | length)) and
+  (.summary.failed == ([.rows[] | select(.status == "failed")] | length)) and
+  (all(.rows[]; (.repo | type == "string") and (.number | type == "number") and
+                (.status | IN("closed", "failed"))))
+' "$STALE_ARTIFACT" >/dev/null 2>"$RAW_DIR/selfcheck.err" ||
+  fail "artifact failed its structural self-check"
+
+cleanup() { rm -rf "$RAW_DIR"; }
+log "stale close done: closed=$CLOSED failed=$FAILED"
+printf '%s\n' "$STALE_ARTIFACT"

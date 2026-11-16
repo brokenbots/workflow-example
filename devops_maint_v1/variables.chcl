@@ -123,6 +123,25 @@ variable "protection_plan" {
 // Pre-decided CodeQL dispositions the triage loop executes verbatim (never
 // re-derived at run time). fix rows ride the standard pipeline (no budget);
 // suppress rows are typed dismissals capped by the per-run budget.
+// Stale-superseded close lane (dave ruling 2026-11-16): judgment rows older
+// than this and superseded by a fresher minor-and-patch consolidation branch
+// close instead of parking forever. Dependabot regenerates by its own
+// schedule, so closing is reversible by design.
+variable "stale_days" {
+    description = "Age in days beyond which a judgment-lane dependabot PR that is superseded by a fresher minor-and-patch branch for the same module family closes as stale (merge lane, brokenbot identity)."
+    type        = number
+    default     = 45
+}
+
+// Red-CI close lane (terminal-disposition ruling): red-CI judgment rows older
+// than this close — a red PR parked for days is not-helpful by evidence of age;
+// dependabot regenerates a fresh PR.
+variable "red_close_days" {
+    description = "Age in days beyond which a red-CI judgment-lane dependabot PR closes as not-helpful (merge/stale_close lane, brokenbot identity)."
+    type        = number
+    default     = 7
+}
+
 variable "codeql_triage_plan" {
     description = "Typed triage decisions for open CodeQL alerts: repo + alert_number + rule_id + disposition (fix | suppress) + rationale. A suppress row must carry dismissed_reason (false_positive | wont_fix | used_in_tests | used_in_docs). Rows outside the repos scope or duplicating (repo, alert_number) fail loud before any network call; open alerts without a row stay unplanned (report-only)."
     type        = list(object({

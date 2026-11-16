@@ -155,7 +155,7 @@ codeql_enumerate() {
   out="$(gh api "repos/$ORG/$repo/code-scanning/alerts?state=open&per_page=100&tool_name=CodeQL" --paginate 2>"$RAW_DIR/enum.$repo.tmp")" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
     mv "$RAW_DIR/enum.$repo.tmp" "$RAW_DIR/enum.$repo.err" 2>/dev/null || true
-    if grep -qiE '404|not enabled|not found' "$RAW_DIR/enum.$repo.err" 2>/dev/null; then
+    if grep -qiE '404|not enabled|not found|not authorized to read code scanning alerts' "$RAW_DIR/enum.$repo.err" 2>/dev/null; then
       # 404 lane: CodeQL not enabled for this repo — nothing to triage here,
       # recorded as disabled (never surfaced as a workflow error).
       return 1

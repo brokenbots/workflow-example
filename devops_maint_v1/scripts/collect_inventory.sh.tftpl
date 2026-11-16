@@ -202,7 +202,10 @@ codeql_alert_count() {
   local out rc
   out="$(gh api "repos/$ORG/$repo/code-scanning/alerts?state=open&per_page=100&tool_name=CodeQL" --paginate 2>"$rdir/codeql.err")" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
-    if grep -qiE '404|not enabled|not found' "$rdir/codeql.err" 2>/dev/null; then
+    # Not-enabled repos surface several shapes: 404/no analysis found, 403 'not
+    # enabled', and 401 'not authorized to read code scanning alerts' (seen live on
+    # criteria-adapter-starter-go). All mean 'no CodeQL here'; count 0, report-only.
+    if grep -qiE '404|not enabled|not found|not authorized to read code scanning alerts' "$rdir/codeql.err" 2>/dev/null; then
       return 1
     fi
     log "CodeQL alerts API call failed rc=$rc: $(err_text "$rdir/codeql.err")"

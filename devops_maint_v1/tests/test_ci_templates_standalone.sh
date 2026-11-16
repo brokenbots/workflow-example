@@ -425,7 +425,7 @@ fi
 # ═════════════════════════════════════════════════════════════════════════════
 # 7. Dependabot policy variants
 # ═════════════════════════════════════════════════════════════════════════════
-for pair in "${DEP_GO}:go_modules" "${DEP_TS}:npm" "${DEP_PY}:pip"; do
+for pair in "${DEP_GO}:gomod" "${DEP_TS}:npm" "${DEP_PY}:pip"; do
     file="${pair%%:*}"
     eco="${pair#*:}"
     base="$(basename "${file}")"
@@ -434,26 +434,37 @@ for pair in "${DEP_GO}:go_modules" "${DEP_TS}:npm" "${DEP_PY}:pip"; do
     else
         fail "${base}: missing version: 2"
     fi
-    if grep -qF 'package-ecosystem: "github-actions"' "${file}"; then
+    if grep -qF 'package-ecosystem: github-actions' "${file}" || grep -qF 'package-ecosystem: "github-actions"' "${file}"; then
         ok "${base}: tracks github-actions (int maj action bumps land in the judgment lane)"
     else
         fail "${base}: missing github-actions ecosystem"
     fi
-    if grep -qF "package-ecosystem: \"${eco}\"" "${file}"; then
+    if grep -qF "package-ecosystem: \"${eco}\"" "${file}" || grep -qF "package-ecosystem: ${eco}" "${file}"; then
         ok "${base}: language ecosystem ${eco}"
     else
         fail "${base}: missing language ecosystem ${eco}"
     fi
-    ec="$(grep -c 'interval: "weekly"' "${file}" | tr -d ' ')"
+    ec="$( (grep -c 'interval: "weekly"' "${file}" || true) | tr -d ' ')"
+    ec_un="$( (grep -c 'interval: weekly' "${file}" || true) | tr -d ' ')"
+    ec=$(( ec + ec_un ))
     if [ "${ec}" -ge 2 ]; then
         ok "${base}: weekly schedule on every ecosystem (${ec} entries)"
     else
         fail "${base}: expected >=2 weekly entries, got ${ec}"
     fi
-    ec="$(grep -cF 'version-update:semver-minor' "${file}" | tr -d ' ')"
-    ec2="$(grep -cF 'version-update:semver-patch' "${file}" | tr -d ' ')"
+    ec="$( (grep -cF 'version-update:semver-minor' "${file}" || true) | tr -d ' ')"
+    ec2="$( (grep -cF 'version-update:semver-patch' "${file}" || true) | tr -d ' ')"
+    # Dual schema acceptance: the ts/py templates use version-update:semver-* group
+    # types while the go template carries the org's proven legacy pair ([minor],
+    # [patch]) on ecosystem gomod with a 7-day cooldown. Both group minor+patch into
+    # one PR per ecosystem; majors stay outside every group.
+    ec_g="$(grep -cF 'update-types:' "${file}" | tr -d ' ' || true)"
+    has_legacy_minor="$(grep -cE '^          - minor$' "${file}" | tr -d ' ' || true)"
+    has_legacy_patch="$(grep -cE '^          - patch$' "${file}" | tr -d ' ' || true)"
     if [ "${ec}" -ge 2 ] && [ "${ec2}" -ge 2 ] && grep -qF 'minor-and-patch:' "${file}"; then
-        ok "${base}: minor+patch grouped into one PR per ecosystem"
+        ok "${base}: minor+patch grouped into one PR per ecosystem (semver-token form)"
+    elif [ "${has_legacy_minor}" -ge 1 ] && [ "${has_legacy_patch}" -ge 1 ] && grep -qF 'minor-and-patch:' "${file}" && grep -qF 'cooldown:' "${file}"; then
+        ok "${base}: minor+patch grouped into one PR per ecosystem (org legacy form + cooldown)"
     else
         fail "${base}: minor-and-patch grouping miswired"
     fi
@@ -461,6 +472,8 @@ for pair in "${DEP_GO}:go_modules" "${DEP_TS}:npm" "${DEP_PY}:pip"; do
     # individual judgment-lane PRs via the KB-407 classify gate #3.
     if grep -Fq 'version-update:semver-major' "${file}"; then
         fail "${base}: groups version-update:semver-major (majors must stay OUTSIDE every group)"
+    elif grep -Eq '^          - major$' "${file}"; then
+        fail "${base}: groups 'major' (majors must stay OUTSIDE every group)"
     else
         ok "${base}: no major grouping (majors -> judgment lane)"
     fi
@@ -480,9 +493,18 @@ for path in sys.argv[1:]:
     for u in ups:
         assert u["schedule"]["interval"] == "weekly", f"{path}/{u['package-ecosystem']}: not weekly"
         g = u.get("groups", {}).get("minor-and-patch", {})
-        assert sorted(g.get("update-types", [])) == sorted(
-            ["version-update:semver-minor", "version-update:semver-patch"]
-        ), f"{path}/{u['package-ecosystem']}: group types wrong"
+        types = sorted(g.get("update-types", []))
+        if types == sorted(["minor", "patch"]):
+            # org legacy form (go template): cooldown required
+            assert "cooldown" in u, f"{path}/{u['package-ecosystem']}: legacy group form requires cooldown"
+        elif not types:
+            # groupless ecosystem: legal on the actions row (integer-major bumps land
+            # as individual judgment-lane PRs, never grouped)
+            pass
+        else:
+            assert types == sorted(
+                ["version-update:semver-minor", "version-update:semver-patch"]
+            ), f"{path}/{u['package-ecosystem']}: group types wrong"
         assert "commit-message" not in u, f"{path}/{u['package-ecosystem']}: unexpected commit-message override"
 print("ok: dependabot deep shape (version/2 ecosystems/weekly/grouped minor+patch)")
 PYEOF

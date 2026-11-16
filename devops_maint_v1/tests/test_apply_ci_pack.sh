@@ -448,12 +448,16 @@ P3_RC=0
 run_apply "${P3}" "${FX3}" "${WORK_ROOT}/a3.out" "${WORK_ROOT}/a3.err" || P3_RC=$?
 expect_count "S5 drift-heal run exits 0" 0 "${P3_RC}"
 ART3="$(tr -d '[:space:]' <"${WORK_ROOT}/a3.out")"
-check "S5 updated + readback-verified" jq -e '.repos[0].status == "verified" and .repos[0].files.ci.action == "updated" and .repos[0].files.ci.readback_verified == true and .repos[0].files.dependabot.action == "updated"' "${ART3}" >/dev/null
-check "S5 summary records updates, not creates" jq -e '.summary.files_updated_total == 2 and .summary.files_created_total == 0 and .summary.files_unchanged_total == 0' "${ART3}" >/dev/null
-expect_count "S5 exactly two PUTs" 2 "$(grep -c "^PUT repos/testorg/go3/contents/" "${FX3}/call.log")"
-check "S5 PUT bodies carry the fetched drift sha" test "$(jq -r '.sha' "${FX3}/go3/lastbody.ci.json")" = "drifted-sha" && test "$(jq -r '.sha' "${FX3}/go3/lastbody.db.json")" = "drifted-sha"
-check "S5 PUT lands on the declared default branch" test "$(jq -r '.branch' "${FX3}/go3/lastbody.ci.json")" = "trunk"
-check "S5 healed bytes match the go pack templates" test "$(body_matches_template "${FX3}/go3/lastbody.ci.json" "${CI_TPL_DIR}/github-ci-go.yml")" = "ok" && test "$(body_matches_template "${FX3}/go3/lastbody.db.json" "${CI_TPL_DIR}/dependabot-go.yml")" = "ok"
+# No-clobber contract: the drifted ci.yml (noclobber) is reported skipped_existing —
+# the repo's own workflow governs; the drifted dependabot.yml (clobber-mode config)
+# heals to the pack bytes with the fetched sha and is read-back verified.
+check "S5 ci skips under no-clobber; dependabot updated + readback-verified" jq -e '.repos[0].status == "verified" and .repos[0].files.ci.action == "skipped_existing" and .repos[0].files.ci.readback_verified == true and .repos[0].files.dependabot.action == "updated" and .repos[0].files.dependabot.readback_verified == true' "${ART3}" >/dev/null
+check "S5 summary records one skip + one update, no creates" jq -e '.summary.files_updated_total == 1 and .summary.files_created_total == 0 and .summary.files_unchanged_total == 0 and .summary.files_skipped_total == 1' "${ART3}" >/dev/null
+expect_count "S5 exactly one PUT (dependabot only; ci never overwritten)" 1 "$(grep -c "^PUT repos/testorg/go3/contents/" "${FX3}/call.log")"
+check "S5 PUT body carries the fetched drift sha" test "$(jq -r '.sha' "${FX3}/go3/lastbody.db.json")" = "drifted-sha"
+check "S5 PUT lands on the declared default branch" test "$(jq -r '.branch' "${FX3}/go3/lastbody.db.json")" = "trunk"
+check "S5 healed dependabot bytes match the go pack template" test "$(body_matches_template "${FX3}/go3/lastbody.db.json" "${CI_TPL_DIR}/dependabot-go.yml")" = "ok"
+check "S5 skip row records the no-clobber reason" jq -e '.repos[0].files.ci.detail | test("no-clobber")' "${ART3}" >/dev/null
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 6. Pack routing: go/ts self-describing; starter routes dependabot by
@@ -490,9 +494,10 @@ FX5="${WORK_ROOT}/fx5"
 make_fixtures "${FX5}"
 mkdir -p "${FX5}/go5"
 printf '{"default_branch": "main"}' >"${FX5}/go5/repo.json"
-# The PUT succeeds but the later read-back GET serves DIFFERENT bytes (a
-# non-404 error would be transport, not mismatch).
-printf '{"content": "%s", "sha": "wrong-sha"}' "$(tpl_b64 "${CI_TPL_DIR}/github-ci-ts.yml")" >"${FX5}/go5/readback.ci.json"
+file_fixture "${FX5}/go5" ci "${CI_TPL_DIR}/github-ci-py.yml" "drift-sha"
+file_fixture "${FX5}/go5" db "${CI_TPL_DIR}/dependabot-ts.yml" "drift-sha"
+# after the PUT, the read-back GET serves DIFFERENT db bytes (mismatch):
+printf '{"content": "%s", "sha": "post-sha"}' "$(tpl_b64 "${CI_TPL_DIR}/dependabot-ts.yml")" >"${FX5}/go5/readback.db.json"
 
 P5="${WORK_ROOT}/apply5.sh"
 render_apply testorg '["go5"]' '[{"repo":"go5","pack":"go"}]' "$(mk_anchor "a5.json")" "${P5}"
@@ -503,9 +508,9 @@ check "S7 typed failure names the compliance gate" grep -q '^apply_ci_pack_faile
 check "S7 typed failure names the preserved artifact path" grep -qF "$(mk_anchor "a5.json" | sed 's|[^/]*$||')compliance.json" "${WORK_ROOT}/a5.err"
 check "S7 artifact was still written and preserved" test -f "${WORK_ROOT}/runs/a5.json/compliance.json"
 ART5="${WORK_ROOT}/runs/a5.json/compliance.json"
-check "S7 row is error with the read-back error" jq -e '.repos[0].status == "error" and .repos[0].errors[0].surface == "ci_readback" and (.repos[0].errors[0].detail | test("read-back|template"))' "${ART5}" >/dev/null
-check "S7 mismatched file zeroed from the row" jq -e '.repos[0].files.ci == null' "${ART5}" >/dev/null
-check "S7 un-attempted dependabot file stays unverified" jq -e '.repos[0].files.dependabot != null and .repos[0].files.dependabot.action == "none" and .repos[0].files.dependabot.readback_verified == false' "${ART5}" >/dev/null
+check "S7 row is error with the read-back error" jq -e '.repos[0].status == "error" and .repos[0].errors[0].surface == "dependabot_readback" and (.repos[0].errors[0].detail | test("read-back|template"))' "${ART5}" >/dev/null
+check "S7 mismatched dependabot file zeroed from the row" jq -e '.repos[0].files.dependabot == null' "${ART5}" >/dev/null
+check "S7 skipped ci stays verified-true under no-clobber" jq -e '.repos[0].files.ci.action == "skipped_existing" and .repos[0].files.ci.readback_verified == true' "${ART5}" >/dev/null
 check "S7 summary counts one mismatch and zero verified" jq -e '.summary.verify_mismatch_total == 1 and .summary.repos_verified_total == 0 and .summary.repos_error_total == 1' "${ART5}" >/dev/null
 check "S7 log has the PUT before the failed read-back" test "$(grep -c "^PUT repos/testorg/go5/contents/" "${FX5}/call.log")" = "1"
 
@@ -623,6 +628,38 @@ check "S13 the good repo verified despite the bad one" jq -e '[.repos[] | select
 check "S13 the bad repo error with the db file surface" jq -e '[.repos[] | select(.repo == "bad")][0].status == "error" and [.repos[] | select(.repo == "bad")][0].errors[0].surface == "dependabot_apply"' "${ART10}" >/dev/null
 check "S13 summary: one verified, one error" jq -e '.summary.repos_verified_total == 1 and .summary.repos_error_total == 1' "${ART10}" >/dev/null
 check "S13 py pack wrote the py templates" test "$(body_matches_template "${FX10}/ok/lastbody.ci.json" "${CI_TPL_DIR}/github-ci-py.yml")" = "ok" && test "$(body_matches_template "${FX10}/ok/lastbody.db.json" "${CI_TPL_DIR}/dependabot-py.yml")" = "ok"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 13b. Dependabot structure detection (no-clobber=auto on dependabot.yml):
+#      a richer existing config (>=3 ecosystems or any submodule directory)
+#      governs; a flat 1-2-ecosystem config clobbers to the pack.
+# ═════════════════════════════════════════════════════════════════════════════
+FX11="${WORK_ROOT}/fx11"
+make_fixtures "${FX11}"
+for r in flat multi; do
+    mkdir -p "${FX11}/${r}"
+    printf '{"default_branch": "main"}' >"${FX11}/${r}/repo.json"
+done
+# flat: 2 ecosystems, both root — NOT rich -> clobber (PUT to pack byte-exact)
+file_fixture "${FX11}/flat" db "${CI_TPL_DIR}/dependabot-ts.yml" "flat-sha"
+file_fixture "${FX11}/flat" ci "${CI_TPL_DIR}/github-ci-go.yml" "csha-same"
+# multi: 4 ecosystems, two submodule directories — RICH -> skipped_existing
+RICH_CFG="$(mktemp)"
+printf 'version: 2\nupdates:\n  - package-ecosystem: gomod\n    directory: /\n  - package-ecosystem: gomod\n    directory: /sdk\n  - package-ecosystem: gomod\n    directory: /tools\n  - package-ecosystem: gomod\n    directory: /workflow\n' >"${RICH_CFG}"
+printf '{"content": "%s", "sha": "rich-sha"}' "$(base64 -w0 "${RICH_CFG}")" >"${FX11}/multi/get.db.json"
+file_fixture "${FX11}/multi" ci "${CI_TPL_DIR}/github-ci-go.yml" "csha-same"
+
+P11="${WORK_ROOT}/apply11.sh"
+render_apply testorg '["flat","multi"]' '[{"repo":"flat","pack":"go"},{"repo":"multi","pack":"go"}]' "$(mk_anchor "a11.json")" "${P11}"
+P11_RC=0
+run_apply "${P11}" "${FX11}" "${WORK_ROOT}/a11.out" "${WORK_ROOT}/a11.err" || P11_RC=$?
+expect_count "S14 structure-detection run exits 0" 0 "${P11_RC}"
+ART11="${WORK_ROOT}/runs/a11.json/compliance.json"
+check "S14 flat config clobbered (updated + verified)" jq -e '[.repos[] | select(.repo == "flat")][0].status == "verified" and [.repos[] | select(.repo == "flat")][0].files.dependabot.action == "updated"' "${ART11}" >/dev/null
+check "S14 flat healed to pack bytes" test "$(body_matches_template "${FX11}/flat/lastbody.db.json" "${CI_TPL_DIR}/dependabot-go.yml")" = "ok"
+check "S14 rich config skipped_existing with the reason" jq -e '[.repos[] | select(.repo == "multi")][0].files.dependabot.action == "skipped_existing" and ([.repos[] | select(.repo == "multi")][0].files.dependabot.readback_verified == true)' "${ART11}" >/dev/null
+check "S14 rich config's own bytes untouched" test "$(grep -c "^PUT repos/testorg/multi/contents/.github/dependabot.yml" "${FX11}/multi/call.log" 2>/dev/null || echo 0)" = "0"
+check "S14 summary records one skip + one update" jq -e '.summary.files_skipped_total == 1 and .summary.files_updated_total == 1' "${ART11}" >/dev/null
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 14. Tree validation (node + criteria), matching the other step suites
