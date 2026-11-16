@@ -217,7 +217,7 @@ jq '
 # ---------------------------------------------------------------------------
 STALE_NUMBERS="$RUN_DIR/.classify.stale.$$.txt"
 : >"$STALE_NUMBERS"
-jq -c '.[] | select(.class == "needs_judgment")
+jq -c '.[] | select(.class == "needs_judgment" or .class == "needs_rebase")
         | select(.updated_at != null) | {repo, number, updated_at, head_ref}' \
     "$TMP_ROWS" >"$RUN_DIR/.classify.rows1.$$.ndjson" ||
   fail "rows1 export failed"
@@ -233,12 +233,13 @@ while IFS= read -r row; do
   upd_epoch="$(date -u -d "$upd" +%s 2>/dev/null)" || continue
   age_days=$(( (NOW_EPOCH - upd_epoch) / 86400 ))
   [ "$age_days" -gt "$STALE_DAYS" ] || continue
-  fresher="$(jq -r --arg repo "$repo" --arg fam "$fam" --arg upd "$upd" '
+  fresher="$(jq -r --arg repo "$repo" --arg fam "$fam" --arg upd "$upd" --argjson self "$num" '
     [.repos[] | select(.repo == $repo)
      | .prs.dependabot[]?
-     | select((.head_ref | test("minor-and-patch")) and
+     | select((.number != $self) and
+              (.head_ref | test("minor-and-patch")) and
               ((.head_ref | capture("^dependabot/(?<f>[^/]+)/") | .f) == $fam) and
-              ((.updated_at // "") > $upd))
+              ((.updated_at // "") >= $upd))
      | .number] | length' "$INVENTORY_PATH")"
   [ "${fresher:-0}" -gt 0 ] || continue
   printf '%s\n' "$num" >>"$STALE_NUMBERS"
@@ -249,7 +250,7 @@ done < "$RUN_DIR/.classify.rows1.$$.ndjson"
 if [ "$STALE_COUNT" -gt 0 ]; then
   jq -c --argjson nums "$(jq -s . "$STALE_NUMBERS")" '
     map(. as $r
-        | if (.number | IN($nums[])) and .class == "needs_judgment"
+        | if (.number | IN($nums[])) and (.class == "needs_judgment" or .class == "needs_rebase")
           then .class = "stale"
             | .reasons += ["stale: PR is older than the stale threshold and superseded by a fresher minor-and-patch branch for the same module family; closing the stale single is the honest disposition (dependabot regenerates by its own schedule)"]
           else . end)' "$TMP_ROWS" >"${TMP_ROWS}.stale" ||
