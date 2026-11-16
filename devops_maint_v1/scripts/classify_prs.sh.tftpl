@@ -225,7 +225,7 @@ STALE_NUMBERS="$RUN_DIR/.classify.stale.$$.txt"
 # regenerates; a red PR parked for N days is not-helpful by evidence of age).
 # Defaults to 7 via RED_CLOSE_DAYS (valid like STALE_DAYS).
 jq -c '.[] | select(.class == "needs_judgment" or .class == "needs_rebase")
-        | select(.updated_at != null) | {repo, number, updated_at, head_ref}' \
+        | select(.updated_at != null) | {repo, number, updated_at, head_ref, ci_verdict}' \
     "$TMP_ROWS" >"$RUN_DIR/.classify.rows1.$$.ndjson" ||
   fail "rows1 export failed"
 NOW_EPOCH="$(date -u +%s)"
