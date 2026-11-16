@@ -60,7 +60,7 @@ jq -cn \
   --arg sid "$(jq -r '.run.sweep_id' "$CLASSIFICATION_PATH")" \
   --arg org "$(jq -r '.run.org' "$CLASSIFICATION_PATH")" \
   --arg cls "$CLASSIFICATION_PATH" \
-  --argjson rows "[$(cat "$ND")]" \
+  --argjson rows "$(jq -s . "$ND")" \
   --argjson closed "$CLOSED" --argjson failed "$FAILED" \
   '{schema: "devops_maint_v1.stale_close.v1",
     run: {sweep_id: $sid, org: $org, started_at: $s, finished_at: $f,
