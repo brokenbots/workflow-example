@@ -103,6 +103,7 @@ log "merge plan: $GROUP_COUNT carrier(s) from $CLASSIFICATION_PATH"
 # the PRs stay open for a human next pass. Dependabot regenerates on its own
 # schedule, so closes are reversible by design.
 # ---------------------------------------------------------------------------
+mkdir -p "$RAW_DIR" || fail "raw directory not creatable: $RAW_DIR"
 stale_done="$RUN_DIR/.merge.stale.$$.ndjson"
 : >"$stale_done"
 STALE_CLOSE_FAILS=0
