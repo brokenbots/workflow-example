@@ -350,15 +350,37 @@ file_apply() { # repo rel_path branch tpl_file commit_msg
     if cmp -s "$cur_file" "$tpl_file"; then
       return 0   # idempotent: bytes already exact, no write, no churn
     fi
-    if [ "${NOCLOBBER:-0}" -eq 1 ]; then
-      # The repo already carries a differing (functional) file. Overwriting hand-rolled
-      # workflows silently destroyed live infra (seen: noop's WS-series CI with richer
-      # jobs than the pack). Typed skip: report it, let the ADR-grade merge strategy
-      # (pack-into-existing) land later. rc 4 = skipped_existing.
-      FA_ERR="existing $path differs from the KB-408 template; no-clobber policy skips overwrite (pack-into-existing merge is future design)"
-      log "$FA_ERR"
-      FACTION="skipped_existing"
-      return 4
+    if [ "${NOCLOBBER:-0}" -ne 0 ]; then
+      # Each repo is its own thing (dave ruling): a richer existing config governs.
+      # NOCLOBBER=1 (always skip: ci.yml — the repo's workflow split is deliberate).
+      # NOCLOBBER=2 (auto: dependabot.yml — skip only when the existing config is
+      # STRUCTURE-RICH: >=3 ecosystems or any non-root directory entry; multi-module
+      # refresh splits (criteria /sdk //tools /workflow) regress under the
+      # lowest-common-denominator pack. A 1-2-ecosystem flat config clobbers cleanly.
+      local rich=0
+      if [ "${NOCLOBBER}" -eq 2 ]; then
+        local eco_count dir_count
+        eco_count="$(grep -c '^[[:space:]]*package-ecosystem:' "$cur_file" || true)"
+        dir_count="$(grep -cE '^[[:space:]]*directory:[[:space:]]*"/' "$cur_file" || true)"
+        # non-root dirs: count 'directory: "..."' whose path isn't exactly /
+        local subdir=0
+        # directory values may be quoted ("dir") or bare (dir); strip quotes, treat
+        # exactly-/ as root. grep -qv exits 1 when NO line mismatches → fine under
+        # the ! check below; use an explicit count of non-root lines instead:
+        local nonroot
+        nonroot="$(grep -E '^[[:space:]]*directory:' "$cur_file" \
+            | sed 's/^[[:space:]]*directory:[[:space:]]*//' \
+            | tr -d '"' | grep -vcE '^/[[:space:]]*$' || true)"
+        [ "${nonroot:-0}" -gt 0 ] && subdir=1
+        [ "${eco_count:-0}" -ge 3 ] && rich=1
+        [ "$subdir" -eq 1 ] && rich=1
+      fi
+      if [ "${NOCLOBBER}" -eq 1 ] || [ "$rich" -eq 1 ]; then
+        FA_ERR="existing $path differs from the KB-408 template; no-clobber policy skips overwrite (pack-into-existing merge is future design)"
+        log "$FA_ERR"
+        FACTION="skipped_existing"
+        return 4
+      fi
     fi
     FACTION="updated"
   fi
@@ -482,14 +504,18 @@ for repo in $REPOS_LIST; do
       pending_specs=""
       pr_batch_done=0
       CI_SKIPPED=0
-      for spec in "ci:$CI_REL:noclobber:$tpl_ci:$COMMIT_MSG_CI" "dependabot:$DB_REL:clobber:$tpl_db:$COMMIT_MSG_DB"; do
+      for spec in "ci:$CI_REL:noclobber:$tpl_ci:$COMMIT_MSG_CI" "dependabot:$DB_REL:auto:$tpl_db:$COMMIT_MSG_DB"; do
         [ "$apply_ok" -eq 1 ] || break
         # Field order matters: clobber_mode BEFORE commit_msg — the message contains
         # colons, and with IFS=':' the trailing field would otherwise swallow the mode.
         IFS=':' read -r file_name rel_path clobber_mode tpl_file commit_msg <<EOFS
 $spec
 EOFS
-        NOCLOBBER=$([ "$clobber_mode" = "noclobber" ] && echo 1 || echo 0)
+        case "$clobber_mode" in
+          noclobber) NOCLOBBER=1 ;;
+          auto)      NOCLOBBER=2 ;;
+          *)         NOCLOBBER=0 ;;
+        esac
         if [ "$pr_batch_done" -eq 1 ]; then
           # the PR batch carried this file; mark it from PR_FILES
           case " $PR_FILES " in

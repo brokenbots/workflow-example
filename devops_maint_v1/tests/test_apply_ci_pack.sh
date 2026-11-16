@@ -630,6 +630,38 @@ check "S13 summary: one verified, one error" jq -e '.summary.repos_verified_tota
 check "S13 py pack wrote the py templates" test "$(body_matches_template "${FX10}/ok/lastbody.ci.json" "${CI_TPL_DIR}/github-ci-py.yml")" = "ok" && test "$(body_matches_template "${FX10}/ok/lastbody.db.json" "${CI_TPL_DIR}/dependabot-py.yml")" = "ok"
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 13b. Dependabot structure detection (no-clobber=auto on dependabot.yml):
+#      a richer existing config (>=3 ecosystems or any submodule directory)
+#      governs; a flat 1-2-ecosystem config clobbers to the pack.
+# ═════════════════════════════════════════════════════════════════════════════
+FX11="${WORK_ROOT}/fx11"
+make_fixtures "${FX11}"
+for r in flat multi; do
+    mkdir -p "${FX11}/${r}"
+    printf '{"default_branch": "main"}' >"${FX11}/${r}/repo.json"
+done
+# flat: 2 ecosystems, both root — NOT rich -> clobber (PUT to pack byte-exact)
+file_fixture "${FX11}/flat" db "${CI_TPL_DIR}/dependabot-ts.yml" "flat-sha"
+file_fixture "${FX11}/flat" ci "${CI_TPL_DIR}/github-ci-go.yml" "csha-same"
+# multi: 4 ecosystems, two submodule directories — RICH -> skipped_existing
+RICH_CFG="$(mktemp)"
+printf 'version: 2\nupdates:\n  - package-ecosystem: gomod\n    directory: /\n  - package-ecosystem: gomod\n    directory: /sdk\n  - package-ecosystem: gomod\n    directory: /tools\n  - package-ecosystem: gomod\n    directory: /workflow\n' >"${RICH_CFG}"
+printf '{"content": "%s", "sha": "rich-sha"}' "$(base64 -w0 "${RICH_CFG}")" >"${FX11}/multi/get.db.json"
+file_fixture "${FX11}/multi" ci "${CI_TPL_DIR}/github-ci-go.yml" "csha-same"
+
+P11="${WORK_ROOT}/apply11.sh"
+render_apply testorg '["flat","multi"]' '[{"repo":"flat","pack":"go"},{"repo":"multi","pack":"go"}]' "$(mk_anchor "a11.json")" "${P11}"
+P11_RC=0
+run_apply "${P11}" "${FX11}" "${WORK_ROOT}/a11.out" "${WORK_ROOT}/a11.err" || P11_RC=$?
+expect_count "S14 structure-detection run exits 0" 0 "${P11_RC}"
+ART11="${WORK_ROOT}/runs/a11.json/compliance.json"
+check "S14 flat config clobbered (updated + verified)" jq -e '[.repos[] | select(.repo == "flat")][0].status == "verified" and [.repos[] | select(.repo == "flat")][0].files.dependabot.action == "updated"' "${ART11}" >/dev/null
+check "S14 flat healed to pack bytes" test "$(body_matches_template "${FX11}/flat/lastbody.db.json" "${CI_TPL_DIR}/dependabot-go.yml")" = "ok"
+check "S14 rich config skipped_existing with the reason" jq -e '[.repos[] | select(.repo == "multi")][0].files.dependabot.action == "skipped_existing" and ([.repos[] | select(.repo == "multi")][0].files.dependabot.readback_verified == true)' "${ART11}" >/dev/null
+check "S14 rich config's own bytes untouched" test "$(grep -c "^PUT repos/testorg/multi/contents/.github/dependabot.yml" "${FX11}/multi/call.log" 2>/dev/null || echo 0)" = "0"
+check "S14 summary records one skip + one update" jq -e '.summary.files_skipped_total == 1 and .summary.files_updated_total == 1' "${ART11}" >/dev/null
+
+# ═════════════════════════════════════════════════════════════════════════════
 # 14. Tree validation (node + criteria), matching the other step suites
 # ═════════════════════════════════════════════════════════════════════════════
 NODE_OK=1
