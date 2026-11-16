@@ -322,6 +322,7 @@ step "classify" {
         command = templatefile("./scripts/classify_prs.sh.tftpl", {
             inventory_file = data.internal.inventory_file.value
             stale_days     = var.stale_days
+            red_close_days = var.red_close_days
         })
     }
     outcome "success" {

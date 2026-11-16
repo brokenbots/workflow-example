@@ -133,6 +133,15 @@ variable "stale_days" {
     default     = 45
 }
 
+// Red-CI close lane (terminal-disposition ruling): red-CI judgment rows older
+// than this close — a red PR parked for days is not-helpful by evidence of age;
+// dependabot regenerates a fresh PR.
+variable "red_close_days" {
+    description = "Age in days beyond which a red-CI judgment-lane dependabot PR closes as not-helpful (merge/stale_close lane, brokenbot identity)."
+    type        = number
+    default     = 7
+}
+
 variable "codeql_triage_plan" {
     description = "Typed triage decisions for open CodeQL alerts: repo + alert_number + rule_id + disposition (fix | suppress) + rationale. A suppress row must carry dismissed_reason (false_positive | wont_fix | used_in_tests | used_in_docs). Rows outside the repos scope or duplicating (repo, alert_number) fail loud before any network call; open alerts without a row stay unplanned (report-only)."
     type        = list(object({

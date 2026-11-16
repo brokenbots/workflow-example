@@ -79,6 +79,10 @@ case "${STALE_DAYS:-45}" in
   ''|*[!0-9]*) fail "STALE_DAYS must be a non-negative integer (days); got: ${STALE_DAYS:-<empty>}" ;;
 esac
 STALE_DAYS="${STALE_DAYS:-45}"
+case "${RED_CLOSE_DAYS:-7}" in
+  ''|*[!0-9]*) fail "RED_CLOSE_DAYS must be a non-negative integer (days); got: ${RED_CLOSE_DAYS:-<empty>}" ;;
+esac
+RED_CLOSE_DAYS="${RED_CLOSE_DAYS:-7}"
 
 RUN_DIR="$(dirname "$INVENTORY_PATH")"
 CLASSIFICATION_PATH="$RUN_DIR/classification.json"
@@ -217,6 +221,9 @@ jq '
 # ---------------------------------------------------------------------------
 STALE_NUMBERS="$RUN_DIR/.classify.stale.$$.txt"
 : >"$STALE_NUMBERS"
+# red_close_days: red-CI judgment rows older than this close too (dependabot
+# regenerates; a red PR parked for N days is not-helpful by evidence of age).
+# Defaults to 7 via RED_CLOSE_DAYS (valid like STALE_DAYS).
 jq -c '.[] | select(.class == "needs_judgment" or .class == "needs_rebase")
         | select(.updated_at != null) | {repo, number, updated_at, head_ref}' \
     "$TMP_ROWS" >"$RUN_DIR/.classify.rows1.$$.ndjson" ||
@@ -241,10 +248,26 @@ while IFS= read -r row; do
               ((.head_ref | capture("^dependabot/(?<f>[^/]+)/") | .f) == $fam) and
               ((.updated_at // "") >= $upd))
      | .number] | length' "$INVENTORY_PATH")"
-  [ "${fresher:-0}" -gt 0 ] || continue
-  printf '%s\n' "$num" >>"$STALE_NUMBERS"
-  STALE_COUNT=$((STALE_COUNT + 1))
-  log "stale candidate #$num ($repo): age=${age_days}d > ${STALE_DAYS}d, superseded by a fresher minor-and-patch branch in family '$fam'"
+  verdict="$(printf '%s' "$row" | jq -r '.ci_verdict // ""')"
+  if [ "${fresher:-0}" -gt 0 ]; then
+    printf '%s\n' "$num" >>"$STALE_NUMBERS"
+    STALE_COUNT=$((STALE_COUNT + 1))
+    log "stale candidate #$num ($repo): age=${age_days}d > ${STALE_DAYS}d, superseded by a fresher minor-and-patch branch in family '$fam'"
+    continue
+  fi
+  # red-close lane (dave terminal-disposition ruling): a red-CI row older than
+  # RED_CLOSE_DAYS is not-helpful by age alone — dependabot regenerates a fresh PR
+  # and the red evidence rides the close comment.
+  case "$verdict" in
+    red)
+      red_epoch="$(date -u -d "$upd" +%s 2>/dev/null)" || continue
+      red_days=$(( (NOW_EPOCH - red_epoch) / 86400 ))
+      if [ "$red_days" -gt "$RED_CLOSE_DAYS" ]; then
+        printf '%s\n' "$num" >>"$STALE_NUMBERS"
+        STALE_COUNT=$((STALE_COUNT + 1))
+        log "red close candidate #$num ($repo): age=${red_days}d > ${RED_CLOSE_DAYS}d, CI red and not regenerated"
+      fi ;;
+  esac
 done < "$RUN_DIR/.classify.rows1.$$.ndjson"
 
 if [ "$STALE_COUNT" -gt 0 ]; then
