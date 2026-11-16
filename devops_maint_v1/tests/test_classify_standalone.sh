@@ -91,6 +91,7 @@ render_classify() { # <inventory_path> <out>
     local rendered
     rendered="$(cat "${TEMPLATE}")"
     rendered="${rendered//'{{ .inventory_file | shellquote }}'/"${inv_rep}"}"
+    rendered="${rendered//'{{ .stale_days }}'/'${STALE_DAYS_UNDER_TEST:-45}'}"
     printf '%s' "${rendered}" >"${out}"
     if grep -q '{{' "${out}"; then
         echo "BUG: rendered classify still contains template markers" >&2
@@ -203,7 +204,7 @@ check "S1 stdout carries exactly the classification path" test "${CLS1}" = "${FX
 check "S1 classification artifact is a sibling of the inventory" jq -e '.schema == "devops_maint_v1.classification.v1"' "${CLS1}" >/dev/null
 
 check "S1 run block mirrors the inventory sweep identity" jq -e '.run.sweep_id == "sw-classify" and .run.org == "testorg" and .run.repos == ["alpha", "delta"]' "${CLS1}" >/dev/null
-check "S1 summary counts every bucket" jq -e '.summary == {rows_total: 11, mechanical_bump: 3, vuln_clear: 1, needs_rebase: 1, needs_judgment: 5, report_hold: 1, report_only: 1, parked_groups: 0, groups_total: 4, carriers_total: 4, closes_total: 1, rebases_total: 1}' "${CLS1}" >/dev/null
+check "S1 summary counts every bucket" jq -e '.summary == {rows_total: 11, mechanical_bump: 3, vuln_clear: 1, needs_rebase: 1, needs_judgment: 5, stale: 0, report_hold: 1, report_only: 1, parked_groups: 0, groups_total: 4, carriers_total: 4, closes_total: 1, rebases_total: 1}' "${CLS1}" >/dev/null
 
 # Gate ladder — first-fired gate wins, every triggered gate recorded.
 check "S1 same-major bump -> mechanical_bump" jq -e '.rows[] | select(.number == 21) | .class == "mechanical_bump" and (.reasons | length == 0) and .is_carrier' "${CLS1}" >/dev/null
@@ -252,7 +253,7 @@ CLS_RCP=0
 run_classify "${WORK_ROOT}/classify_prefixed.sh" "${WORK_ROOT}/s1p.out" "${WORK_ROOT}/s1p.err" || CLS_RCP=$?
 expect_count "S1p classify exits 0 on prefixed/case titles" 0 "${CLS_RCP}"
 CLS_P="$(cat "${WORK_ROOT}/s1p.out")"
-check "S1p prefixed/case titles land in the mechanical buckets" jq -e '.summary == {rows_total: 5, mechanical_bump: 4, vuln_clear: 0, needs_rebase: 0, needs_judgment: 1, report_hold: 0, report_only: 0, parked_groups: 0, groups_total: 4, carriers_total: 4, closes_total: 0, rebases_total: 0}' "${CLS_P}" >/dev/null
+check "S1p prefixed/case titles land in the mechanical buckets" jq -e '.summary == {rows_total: 5, mechanical_bump: 4, vuln_clear: 0, needs_rebase: 0, needs_judgment: 1, stale: 0, report_hold: 0, report_only: 0, parked_groups: 0, groups_total: 4, carriers_total: 4, closes_total: 0, rebases_total: 0}' "${CLS_P}" >/dev/null
 check "S1p canonical build(deps) title parses and acts mechanically" jq -e '.rows[] | select(.number == 61) | .class == "mechanical_bump" and .module == "github.com/brokenbots/criteria-go-adapter-sdk" and .from_version == "0.5.2" and .to_version == "0.5.3" and (.reasons | length == 0) and .is_carrier' "${CLS_P}" >/dev/null
 check "S1p chore(deps) + lowercase bump parses and acts mechanically" jq -e '.rows[] | select(.number == 62) | .class == "mechanical_bump" and .module == "npm/case-var" and .from_version == "1.2.0" and .to_version == "1.2.1"' "${CLS_P}" >/dev/null
 check "S1p fix(deps) prefix parses and acts mechanically" jq -e '.rows[] | select(.number == 63) | .class == "mechanical_bump" and .module == "registry.example/pkg"' "${CLS_P}" >/dev/null
@@ -278,7 +279,7 @@ expect_count "S2 classify exits 0 with a parked group" 0 "${CLS_RC2}"
 CLS2="$(tr -d '[:space:]' <"${WORK_ROOT}/s2.out")"
 # Parked groups keep their place in the deterministic id order, so the active
 # group after them takes g002 (an id gap where a later sort key parked).
-check "S2 mixed base refs park the group report-only" jq -e '.summary == {rows_total: 3, mechanical_bump: 1, vuln_clear: 0, needs_rebase: 0, needs_judgment: 0, report_hold: 2, report_only: 2, parked_groups: 1, groups_total: 1, carriers_total: 1, closes_total: 0, rebases_total: 0}' "${CLS2}" >/dev/null
+check "S2 mixed base refs park the group report-only" jq -e '.summary == {rows_total: 3, mechanical_bump: 1, vuln_clear: 0, needs_rebase: 0, needs_judgment: 0, stale: 0, report_hold: 2, report_only: 2, parked_groups: 1, groups_total: 1, carriers_total: 1, closes_total: 0, rebases_total: 0}' "${CLS2}" >/dev/null
 check "S2 parked members keep class report_hold with the blocker reason" jq -e '[.rows[] | select((.report_reason // "") | test("consolidation blocked: mixed base refs \\(main, release-1.0\\)"))] | length == 2' "${CLS2}" >/dev/null
 check "S2 parked rows never carry group ids" jq -e '[.rows[] | select(.class == "report_hold") | select(.group_id != null)] | length == 0' "${CLS2}" >/dev/null
 check "S2 both parked rows land in report_hold" jq -e '[.rows[] | select(.class == "report_hold")] | length == 2' "${CLS2}" >/dev/null
@@ -367,7 +368,7 @@ fi
 # 7. Hygiene: stderr evidence lane, stdout protocol purity, no temp residue
 # ═════════════════════════════════════════════════════════════════════════════
 check "S7 stderr logs the inventory input line" grep -q 'classify: input inventory' "${ERR1}"
-check "S7 stderr logs the deterministic bucket counts" grep -q 'classify: buckets: mechanical=3 vuln=1 rebase=1 judgment=5 report_only=1' "${ERR1}"
+check "S7 stderr logs the deterministic bucket counts" grep -q 'classify: buckets: mechanical=3 vuln=1 rebase=1 judgment=5 stale=0 report_only=1' "${ERR1}"
 check_not "S7 success run never prints the typed failure prefix" grep -q 'classify_failed' "${ERR1}"
 check "S7 no temp residue next to the mixed inventory (S1)" test "$(ls -A "${RUN1}" | grep -v '^runs$' | sort | tr '\n' ' ')" = "classification.json inventory.json "
 check "S7 no temp residue next to the parked inventory (S2)" test "$(ls -A "${RUN2}" | sort | tr '\n' ' ')" = "classification.json inventory.json "

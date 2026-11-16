@@ -94,6 +94,34 @@ GROUP_COUNT="$(jq -r '.summary.groups_total' "$CLASSIFICATION_PATH")"
 started_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 log "merge plan: $GROUP_COUNT carrier(s) from $CLASSIFICATION_PATH"
 
+# ---------------------------------------------------------------------------
+# Stale-superseded close phase (brokenbot identity). Judgment rows the
+# classifier flagged stale (older than the threshold and superseded by a
+# fresher minor-and-patch branch of the same family) close here, BEFORE
+# carrier merges: a typed comment names the superseding structure and the
+# sweep stamp. A close failure is bookkeeping (recorded row), never fatal —
+# the PRs stay open for a human next pass. Dependabot regenerates on its own
+# schedule, so closes are reversible by design.
+# ---------------------------------------------------------------------------
+stale_done="$RUN_DIR/.merge.stale.$$.ndjson"
+: >"$stale_done"
+STALE_CLOSE_FAILS=0
+for row in $(jq -r '[.stale_closes[]? | {repo, number} | tojson] | .[]' "$CLASSIFICATION_PATH"); do
+    srepo="$(printf '%s' "$row" | jq -r '.repo')"
+    snum="$(printf '%s' "$row" | jq -r '.number')"
+    reason="$(jq -r --arg repo "$srepo" --argjson num "$snum" '
+      ([.stale_closes[]? | select(.repo == $repo and .number == $num) | .reasons[0]][0] // "stale")'       "$CLASSIFICATION_PATH")"
+    if gh pr close "$snum" -R "$ORG/$srepo" --comment "$reason" >/dev/null 2>"$RAW_DIR/stale.$srepo.$snum.err"; then
+      jq -cn --arg repo "$srepo" --argjson num "$snum" '{repo: $repo, number: $num, status: "closed"}' >>"$stale_done"
+      log "stale: #$snum ($srepo) closed (typed stale-superseded lane)"
+    else
+      STALE_CLOSE_FAILS=$((STALE_CLOSE_FAILS + 1))
+      log "stale: #$snum ($srepo) close failed: $(err_text "$RAW_DIR/stale.$srepo.$snum.err")"
+    fi
+done
+STALE_CLOSED_TOTAL="$(grep -c '"status": "closed"' "$stale_done" 2>/dev/null || true)"
+log "stale close phase done: closed=$STALE_CLOSED_TOTAL failed=$STALE_CLOSE_FAILS"
+
 mkdir -p "$RAW_DIR"
 : >"$RUN_DIR/.merge.rows.ndjson"
 

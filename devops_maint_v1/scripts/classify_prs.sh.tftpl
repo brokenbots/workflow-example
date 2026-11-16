@@ -75,6 +75,11 @@ esac
 jq -e '.schema == "devops_maint_v1.inventory.v1"' "$INVENTORY_PATH" >/dev/null 2>&1 ||
   fail "input is not a devops_maint_v1.inventory.v1 artifact: $INVENTORY_PATH"
 
+case "${STALE_DAYS:-45}" in
+  ''|*[!0-9]*) fail "STALE_DAYS must be a non-negative integer (days); got: ${STALE_DAYS:-<empty>}" ;;
+esac
+STALE_DAYS="${STALE_DAYS:-45}"
+
 RUN_DIR="$(dirname "$INVENTORY_PATH")"
 CLASSIFICATION_PATH="$RUN_DIR/classification.json"
 [ -w "$RUN_DIR" ] || fail "run directory not writable: $RUN_DIR"
@@ -84,7 +89,8 @@ TMP_PASS2="$RUN_DIR/.classify.pass2.$$.tmp"
 cleanup() {
   rm -f "$RUN_DIR/.classify.rows.$$.tmp" "$RUN_DIR/.classify.pass2.$$.tmp" \
         "$RUN_DIR/.classify.pass1.$$.err" "$RUN_DIR/.classify.pass2.$$.err" \
-        "$RUN_DIR/.classify.assemble.$$.err" "$RUN_DIR/.classify.selfcheck.$$.err"
+        "$RUN_DIR/.classify.assemble.$$.err" "$RUN_DIR/.classify.selfcheck.$$.err" \
+        "$RUN_DIR/.classify.stale.$$.txt" "$RUN_DIR/.classify.rows1.$$.ndjson"
 }
 trap cleanup EXIT
 
@@ -137,6 +143,7 @@ jq '
         repo: $rec.repo,
         number: .number,
         title: .title,
+        head_ref: (.head_ref // null),
         module: null, from_version: null, to_version: null,
         base_ref: .base_ref, merge_state: .merge_state,
         ci_verdict: .ci.verdict, updated_at: .updated_at,
@@ -194,10 +201,67 @@ jq '
   fail "classifying pass rejected the artifact: $(head -c 200 "$RUN_DIR/.classify.pass1.$$.err" 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
+# Pass 1b — stale-superseded detection (typed). dave ruling 2026-11-16: each
+# repo is its own thing; dead dependabot singles must close rather than park
+# forever. A judgment row is STALE when BOTH:
+#   (a) its age (now - updated_at) > STALE_DAYS (tunable per-run variable,
+#       default 45), computed with date -u -d (GNU date; the runner's image
+#       ships it — collect already uses GNU-safe stamps), AND
+#   (b) a FRESHER dependabot minor-and-patch consolidation branch for the same
+#       repo + branch family exists in the inventory (family = the token under
+#       dependabot/ in head_ref: go_modules, github_actions, ...).
+# Stale rows flip to class "stale"; pass 2 excludes them from grouping;
+# they emit a closes plan that the merge lane (brokenbot identity) executes
+# as `gh pr close --comment`. Dependabot regenerates updates on its own
+# schedule, so closing is reversible by design.
+# ---------------------------------------------------------------------------
+STALE_NUMBERS="$RUN_DIR/.classify.stale.$$.txt"
+: >"$STALE_NUMBERS"
+jq -c '.[] | select(.class == "needs_judgment")
+        | select(.updated_at != null) | {repo, number, updated_at, head_ref}' \
+    "$TMP_ROWS" >"$RUN_DIR/.classify.rows1.$$.ndjson" ||
+  fail "rows1 export failed"
+NOW_EPOCH="$(date -u +%s)"
+STALE_COUNT=0
+while IFS= read -r row; do
+  upd="$(printf '%s' "$row" | jq -r '.updated_at')"
+  repo="$(printf '%s' "$row" | jq -r '.repo')"
+  num="$(printf '%s' "$row" | jq -r '.number')"
+  fam="$(printf '%s' "$row" | jq -r '
+    (.head_ref // "none") | capture("^dependabot/(?<f>[^/]+)/") | .f // "none"')"
+  [ "$fam" != "none" ] || continue
+  upd_epoch="$(date -u -d "$upd" +%s 2>/dev/null)" || continue
+  age_days=$(( (NOW_EPOCH - upd_epoch) / 86400 ))
+  [ "$age_days" -gt "$STALE_DAYS" ] || continue
+  fresher="$(jq -r --arg repo "$repo" --arg fam "$fam" --arg upd "$upd" '
+    [.repos[] | select(.repo == $repo)
+     | .prs.dependabot[]?
+     | select((.head_ref | test("minor-and-patch")) and
+              ((.head_ref | capture("^dependabot/(?<f>[^/]+)/") | .f) == $fam) and
+              ((.updated_at // "") > $upd))
+     | .number] | length' "$INVENTORY_PATH")"
+  [ "${fresher:-0}" -gt 0 ] || continue
+  printf '%s\n' "$num" >>"$STALE_NUMBERS"
+  STALE_COUNT=$((STALE_COUNT + 1))
+  log "stale candidate #$num ($repo): age=${age_days}d > ${STALE_DAYS}d, superseded by a fresher minor-and-patch branch in family '$fam'"
+done < "$RUN_DIR/.classify.rows1.$$.ndjson"
+
+if [ "$STALE_COUNT" -gt 0 ]; then
+  jq -c --argjson nums "$(jq -s . "$STALE_NUMBERS")" '
+    map(. as $r
+        | if (.number | IN($nums[])) and .class == "needs_judgment"
+          then .class = "stale"
+            | .reasons += ["stale: PR is older than the stale threshold and superseded by a fresher minor-and-patch branch for the same module family; closing the stale single is the honest disposition (dependabot regenerates by its own schedule)"]
+          else . end)' "$TMP_ROWS" >"${TMP_ROWS}.stale" ||
+    fail "stale class rewrite failed"
+  mv "${TMP_ROWS}.stale" "$TMP_ROWS"
+fi
+
+# ---------------------------------------------------------------------------
 # Pass 2 — consolidation groups, carriers, rebase list
 # ---------------------------------------------------------------------------
 jq '
-  def actionable: (.class != "needs_judgment") and (.class != "report_hold") and (.report_only | not);
+  def actionable: (.class != "needs_judgment") and (.class != "report_hold") and (.report_only | not) and (.class != "stale");
   def gkey: [.repo, .module, (if .to_version == "" then "?" else .to_version end)];
   def pad($n): ($n | tostring | ("00" + .)[-3:]);
   [.[] | select(actionable)] as $actionable
@@ -292,6 +356,7 @@ jq -cn \
         vuln_clear: ([$rows[] | select(.class == "vuln_clear")] | length),
         needs_rebase: ([$rows[] | select(.class == "needs_rebase")] | length),
         needs_judgment: ([$rows[] | select(.class == "needs_judgment")] | length),
+        stale: ([$rows[] | select(.class == "stale")] | length),
         report_hold: ([$rows[] | select(.class == "report_hold")] | length),
         report_only: ([$rows[] | select(.report_only)] | length),
         parked_groups: ($parked | length),
@@ -301,6 +366,8 @@ jq -cn \
         rebases_total: ($rebases | length)
       },
       rows: $rows,
+      stale_closes: [$rows[] | select(.class == "stale")
+                     | {repo, number, title, reasons}],
       groups: $groups,
       rebases: $rebases,
       report: [$rows[] | select(.report_only)
@@ -334,13 +401,21 @@ jq -e '
   ($root.summary.needs_rebase == ([$root.rows[] | select(.class == "needs_rebase")] | length)) and
   ($root.summary.needs_judgment == ([$root.rows[] | select(.class == "needs_judgment")] | length)) and
   ($root.summary.report_hold == ([$root.rows[] | select(.class == "report_hold")] | length)) and
+  ($root.summary.stale == ([$root.rows[] | select(.class == "stale")] | length)) and
+  ($root.summary.stale == ($root.stale_closes | length)) and
+  (all($root.stale_closes[];
+      (.repo | type == "string" and length > 0) and
+      (.number | type == "number") and
+      (.title | type == "string") and
+      (.reasons | type == "array" and all(.[]; type == "string" and length > 0)))) and
+  (all($root.stale_closes[]; .number | type == "number")) and
   (([$root.rows[] | [.repo, .number]] | unique | length) == ($root.rows | length)) and
   (all($root.rows[];
       . as $row
       | ($row.repo | type == "string" and length > 0) and
         ($row.number | type == "number") and
         ($row.title | type == "string") and
-        ($row.class | IN("mechanical_bump", "vuln_clear", "needs_rebase", "needs_judgment", "report_hold")) and
+        ($row.class | IN("mechanical_bump", "vuln_clear", "needs_rebase", "needs_judgment", "report_hold", "stale")) and
         ($row.reasons | type == "array" and all(.[]; type == "string" and length > 0)) and
         ($row.advisory_ids | type == "array" and all(.[]; type == "string" and length > 0)) and
         ($row.is_carrier | type == "boolean") and
@@ -349,6 +424,8 @@ jq -e '
          then ($row.class == "report_hold") and ($row.group_id == null) and ($row.is_carrier == false) and
               (($row.report_reason | type == "string") and ($row.report_reason | length) > 0)
          elif $row.class == "needs_judgment"
+         then ($row.group_id == null) and ($row.is_carrier == false)
+         elif $row.class == "stale"
          then ($row.group_id == null) and ($row.is_carrier == false)
          else ($row.group_id | type == "string" and length > 0)
          end))) and
@@ -393,6 +470,6 @@ jq -e '
 ' "$CLASSIFICATION_PATH" >/dev/null 2>"$RUN_DIR/.classify.selfcheck.$$.err" ||
   fail "classification artifact failed its structural self-check: $(head -c 200 "$RUN_DIR/.classify.selfcheck.$$.err" 2>/dev/null)"
 
-log "buckets: mechanical=$(jq -r '.summary.mechanical_bump' "$CLASSIFICATION_PATH") vuln=$(jq -r '.summary.vuln_clear' "$CLASSIFICATION_PATH") rebase=$(jq -r '.summary.needs_rebase' "$CLASSIFICATION_PATH") judgment=$(jq -r '.summary.needs_judgment' "$CLASSIFICATION_PATH") report_only=$(jq -r '.summary.report_only' "$CLASSIFICATION_PATH"); groups=$(jq -r '.summary.groups_total' "$CLASSIFICATION_PATH") closes=$(jq -r '.summary.closes_total' "$CLASSIFICATION_PATH")"
+log "buckets: mechanical=$(jq -r '.summary.mechanical_bump' "$CLASSIFICATION_PATH") vuln=$(jq -r '.summary.vuln_clear' "$CLASSIFICATION_PATH") rebase=$(jq -r '.summary.needs_rebase' "$CLASSIFICATION_PATH") judgment=$(jq -r '.summary.needs_judgment' "$CLASSIFICATION_PATH") stale=$(jq -r '.summary.stale' "$CLASSIFICATION_PATH") report_only=$(jq -r '.summary.report_only' "$CLASSIFICATION_PATH"); groups=$(jq -r '.summary.groups_total' "$CLASSIFICATION_PATH") closes=$(jq -r '.summary.closes_total' "$CLASSIFICATION_PATH")"
 
 printf '%s\n' "$CLASSIFICATION_PATH"
