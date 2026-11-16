@@ -92,6 +92,17 @@ adapter "shell" "merge" {
     }
 }
 
+// Stale-superseded close lane (brokenbot identity — the closes are reversible:
+// dependabot regenerates by its own schedule; still a write, so NOT the
+// classifying identity).
+adapter "shell" "stale_close" {
+    source      = "ghcr.io/brokenbots/criteria-adapter-shell"
+    version     = "0.5.5"
+    environment = shell.merge
+    secrets {
+        GH_TOKEN = var.brokenbot_github_token
+    }
+}
 // Lane B protection application: workflow GitHub identity (ruleset writes +
 // read-back verification under the same secret channel as collect/act).
 adapter "shell" "protect" {
