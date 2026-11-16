@@ -263,7 +263,8 @@ pr_apply_pack() { # repo specs_csv commit_title -> sets PR_INFO; PR_FILES
   git -C "$work" checkout --quiet -b "$branch"
   IFS=',' read -r -a SPECS <<<"$specs_csv"
   for spec in "${SPECS[@]}"; do
-    name="${spec%%:*}"; rest="${spec#*:}"; path="${rest%%:*}"; tpl_file="${rest#*:}"
+    name="${spec%%:*}"; rest="${spec#*:}"; path="${rest%%:*}"; rest="${rest#*:}"
+    mode="${rest%%:*}"; tpl_file="${rest#*:}"
     [ -f "$tpl_file" ] || { log "pr route: template missing for $path"; return 1; }
     mkdir -p "$(dirname "$work/$path")"
     cp "$tpl_file" "$work/$path"
@@ -281,7 +282,8 @@ pr_apply_pack() { # repo specs_csv commit_title -> sets PR_INFO; PR_FILES
   # encode a stale fetch (the pre-PUT main bytes) -> false mismatch (seen live).
   PR_FILES=""
   for spec in "${SPECS[@]}"; do
-    name="${spec%%:*}"; rest="${spec#*:}"; path="${rest%%:*}"; tpl_file="${rest#*:}"
+    name="${spec%%:*}"; rest="${spec#*:}"; path="${rest%%:*}"; rest="${rest#*:}"
+    mode="${rest%%:*}"; tpl_file="${rest#*:}"
     local grc=0
     contents_get "$repo" "$path" "$branch" || grc=$?
     if [ "$grc" -ne 0 ]; then
@@ -479,9 +481,11 @@ for repo in $REPOS_LIST; do
       pending_specs=""
       pr_batch_done=0
       CI_SKIPPED=0
-      for spec in "ci:$CI_REL:$tpl_ci:$COMMIT_MSG_CI:noclobber" "dependabot:$DB_REL:$tpl_db:$COMMIT_MSG_DB:clobber"; do
+      for spec in "ci:$CI_REL:noclobber:$tpl_ci:$COMMIT_MSG_CI" "dependabot:$DB_REL:clobber:$tpl_db:$COMMIT_MSG_DB"; do
         [ "$apply_ok" -eq 1 ] || break
-        IFS=':' read -r file_name rel_path tpl_file commit_msg clobber_mode <<EOFS
+        # Field order matters: clobber_mode BEFORE commit_msg — the message contains
+        # colons, and with IFS=':' the trailing field would otherwise swallow the mode.
+        IFS=':' read -r file_name rel_path clobber_mode tpl_file commit_msg <<EOFS
 $spec
 EOFS
         NOCLOBBER=$([ "$clobber_mode" = "noclobber" ] && echo 1 || echo 0)
@@ -527,14 +531,14 @@ EOFS
             3)
               # Protected main: batch THIS file + every remaining spec into ONE
               # commit/branch/PR, verify each on the branch, then mark all.
-              batch_specs="$file_name:$rel_path:$tpl_file"
+              batch_specs="$file_name:$rel_path:$clobber_mode:$tpl_file"
               case "$spec" in
-                ci:*) batch_specs="$batch_specs,dependabot:$DB_REL:$tpl_db" ;;
+                ci:*) batch_specs="$batch_specs,dependabot:$DB_REL:clobber:$tpl_db" ;;
                 dependabot:*)
                   # ci is noclobber: do not re-add it to the PR batch when it was
                   # skipped (rc 4). Only pair with ci when ci is clobber-mode.
                   if [ "${CI_SKIPPED:-0}" -ne 1 ]; then
-                    batch_specs="$batch_specs,ci:$CI_REL:$tpl_ci"
+                    batch_specs="$batch_specs,ci:$CI_REL:noclobber:$tpl_ci"
                   fi ;;
               esac
               PR_FILES=""
