@@ -208,7 +208,9 @@ prs_after() { # prs_after <repo> -> sets A_OPEN/A_DEP/A_OTHER; rc 2 = transport 
 codeql_after() { # codeql_after <repo> -> sets A_CODEQL/A_CODEQL_STATUS; rc 1 disabled / 2 transport
     local cq_file="$RAW_DIR/$1.cq.json"
     if ! gh api "repos/$ORG/$1/code-scanning/alerts?state=open&per_page=100&tool_name=CodeQL" --paginate >"$cq_file" 2>"$cq_file.err"; then
-        if grep -qiE '404|not enabled|not found' "$cq_file.err" 2>/dev/null; then
+        # Not-enabled repos surface several shapes (collect comment): 404 / not
+        # enabled / not authorized to read code scanning alerts (live: starter-go).
+        if grep -qiE '404|not enabled|not found|not authorized to read code scanning alerts' "$cq_file.err" 2>/dev/null; then
             A_CODEQL=0
             A_CODEQL_STATUS="disabled"
             rm -f "$cq_file" "$cq_file.err"
